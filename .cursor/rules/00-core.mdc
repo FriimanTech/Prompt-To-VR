@@ -1,0 +1,23 @@
+---
+description: Core constraints for the Prompt-To-Native-VR system.
+globs: ["**/*"]
+alwaysApply: true
+---
+
+# Prompt-To-Native-VR: core rules
+
+- This project is **local-first** and targets a **native C++ VR executable**
+  running on Windows PC VR (Meta Quest 3 via Quest Link).
+- **Do NOT introduce** Unity, Unreal Engine, Godot, WebXR, Three.js,
+  Babylon.js, or any browser-rendered VR runtime.
+- Rendering uses **Vulkan**. XR uses **OpenXR**. Build is **CMake** with
+  **vcpkg manifest mode**.
+- Do not add cloud services: no Supabase, S3, Temporal, cloud auth, multiplayer,
+  speech-to-text, marketplace publishing, Steam packaging, Quest standalone
+  packaging in this version.
+- Prefer determinism over agent improvisation. Prefer reusable built-in VR
+  mechanics over regenerating them.
+- Whenever you change the set of artifacts, stages, providers, or engine
+  subsystems, update `docs/` in the same change.
+- Before editing provider code, verify SDK signatures and model names against
+  official docs.

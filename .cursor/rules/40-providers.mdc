@@ -1,0 +1,74 @@
+---
+description: Rules for using Claude, Gemini/Imagen, and Tripo.
+globs: ["packages/provider-clients/**/*", "apps/orchestrator/**/*"]
+alwaysApply: false
+---
+
+# Provider rules (verified April 2026)
+
+## Anthropic (Claude)
+
+- Python SDK: `anthropic`.
+- Models: `claude-opus-4-7` (hard planning + hard C++ gen);
+  `claude-sonnet-4-6` (light planning / routine transforms).
+- Use **structured outputs** via `output_config.format = {"type":
+  "json_schema", "schema": <JSON Schema>}` for any stage that must return a
+  schema-validated artifact (BuildSpec, AssetManifest, MechanicPlan,
+  SceneSpec, CodeTask).
+- For tool-using agents, pass `strict: true` on tool definitions to get
+  grammar-constrained tool inputs.
+
+## OpenAI (ChatGPT fallback for Claude)
+
+- Python SDK: `openai`.
+- Default models: `gpt-5` (hard), `gpt-5-mini` (light), configurable via
+  `OPENAI_HARD_MODEL` / `OPENAI_LIGHT_MODEL`.
+- Pipeline stages MUST call the shared `LlmClient` (via
+  `ptv_orchestrator.pipeline.llm.make_llm`), NOT `AnthropicClient` or
+  `OpenAIClient` directly. The facade falls back from Claude to ChatGPT
+  transparently on `ProviderConfigError` / `ProviderCallError` and
+  translates model names automatically.
+- For structured outputs the OpenAI wrapper uses JSON mode
+  (`response_format={"type": "json_object"}`) with the schema embedded in
+  the system prompt. Callers re-validate the returned JSON with the
+  original Pydantic model, matching the Claude path exactly.
+- **Reasoning models (GPT-5 family + o1/o3/o4) reject sampling params.**
+  `gpt-5`, `gpt-5-mini`, `gpt-5-nano`, `gpt-5-codex`, dated snapshots thereof,
+  and the o-series models return HTTP 400 if you pass `temperature`,
+  `top_p`, `presence_penalty`, `frequency_penalty`, or `logprobs`. Only
+  `gpt-5-chat-latest` and legacy `gpt-4o*` / `gpt-4.1*` models accept them.
+  The `OpenAIClient` wrapper detects reasoning models via
+  `is_reasoning_model(name)` and OMITS `temperature` automatically, so call
+  sites can keep passing `temperature=0.0` uniformly.
+- Reasoning models consume "thinking" tokens before emitting output. The
+  default `OpenAIConfig.max_tokens` is 16384 to accommodate this. If you see
+  `ProviderCallError: OpenAI response was truncated (finish_reason='length')`,
+  raise the cap or simplify the schema.
+- Use `max_completion_tokens` (NOT the legacy `max_tokens`) on Chat Completions
+  for GPT-5 family models.
+
+## Google GenAI (Imagen + Gemini image)
+
+- Python SDK: `google-genai` (PyPI: `google-genai`). Import via
+  `from google import genai; from google.genai import types`.
+- Client: `genai.Client(api_key=os.environ["GOOGLE_API_KEY"])`.
+- Imagen: `client.models.generate_images(model="imagen-4.0-generate-001",
+  prompt=..., config=types.GenerateImagesConfig(number_of_images=...))`.
+- Gemini multimodal image fallback:
+  `client.models.generate_content(model="gemini-2.5-flash-image",
+  contents=..., config=types.GenerateContentConfig(response_modalities=["IMAGE"]))`.
+
+## Tripo
+
+- Python SDK: `tripo3d` (VAST-AI-Research/tripo-python-sdk).
+- Every image-to-3D call MUST set:
+  - `texture=True`
+  - `pbr=True`
+  - `texture_alignment="original_image"` (unless the task truly needs
+    geometry-aligned projection, in which case document why).
+  - `texture_quality="detailed"` for hero assets, `"standard"` otherwise.
+- Flow: `task_id = await client.image_to_model(...)` →
+  `task = await client.wait_for_task(task_id, polling_interval=3.0)` →
+  `await client.download_task_models(task, out_dir)`.
+- If the provider's current docs describe a different request shape, adapt
+  the request while preserving the intent (textured, color, game-ready).

@@ -1,0 +1,26 @@
+---
+description: Rules for the hand-authored C++ engine core.
+globs: ["engine/runtime/**/*", "engine/tools/**/*", "samples/**/*"]
+alwaysApply: false
+---
+
+# Engine core rules
+
+- Engine core under `engine/runtime/` is **hand-authored**. Do not let the
+  generator modify it.
+- Headers live in `engine/runtime/include/ptv/` and use the `ptv` namespace.
+- Implementation files live in `engine/runtime/src/<subsystem>/`.
+- Platform bootstrap uses **GLFW** for the desktop surface / mirror window.
+- Vulkan loading goes through **volk**. Memory allocation uses **VMA**.
+- XR uses the Khronos **OpenXR loader** with the `XR_KHR_vulkan_enable2`
+  graphics binding. The engine owns the swapchain through `xrCreateSwapchain`;
+  do NOT create a Vulkan surface swapchain for the HMD.
+- ECS uses **EnTT**. Scene loading uses **TinyGLTF**. Physics uses
+  **Jolt Physics**. Debug overlay uses **Dear ImGui** on the mirror window
+  only.
+- The built-in mechanics (teleport, smooth locomotion, snap turn, grab, throw,
+  use, push/pull, trigger zones, spawners, inventory, dialogue trigger,
+  health/damage, enemy AI hook, projectile hook, HUD anchor) are data-driven
+  via `SceneSpec.mechanic_bindings` and registered in
+  `engine/runtime/src/mechanics/MechanicRegistry.cpp`. Reuse them whenever a
+  prompt can be served by configuration.

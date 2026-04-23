@@ -1,0 +1,24 @@
+---
+description: Hard boundaries around generated C++ code.
+globs: ["engine/generated/**/*", "apps/orchestrator/**/pipeline/**/*"]
+alwaysApply: true
+---
+
+# Generated-code boundaries
+
+- Generated C++ may only live under:
+  - `engine/generated/mechanics/`
+  - `engine/generated/ai/`
+  - `engine/generated/dialogue/`
+- Generated code MUST implement one of the abstract interfaces in
+  `engine/runtime/include/ptv/api/`:
+  - `IMechanic` for gameplay mechanics.
+  - `IBehaviour` for NPC / AI behavior.
+  - `IDialogueHook` for dialogue logic.
+- Generated files register themselves with `REGISTER_MECHANIC("id")` (or the
+  sibling macros). They never modify `MechanicRegistry`, the renderer, the
+  XR session loop, the platform layer, memory management, or the ECS core.
+- Generated files must not include engine internals other than the public
+  `ptv/api/*` headers and the public scene / ECS headers.
+- The orchestrator runs `engine/tools/check-generated-bounds.py` before
+  triggering the build and fails the stage on any violation.

@@ -1,0 +1,58 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: dark;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  font-family: theme("fontFamily.sans");
+  @apply bg-ink text-white antialiased;
+}
+
+code,
+pre,
+.mono {
+  font-family: theme("fontFamily.mono");
+}
+
+.ptv-card {
+  @apply bg-panel border border-white/5 rounded-xl shadow-lg;
+}
+
+.ptv-button {
+  @apply inline-flex items-center gap-2 rounded-lg px-3 py-1.5 bg-accent/20 text-accent border border-accent/40 hover:bg-accent/30 transition-colors;
+}
+
+.ptv-button-primary {
+  @apply inline-flex items-center gap-2 rounded-lg px-4 py-2 bg-accent text-ink font-medium hover:bg-accent/90 transition-colors;
+}
+
+.ptv-button-danger {
+  @apply inline-flex items-center gap-2 rounded-lg px-3 py-1.5 bg-err/15 text-err border border-err/40 hover:bg-err/25 transition-colors;
+}
+
+.ptv-pill {
+  @apply inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs border;
+}
+
+.ptv-input,
+.ptv-textarea {
+  @apply w-full bg-panelmuted border border-white/10 rounded-lg px-3 py-2 text-sm outline-none focus:border-accent/60;
+}
+
+.ptv-textarea {
+  resize: vertical;
+  min-height: 160px;
+}
+
+.stage-row {
+  @apply grid grid-cols-[1fr_auto] gap-4 items-center border-b border-white/5 py-2;
+}

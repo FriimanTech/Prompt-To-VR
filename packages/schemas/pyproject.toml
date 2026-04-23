@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ptv-schemas"
+version = "0.1.0"
+description = "Strict Pydantic v2 + JSON Schemas for the Prompt-To-Native-VR pipeline"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "pydantic>=2.7",
+]
+
+[project.scripts]
+ptv-export-schemas = "ptv_schemas.export:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["ptv_schemas*"]

@@ -1,0 +1,188 @@
+{
+  "$defs": {
+    "CodeTask": {
+      "additionalProperties": false,
+      "properties": {
+        "acceptance_notes": {
+          "default": "",
+          "maxLength": 2000,
+          "title": "Acceptance Notes",
+          "type": "string"
+        },
+        "description": {
+          "maxLength": 4000,
+          "title": "Description",
+          "type": "string"
+        },
+        "files": {
+          "items": {
+            "$ref": "#/$defs/CodeTaskFile"
+          },
+          "maxItems": 16,
+          "title": "Files",
+          "type": "array"
+        },
+        "headers": {
+          "description": "Whitelisted public engine headers that the generated code may include. Only ptv/api/* and ptv/scene/* are allowed.",
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 32,
+          "title": "Headers",
+          "type": "array"
+        },
+        "id": {
+          "description": "Snake-case identifier, max 64 chars.",
+          "pattern": "^[a-z0-9][a-z0-9_.\\-]{0,63}$",
+          "title": "Id",
+          "type": "string"
+        },
+        "interface": {
+          "description": "Name of the abstract interface the generated module implements: 'IMechanic' | 'IBehaviour' | 'IDialogueHook'.",
+          "title": "Interface",
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/$defs/CodeTaskKind"
+        },
+        "test_files": {
+          "items": {
+            "$ref": "#/$defs/CodeTaskFile"
+          },
+          "maxItems": 8,
+          "title": "Test Files",
+          "type": "array"
+        },
+        "title": {
+          "maxLength": 200,
+          "title": "Title",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "kind",
+        "title",
+        "description",
+        "interface"
+      ],
+      "title": "CodeTask",
+      "type": "object"
+    },
+    "CodeTaskFile": {
+      "additionalProperties": false,
+      "properties": {
+        "contents": {
+          "maxLength": 120000,
+          "title": "Contents",
+          "type": "string"
+        },
+        "path": {
+          "description": "Relative path starting with 'engine/generated/mechanics/', 'engine/generated/ai/', or 'engine/generated/dialogue/'.",
+          "maxLength": 256,
+          "title": "Path",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "contents"
+      ],
+      "title": "CodeTaskFile",
+      "type": "object"
+    },
+    "CodeTaskKind": {
+      "enum": [
+        "mechanic",
+        "ai",
+        "dialogue"
+      ],
+      "title": "CodeTaskKind",
+      "type": "string"
+    },
+    "MechanicClassification": {
+      "enum": [
+        "builtin",
+        "builtin+config",
+        "generate"
+      ],
+      "title": "MechanicClassification",
+      "type": "string"
+    },
+    "MechanicPlanItem": {
+      "additionalProperties": false,
+      "properties": {
+        "builtin_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "When classification is 'builtin' or 'builtin+config', the id of the reused built-in mechanic (e.g. 'builtin.grab').",
+          "title": "Builtin Id"
+        },
+        "classification": {
+          "$ref": "#/$defs/MechanicClassification"
+        },
+        "code_task": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CodeTask"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Present only when classification == 'generate'."
+        },
+        "config": {
+          "additionalProperties": true,
+          "description": "Free-form config passed to the built-in mechanic.",
+          "title": "Config",
+          "type": "object"
+        },
+        "id": {
+          "description": "Snake-case identifier, max 64 chars.",
+          "pattern": "^[a-z0-9][a-z0-9_.\\-]{0,63}$",
+          "title": "Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "classification"
+      ],
+      "title": "MechanicPlanItem",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "items": {
+      "items": {
+        "$ref": "#/$defs/MechanicPlanItem"
+      },
+      "maxItems": 20,
+      "minItems": 1,
+      "title": "Items",
+      "type": "array"
+    },
+    "prompt_id": {
+      "description": "Snake-case identifier, max 64 chars.",
+      "pattern": "^[a-z0-9][a-z0-9_.\\-]{0,63}$",
+      "title": "Prompt Id",
+      "type": "string"
+    }
+  },
+  "required": [
+    "prompt_id",
+    "items"
+  ],
+  "title": "MechanicPlan",
+  "type": "object"
+}

@@ -1,0 +1,61 @@
+{
+  "$defs": {
+    "AcceptanceCheck": {
+      "additionalProperties": false,
+      "properties": {
+        "description": {
+          "maxLength": 2000,
+          "title": "Description",
+          "type": "string"
+        },
+        "expected_outcome": {
+          "maxLength": 2000,
+          "title": "Expected Outcome",
+          "type": "string"
+        },
+        "id": {
+          "description": "Snake-case identifier, max 64 chars.",
+          "pattern": "^[a-z0-9][a-z0-9_.\\-]{0,63}$",
+          "title": "Id",
+          "type": "string"
+        },
+        "manual": {
+          "default": true,
+          "title": "Manual",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "id",
+        "description",
+        "expected_outcome"
+      ],
+      "title": "AcceptanceCheck",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "checks": {
+      "items": {
+        "$ref": "#/$defs/AcceptanceCheck"
+      },
+      "maxItems": 32,
+      "minItems": 1,
+      "title": "Checks",
+      "type": "array"
+    },
+    "prompt_id": {
+      "description": "Snake-case identifier, max 64 chars.",
+      "pattern": "^[a-z0-9][a-z0-9_.\\-]{0,63}$",
+      "title": "Prompt Id",
+      "type": "string"
+    }
+  },
+  "required": [
+    "prompt_id",
+    "checks"
+  ],
+  "title": "AcceptanceTestPlan",
+  "type": "object"
+}

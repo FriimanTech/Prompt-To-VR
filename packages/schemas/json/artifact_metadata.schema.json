@@ -1,0 +1,79 @@
+{
+  "$defs": {
+    "ArtifactKind": {
+      "enum": [
+        "json",
+        "image",
+        "glb",
+        "cpp",
+        "header",
+        "log",
+        "binary",
+        "other"
+      ],
+      "title": "ArtifactKind",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "created_at": {
+      "format": "date-time",
+      "title": "Created At",
+      "type": "string"
+    },
+    "description": {
+      "anyOf": [
+        {
+          "maxLength": 1000,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Description"
+    },
+    "id": {
+      "description": "Snake-case identifier, max 64 chars.",
+      "pattern": "^[a-z0-9][a-z0-9_.\\-]{0,63}$",
+      "title": "Id",
+      "type": "string"
+    },
+    "kind": {
+      "$ref": "#/$defs/ArtifactKind"
+    },
+    "path": {
+      "maxLength": 1024,
+      "title": "Path",
+      "type": "string"
+    },
+    "sha256": {
+      "description": "Lowercase hex sha-256.",
+      "pattern": "^[a-f0-9]{64}$",
+      "title": "Sha256",
+      "type": "string"
+    },
+    "size_bytes": {
+      "minimum": 0,
+      "title": "Size Bytes",
+      "type": "integer"
+    },
+    "stage": {
+      "maxLength": 64,
+      "title": "Stage",
+      "type": "string"
+    }
+  },
+  "required": [
+    "id",
+    "kind",
+    "path",
+    "size_bytes",
+    "sha256",
+    "stage"
+  ],
+  "title": "ArtifactMetadata",
+  "type": "object"
+}

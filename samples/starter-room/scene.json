@@ -1,0 +1,131 @@
+{
+  "version": 1,
+  "prompt_id": "starter-room",
+  "scene_id": "room",
+  "title": "Starter Room",
+  "name": "Room",
+  "player": {
+    "height_meters": 1.7,
+    "locomotion": "teleport",
+    "comfort": "comfort",
+    "spawn": {
+      "position": [0.0, 0.0, 0.0],
+      "rotation": [0.0, 0.0, 0.0, 1.0]
+    }
+  },
+  "sky_color": [0.58, 0.70, 0.86],
+  "ambient_intensity": 0.45,
+  "lights": [
+    {
+      "id": "sun",
+      "kind": "directional",
+      "transform": {
+        "position": [0.0, 5.0, 0.0],
+        "rotation": [0.0, 0.0, 0.0, 1.0],
+        "scale": 1.0
+      },
+      "color_rgb": [1.0, 0.95, 0.9],
+      "intensity": 1.2
+    }
+  ],
+  "entities": [
+    {
+      "id": "floor",
+      "name": "Floor",
+      "transform": {
+        "position": [0.0, -0.01, 0.0],
+        "rotation": [0.0, 0.0, 0.0, 1.0],
+        "scale": 4.0
+      },
+      "mesh": null,
+      "physics": {
+        "kind": "static",
+        "mass_kg": 0.0,
+        "collision_shape": "aabb",
+        "restitution": 0.1,
+        "friction": 0.9
+      },
+      "mechanic_bindings": [
+        {
+          "id": "builtin.teleport",
+          "builtin_id": "builtin.teleport",
+          "params": { "max_distance_m": 6.0 }
+        },
+        {
+          "id": "builtin.snap_turn",
+          "builtin_id": "builtin.snap_turn",
+          "params": { "degrees": 30.0 }
+        }
+      ],
+      "tags": ["ground", "teleport_target"]
+    },
+    {
+      "id": "cube_a",
+      "name": "Grabbable Cube A",
+      "transform": {
+        "position": [-0.3, 0.95, -0.6],
+        "rotation": [0.0, 0.0, 0.0, 1.0],
+        "scale": 1.0
+      },
+      "mesh": null,
+      "physics": {
+        "kind": "dynamic",
+        "mass_kg": 0.4,
+        "collision_shape": "aabb",
+        "restitution": 0.25,
+        "friction": 0.5
+      },
+      "mechanic_bindings": [
+        { "id": "builtin.grab", "builtin_id": "builtin.grab", "params": {} },
+        { "id": "builtin.throw", "builtin_id": "builtin.throw", "params": { "impulse": 4.5 } }
+      ],
+      "tags": ["grabbable"]
+    },
+    {
+      "id": "cube_b",
+      "name": "Grabbable Cube B",
+      "transform": {
+        "position": [0.3, 0.95, -0.6],
+        "rotation": [0.0, 0.0, 0.0, 1.0],
+        "scale": 1.0
+      },
+      "mesh": null,
+      "physics": {
+        "kind": "dynamic",
+        "mass_kg": 0.4,
+        "collision_shape": "aabb",
+        "restitution": 0.25,
+        "friction": 0.5
+      },
+      "mechanic_bindings": [
+        { "id": "builtin.grab", "builtin_id": "builtin.grab", "params": {} }
+      ],
+      "tags": ["grabbable"]
+    },
+    {
+      "id": "pedestal",
+      "name": "Pedestal trigger",
+      "transform": {
+        "position": [0.0, 0.8, -1.2],
+        "rotation": [0.0, 0.0, 0.0, 1.0],
+        "scale": 1.0
+      },
+      "mesh": null,
+      "physics": {
+        "kind": "kinematic",
+        "mass_kg": 0.0,
+        "collision_shape": "aabb",
+        "restitution": 0.0,
+        "friction": 1.0
+      },
+      "mechanic_bindings": [
+        {
+          "id": "builtin.trigger_zone",
+          "builtin_id": "builtin.trigger_zone",
+          "params": { "radius_m": 0.35 }
+        }
+      ],
+      "tags": ["trigger"]
+    }
+  ]
+}

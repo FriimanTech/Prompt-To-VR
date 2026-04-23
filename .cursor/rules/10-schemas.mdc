@@ -1,0 +1,20 @@
+---
+description: Schema-first development rules.
+globs: ["packages/schemas/**/*", "apps/orchestrator/**/*", "engine/runtime/src/scene/**/*"]
+alwaysApply: false
+---
+
+# Schema-first rules
+
+- `packages/schemas` is the single source of truth for: `BuildSpec`,
+  `AssetManifest`, `MechanicPlan`, `SceneSpec`, `CodeTask`, `ProjectState`,
+  `ArtifactMetadata`, `AcceptanceTestPlan`.
+- Any pipeline stage after prompt parsing must read the **structured
+  artifact**, not the raw prompt.
+- When you add or rename a field on a schema, update:
+  1. the Pydantic model in `packages/schemas/ptv_schemas/`,
+  2. the exported JSON schema under `packages/schemas/json/`,
+  3. any C++ consumer in `engine/runtime/src/scene/` or the scene compiler
+     under `engine/tools/`.
+- Every artifact written to disk must be validated against its Pydantic model
+  before and after writing.

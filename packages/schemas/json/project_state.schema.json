@@ -1,0 +1,184 @@
+{
+  "$defs": {
+    "ProjectStage": {
+      "enum": [
+        "created",
+        "build_spec",
+        "asset_manifest",
+        "mechanic_plan",
+        "scene_spec",
+        "reference_images",
+        "tripo_models",
+        "asset_normalization",
+        "code_generation",
+        "scene_compile",
+        "cmake_configure",
+        "cmake_build",
+        "ready_to_launch",
+        "failed"
+      ],
+      "title": "ProjectStage",
+      "type": "string"
+    },
+    "ProjectStatus": {
+      "enum": [
+        "idle",
+        "running",
+        "paused",
+        "succeeded",
+        "failed"
+      ],
+      "title": "ProjectStatus",
+      "type": "string"
+    },
+    "StageRecord": {
+      "additionalProperties": false,
+      "properties": {
+        "artifacts": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Artifacts",
+          "type": "array"
+        },
+        "ended_at": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Ended At"
+        },
+        "message": {
+          "default": "",
+          "title": "Message",
+          "type": "string"
+        },
+        "stage": {
+          "$ref": "#/$defs/ProjectStage"
+        },
+        "started_at": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Started At"
+        },
+        "status": {
+          "$ref": "#/$defs/ProjectStatus"
+        }
+      },
+      "required": [
+        "stage",
+        "status"
+      ],
+      "title": "StageRecord",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "created_at": {
+      "format": "date-time",
+      "title": "Created At",
+      "type": "string"
+    },
+    "current_stage": {
+      "$ref": "#/$defs/ProjectStage",
+      "default": "created"
+    },
+    "env_snapshot": {
+      "additionalProperties": {
+        "type": "string"
+      },
+      "title": "Env Snapshot",
+      "type": "object"
+    },
+    "latest_build_dir": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Latest Build Dir"
+    },
+    "latest_build_exe": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Latest Build Exe"
+    },
+    "latest_scene_json": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Latest Scene Json"
+    },
+    "project_id": {
+      "description": "Snake-case identifier, max 64 chars.",
+      "pattern": "^[a-z0-9][a-z0-9_.\\-]{0,63}$",
+      "title": "Project Id",
+      "type": "string"
+    },
+    "prompt": {
+      "maxLength": 16000,
+      "title": "Prompt",
+      "type": "string"
+    },
+    "stages": {
+      "items": {
+        "$ref": "#/$defs/StageRecord"
+      },
+      "title": "Stages",
+      "type": "array"
+    },
+    "status": {
+      "$ref": "#/$defs/ProjectStatus",
+      "default": "idle"
+    },
+    "title": {
+      "maxLength": 128,
+      "title": "Title",
+      "type": "string"
+    },
+    "updated_at": {
+      "format": "date-time",
+      "title": "Updated At",
+      "type": "string"
+    }
+  },
+  "required": [
+    "project_id",
+    "title",
+    "prompt"
+  ],
+  "title": "ProjectState",
+  "type": "object"
+}

@@ -1,0 +1,57 @@
+"""Stage 1: Prompt -> BuildSpec via Claude Opus structured output."""
+
+from __future__ import annotations
+
+import re
+
+from ptv_providers import ProviderConfigError
+from ptv_schemas import BuildSpec, ProjectStage, ProjectStatus
+
+from .context import PipelineContext, StageResult
+from .llm import make_llm
+from .prompts import BUILD_SPEC_SYSTEM
+
+
+def _prompt_id_from_text(prompt: str) -> str:
+    s = re.sub(r"[^a-zA-Z0-9]+", "-", prompt.strip().lower()).strip("-")
+    return (s[:48] or "prompt")
+
+
+def run(ctx: PipelineContext) -> StageResult:
+    ctx.emit(ProjectStage.build_spec, "running", "Planning BuildSpec")
+    state = ctx.store.load_state(ctx.project_id)
+    ctx.store.record_stage(state, ProjectStage.build_spec, ProjectStatus.running)
+
+    schema = BuildSpec.model_json_schema(by_alias=True)
+    client = make_llm(ctx.settings)
+
+    user_prompt = (
+        f"User prompt (verbatim):\n---\n{state.prompt.strip()}\n---\n"
+        f"Use prompt_id = {_prompt_id_from_text(state.prompt)!r}. "
+        "Produce a complete BuildSpec."
+    )
+    if ctx.dry_run:
+        raise ProviderConfigError(
+            "BuildSpec dry-run requested: supply a canned BuildSpec via tests."
+        )
+
+    resp = client.generate_json(
+        prompt=user_prompt,
+        schema=schema,
+        system=BUILD_SPEC_SYSTEM,
+    )
+    spec = BuildSpec.model_validate(resp.data)
+    ctx.build_spec = spec
+    art = ctx.store.save_build_spec(ctx.project_id, spec)
+
+    ctx.store.record_stage(
+        state,
+        ProjectStage.build_spec,
+        ProjectStatus.succeeded,
+        message=f"Produced BuildSpec for {spec.title!r}",
+        artifacts=[art.path],
+    )
+    ctx.emit(ProjectStage.build_spec, "succeeded", spec.title)
+    return StageResult(
+        stage=ProjectStage.build_spec, artifacts=[art.path], data=spec
+    )

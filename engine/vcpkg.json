@@ -1,0 +1,23 @@
+{
+  "name": "ptv-engine",
+  "version-string": "0.1.0",
+  "description": "Prompt-To-Native-VR engine runtime (Vulkan + OpenXR + EnTT + Jolt).",
+  "dependencies": [
+    "vulkan-loader",
+    "vulkan-headers",
+    "openxr-loader",
+    "glfw3",
+    "volk",
+    "vulkan-memory-allocator",
+    "glm",
+    "tinygltf",
+    "entt",
+    "joltphysics",
+    "spdlog",
+    "nlohmann-json",
+    {
+      "name": "imgui",
+      "features": ["vulkan-binding", "glfw-binding"]
+    }
+  ]
+}

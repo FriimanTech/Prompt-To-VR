@@ -1,0 +1,220 @@
+{
+  "$defs": {
+    "AssetCategory": {
+      "enum": [
+        "environment",
+        "prop",
+        "character",
+        "fx",
+        "ui"
+      ],
+      "title": "AssetCategory",
+      "type": "string"
+    },
+    "AssetItem": {
+      "additionalProperties": false,
+      "properties": {
+        "category": {
+          "$ref": "#/$defs/AssetCategory"
+        },
+        "collision_shape": {
+          "default": "aabb",
+          "description": "Deterministic collision primitive: 'aabb', 'sphere', 'capsule', or 'mesh' (from GLB).",
+          "maxLength": 32,
+          "title": "Collision Shape",
+          "type": "string"
+        },
+        "id": {
+          "description": "Snake-case identifier, max 64 chars.",
+          "pattern": "^[a-z0-9][a-z0-9_.\\-]{0,63}$",
+          "title": "Id",
+          "type": "string"
+        },
+        "name": {
+          "maxLength": 128,
+          "title": "Name",
+          "type": "string"
+        },
+        "reference": {
+          "$ref": "#/$defs/ReferenceImageRequest"
+        },
+        "rigged": {
+          "default": false,
+          "title": "Rigged",
+          "type": "boolean"
+        },
+        "strategy": {
+          "$ref": "#/$defs/GenerationStrategy",
+          "default": "image_to_3d"
+        },
+        "style_notes": {
+          "maxLength": 2000,
+          "title": "Style Notes",
+          "type": "string"
+        },
+        "target_scale_meters": {
+          "default": 1.0,
+          "exclusiveMaximum": 30.0,
+          "exclusiveMinimum": 0.0,
+          "title": "Target Scale Meters",
+          "type": "number"
+        },
+        "tripo": {
+          "$ref": "#/$defs/TripoRequest"
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "category",
+        "style_notes",
+        "reference"
+      ],
+      "title": "AssetItem",
+      "type": "object"
+    },
+    "GenerationStrategy": {
+      "enum": [
+        "image_to_3d",
+        "text_to_3d"
+      ],
+      "title": "GenerationStrategy",
+      "type": "string"
+    },
+    "ReferenceImageRequest": {
+      "additionalProperties": false,
+      "description": "Reference image parameters sent to Gemini / Imagen.",
+      "properties": {
+        "aspect_ratio": {
+          "default": "1:1",
+          "pattern": "^\\d{1,2}:\\d{1,2}$",
+          "title": "Aspect Ratio",
+          "type": "string"
+        },
+        "negative_prompt": {
+          "anyOf": [
+            {
+              "maxLength": 1000,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Negative Prompt"
+        },
+        "number_of_images": {
+          "default": 1,
+          "maximum": 4,
+          "minimum": 1,
+          "title": "Number Of Images",
+          "type": "integer"
+        },
+        "prompt": {
+          "maxLength": 4000,
+          "title": "Prompt",
+          "type": "string"
+        }
+      },
+      "required": [
+        "prompt"
+      ],
+      "title": "ReferenceImageRequest",
+      "type": "object"
+    },
+    "TripoRequest": {
+      "additionalProperties": false,
+      "description": "Shape of the Tripo image-to-3D / text-to-3D request.\n\nTextured, PBR, image-aligned defaults are REQUIRED per project policy.",
+      "properties": {
+        "face_limit": {
+          "anyOf": [
+            {
+              "maximum": 50000,
+              "minimum": 64,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Face Limit"
+        },
+        "model_version": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional explicit model version (e.g. 'v2.5-20250123', 'p1'). When None the client uses its default.",
+          "title": "Model Version"
+        },
+        "pbr": {
+          "default": true,
+          "title": "Pbr",
+          "type": "boolean"
+        },
+        "texture": {
+          "default": true,
+          "title": "Texture",
+          "type": "boolean"
+        },
+        "texture_alignment": {
+          "$ref": "#/$defs/TripoTextureAlignment",
+          "default": "original_image"
+        },
+        "texture_quality": {
+          "$ref": "#/$defs/TripoTextureQuality",
+          "default": "detailed"
+        }
+      },
+      "title": "TripoRequest",
+      "type": "object"
+    },
+    "TripoTextureAlignment": {
+      "enum": [
+        "original_image",
+        "geometry"
+      ],
+      "title": "TripoTextureAlignment",
+      "type": "string"
+    },
+    "TripoTextureQuality": {
+      "enum": [
+        "standard",
+        "detailed"
+      ],
+      "title": "TripoTextureQuality",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "items": {
+      "items": {
+        "$ref": "#/$defs/AssetItem"
+      },
+      "maxItems": 48,
+      "minItems": 1,
+      "title": "Items",
+      "type": "array"
+    },
+    "prompt_id": {
+      "description": "Snake-case identifier, max 64 chars.",
+      "pattern": "^[a-z0-9][a-z0-9_.\\-]{0,63}$",
+      "title": "Prompt Id",
+      "type": "string"
+    }
+  },
+  "required": [
+    "prompt_id",
+    "items"
+  ],
+  "title": "AssetManifest",
+  "type": "object"
+}

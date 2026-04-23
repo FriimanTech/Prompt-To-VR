@@ -1,0 +1,334 @@
+{
+  "$defs": {
+    "EntitySpec": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "description": "Snake-case identifier, max 64 chars.",
+          "pattern": "^[a-z0-9][a-z0-9_.\\-]{0,63}$",
+          "title": "Id",
+          "type": "string"
+        },
+        "mechanic_bindings": {
+          "items": {
+            "$ref": "#/$defs/MechanicBinding"
+          },
+          "title": "Mechanic Bindings",
+          "type": "array"
+        },
+        "mesh": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MeshRef"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "name": {
+          "maxLength": 128,
+          "title": "Name",
+          "type": "string"
+        },
+        "physics": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PhysicsProps"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "tags": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 16,
+          "title": "Tags",
+          "type": "array"
+        },
+        "transform": {
+          "$ref": "#/$defs/Transform"
+        }
+      },
+      "required": [
+        "id",
+        "name"
+      ],
+      "title": "EntitySpec",
+      "type": "object"
+    },
+    "LightSpec": {
+      "additionalProperties": false,
+      "properties": {
+        "color_rgb": {
+          "items": {
+            "type": "number"
+          },
+          "title": "Color Rgb",
+          "type": "array"
+        },
+        "id": {
+          "description": "Snake-case identifier, max 64 chars.",
+          "pattern": "^[a-z0-9][a-z0-9_.\\-]{0,63}$",
+          "title": "Id",
+          "type": "string"
+        },
+        "intensity": {
+          "default": 1.0,
+          "maximum": 20.0,
+          "minimum": 0.0,
+          "title": "Intensity",
+          "type": "number"
+        },
+        "kind": {
+          "default": "directional",
+          "maxLength": 32,
+          "title": "Kind",
+          "type": "string"
+        },
+        "transform": {
+          "$ref": "#/$defs/Transform"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "title": "LightSpec",
+      "type": "object"
+    },
+    "MechanicBinding": {
+      "additionalProperties": false,
+      "properties": {
+        "mechanic_id": {
+          "description": "Either 'builtin.<name>' for a reusable mechanic or 'generated.<code_task_id>' for a generated module.",
+          "maxLength": 128,
+          "title": "Mechanic Id",
+          "type": "string"
+        },
+        "params": {
+          "additionalProperties": true,
+          "title": "Params",
+          "type": "object"
+        }
+      },
+      "required": [
+        "mechanic_id"
+      ],
+      "title": "MechanicBinding",
+      "type": "object"
+    },
+    "MeshRef": {
+      "additionalProperties": false,
+      "properties": {
+        "asset_id": {
+          "description": "Snake-case identifier, max 64 chars.",
+          "pattern": "^[a-z0-9][a-z0-9_.\\-]{0,63}$",
+          "title": "Asset Id",
+          "type": "string"
+        },
+        "glb_path": {
+          "description": "Project-relative path under projects/<id>/assets/",
+          "maxLength": 512,
+          "title": "Glb Path",
+          "type": "string"
+        }
+      },
+      "required": [
+        "asset_id",
+        "glb_path"
+      ],
+      "title": "MeshRef",
+      "type": "object"
+    },
+    "PhysicsProps": {
+      "additionalProperties": false,
+      "properties": {
+        "collision_shape": {
+          "default": "aabb",
+          "maxLength": 32,
+          "title": "Collision Shape",
+          "type": "string"
+        },
+        "friction": {
+          "default": 0.5,
+          "maximum": 2.0,
+          "minimum": 0.0,
+          "title": "Friction",
+          "type": "number"
+        },
+        "kind": {
+          "default": "static",
+          "maxLength": 32,
+          "title": "Kind",
+          "type": "string"
+        },
+        "mass_kg": {
+          "default": 1.0,
+          "exclusiveMaximum": 10000.0,
+          "minimum": 0.0,
+          "title": "Mass Kg",
+          "type": "number"
+        },
+        "restitution": {
+          "default": 0.2,
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "title": "Restitution",
+          "type": "number"
+        }
+      },
+      "title": "PhysicsProps",
+      "type": "object"
+    },
+    "PlayerSpawn": {
+      "additionalProperties": false,
+      "properties": {
+        "face_direction": {
+          "$ref": "#/$defs/Vec3"
+        },
+        "transform": {
+          "$ref": "#/$defs/Transform"
+        }
+      },
+      "title": "PlayerSpawn",
+      "type": "object"
+    },
+    "QuatXYZW": {
+      "additionalProperties": false,
+      "description": "Quaternion stored as (x, y, z, w), identity = (0,0,0,1).",
+      "properties": {
+        "w": {
+          "default": 1.0,
+          "title": "W",
+          "type": "number"
+        },
+        "x": {
+          "default": 0.0,
+          "title": "X",
+          "type": "number"
+        },
+        "y": {
+          "default": 0.0,
+          "title": "Y",
+          "type": "number"
+        },
+        "z": {
+          "default": 0.0,
+          "title": "Z",
+          "type": "number"
+        }
+      },
+      "title": "QuatXYZW",
+      "type": "object"
+    },
+    "Transform": {
+      "additionalProperties": false,
+      "properties": {
+        "position": {
+          "$ref": "#/$defs/Vec3"
+        },
+        "rotation": {
+          "$ref": "#/$defs/QuatXYZW"
+        },
+        "scale": {
+          "default": 1.0,
+          "exclusiveMaximum": 1000.0,
+          "exclusiveMinimum": 0.0,
+          "title": "Scale",
+          "type": "number"
+        }
+      },
+      "title": "Transform",
+      "type": "object"
+    },
+    "Vec3": {
+      "additionalProperties": false,
+      "properties": {
+        "x": {
+          "default": 0.0,
+          "title": "X",
+          "type": "number"
+        },
+        "y": {
+          "default": 0.0,
+          "title": "Y",
+          "type": "number"
+        },
+        "z": {
+          "default": 0.0,
+          "title": "Z",
+          "type": "number"
+        }
+      },
+      "title": "Vec3",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "ambient_intensity": {
+      "default": 0.25,
+      "maximum": 5.0,
+      "minimum": 0.0,
+      "title": "Ambient Intensity",
+      "type": "number"
+    },
+    "entities": {
+      "items": {
+        "$ref": "#/$defs/EntitySpec"
+      },
+      "maxItems": 256,
+      "minItems": 0,
+      "title": "Entities",
+      "type": "array"
+    },
+    "lights": {
+      "items": {
+        "$ref": "#/$defs/LightSpec"
+      },
+      "maxItems": 32,
+      "title": "Lights",
+      "type": "array"
+    },
+    "name": {
+      "maxLength": 128,
+      "title": "Name",
+      "type": "string"
+    },
+    "player_spawn": {
+      "$ref": "#/$defs/PlayerSpawn"
+    },
+    "prompt_id": {
+      "description": "Snake-case identifier, max 64 chars.",
+      "pattern": "^[a-z0-9][a-z0-9_.\\-]{0,63}$",
+      "title": "Prompt Id",
+      "type": "string"
+    },
+    "scene_id": {
+      "description": "Snake-case identifier, max 64 chars.",
+      "pattern": "^[a-z0-9][a-z0-9_.\\-]{0,63}$",
+      "title": "Scene Id",
+      "type": "string"
+    },
+    "sky_color": {
+      "items": {
+        "type": "number"
+      },
+      "title": "Sky Color",
+      "type": "array"
+    }
+  },
+  "required": [
+    "prompt_id",
+    "scene_id",
+    "name",
+    "entities"
+  ],
+  "title": "SceneSpec",
+  "type": "object"
+}

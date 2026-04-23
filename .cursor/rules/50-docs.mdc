@@ -1,0 +1,20 @@
+---
+description: Documentation rules.
+globs: ["docs/**/*", "README.md", "AGENTS.md"]
+alwaysApply: false
+---
+
+# Documentation rules
+
+- `docs/` contains the 9 user-facing docs (overview, architecture,
+  local-setup, build-and-run, provider-setup, prompt-schema,
+  runtime-subsystems, project-layout, troubleshooting). All of them MUST
+  remain current.
+- When code structure changes, update:
+  - `docs/architecture.md` if data flow changes,
+  - `docs/runtime-subsystems.md` if engine modules change,
+  - `docs/prompt-schema.md` if any schema changes,
+  - `docs/build-and-run.md` if the build / launch command changes,
+  - `docs/troubleshooting.md` if a new reproducible failure has a workaround.
+- The `README.md` must always end with a `# Manual Steps I Still Need To Do`
+  section that honestly lists software, keys, env vars, and blocked items.

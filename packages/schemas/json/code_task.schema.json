@@ -1,0 +1,102 @@
+{
+  "$defs": {
+    "CodeTaskFile": {
+      "additionalProperties": false,
+      "properties": {
+        "contents": {
+          "maxLength": 120000,
+          "title": "Contents",
+          "type": "string"
+        },
+        "path": {
+          "description": "Relative path starting with 'engine/generated/mechanics/', 'engine/generated/ai/', or 'engine/generated/dialogue/'.",
+          "maxLength": 256,
+          "title": "Path",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "contents"
+      ],
+      "title": "CodeTaskFile",
+      "type": "object"
+    },
+    "CodeTaskKind": {
+      "enum": [
+        "mechanic",
+        "ai",
+        "dialogue"
+      ],
+      "title": "CodeTaskKind",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "acceptance_notes": {
+      "default": "",
+      "maxLength": 2000,
+      "title": "Acceptance Notes",
+      "type": "string"
+    },
+    "description": {
+      "maxLength": 4000,
+      "title": "Description",
+      "type": "string"
+    },
+    "files": {
+      "items": {
+        "$ref": "#/$defs/CodeTaskFile"
+      },
+      "maxItems": 16,
+      "title": "Files",
+      "type": "array"
+    },
+    "headers": {
+      "description": "Whitelisted public engine headers that the generated code may include. Only ptv/api/* and ptv/scene/* are allowed.",
+      "items": {
+        "type": "string"
+      },
+      "maxItems": 32,
+      "title": "Headers",
+      "type": "array"
+    },
+    "id": {
+      "description": "Snake-case identifier, max 64 chars.",
+      "pattern": "^[a-z0-9][a-z0-9_.\\-]{0,63}$",
+      "title": "Id",
+      "type": "string"
+    },
+    "interface": {
+      "description": "Name of the abstract interface the generated module implements: 'IMechanic' | 'IBehaviour' | 'IDialogueHook'.",
+      "title": "Interface",
+      "type": "string"
+    },
+    "kind": {
+      "$ref": "#/$defs/CodeTaskKind"
+    },
+    "test_files": {
+      "items": {
+        "$ref": "#/$defs/CodeTaskFile"
+      },
+      "maxItems": 8,
+      "title": "Test Files",
+      "type": "array"
+    },
+    "title": {
+      "maxLength": 200,
+      "title": "Title",
+      "type": "string"
+    }
+  },
+  "required": [
+    "id",
+    "kind",
+    "title",
+    "description",
+    "interface"
+  ],
+  "title": "CodeTask",
+  "type": "object"
+}
