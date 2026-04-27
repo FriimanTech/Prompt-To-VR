@@ -34,6 +34,48 @@ public:
     float delta_time() const { return dt_; }
     void set_delta_time(float dt) { dt_ = dt; }
 
+    // ---- uint32_t-safe component helpers for generated code ---------------
+    //
+    // IMechanic's interface passes entities as std::uint32_t (a stable ABI
+    // for generated code). entt::registry wants ``entt::entity``. Wrapping
+    // the cast once here means mechanics never have to write
+    // ``static_cast<entt::entity>(e)`` and can't accidentally truncate.
+
+    template <class C>
+    bool has(std::uint32_t e) const {
+        return registry_.all_of<C>(static_cast<entt::entity>(e));
+    }
+
+    template <class... Cs>
+    bool has_all(std::uint32_t e) const {
+        return registry_.all_of<Cs...>(static_cast<entt::entity>(e));
+    }
+
+    template <class C>
+    C& get(std::uint32_t e) {
+        return registry_.get<C>(static_cast<entt::entity>(e));
+    }
+
+    template <class C>
+    const C& get(std::uint32_t e) const {
+        return registry_.get<C>(static_cast<entt::entity>(e));
+    }
+
+    template <class C, class... Args>
+    C& emplace_or_replace(std::uint32_t e, Args&&... args) {
+        return registry_.emplace_or_replace<C>(
+            static_cast<entt::entity>(e), std::forward<Args>(args)...);
+    }
+
+    template <class C>
+    void remove(std::uint32_t e) {
+        registry_.remove<C>(static_cast<entt::entity>(e));
+    }
+
+    bool valid(std::uint32_t e) const {
+        return registry_.valid(static_cast<entt::entity>(e));
+    }
+
 private:
     entt::registry registry_{};
     std::unordered_map<std::string, entt::entity> id_to_entity_{};

@@ -65,6 +65,23 @@ struct SceneDoc {
     std::string locomotion{"teleport"};
     std::string comfort{"comfort"};
     PlayerSpawn spawn{};
+    /** When true (default), Application shows the Meta-style movement picker
+     * on first run. When false, ``default_locomotion_mode`` is used and the
+     * menu is skipped (arcade / seated titles). */
+    bool locomotion_menu_enabled{true};
+    /** Used only when ``locomotion_menu_enabled`` is false. One of:
+     * ``teleport``, ``slide_head_relative``, ``slide_controller_relative``. */
+    std::string default_locomotion_mode{};
+    /** Tunables for Application.cpp (override hardcoded defaults). */
+    float slide_max_speed_mps{1.5f};
+    float slide_accel_tau_s{0.12f};
+    float slide_decel_tau_s{0.18f};
+    float teleport_launch_speed_mps{6.0f};
+    float teleport_max_horizontal_m{12.0f};
+    /** Y plane used for teleport arc landing tests (meters). */
+    float teleport_floor_y{0.0f};
+    float snap_turn_degrees{45.0f};
+    float snap_turn_cooldown_s{0.30f};
     Vec3 sky_color{0.05f, 0.07f, 0.11f};
     float ambient_intensity{0.25f};
     std::vector<LightSpec> lights;

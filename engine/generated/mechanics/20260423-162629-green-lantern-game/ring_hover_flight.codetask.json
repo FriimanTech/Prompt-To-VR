@@ -1,0 +1,26 @@
+{
+  "id": "ring_hover_flight",
+  "kind": "mechanic",
+  "title": "Ring Hover Flight (Grip Toggle, Speed/Alt Caps, Energy Drain, Comfort)",
+  "description": "Adds a hover-flight mode unlocked after tutorial. Holding grip engages hover; thumbstick moves with capped speed and ascent, altitude cap above ground, and optional soft pushback near scene bounds. Applies speed-scaled comfort vignette and drains ring_energy while active. Disabled in no-fly volumes and in indoor scenes. Coexists with teleport and snap turn.",
+  "interface": "IMechanic",
+  "headers": [
+    "ptv/api/imechanic.h",
+    "ptv/api/input.h",
+    "ptv/api/locomotion.h",
+    "ptv/api/haptics.h",
+    "ptv/api/time.h",
+    "ptv/api/ui.h",
+    "ptv/api/save_state.h",
+    "ptv/scene/node.h",
+    "ptv/scene/volume.h"
+  ],
+  "files": [
+    {
+      "path": "engine/generated/mechanics/ring_hover_flight.cpp",
+      "contents": "// RingHoverFlight - generated task stub (no implementation here)\n// Responsibilities:\n// - Toggle hover mode on grip hold (right hand by default) after 'flight_unlocked' flag is true.\n// - Translate input vector into horizontal movement with acceleration, speed cap, and optional vertical control (gentle auto-hover).\n// - Enforce altitude cap above navmesh/ground; clamp ascent rate; prevent entering indoor/no-fly volumes.\n// - Apply soft boundary forces near scene bounds (tagged volumes) and fully disable indoors or when near hard limits.\n// - Drain 'ring_energy' per second while hovering; prevent engage if below min energy; auto-disengage at 0.\n// - Drive speed-scaled comfort vignette; expose strength curve and min/max.\n// - Show HUD flight indicators via ui_ring_hud.\n// - Persist unlock state and settings across scene loads.\n//\n// Expected Config:\n//   input: { grip_binding: 'right_grip', move_stick: 'right_thumbstick' }\n//   speed_mps_max: float        // e.g., 6.0\n//   accel_mps2: float           // e.g., 10.0\n//   ascent_rate_mps: float      // e.g., 2.0\n//   altitude_cap_m: float       // e.g., 8.0\n//   energy: { resource_id: 'ring_energy', drain_per_sec: 2.0, min_to_engage: 5 }\n//   comfort: { vignette_min: 0.2, vignette_max: 0.7, speed_for_max: 6.0 }\n//   volumes: { allowed_tag: 'hover_allowed', no_fly_tag: 'no_fly', soft_bound_tag: 'soft_bound' }\n//   unlock_flag_key: 'flight_unlocked'\n//   scenes_enabled: ['oa_plaza']\n//\n// Integration Points:\n// - Reads/writes builtin.inventory resource 'ring_energy'.\n// - Respects builtin.snap_turn setting; ignores turn input while hovering if snap turn is active.\n// - Reads SaveState for 'flight_unlocked' and user comfort settings.\n//\n// Acceptance Criteria Mapping:\n// - hover_flight_unlock_and_bounds: engages only after unlock, respects caps, vignette scales with speed, disabled in hall and near boundaries.\n// - performance_budget_check_pcvr: motion updates efficient; no excessive allocations; VFX minimal."
+    }
+  ],
+  "test_files": [],
+  "acceptance_notes": "Ensure hover only in oa_plaza and within tagged allowed areas. Energy drains continuously; disengages safely at 0. Comfort vignette scales with velocity. Disable in central_battery_chamber and any no_fly volumes. Unlock controlled by tutorial flag."
+}

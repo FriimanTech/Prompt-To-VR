@@ -58,6 +58,16 @@ SceneDoc LoadSceneJson(const std::string& path) {
         d.player_height_meters = p.value("height_meters", 1.7f);
         d.locomotion = p.value("locomotion", std::string("teleport"));
         d.comfort = p.value("comfort", std::string("comfort"));
+        d.locomotion_menu_enabled = p.value("locomotion_menu", true);
+        d.default_locomotion_mode = p.value("default_locomotion_mode", std::string{});
+        d.slide_max_speed_mps = p.value("slide_max_speed_mps", 1.5f);
+        d.slide_accel_tau_s = p.value("slide_accel_tau_s", 0.12f);
+        d.slide_decel_tau_s = p.value("slide_decel_tau_s", 0.18f);
+        d.teleport_launch_speed_mps = p.value("teleport_launch_speed_mps", 6.0f);
+        d.teleport_max_horizontal_m = p.value("teleport_max_horizontal_m", 12.0f);
+        d.teleport_floor_y = p.value("teleport_floor_y", 0.0f);
+        d.snap_turn_degrees = p.value("snap_turn_degrees", 45.0f);
+        d.snap_turn_cooldown_s = p.value("snap_turn_cooldown_s", 0.30f);
         if (p.contains("spawn")) {
             d.spawn.position = read_vec3(p["spawn"].value("position", Json::array()),
                                          Vec3(0.0f));

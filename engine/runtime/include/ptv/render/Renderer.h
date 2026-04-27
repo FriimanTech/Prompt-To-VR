@@ -44,6 +44,9 @@ public:
         //       shader; the X/Z world coordinates drive the pattern)
         //   2 = hand / grab highlight (slightly emissive rim)
         float material_id{0.0f};
+        // -1 = draw the built-in unit cube (legacy procedural entities).
+        // >=0 = index into this renderer's uploaded GLB mesh cache.
+        int mesh_slot{-1};
     };
 
     struct EyeTarget {
@@ -75,10 +78,9 @@ public:
                     const std::vector<DrawItem>& items,
                     const Vec3& sky_color);
 
-    /** Build a list of DrawItems from the ECS. Ground/grabbable/trigger
-     *  entities get different colors so the scene is readable. */
-    void build_items_from_world(World& world,
-                                std::vector<DrawItem>& out) const;
+    /** Build a list of DrawItems from the ECS. Entities with ``CMesh`` load
+     *  GLB geometry on first use; others use the procedural unit cube. */
+    void build_items_from_world(World& world, std::vector<DrawItem>& out);
 
     VkFormat color_format() const { return color_format_; }
     VkRenderPass render_pass() const { return render_pass_; }
@@ -92,6 +94,18 @@ private:
 
     VkImageView get_or_create_color_view(VkImage img);
     VkFramebuffer get_or_create_framebuffer(VkImage img);
+
+    struct GltfGpuMesh {
+        VkBuffer vb{VK_NULL_HANDLE};
+        VmaAllocation vb_alloc{nullptr};
+        VkBuffer ib{VK_NULL_HANDLE};
+        VmaAllocation ib_alloc{nullptr};
+        uint32_t index_count{0};
+    };
+    /** Return cache slot for ``resolved_path`` (absolute on disk), or -1. */
+    int ensure_gltf_mesh(const std::string& resolved_path,
+                         float target_scale_meters);
+    void destroy_gltf_meshes();
 
     VulkanContext* vk_{nullptr};
     VkFormat color_format_{VK_FORMAT_UNDEFINED};
@@ -122,6 +136,9 @@ private:
 
     std::unordered_map<VkImage, VkImageView> color_views_;
     std::unordered_map<VkImage, VkFramebuffer> framebuffers_;
+
+    std::vector<GltfGpuMesh> gltf_meshes_;
+    std::unordered_map<std::string, int> gltf_path_to_slot_;
 };
 
 }  // namespace ptv

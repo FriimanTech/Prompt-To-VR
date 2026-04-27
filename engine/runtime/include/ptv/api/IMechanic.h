@@ -43,10 +43,24 @@ using MechanicFactory = std::function<std::unique_ptr<IMechanic>()>;
  */
 bool register_mechanic(const std::string& id, MechanicFactory factory);
 
+#define PTV_DETAIL_CONCAT_(a, b) a##b
+#define PTV_DETAIL_CONCAT(a, b) PTV_DETAIL_CONCAT_(a, b)
+
+/**
+ * Register a mechanic factory at file scope. Safe to use with either a
+ * plain, unqualified TypeName (``RingHoverFlight``) or a fully-qualified
+ * one (``ptv::RingHoverFlight``, ``mygame::Foo``, etc.). The registration
+ * variable is uniquified by ``__LINE__`` + ``__COUNTER__`` so it never
+ * collides and never token-pastes ``::`` into an identifier.
+ *
+ * Must be invoked at namespace scope (NOT inside a class/function body).
+ */
 #define PTV_REGISTER_MECHANIC(id_literal, TypeName)                                          \
     namespace {                                                                              \
-        const bool _ptv_reg_##TypeName = ::ptv::register_mechanic(                           \
-            id_literal, [] { return std::unique_ptr<::ptv::IMechanic>(new TypeName()); });   \
+        const bool PTV_DETAIL_CONCAT(_ptv_reg_, PTV_DETAIL_CONCAT(__LINE__, __COUNTER__)) =  \
+            ::ptv::register_mechanic(                                                        \
+                id_literal,                                                                  \
+                [] { return std::unique_ptr<::ptv::IMechanic>(new TypeName()); });           \
     }
 
 }  // namespace ptv

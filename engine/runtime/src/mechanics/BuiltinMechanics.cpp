@@ -58,6 +58,11 @@ public:
     void tick(World&, std::uint32_t, float) {}
 };
 PTV_REGISTER_MECHANIC("builtin.teleport", TeleportMechanic)
+// Planner / engine-catalog ids (locomotion is implemented in Application.cpp;
+// these registrations exist so ``MechanicHost`` can attach scene bindings
+// without logging "No mechanic registered" and so generated ``scene.json``
+// stays aligned with ``docs/locomotion.md``).
+PTV_REGISTER_MECHANIC("builtin.locomotion.teleport", TeleportMechanic)
 
 // ---------------------------------------------------------------------------
 // Smooth locomotion
@@ -73,6 +78,10 @@ private:
     float speed_{1.5f};
 };
 PTV_REGISTER_MECHANIC("builtin.smooth_locomotion", SmoothLocomotionMechanic)
+PTV_REGISTER_MECHANIC("builtin.locomotion.slide.head_relative",
+                      SmoothLocomotionMechanic)
+PTV_REGISTER_MECHANIC("builtin.locomotion.slide.controller_relative",
+                      SmoothLocomotionMechanic)
 
 // ---------------------------------------------------------------------------
 // Snap turn
@@ -88,6 +97,7 @@ private:
     float degrees_{30.0f};
 };
 PTV_REGISTER_MECHANIC("builtin.snap_turn", SnapTurnMechanic)
+PTV_REGISTER_MECHANIC("builtin.locomotion.snap_turn", SnapTurnMechanic)
 
 // ---------------------------------------------------------------------------
 // Grab

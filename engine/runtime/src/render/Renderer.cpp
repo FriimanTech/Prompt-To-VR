@@ -2,12 +2,14 @@
 
 #include <array>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
 #include <sstream>
 #include <vector>
 
 #include "ptv/core/Logger.h"
 #include "ptv/ecs/World.h"
+#include "ptv/render/GltfMeshLoad.h"
 #include "ptv/render/VulkanContext.h"
 
 namespace ptv {
@@ -53,45 +55,55 @@ struct PushConstants {
     Vec4 params;
 };
 
+// Shared vertex layout for both the procedural cube path and the GLB mesh
+// path. Keeping a single layout means we only need one graphics pipeline
+// and one vertex-input description; the cube simply ships pure-white
+// colors so its appearance is driven entirely by the per-DrawItem tint
+// (push constant), while GLBs ship per-vertex baseColor from their
+// source material so each Tripo asset renders with its design palette.
 struct Vertex {
     float pos[3];
     float normal[3];
+    float color[4];
 };
+static_assert(sizeof(Vertex) == sizeof(gltf_mesh_load::LitVertex),
+              "Renderer::Vertex and LitVertex must match (shared pipeline)");
 
 // A unit cube centered at the origin with side length 1. Each face gets a
 // flat outward normal (6 faces x 4 vertices = 24 unique vertices), which
-// makes lighting look correct without smoothing.
+// makes lighting look correct without smoothing. Color is white so the
+// per-item DrawItem.color tint controls the look unmodified.
 const std::array<Vertex, 24> kCubeVerts = {{
     // +X
-    {{ 0.5f, -0.5f, -0.5f}, { 1.0f,  0.0f,  0.0f}},
-    {{ 0.5f,  0.5f, -0.5f}, { 1.0f,  0.0f,  0.0f}},
-    {{ 0.5f,  0.5f,  0.5f}, { 1.0f,  0.0f,  0.0f}},
-    {{ 0.5f, -0.5f,  0.5f}, { 1.0f,  0.0f,  0.0f}},
+    {{ 0.5f, -0.5f, -0.5f}, { 1.0f,  0.0f,  0.0f}, {1.0f,1.0f,1.0f,1.0f}},
+    {{ 0.5f,  0.5f, -0.5f}, { 1.0f,  0.0f,  0.0f}, {1.0f,1.0f,1.0f,1.0f}},
+    {{ 0.5f,  0.5f,  0.5f}, { 1.0f,  0.0f,  0.0f}, {1.0f,1.0f,1.0f,1.0f}},
+    {{ 0.5f, -0.5f,  0.5f}, { 1.0f,  0.0f,  0.0f}, {1.0f,1.0f,1.0f,1.0f}},
     // -X
-    {{-0.5f, -0.5f,  0.5f}, {-1.0f,  0.0f,  0.0f}},
-    {{-0.5f,  0.5f,  0.5f}, {-1.0f,  0.0f,  0.0f}},
-    {{-0.5f,  0.5f, -0.5f}, {-1.0f,  0.0f,  0.0f}},
-    {{-0.5f, -0.5f, -0.5f}, {-1.0f,  0.0f,  0.0f}},
+    {{-0.5f, -0.5f,  0.5f}, {-1.0f,  0.0f,  0.0f}, {1.0f,1.0f,1.0f,1.0f}},
+    {{-0.5f,  0.5f,  0.5f}, {-1.0f,  0.0f,  0.0f}, {1.0f,1.0f,1.0f,1.0f}},
+    {{-0.5f,  0.5f, -0.5f}, {-1.0f,  0.0f,  0.0f}, {1.0f,1.0f,1.0f,1.0f}},
+    {{-0.5f, -0.5f, -0.5f}, {-1.0f,  0.0f,  0.0f}, {1.0f,1.0f,1.0f,1.0f}},
     // +Y (top)
-    {{-0.5f,  0.5f, -0.5f}, { 0.0f,  1.0f,  0.0f}},
-    {{-0.5f,  0.5f,  0.5f}, { 0.0f,  1.0f,  0.0f}},
-    {{ 0.5f,  0.5f,  0.5f}, { 0.0f,  1.0f,  0.0f}},
-    {{ 0.5f,  0.5f, -0.5f}, { 0.0f,  1.0f,  0.0f}},
+    {{-0.5f,  0.5f, -0.5f}, { 0.0f,  1.0f,  0.0f}, {1.0f,1.0f,1.0f,1.0f}},
+    {{-0.5f,  0.5f,  0.5f}, { 0.0f,  1.0f,  0.0f}, {1.0f,1.0f,1.0f,1.0f}},
+    {{ 0.5f,  0.5f,  0.5f}, { 0.0f,  1.0f,  0.0f}, {1.0f,1.0f,1.0f,1.0f}},
+    {{ 0.5f,  0.5f, -0.5f}, { 0.0f,  1.0f,  0.0f}, {1.0f,1.0f,1.0f,1.0f}},
     // -Y
-    {{-0.5f, -0.5f,  0.5f}, { 0.0f, -1.0f,  0.0f}},
-    {{-0.5f, -0.5f, -0.5f}, { 0.0f, -1.0f,  0.0f}},
-    {{ 0.5f, -0.5f, -0.5f}, { 0.0f, -1.0f,  0.0f}},
-    {{ 0.5f, -0.5f,  0.5f}, { 0.0f, -1.0f,  0.0f}},
+    {{-0.5f, -0.5f,  0.5f}, { 0.0f, -1.0f,  0.0f}, {1.0f,1.0f,1.0f,1.0f}},
+    {{-0.5f, -0.5f, -0.5f}, { 0.0f, -1.0f,  0.0f}, {1.0f,1.0f,1.0f,1.0f}},
+    {{ 0.5f, -0.5f, -0.5f}, { 0.0f, -1.0f,  0.0f}, {1.0f,1.0f,1.0f,1.0f}},
+    {{ 0.5f, -0.5f,  0.5f}, { 0.0f, -1.0f,  0.0f}, {1.0f,1.0f,1.0f,1.0f}},
     // +Z
-    {{-0.5f, -0.5f,  0.5f}, { 0.0f,  0.0f,  1.0f}},
-    {{ 0.5f, -0.5f,  0.5f}, { 0.0f,  0.0f,  1.0f}},
-    {{ 0.5f,  0.5f,  0.5f}, { 0.0f,  0.0f,  1.0f}},
-    {{-0.5f,  0.5f,  0.5f}, { 0.0f,  0.0f,  1.0f}},
+    {{-0.5f, -0.5f,  0.5f}, { 0.0f,  0.0f,  1.0f}, {1.0f,1.0f,1.0f,1.0f}},
+    {{ 0.5f, -0.5f,  0.5f}, { 0.0f,  0.0f,  1.0f}, {1.0f,1.0f,1.0f,1.0f}},
+    {{ 0.5f,  0.5f,  0.5f}, { 0.0f,  0.0f,  1.0f}, {1.0f,1.0f,1.0f,1.0f}},
+    {{-0.5f,  0.5f,  0.5f}, { 0.0f,  0.0f,  1.0f}, {1.0f,1.0f,1.0f,1.0f}},
     // -Z
-    {{ 0.5f, -0.5f, -0.5f}, { 0.0f,  0.0f, -1.0f}},
-    {{-0.5f, -0.5f, -0.5f}, { 0.0f,  0.0f, -1.0f}},
-    {{-0.5f,  0.5f, -0.5f}, { 0.0f,  0.0f, -1.0f}},
-    {{ 0.5f,  0.5f, -0.5f}, { 0.0f,  0.0f, -1.0f}},
+    {{ 0.5f, -0.5f, -0.5f}, { 0.0f,  0.0f, -1.0f}, {1.0f,1.0f,1.0f,1.0f}},
+    {{-0.5f, -0.5f, -0.5f}, { 0.0f,  0.0f, -1.0f}, {1.0f,1.0f,1.0f,1.0f}},
+    {{-0.5f,  0.5f, -0.5f}, { 0.0f,  0.0f, -1.0f}, {1.0f,1.0f,1.0f,1.0f}},
+    {{ 0.5f,  0.5f, -0.5f}, { 0.0f,  0.0f, -1.0f}, {1.0f,1.0f,1.0f,1.0f}},
 }};
 
 const std::array<uint16_t, 36> kCubeIndices = {{
@@ -197,7 +209,7 @@ bool Renderer::create_pipeline() {
     vbd.stride = sizeof(Vertex);
     vbd.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
 
-    VkVertexInputAttributeDescription vattr[2]{};
+    VkVertexInputAttributeDescription vattr[3]{};
     vattr[0].location = 0;
     vattr[0].binding = 0;
     vattr[0].format = VK_FORMAT_R32G32B32_SFLOAT;
@@ -206,12 +218,19 @@ bool Renderer::create_pipeline() {
     vattr[1].binding = 0;
     vattr[1].format = VK_FORMAT_R32G32B32_SFLOAT;
     vattr[1].offset = offsetof(Vertex, normal);
+    // Per-vertex baseColor (RGBA, linear). For GLB meshes this carries the
+    // material's baseColorFactor (and COLOR_0 if present); for the
+    // procedural cube path it's white so the per-DrawItem tint dominates.
+    vattr[2].location = 2;
+    vattr[2].binding = 0;
+    vattr[2].format = VK_FORMAT_R32G32B32A32_SFLOAT;
+    vattr[2].offset = offsetof(Vertex, color);
 
     VkPipelineVertexInputStateCreateInfo vi{
         VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
     vi.vertexBindingDescriptionCount = 1;
     vi.pVertexBindingDescriptions = &vbd;
-    vi.vertexAttributeDescriptionCount = 2;
+    vi.vertexAttributeDescriptionCount = 3;
     vi.pVertexAttributeDescriptions = vattr;
 
     VkPipelineInputAssemblyStateCreateInfo ia{
@@ -412,7 +431,9 @@ VkFramebuffer Renderer::get_or_create_framebuffer(VkImage img) {
 void Renderer::draw_frame(const std::array<EyeTarget, 2>& eyes,
                           const std::vector<DrawItem>& items,
                           const Vec3& sky_color) {
-    // Wait for last frame to finish before re-recording the same cmdbuf.
+    // Wait for the PREVIOUS frame's GPU work to finish before touching the
+    // command buffer or the swapchain-image framebuffers again. The fence is
+    // created signaled so the very first frame returns immediately.
     vkWaitForFences(vk_->device(), 1, &frame_fence_, VK_TRUE, UINT64_MAX);
     vkResetFences(vk_->device(), 1, &frame_fence_);
 
@@ -451,9 +472,6 @@ void Renderer::draw_frame(const std::array<EyeTarget, 2>& eyes,
         vkCmdSetScissor(cmd_, 0, 1, &sc);
 
         vkCmdBindPipeline(cmd_, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_);
-        VkDeviceSize voff = 0;
-        vkCmdBindVertexBuffers(cmd_, 0, 1, &cube_vb_, &voff);
-        vkCmdBindIndexBuffer(cmd_, cube_ib_, 0, VK_INDEX_TYPE_UINT16);
 
         Mat4 vp_mat = eye.projection * eye.view;
         for (const auto& it : items) {
@@ -466,7 +484,21 @@ void Renderer::draw_frame(const std::array<EyeTarget, 2>& eyes,
                                VK_SHADER_STAGE_VERTEX_BIT |
                                    VK_SHADER_STAGE_FRAGMENT_BIT,
                                0, sizeof(pc), &pc);
-            vkCmdDrawIndexed(cmd_, cube_index_count_, 1, 0, 0, 0);
+
+            if (it.mesh_slot >= 0 &&
+                static_cast<size_t>(it.mesh_slot) < gltf_meshes_.size()) {
+                const GltfGpuMesh& gm = gltf_meshes_[static_cast<size_t>(
+                    it.mesh_slot)];
+                VkDeviceSize voff = 0;
+                vkCmdBindVertexBuffers(cmd_, 0, 1, &gm.vb, &voff);
+                vkCmdBindIndexBuffer(cmd_, gm.ib, 0, VK_INDEX_TYPE_UINT32);
+                vkCmdDrawIndexed(cmd_, gm.index_count, 1, 0, 0, 0);
+            } else {
+                VkDeviceSize voff = 0;
+                vkCmdBindVertexBuffers(cmd_, 0, 1, &cube_vb_, &voff);
+                vkCmdBindIndexBuffer(cmd_, cube_ib_, 0, VK_INDEX_TYPE_UINT16);
+                vkCmdDrawIndexed(cmd_, cube_index_count_, 1, 0, 0, 0);
+            }
         }
         vkCmdEndRenderPass(cmd_);
     }
@@ -476,16 +508,180 @@ void Renderer::draw_frame(const std::array<EyeTarget, 2>& eyes,
     si.commandBufferCount = 1;
     si.pCommandBuffers = &cmd_;
     vkQueueSubmit(vk_->graphics_queue(), 1, &si, frame_fence_);
+
+    // IMPORTANT: Block until our submit has fully completed on the GPU
+    // BEFORE returning to the XR runtime. The caller (XrRuntime::render_frame)
+    // will call xrReleaseSwapchainImage immediately after we return, which
+    // hands the eye images back to the OpenXR compositor. If the GPU hasn't
+    // finished writing them yet, the compositor samples from images that are
+    // still in the middle of a render pass -- on Meta Quest Link this reads
+    // as full-white "flash" frames in the headset, and the compositor's own
+    // submits on our shared graphics queue race with our pending command
+    // buffer (producing VUID-vkQueueSubmit-pCommandBuffers-00071 validation
+    // errors).
+    //
+    // Waiting here serializes us to one frame in flight. That is fine for
+    // the starter room (and any scene we currently generate) and is the
+    // pattern the Khronos hello_xr sample uses for the single-queue case.
+    vkWaitForFences(vk_->device(), 1, &frame_fence_, VK_TRUE, UINT64_MAX);
 }
 
-void Renderer::build_items_from_world(World& world,
-                                      std::vector<DrawItem>& out) const {
+void Renderer::destroy_gltf_meshes() {
+    if (!vk_) return;
+    for (auto& m : gltf_meshes_) {
+        if (m.vb) vmaDestroyBuffer(vk_->allocator(), m.vb, m.vb_alloc);
+        if (m.ib) vmaDestroyBuffer(vk_->allocator(), m.ib, m.ib_alloc);
+        m.vb = VK_NULL_HANDLE;
+        m.ib = VK_NULL_HANDLE;
+        m.vb_alloc = m.ib_alloc = nullptr;
+        m.index_count = 0;
+    }
+    gltf_meshes_.clear();
+    gltf_path_to_slot_.clear();
+}
+
+int Renderer::ensure_gltf_mesh(const std::string& resolved_path,
+                               float target_scale_meters) {
+    if (!vk_ || resolved_path.empty()) return -1;
+    namespace fs = std::filesystem;
+    if (!fs::exists(fs::path(resolved_path))) {
+        PTV_WARN("GLB not found on disk: {}", resolved_path);
+        return -1;
+    }
+    auto it = gltf_path_to_slot_.find(resolved_path);
+    if (it != gltf_path_to_slot_.end()) return it->second;
+
+    std::vector<gltf_mesh_load::LitVertex> verts;
+    std::vector<uint32_t> indices;
+    std::string err;
+    if (!gltf_mesh_load::load_glb_merged(resolved_path, target_scale_meters,
+                                         verts, indices, err)) {
+        PTV_ERROR("GLB load failed ({}): {}", resolved_path, err);
+        return -1;
+    }
+    if (verts.empty() || indices.empty()) return -1;
+
+    auto make_vma_buffer = [&](VkBufferUsageFlags usage, VkDeviceSize size,
+                               VkBuffer& buf, VmaAllocation& alloc) -> bool {
+        VkBufferCreateInfo bci{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+        bci.size = size;
+        bci.usage = usage;
+        bci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        VmaAllocationCreateInfo aci{};
+        aci.usage = VMA_MEMORY_USAGE_AUTO;
+        aci.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT |
+                    VMA_ALLOCATION_CREATE_MAPPED_BIT;
+        return vmaCreateBuffer(vk_->allocator(), &bci, &aci, &buf, &alloc,
+                               nullptr) == VK_SUCCESS;
+    };
+
+    GltfGpuMesh gm{};
+    const VkDeviceSize vb_size =
+        static_cast<VkDeviceSize>(verts.size() * sizeof(verts[0]));
+    const VkDeviceSize ib_size =
+        static_cast<VkDeviceSize>(indices.size() * sizeof(uint32_t));
+    if (!make_vma_buffer(VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, vb_size, gm.vb,
+                         gm.vb_alloc)) {
+        return -1;
+    }
+    upload_buffer(*vk_, gm.vb, gm.vb_alloc, verts.data(),
+                  static_cast<size_t>(vb_size));
+    if (!make_vma_buffer(VK_BUFFER_USAGE_INDEX_BUFFER_BIT, ib_size, gm.ib,
+                         gm.ib_alloc)) {
+        vmaDestroyBuffer(vk_->allocator(), gm.vb, gm.vb_alloc);
+        return -1;
+    }
+    upload_buffer(*vk_, gm.ib, gm.ib_alloc, indices.data(),
+                  static_cast<size_t>(ib_size));
+    gm.index_count = static_cast<uint32_t>(indices.size());
+
+    const int slot = static_cast<int>(gltf_meshes_.size());
+    gltf_meshes_.push_back(gm);
+    gltf_path_to_slot_[resolved_path] = slot;
+    return slot;
+}
+
+void Renderer::build_items_from_world(World& world, std::vector<DrawItem>& out) {
     out.clear();
     auto view = world.registry().view<const CTransform>();
     for (auto entity : view) {
         const auto& ct = view.get<const CTransform>(entity).t;
+
+        // --- Skip invisible / logic-only entities --------------------------------
+        // Generated scenes often include dozens of ``mesh: null`` trigger /
+        // tutorial volumes. Without this guard the renderer falls through to
+        // the procedural cube path, littering the world with cyan "starter
+        // room" debug cubes *on top of* the real Tripo environment. Template
+        // meshes (construct prefabs parked at a far staging coordinate) are
+        // also hidden so only runtime-spawned copies draw.
+        if (world.registry().all_of<CTag>(entity)) {
+            const auto& tags = world.registry().get<CTag>(entity).tags;
+            auto has_tag = [&](const char* t) {
+                for (const auto& s : tags) {
+                    if (s == t) return true;
+                }
+                return false;
+            };
+            if (has_tag("template")) {
+                continue;
+            }
+            const bool meshless =
+                !world.registry().all_of<CMesh>(entity) ||
+                world.registry().get<CMesh>(entity).glb_path.empty();
+            if (meshless &&
+                (has_tag("player_system") || has_tag("tutorial") ||
+                 has_tag("checkpoint"))) {
+                continue;
+            }
+        }
+
+        if (world.registry().all_of<CMesh>(entity)) {
+            const auto& cm = world.registry().get<CMesh>(entity);
+            if (!cm.glb_path.empty()) {
+                int slot =
+                    ensure_gltf_mesh(cm.glb_path, cm.target_scale_meters);
+                if (slot >= 0) {
+                    DrawItem it{};
+                    it.model = ct.matrix();
+                    it.mesh_slot = slot;
+                    it.material_id = 0.0f;
+                    // GLB primitives carry their own per-vertex baseColor
+                    // (see GltfMeshLoad). Use a near-white tint so the
+                    // material color drives the look; we only nudge the
+                    // tint for category cues and never crush the source.
+                    it.color = Vec4{1.0f, 1.0f, 1.0f, 1.0f};
+                    if (world.registry().all_of<CTag>(entity)) {
+                        const auto& tags = world.registry().get<CTag>(entity).tags;
+                        for (const auto& tag : tags) {
+                            if (tag == "environment" ||
+                                tag == "hover_allowed") {
+                                // Cool, very subtle so skybox / terrain
+                                // baseColor still reads.
+                                it.color = Vec4{0.96f, 0.98f, 1.05f, 1.0f};
+                                break;
+                            }
+                            if (tag == "enemy") {
+                                // Warm rim cue without overpowering the
+                                // source palette.
+                                it.color = Vec4{1.05f, 0.95f, 0.92f, 1.0f};
+                                break;
+                            }
+                            if (tag == "grabbable") {
+                                // Slight pop so prop grabs read in VR.
+                                it.color = Vec4{1.05f, 1.02f, 0.98f, 1.0f};
+                                break;
+                            }
+                        }
+                    }
+                    out.push_back(it);
+                    continue;
+                }
+            }
+        }
+
         DrawItem it;
         it.model = ct.matrix();
+        it.mesh_slot = -1;
 
         // Size + color hints by tag.
         float xz_scale = 0.3f;
@@ -527,6 +723,7 @@ void Renderer::shutdown() {
     if (vk_->device() != VK_NULL_HANDLE) {
         vkDeviceWaitIdle(vk_->device());
     }
+    destroy_gltf_meshes();
     for (auto& kv : framebuffers_) {
         if (kv.second) vkDestroyFramebuffer(vk_->device(), kv.second, nullptr);
     }
