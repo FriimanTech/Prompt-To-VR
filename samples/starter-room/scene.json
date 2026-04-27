@@ -13,19 +13,41 @@
       "rotation": [0.0, 0.0, 0.0, 1.0]
     }
   },
-  "sky_color": [0.58, 0.70, 0.86],
-  "ambient_intensity": 0.45,
+  "sky_color": [0.08, 0.10, 0.18],
+  "ambient_intensity": 0.35,
   "lights": [
     {
       "id": "sun",
       "kind": "directional",
       "transform": {
-        "position": [0.0, 5.0, 0.0],
+        "position": [3.0, 6.0, 2.0],
         "rotation": [0.0, 0.0, 0.0, 1.0],
         "scale": 1.0
       },
-      "color_rgb": [1.0, 0.95, 0.9],
-      "intensity": 1.2
+      "color_rgb": [1.0, 0.92, 0.85],
+      "intensity": 1.4
+    },
+    {
+      "id": "warm_accent",
+      "kind": "point",
+      "transform": {
+        "position": [-2.6, 0.4, -2.6],
+        "rotation": [0.0, 0.0, 0.0, 1.0],
+        "scale": 1.0
+      },
+      "color_rgb": [1.0, 0.55, 0.25],
+      "intensity": 1.6
+    },
+    {
+      "id": "cool_accent",
+      "kind": "point",
+      "transform": {
+        "position": [0.0, 2.6, 0.0],
+        "rotation": [0.0, 0.0, 0.0, 1.0],
+        "scale": 1.0
+      },
+      "color_rgb": [0.35, 0.6, 1.0],
+      "intensity": 1.5
     }
   ],
   "entities": [
@@ -35,7 +57,7 @@
       "transform": {
         "position": [0.0, -0.01, 0.0],
         "rotation": [0.0, 0.0, 0.0, 1.0],
-        "scale": 4.0
+        "scale": 6.0
       },
       "mesh": null,
       "physics": {
@@ -58,6 +80,312 @@
         }
       ],
       "tags": ["ground", "teleport_target"]
+    },
+    {
+      "id": "wall_n_left",
+      "name": "North Wall (L)",
+      "transform": {
+        "position": [-1.5, 1.5, -4.5],
+        "rotation": [0.0, 0.0, 0.0, 1.0],
+        "scale": 10.0
+      },
+      "mesh": null,
+      "physics": {
+        "kind": "static",
+        "mass_kg": 0.0,
+        "collision_shape": "aabb",
+        "restitution": 0.05,
+        "friction": 0.9
+      },
+      "tags": ["wall"]
+    },
+    {
+      "id": "wall_n_right",
+      "name": "North Wall (R)",
+      "transform": {
+        "position": [1.5, 1.5, -4.5],
+        "rotation": [0.0, 0.0, 0.0, 1.0],
+        "scale": 10.0
+      },
+      "mesh": null,
+      "physics": {
+        "kind": "static",
+        "mass_kg": 0.0,
+        "collision_shape": "aabb",
+        "restitution": 0.05,
+        "friction": 0.9
+      },
+      "tags": ["wall"]
+    },
+    {
+      "id": "wall_s_left",
+      "name": "South Wall (L)",
+      "transform": {
+        "position": [-1.5, 1.5, 4.5],
+        "rotation": [0.0, 0.0, 0.0, 1.0],
+        "scale": 10.0
+      },
+      "mesh": null,
+      "physics": {
+        "kind": "static",
+        "mass_kg": 0.0,
+        "collision_shape": "aabb",
+        "restitution": 0.05,
+        "friction": 0.9
+      },
+      "tags": ["wall"]
+    },
+    {
+      "id": "wall_s_right",
+      "name": "South Wall (R)",
+      "transform": {
+        "position": [1.5, 1.5, 4.5],
+        "rotation": [0.0, 0.0, 0.0, 1.0],
+        "scale": 10.0
+      },
+      "mesh": null,
+      "physics": {
+        "kind": "static",
+        "mass_kg": 0.0,
+        "collision_shape": "aabb",
+        "restitution": 0.05,
+        "friction": 0.9
+      },
+      "tags": ["wall"]
+    },
+    {
+      "id": "wall_e_front",
+      "name": "East Wall (F)",
+      "transform": {
+        "position": [4.5, 1.5, -1.5],
+        "rotation": [0.0, 0.0, 0.0, 1.0],
+        "scale": 10.0
+      },
+      "mesh": null,
+      "physics": {
+        "kind": "static",
+        "mass_kg": 0.0,
+        "collision_shape": "aabb",
+        "restitution": 0.05,
+        "friction": 0.9
+      },
+      "tags": ["wall"]
+    },
+    {
+      "id": "wall_e_back",
+      "name": "East Wall (B)",
+      "transform": {
+        "position": [4.5, 1.5, 1.5],
+        "rotation": [0.0, 0.0, 0.0, 1.0],
+        "scale": 10.0
+      },
+      "mesh": null,
+      "physics": {
+        "kind": "static",
+        "mass_kg": 0.0,
+        "collision_shape": "aabb",
+        "restitution": 0.05,
+        "friction": 0.9
+      },
+      "tags": ["wall"]
+    },
+    {
+      "id": "wall_w_front",
+      "name": "West Wall (F)",
+      "transform": {
+        "position": [-4.5, 1.5, -1.5],
+        "rotation": [0.0, 0.0, 0.0, 1.0],
+        "scale": 10.0
+      },
+      "mesh": null,
+      "physics": {
+        "kind": "static",
+        "mass_kg": 0.0,
+        "collision_shape": "aabb",
+        "restitution": 0.05,
+        "friction": 0.9
+      },
+      "tags": ["wall"]
+    },
+    {
+      "id": "wall_w_back",
+      "name": "West Wall (B)",
+      "transform": {
+        "position": [-4.5, 1.5, 1.5],
+        "rotation": [0.0, 0.0, 0.0, 1.0],
+        "scale": 10.0
+      },
+      "mesh": null,
+      "physics": {
+        "kind": "static",
+        "mass_kg": 0.0,
+        "collision_shape": "aabb",
+        "restitution": 0.05,
+        "friction": 0.9
+      },
+      "tags": ["wall"]
+    },
+    {
+      "id": "ceiling",
+      "name": "Ceiling",
+      "transform": {
+        "position": [0.0, 6.0, 0.0],
+        "rotation": [0.0, 0.0, 0.0, 1.0],
+        "scale": 20.0
+      },
+      "mesh": null,
+      "physics": {
+        "kind": "static",
+        "mass_kg": 0.0,
+        "collision_shape": "aabb",
+        "restitution": 0.05,
+        "friction": 0.9
+      },
+      "tags": ["wall", "ceiling"]
+    },
+    {
+      "id": "pillar_ne",
+      "name": "Pillar NE",
+      "transform": {
+        "position": [2.7, 1.2, -2.7],
+        "rotation": [0.0, 0.0, 0.0, 1.0],
+        "scale": 8.0
+      },
+      "mesh": null,
+      "physics": {
+        "kind": "static",
+        "mass_kg": 0.0,
+        "collision_shape": "aabb",
+        "restitution": 0.05,
+        "friction": 0.9
+      },
+      "tags": ["pillar"]
+    },
+    {
+      "id": "pillar_nw",
+      "name": "Pillar NW",
+      "transform": {
+        "position": [-2.7, 1.2, -2.7],
+        "rotation": [0.0, 0.0, 0.0, 1.0],
+        "scale": 8.0
+      },
+      "mesh": null,
+      "physics": {
+        "kind": "static",
+        "mass_kg": 0.0,
+        "collision_shape": "aabb",
+        "restitution": 0.05,
+        "friction": 0.9
+      },
+      "tags": ["pillar"]
+    },
+    {
+      "id": "pillar_se",
+      "name": "Pillar SE",
+      "transform": {
+        "position": [2.7, 1.2, 2.7],
+        "rotation": [0.0, 0.0, 0.0, 1.0],
+        "scale": 8.0
+      },
+      "mesh": null,
+      "physics": {
+        "kind": "static",
+        "mass_kg": 0.0,
+        "collision_shape": "aabb",
+        "restitution": 0.05,
+        "friction": 0.9
+      },
+      "tags": ["pillar"]
+    },
+    {
+      "id": "pillar_sw",
+      "name": "Pillar SW",
+      "transform": {
+        "position": [-2.7, 1.2, 2.7],
+        "rotation": [0.0, 0.0, 0.0, 1.0],
+        "scale": 8.0
+      },
+      "mesh": null,
+      "physics": {
+        "kind": "static",
+        "mass_kg": 0.0,
+        "collision_shape": "aabb",
+        "restitution": 0.05,
+        "friction": 0.9
+      },
+      "tags": ["pillar"]
+    },
+    {
+      "id": "platform_a",
+      "name": "Platform A",
+      "transform": {
+        "position": [1.8, 0.25, -1.6],
+        "rotation": [0.0, 0.0, 0.0, 1.0],
+        "scale": 2.5
+      },
+      "mesh": null,
+      "physics": {
+        "kind": "static",
+        "mass_kg": 0.0,
+        "collision_shape": "aabb",
+        "restitution": 0.1,
+        "friction": 0.8
+      },
+      "tags": ["platform"]
+    },
+    {
+      "id": "platform_b",
+      "name": "Platform B",
+      "transform": {
+        "position": [-1.8, 0.25, -1.6],
+        "rotation": [0.0, 0.0, 0.0, 1.0],
+        "scale": 2.5
+      },
+      "mesh": null,
+      "physics": {
+        "kind": "static",
+        "mass_kg": 0.0,
+        "collision_shape": "aabb",
+        "restitution": 0.1,
+        "friction": 0.8
+      },
+      "tags": ["platform"]
+    },
+    {
+      "id": "platform_c",
+      "name": "Platform C",
+      "transform": {
+        "position": [0.0, 0.25, 2.2],
+        "rotation": [0.0, 0.0, 0.0, 1.0],
+        "scale": 2.5
+      },
+      "mesh": null,
+      "physics": {
+        "kind": "static",
+        "mass_kg": 0.0,
+        "collision_shape": "aabb",
+        "restitution": 0.1,
+        "friction": 0.8
+      },
+      "tags": ["platform"]
+    },
+    {
+      "id": "centerpiece",
+      "name": "Obelisk Centerpiece",
+      "transform": {
+        "position": [0.0, 1.1, 0.0],
+        "rotation": [0.0, 0.0, 0.0, 1.0],
+        "scale": 7.0
+      },
+      "mesh": null,
+      "physics": {
+        "kind": "kinematic",
+        "mass_kg": 0.0,
+        "collision_shape": "aabb",
+        "restitution": 0.1,
+        "friction": 0.6
+      },
+      "tags": ["centerpiece"]
     },
     {
       "id": "cube_a",
@@ -103,10 +431,54 @@
       "tags": ["grabbable"]
     },
     {
+      "id": "cube_c",
+      "name": "Grabbable Cube C",
+      "transform": {
+        "position": [1.8, 0.85, -1.6],
+        "rotation": [0.0, 0.0, 0.0, 1.0],
+        "scale": 1.0
+      },
+      "mesh": null,
+      "physics": {
+        "kind": "dynamic",
+        "mass_kg": 0.3,
+        "collision_shape": "aabb",
+        "restitution": 0.3,
+        "friction": 0.5
+      },
+      "mechanic_bindings": [
+        { "id": "builtin.grab", "builtin_id": "builtin.grab", "params": {} },
+        { "id": "builtin.throw", "builtin_id": "builtin.throw", "params": { "impulse": 4.5 } }
+      ],
+      "tags": ["grabbable"]
+    },
+    {
+      "id": "cube_d",
+      "name": "Grabbable Cube D",
+      "transform": {
+        "position": [-1.8, 0.85, -1.6],
+        "rotation": [0.0, 0.0, 0.0, 1.0],
+        "scale": 1.0
+      },
+      "mesh": null,
+      "physics": {
+        "kind": "dynamic",
+        "mass_kg": 0.3,
+        "collision_shape": "aabb",
+        "restitution": 0.3,
+        "friction": 0.5
+      },
+      "mechanic_bindings": [
+        { "id": "builtin.grab", "builtin_id": "builtin.grab", "params": {} },
+        { "id": "builtin.throw", "builtin_id": "builtin.throw", "params": { "impulse": 4.5 } }
+      ],
+      "tags": ["grabbable"]
+    },
+    {
       "id": "pedestal",
       "name": "Pedestal trigger",
       "transform": {
-        "position": [0.0, 0.8, -1.2],
+        "position": [0.0, 0.85, 2.2],
         "rotation": [0.0, 0.0, 0.0, 1.0],
         "scale": 1.0
       },

@@ -1,13 +1,20 @@
 """TripoClient: image-to-3D and text-to-3D with textured + PBR defaults.
 
-Verified April 2026:
-    * Python SDK: ``tripo3d`` (VAST-AI-Research/tripo-python-sdk).
+Verified April 2026 against tripo3d==0.3.12 (VAST-AI-Research/tripo-python-sdk):
     * ``TripoClient.image_to_model(...)`` and ``text_to_model(...)`` are
       async. They return a ``task_id`` string; poll with ``wait_for_task``
-      and download with ``download_task_models``.
-    * Textured + PBR + image-aligned output is enforced here:
+      and download with ``download_task_models`` (returns a dict with keys
+      ``model``, ``base_model``, ``pbr_model`` -- all GLB files).
+    * Textured + PBR + image-aligned + image-oriented output is enforced here:
       ``texture=True``, ``pbr=True``, ``texture_alignment="original_image"``,
-      ``texture_quality="detailed"`` by default.
+      ``texture_quality="detailed"`` and ``orientation="align_image"`` (for
+      image-to-3D) by default, so the generated GLBs come out fully colored
+      and oriented to match the reference image.
+    * The Tripo SDK lists ``aiohttp`` as an OPTIONAL dependency on PyPI even
+      though the async HTTP paths it uses for upload / polling / download
+      actually require it. We re-declare ``aiohttp>=3.8.0`` as a direct
+      dependency of ``ptv-provider-clients`` so the orchestrator venv always
+      has it, and ``_ensure_sdk`` below double-checks at runtime.
 
 All public methods on this wrapper are synchronous. The wrapper spins up an
 event loop internally so the orchestrator does not have to be async to use
@@ -25,12 +32,49 @@ from typing import Any
 from .errors import ProviderCallError, ProviderConfigError
 
 
+_DEFAULT_MODEL_VERSION = "v3.0-20250812"
+"""The v3.0 checkpoint is the first Tripo family that exposes
+``geometry_quality="detailed"`` (higher-resolution mesh reconstruction).
+Earlier checkpoints (v2.5 etc.) will reject the parameter, so we track
+this sentinel and only pass ``geometry_quality`` when the requested
+model is v3.0 or newer."""
+
+
+def _model_supports_geometry_quality(model_version: str | None) -> bool:
+    """True when ``model_version`` accepts the ``geometry_quality`` kwarg.
+
+    Tripo documents that ``geometry_quality`` was introduced with the
+    v3.0 family (first checkpoint ``v3.0-20250812``). We parse the
+    leading ``vX.Y`` segment and return True for v3.x or higher.
+    """
+
+    if not model_version:
+        # When we don't know, assume yes because our default is v3.0.
+        return True
+    v = model_version.lower().lstrip("v")
+    try:
+        major_str = v.split("-", 1)[0].split(".", 1)[0]
+        return int(major_str) >= 3
+    except (ValueError, IndexError):
+        return False
+
+
 @dataclass(frozen=True)
 class TripoConfig:
     api_key: str | None = None
-    # If None, the SDK's default latest model is used.
-    model_version: str | None = None
+    # Default to v3.0, the first family that supports detailed geometry.
+    # Users can override via TRIPO_MODEL_VERSION.
+    model_version: str | None = _DEFAULT_MODEL_VERSION
     texture_quality: str = "detailed"
+    # Only sent when the selected model supports it. "detailed" is the
+    # highest tier Tripo exposes (internally "Ultra Mode"); standard is
+    # the default.
+    geometry_quality: str = "detailed"
+    # Ask Tripo to try to auto-scale the mesh to real-world dimensions.
+    # Big quality win in VR because every asset shows up at a plausible
+    # meter-scale instead of a unit cube. Safe default, callers can
+    # still override per-asset via the Asset Manifest if needed.
+    auto_size: bool = True
     poll_interval_s: float = 3.0
     timeout_s: float = 600.0
 
@@ -38,7 +82,9 @@ class TripoConfig:
     def from_env(cls) -> "TripoConfig":
         return cls(
             api_key=os.environ.get("TRIPO_API_KEY"),
-            model_version=(os.environ.get("TRIPO_MODEL_VERSION") or None),
+            model_version=(
+                os.environ.get("TRIPO_MODEL_VERSION") or _DEFAULT_MODEL_VERSION
+            ),
         )
 
 
@@ -86,8 +132,40 @@ class TripoClient:
             face_limit=face_limit,
         )
         kwargs["image"] = str(image_path)
+        # ``orientation="align_image"`` tells Tripo to orient the generated
+        # mesh to match the reference image's front-facing view, which is
+        # exactly what we want so the VR scene places the asset the way the
+        # concept art depicted it. This is only valid on image_to_model (the
+        # text_to_model endpoint in v0.3.12 does not take an ``orientation``
+        # kwarg and will reject it).
+        kwargs["orientation"] = "align_image"
 
         return self._run_async(lambda: self._image_to_model_async(out_dir, kwargs))
+
+    def get_balance(self) -> dict[str, float]:
+        """Return the Tripo account balance without spending any credits.
+
+        Hits ``GET /user/balance`` via the SDK's ``TripoClient.get_balance``
+        and returns ``{"balance": <credits>, "frozen": <credits>}``.
+        Useful as a preflight check at the start of the Tripo stage so the
+        orchestrator can fail fast with a clear "insufficient credits"
+        message instead of firing N image-to-3D requests that will all
+        fail with a 402 / empty-result response and each still count
+        against rate limits / quotas.
+        """
+
+        self._ensure_sdk()
+        self._require_key()
+        return self._run_async(self._get_balance_async)
+
+    async def _get_balance_async(self) -> dict[str, float]:
+        TripoClientCls = self._sdk.TripoClient
+        async with TripoClientCls(api_key=self._require_key()) as client:
+            b = await client.get_balance()
+            return {
+                "balance": float(getattr(b, "balance", 0.0) or 0.0),
+                "frozen": float(getattr(b, "frozen", 0.0) or 0.0),
+            }
 
     def text_to_model(
         self,
@@ -121,14 +199,39 @@ class TripoClient:
         texture_quality: str | None,
         face_limit: int | None,
     ) -> dict[str, Any]:
+        # These flags force the Tripo pipeline to output a fully textured,
+        # PBR-shaded GLB aligned to the reference image. ``download_task_models``
+        # will return an entry under ``pbr_model`` which is the fully coloured
+        # asset we want for the VR scene.
+        #
+        # Quality knobs (verified Apr 2026 against Tripo's public API docs at
+        # https://platform.tripo3d.ai/docs/generation and the community API
+        # reference at 3daistudio.com/Platform/API/Documentation/3d-generation/tripo):
+        #
+        #   texture_quality="detailed"  -> HD texture resolution (+20 credits).
+        #   geometry_quality="detailed" -> higher-res mesh, v3.0+ only
+        #                                  (+40 credits). Passed conditionally
+        #                                  below so older model versions like
+        #                                  v2.5 don't reject the request.
+        #   pbr=True                    -> emit PBR maps (BaseColor/Metallic/
+        #                                  Roughness/Normal) so the VR renderer
+        #                                  can light the asset correctly.
+        #   texture_alignment="original_image" and orientation="align_image"
+        #                                  (image_to_model only) keep the UVs
+        #                                  + pose matching the reference art.
+        #   auto_size=True              -> approximate real-world metric scale
+        #                                  so VR placement looks plausible.
         kwargs: dict[str, Any] = {
             "texture": True,
             "pbr": True,
             "texture_alignment": "original_image",
             "texture_quality": texture_quality or self.config.texture_quality,
+            "auto_size": self.config.auto_size,
         }
         if self.config.model_version:
             kwargs["model_version"] = self.config.model_version
+        if _model_supports_geometry_quality(self.config.model_version):
+            kwargs["geometry_quality"] = self.config.geometry_quality
         if face_limit is not None:
             kwargs["face_limit"] = int(face_limit)
         return kwargs
@@ -140,7 +243,8 @@ class TripoClient:
     ) -> TripoTaskResult:
         TripoClientCls = self._sdk.TripoClient
         async with TripoClientCls(api_key=self._require_key()) as client:
-            task_id = await client.image_to_model(**kwargs)
+            accepted = _accepted_kwargs(client.image_to_model, kwargs)
+            task_id = await client.image_to_model(**accepted)
             task = await client.wait_for_task(
                 task_id,
                 polling_interval=self.config.poll_interval_s,
@@ -157,7 +261,8 @@ class TripoClient:
     ) -> TripoTaskResult:
         TripoClientCls = self._sdk.TripoClient
         async with TripoClientCls(api_key=self._require_key()) as client:
-            task_id = await client.text_to_model(**kwargs)
+            accepted = _accepted_kwargs(client.text_to_model, kwargs)
+            task_id = await client.text_to_model(**accepted)
             task = await client.wait_for_task(
                 task_id,
                 polling_interval=self.config.poll_interval_s,
@@ -195,9 +300,47 @@ class TripoClient:
         except Exception as e:  # pragma: no cover
             raise ProviderConfigError(
                 "The `tripo3d` Python package is not installed."
-                " Run `pip install tripo3d`."
+                " Run `pip install 'tripo3d>=0.3.9' 'aiohttp>=3.8.0'`."
+            ) from e
+        # Tripo lists ``aiohttp`` as optional but its async code path imports
+        # it eagerly. If aiohttp is missing the SDK fails deep inside with a
+        # cryptic ``ModuleNotFoundError: No module named 'aiohttp'`` and every
+        # asset in the manifest shows that error in the Tripo stage log.
+        # Surface a clear, actionable message here instead.
+        try:
+            import aiohttp  # type: ignore  # noqa: F401
+        except Exception as e:  # pragma: no cover
+            raise ProviderConfigError(
+                "The `aiohttp` Python package is required by the tripo3d SDK"
+                " but is not installed in this environment."
+                " Run `pip install 'aiohttp>=3.8.0'`."
             ) from e
         self._sdk = tripo3d
+
+
+def _accepted_kwargs(func, kwargs: dict[str, Any]) -> dict[str, Any]:
+    """Filter ``kwargs`` to only those accepted by ``func``'s signature.
+
+    Tripo has added new params (``geometry_quality``, ``auto_size``, etc.)
+    across SDK releases. Rather than pinning to the newest release and
+    breaking users on older ones, we introspect the SDK's ``image_to_model``
+    / ``text_to_model`` methods at call time and only pass through kwargs
+    the installed SDK actually accepts. If the signature has a ``**kwargs``
+    catch-all we pass everything (the SDK will forward them to the API).
+    """
+
+    import inspect
+
+    try:
+        sig = inspect.signature(func)
+    except (TypeError, ValueError):
+        return kwargs
+
+    params = sig.parameters
+    # If the callable has **kwargs, trust the caller and pass everything.
+    if any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()):
+        return kwargs
+    return {k: v for k, v in kwargs.items() if k in params}
 
 
 def _to_result(task_id: str, task, files: dict[str, str]) -> TripoTaskResult:

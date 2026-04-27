@@ -23,6 +23,49 @@ def run(ctx: PipelineContext) -> StageResult:
         )
     )
 
+    # Preflight: check Tripo account balance BEFORE firing N image-to-3D
+    # requests. Without this, a user whose account is out of credits would
+    # watch every single asset attempt, fail, and wait the full polling
+    # timeout. Each image-to-3D run on v2.5 costs ~20 credits, so we need at
+    # least roughly ``len(items) * 20`` credits to complete the stage. If
+    # the balance call itself fails (bad API key, network), surface that
+    # error immediately so the user can fix it before anything else runs.
+    assets_to_generate = [it for it in manifest.items if it.strategy.value in ("image_to_3d", "text_to_3d")]
+    required_credits = max(20, len(assets_to_generate) * 20)
+    try:
+        balance_info = client.get_balance()
+    except Exception as exc:
+        msg = (
+            "Tripo preflight balance check failed: "
+            f"{type(exc).__name__}: {exc}. "
+            "Verify TRIPO_API_KEY in .env and that the account is active."
+        )
+        ctx.store.append_log(ctx.project_id, "tripo_models", msg)
+        raise RuntimeError(msg) from exc
+
+    available = balance_info.get("balance", 0.0)
+    ctx.store.append_log(
+        ctx.project_id,
+        "tripo_models",
+        f"Tripo balance preflight: available={available:.1f} credits, "
+        f"frozen={balance_info.get('frozen', 0.0):.1f}, "
+        f"required_estimate={required_credits} (for {len(assets_to_generate)} assets).",
+    )
+    ctx.emit(
+        ProjectStage.tripo_models,
+        "info",
+        f"Tripo balance: {available:.0f} credits (need ~{required_credits} for {len(assets_to_generate)} assets)",
+    )
+    if available < required_credits:
+        msg = (
+            f"Insufficient Tripo credits: have {available:.1f}, "
+            f"need ~{required_credits} for {len(assets_to_generate)} assets "
+            "(approx 20 credits per image-to-3D job on v2.5). "
+            "Top up at https://platform.tripo3d.ai then press Resume."
+        )
+        ctx.store.append_log(ctx.project_id, "tripo_models", msg)
+        raise RuntimeError(msg)
+
     produced: list[str] = []
     attempted = 0
     per_item_errors: list[str] = []

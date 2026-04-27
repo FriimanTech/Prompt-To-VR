@@ -174,17 +174,31 @@ class ProjectStore:
         items: list[ArtifactMetadata] = []
         for p in _walk(root):
             rel_from_repo = p.relative_to(self.projects_dir.parent).as_posix()
-            items.append(
-                ArtifactMetadata(
-                    id=_artifact_id(p.name),
-                    kind=_kind_for(p),
-                    path=rel_from_repo,
-                    size_bytes=p.stat().st_size,
-                    sha256=_sha256(p),
-                    stage=_stage_for(p, root),
-                    description=None,
+            try:
+                items.append(
+                    ArtifactMetadata(
+                        id=_artifact_id(p.name),
+                        kind=_kind_for(p),
+                        path=rel_from_repo,
+                        size_bytes=p.stat().st_size,
+                        sha256=_sha256(p),
+                        stage=_stage_for(p, root),
+                        description=None,
+                    )
                 )
-            )
+            except Exception as exc:
+                # One unlistable file (e.g. a vcpkg-emitted ``_features.hpp``
+                # before the id sanitizer was strict enough, a locked build
+                # intermediate, or a file that disappeared mid-walk) must
+                # never crash the whole /artifacts endpoint. Log and skip.
+                import sys as _sys
+
+                print(
+                    f"[list_artifacts] skipping {rel_from_repo}: "
+                    f"{type(exc).__name__}: {exc}",
+                    file=_sys.stderr,
+                )
+                continue
         return items
 
     # ------------------------------------------------------------------
@@ -305,7 +319,23 @@ def _stage_for(p: Path, root: Path) -> str:
 
 
 def _artifact_id(name: str) -> str:
+    r"""Produce an ``IdStr``-compatible id for an artifact filename.
+
+    ``IdStr``'s regex (``^[a-z0-9][a-z0-9_.\-]{0,63}$``) requires the first
+    character to be alphanumeric. Real build outputs routinely violate that
+    (vcpkg emits headers like ``_features.hpp``; CMake drops
+    ``.ninja_deps`` files), so we:
+
+    1. lowercase,
+    2. replace every disallowed character with ``-``,
+    3. strip leading characters that are not ``[a-z0-9]`` (so ``_features.hpp``
+       -> ``features.hpp`` and ``.ninja_deps`` -> ``ninja_deps``),
+    4. clip to 64 chars,
+    5. fall back to a stable ``artifact`` id if every char was stripped.
+    """
+
     stem = re.sub(r"[^a-z0-9._-]+", "-", name.lower()).strip("-")
+    stem = re.sub(r"^[^a-z0-9]+", "", stem)
     return stem[:64] or "artifact"
 
 

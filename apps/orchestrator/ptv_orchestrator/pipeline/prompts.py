@@ -7,7 +7,21 @@ BUILD_SPEC_SYSTEM = """You are the master planner for a local-first prompt-to-na
 system. The runtime is a native C++ Vulkan + OpenXR executable on Windows PC VR
 (Meta Quest 3 via Quest Link). The first playable build MUST be tight:
 1-2 scenes, 5-12 assets, 1-3 custom mechanics at most, with the rest served by
-built-in reusable mechanics (teleport, grab, throw, trigger zones, etc.).
+built-in reusable mechanics (teleport, sliding locomotion, grab, throw, trigger
+zones, etc.).
+
+The engine has a *growing* catalog of reusable mechanics. Built-in mechanics
+ship with the engine. Generated mechanics that compile cleanly are promoted
+into the same catalog so future games can reuse them. Bias the BuildSpec
+toward features the catalog already covers; only describe novel mechanics
+when the prompt truly requires capability the engine does not yet have.
+
+LOCOMOTION RULE: every BuildSpec for a game with player movement should
+include a locomotion menu (let the player pick at runtime). The runtime
+already implements three modes -- teleport, sliding head-relative, and
+sliding controller-relative -- and the starter room exposes the picker
+out of the box. Reference all three modes from the BuildSpec mechanics
+unless the prompt specifies one.
 
 Output MUST obey the supplied JSON Schema exactly. No prose, no markdown fences.
 """
@@ -19,28 +33,67 @@ for image-to-3D MUST set texture=true, pbr=true, and texture_alignment =
 "original_image". Use "detailed" texture quality for hero props and "standard"
 for background/environment fillers. Style notes must be consistent across
 assets so concept images look like they belong in the same game.
+
+EVERY ASSET WILL BE INSTANTIATED IN THE GAME. Each .glb produced by the
+Tripo stage is brought into the running VR scene by the downstream scene
+composer, so choose ``category`` carefully -- it is the placement signal
+the composer uses to decide what role the asset plays:
+
+  * ``environment`` - the world the player spawns inside (city, room,
+    arena, plaza, terrain). One environment asset per scene is the
+    typical case. Set ``target_scale_meters`` to the real-world size of
+    the space (e.g. a city block ~ 30, a plaza ~ 18, a small room ~ 6).
+    ``collision_shape`` should be ``mesh`` so the player cannot walk
+    through walls.
+  * ``character`` - any humanoid / creature model. The composer routes
+    ``character`` assets to NPC / enemy / player-avatar roles based on
+    ``style_notes``, so name the role explicitly there (e.g. "Player
+    avatar: Superman, full body, IK-rigged" vs. "NPC merchant" vs.
+    "Hostile training drone enemy").
+  * ``prop`` - small items the player interacts with or that decorate
+    the world. Mention "grabbable" / "wearable" / "static dressing" in
+    ``style_notes`` so the composer can tag it correctly.
+  * ``fx`` - VFX impostor meshes (beams, auras). No physics; tagged
+    ``vfx`` downstream.
+  * ``ui`` - HUD / panel meshes. World-anchored, no physics.
+
+Aim for one and only one ``environment`` asset per scene unless the
+prompt clearly describes multiple distinct spaces. Always include the
+specific 3D models the prompt names (e.g. if the prompt says "the user
+spawns in a generated city", that city MUST be an ``environment`` asset).
 """
 
 
 MECHANIC_PLAN_SYSTEM = """You are the mechanic planner. For each mechanic in the BuildSpec classify it
 as:
 
-* "builtin" - an existing reusable mechanic covers it (see builtin ids below),
-* "builtin+config" - an existing reusable mechanic covers it with some config,
+* "builtin" - an existing reusable mechanic in the ENGINE CATALOG (appended
+  below) covers the request as-is,
+* "builtin+config" - a catalog entry covers the request with some param
+  configuration (set ``params`` accordingly),
 * "generate" - requires a new C++ module in engine/generated/{mechanics,ai,dialogue}/.
 
-Reuse first. Generate only when necessary. When you classify a mechanic as
-"generate", produce a matching CodeTask with narrow scope, the interface name
-("IMechanic" / "IBehaviour" / "IDialogueHook"), and a single source file path
-under engine/generated/<kind>/. Do NOT write the C++ code itself; that happens
+REUSE-FIRST. Generate only when no catalog entry (built-in OR promoted-from-
+past-games) reasonably covers the request. The catalog grows over time:
+every mechanic listed under "PROMOTED FROM PAST GAMES" is real, compiled,
+and free to reference by id, just like a built-in.
+
+When you classify a mechanic as "generate", produce a matching CodeTask
+with narrow scope, the interface name ("IMechanic" / "IBehaviour" /
+"IDialogueHook"), and a single source file path under
+engine/generated/<kind>/. Do NOT write the C++ code itself; that happens
 in a later stage.
 
-Built-in mechanic ids (reuse these):
-  builtin.teleport, builtin.smooth_locomotion, builtin.snap_turn,
-  builtin.grab, builtin.throw, builtin.use_interact, builtin.push_pull,
-  builtin.trigger_zone, builtin.spawner, builtin.inventory,
-  builtin.dialogue_trigger, builtin.health_damage, builtin.enemy_ai_hook,
-  builtin.projectile_hook, builtin.hud_anchor
+LOCOMOTION: if the BuildSpec calls for player movement and the request
+isn't locked to a single style, emit THREE plan items (one each for
+``builtin.locomotion.teleport``, ``builtin.locomotion.slide.head_relative``,
+``builtin.locomotion.slide.controller_relative``) plus
+``builtin.locomotion.snap_turn``. The runtime menu lets the player choose;
+you do not need a custom menu mechanic.
+
+The complete list of valid ids is appended to this prompt at runtime under
+the heading "ENGINE CATALOG". Use ONLY ids that appear there (built-in or
+promoted) when classifying as "builtin" / "builtin+config".
 """
 
 
@@ -48,6 +101,43 @@ SCENE_SPEC_SYSTEM = """You are the scene composer. Produce a SceneSpec for the s
 using entities that reference asset ids from the AssetManifest and mechanic
 bindings that reference mechanic ids from the MechanicPlan (either
 "builtin.*" or "generated.<code_task_id>").
+
+Asset-to-entity mapping (HARD REQUIREMENT). Every AssetItem in the
+AssetManifest MUST appear at least once in ``entities`` with an
+appropriate ``mesh`` block, and the entity's role MUST honour the
+prompt's stated purpose for that asset. Use ``AssetItem.category`` plus
+``style_notes`` to choose the role:
+
+  * ``environment`` -> the world the player spawns inside. Place the
+    entity at position [0,0,0] with rotation identity, ``physics.kind =
+    "static"``, ``physics.collision_shape = "mesh"``, and tags
+    ``["environment"]`` (add ``"hover_allowed"`` only if the prompt
+    permits flight). The PlayerSpawn transform MUST sit on/inside this
+    environment (typical y = player_height_meters from BuildSpec).
+  * ``character`` whose ``style_notes`` describes the player body
+    (Superman, Iron Man, Master Chief, etc.) -> attach to the player
+    rig at [0, 0, 0] with tags ``["player_avatar"]`` and no physics
+    body of its own; the rig drives it.
+  * ``character`` whose ``style_notes`` describes a hostile/enemy ->
+    dynamic capsule, tags include ``["enemy", "target"]``, placed at
+    engagement distance from spawn (>= 3 m).
+  * ``character`` otherwise (NPC / merchant / quest-giver) -> static
+    capsule, tags include ``["npc"]``, placed where the prompt
+    describes (default: 1.5 m to the player's right).
+  * ``prop`` flagged grabbable / wearable / pickup in ``style_notes`` ->
+    dynamic AABB or sphere, tags include ``["interactable"]`` (and
+    ``"grabbable"`` or ``"wearable"`` as appropriate), placed within
+    arm's reach of the spawn (0.3-1.2 m).
+  * ``prop`` otherwise (dressing / fixture) -> static AABB, tags include
+    ``["static"]``, placed where the prompt describes.
+  * ``fx`` -> no physics, tags include ``["vfx"]``, mesh present so the
+    impostor renders.
+  * ``ui`` -> no physics, tags include ``["hud"]``, world-anchored
+    (e.g. 1.2 m in front of the spawn at eye height).
+
+If the AssetManifest names a city / arena / room / plaza / terrain, that
+asset IS the environment the player spawns in -- never leave it floating
+unreferenced.
 
 Rules:
  * Use meters and radians. Player height defaults to 1.7 m.
@@ -69,6 +159,12 @@ CODE_TASK_SYSTEM = """You are a careful C++20 developer writing a single self-co
 file for a local-first prompt-to-native-VR engine. The engine runtime is
 VERY small; do NOT invent APIs that do not exist. The entire public surface
 you are allowed to touch is listed below verbatim.
+
+Note on engine growth: the planner stage may have flagged this CodeTask as
+"generate" because no catalog entry covered it. Once your file compiles,
+the orchestrator's promotion stage will index it for reuse by future games.
+That means the cleaner / more general your implementation, the more value
+it adds to the engine. Still: stay inside the boundaries below.
 
 # Output format
 
@@ -139,23 +235,61 @@ IDialogueHook with `on_enter` / `on_line` / `on_exit` and
 
 # Accessing engine state
 
-Everything you need lives on the EnTT registry inside ``ptv::World``:
+``IMechanic``'s entity argument is ``std::uint32_t`` (stable ABI). To read or
+write components, call the entity-safe helpers on ``ptv::World`` — they cast
+internally so you NEVER write ``static_cast<entt::entity>(entity)`` yourself.
+Use these FOUR helpers only:
 
-    auto& r = world.registry();
-    if (r.all_of<ptv::CTransform>(entity)) {
-        auto& tr = r.get<ptv::CTransform>(entity).t;   // tr.position, tr.rotation, tr.scale
+    if (world.has<ptv::CTransform>(entity)) {
+        auto& tr = world.get<ptv::CTransform>(entity).t;  // tr.position/rotation/scale
     }
-    if (r.all_of<ptv::CTag>(entity)) {
-        const auto& tags = r.get<ptv::CTag>(entity).tags;
-    }
+    world.emplace_or_replace<ptv::CTag>(entity, ptv::CTag{});  // create/overwrite
+    world.remove<ptv::CTag>(entity);                           // drop one component
+    if (world.valid(entity)) { /* entity still alive */ }
+
+Do NOT write ``world.registry().all_of<T>(entity)`` or
+``world.registry().get<T>(entity)`` directly with the ``std::uint32_t``
+``entity`` argument — that WILL fail to compile because entt wants
+``entt::entity``, not ``std::uint32_t``. The ``world.has<>`` / ``world.get<>``
+helpers above are the only correct way.
+
+If you really need to iterate a view, call ``world.registry()`` and work with
+``entt::entity`` values yielded by ``reg.view<...>()`` directly — those are
+already the right type.
 
 Available components (defined in ptv/ecs/World.h):
 
-* CTransform { Transform t; }      // position/rotation/scale
+* CTransform { Transform t; }
+    // Transform is:
+    //     Vec3   position{0.0f};                  // x/y/z meters
+    //     Quat   rotation{1.0f, 0.0f, 0.0f, 0.0f}; // w, x, y, z
+    //     float  scale{1.0f};                     // UNIFORM scale, NOT a Vec3
+    //
+    // CRITICAL: ``Transform::scale`` is a single ``float`` (uniform scale on
+    // all three axes). It is NOT a ``Vec3``. Writing
+    //     tr.scale = Vec3{1.0f, 1.0f, 1.0f};   // <-- COMPILE ERROR
+    // will fail with "cannot convert from 'ptv::Vec3' to 'float'". The
+    // correct form is:
+    //     tr.scale = 1.0f;
+    // If you need non-uniform scaling, scale the mesh in the source GLB
+    // instead -- the engine has no per-axis runtime scale.
 * CMesh      { std::string asset_id; std::string glb_path; float target_scale_meters; }
 * CPhysics   { std::string kind; float mass_kg; float restitution; float friction; std::string collision_shape; }
 * CTag       { std::vector<std::string> tags; }
-* CMechanicBinding { std::vector<Entry> entries; }  // Entry has id, builtin_id, params_json
+* CMechanicBinding { std::vector<Entry> entries; }
+                    // Entry has `id` (string), `builtin_id` (string),
+                    // and `params_json` (STRING — a serialised JSON blob,
+                    // NOT a live ``nlohmann::json`` object).
+
+IMPORTANT: ``CMechanicBinding::Entry::params_json`` is a ``std::string``.
+To read keys out of it you MUST parse first. Never call
+``.contains(...)`` or ``.at(...)`` on it directly. The safe pattern is:
+
+    auto j = nlohmann::json::parse(entry.params_json,
+                                   nullptr, /*allow_exceptions=*/false);
+    if (j.is_object() && j.contains("grip_held")) {
+        bool grip = j.at("grip_held").get<bool>();
+    }
 
 ``world.find("entity_id")`` returns the entity registered with that string id
 (or ``entt::null``). ``world.delta_time()`` is the current frame dt (use the
@@ -201,11 +335,11 @@ Below is the ONLY pattern you should follow. Keep the same anchor
         }
         void on_update(World& w, std::uint32_t e, float dt) override {
             t_ += dt;
-            auto& reg = w.registry();
-            if (!reg.all_of<CTransform>(e)) return;
-            auto& tr = reg.get<CTransform>(e).t;
-            tr.scale = Vec3{1.0f + 0.1f * std::sin(6.2831853f * t_ / period_),
-                            1.0f, 1.0f};
+            // Use world.has<>/world.get<> -- never world.registry().all_of<>(e)
+            if (!w.has<CTransform>(e)) return;
+            auto& tr = w.get<CTransform>(e).t;
+            // Transform::scale is a SINGLE float (uniform). NOT a Vec3.
+            tr.scale = 1.0f + 0.1f * std::sin(6.2831853f * t_ / period_);
         }
         void on_detach(World&, std::uint32_t) override {}
         std::string id() const override { return "generated.example_blink"; }

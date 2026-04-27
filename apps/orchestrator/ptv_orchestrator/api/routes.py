@@ -10,6 +10,7 @@ from typing import AsyncIterator
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Response
 from sse_starlette.sse import EventSourceResponse
 
+from ..engine_catalog import builtin_catalog, promoted_catalog
 from ..events import get_bus
 from ..pipeline import resume_pipeline, run_pipeline, run_stage
 from ..settings import get_settings
@@ -142,6 +143,24 @@ def launch(project_id: str, req: LaunchRequest):
     )
     launch_exe(exe, scene_json=scene)
     return {"ok": True, "exe": str(exe)}
+
+
+# ---------------------------------------------------------------------------
+# Engine catalog (built-in + promoted mechanics)
+# ---------------------------------------------------------------------------
+
+@router.get("/engine/catalog")
+def engine_catalog():
+    """Return the live engine catalog.
+
+    The mechanic-planner stage uses this exact data when prompting the LLM
+    so what the UI shows here is what the planner actually sees.
+    """
+    s = get_settings()
+    return {
+        "builtin": builtin_catalog(),
+        "promoted": promoted_catalog(s.repo_root),
+    }
 
 
 @router.post("/sample/launch")

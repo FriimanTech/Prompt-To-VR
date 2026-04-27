@@ -7,6 +7,21 @@ into an engine-readable ``scene.json`` under
 JSON directly via ``engine/runtime/src/scene/SceneJson.cpp``.
 
 This stage is fully deterministic and runs locally. No LLM calls.
+
+Asset safety-net (Part 3 of apps/adjustments.md): every AssetItem in the
+``AssetManifest`` is *guaranteed* to appear in the compiled scene. If the
+LLM-generated ``SceneSpec`` failed to reference an asset, this stage
+auto-instantiates a category-appropriate default entity for it so the
+.glb still shows up in the running VR game. Concretely:
+
+    environment -> world entity at the origin (static, mesh collision)
+    character   -> NPC capsule (or enemy/player_avatar based on style_notes)
+    prop        -> reachable interactable (or static dressing)
+    fx          -> non-physics VFX impostor near the spawn
+    ui          -> world-anchored HUD panel in front of the spawn
+
+This makes the pipeline robust to LLM forgetfulness so a generated city
+glb is never silently dropped.
 """
 
 from __future__ import annotations
@@ -16,6 +31,7 @@ from pathlib import Path
 from typing import Any
 
 from ptv_schemas import (
+    AssetItem,
     AssetManifest,
     BuildSpec,
     MechanicPlan,
@@ -24,11 +40,238 @@ from ptv_schemas import (
     ProjectStatus,
     SceneSpec,
 )
+from ptv_schemas.asset_manifest import AssetCategory
 
 from .context import PipelineContext, StageResult
 
 
 SCENE_JSON_VERSION = 1
+
+
+# ---------------------------------------------------------------------------
+# Asset safety-net helpers
+# ---------------------------------------------------------------------------
+
+
+def _style_notes_lower(asset: AssetItem) -> str:
+    return f"{asset.name} {asset.style_notes}".lower()
+
+
+def _character_role(asset: AssetItem) -> str:
+    """Heuristic: 'enemy', 'player_avatar', or 'npc' for a character asset."""
+    text = _style_notes_lower(asset)
+    enemy_kw = (
+        "enemy", "hostile", "boss", "drone", "minion", "monster",
+        "demon", "robot foe", "antagonist", "training drone",
+    )
+    if any(k in text for k in enemy_kw):
+        return "enemy"
+    avatar_kw = (
+        "player avatar", "player body", "first-person body", "first person body",
+        "player character", "main character", "protagonist body", "hero body",
+    )
+    if any(k in text for k in avatar_kw):
+        return "player_avatar"
+    return "npc"
+
+
+def _prop_is_grabbable(asset: AssetItem) -> bool:
+    text = _style_notes_lower(asset)
+    grab_kw = (
+        "grab", "grabbable", "pickup", "pick up", "wearable", "wield",
+        "throwable", "interactable", "tool", "weapon", "ring", "battery",
+    )
+    return any(k in text for k in grab_kw)
+
+
+def _spread_xz(index: int, radius: float = 1.5) -> tuple[float, float]:
+    """Deterministic ring placement so multiple unreferenced props don't stack."""
+    import math
+    angle = (index * 137.508) * math.pi / 180.0  # golden-angle-ish, deterministic
+    return radius * math.cos(angle), radius * math.sin(angle)
+
+
+def _default_entity_for_asset(
+    asset: AssetItem,
+    glb_path: str,
+    spread_index: int,
+) -> dict[str, Any]:
+    """Build a category-appropriate default entity for an unreferenced asset."""
+
+    base_mesh = {
+        "asset_id": asset.id,
+        "glb_path": glb_path,
+        "target_scale_meters": asset.target_scale_meters,
+        "collision_shape": asset.collision_shape,
+    }
+    transform_identity = {
+        "position": [0.0, 0.0, 0.0],
+        "rotation": [0.0, 0.0, 0.0, 1.0],
+        "scale": 1.0,
+    }
+
+    if asset.category == AssetCategory.environment:
+        return {
+            "id": f"auto_{asset.id}",
+            "name": asset.name or asset.id,
+            "transform": transform_identity,
+            "mesh": {**base_mesh, "collision_shape": "mesh"},
+            "physics": {
+                "kind": "static",
+                "mass_kg": 1.0,
+                "collision_shape": "mesh",
+                "restitution": 0.1,
+                "friction": 0.6,
+            },
+            "mechanic_bindings": [],
+            "tags": ["environment", "auto"],
+        }
+
+    if asset.category == AssetCategory.character:
+        role = _character_role(asset)
+        if role == "player_avatar":
+            return {
+                "id": f"auto_{asset.id}",
+                "name": asset.name or asset.id,
+                "transform": transform_identity,
+                "mesh": base_mesh,
+                "physics": None,
+                "mechanic_bindings": [],
+                "tags": ["player_avatar", "auto"],
+            }
+        if role == "enemy":
+            x, z = _spread_xz(spread_index, radius=4.0)
+            return {
+                "id": f"auto_{asset.id}",
+                "name": asset.name or asset.id,
+                "transform": {
+                    "position": [x, 1.0, abs(z) + 3.0],
+                    "rotation": [0.0, 0.0, 0.0, 1.0],
+                    "scale": 1.0,
+                },
+                "mesh": base_mesh,
+                "physics": {
+                    "kind": "dynamic",
+                    "mass_kg": 5.0,
+                    "collision_shape": "capsule",
+                    "restitution": 0.2,
+                    "friction": 0.4,
+                },
+                "mechanic_bindings": [],
+                "tags": ["enemy", "target", "auto"],
+            }
+        # Default character: NPC
+        x, z = _spread_xz(spread_index, radius=1.5)
+        return {
+            "id": f"auto_{asset.id}",
+            "name": asset.name or asset.id,
+            "transform": {
+                "position": [x, 0.0, z],
+                "rotation": [0.0, 0.0, 0.0, 1.0],
+                "scale": 1.0,
+            },
+            "mesh": base_mesh,
+            "physics": {
+                "kind": "static",
+                "mass_kg": 1.0,
+                "collision_shape": "capsule",
+                "restitution": 0.2,
+                "friction": 0.5,
+            },
+            "mechanic_bindings": [],
+            "tags": ["npc", "auto"],
+        }
+
+    if asset.category == AssetCategory.prop:
+        x, z = _spread_xz(spread_index, radius=0.8)
+        if _prop_is_grabbable(asset):
+            return {
+                "id": f"auto_{asset.id}",
+                "name": asset.name or asset.id,
+                "transform": {
+                    "position": [x, 1.0, -abs(z) - 0.3],
+                    "rotation": [0.0, 0.0, 0.0, 1.0],
+                    "scale": 1.0,
+                },
+                "mesh": base_mesh,
+                "physics": {
+                    "kind": "dynamic",
+                    "mass_kg": 0.3,
+                    "collision_shape": "aabb",
+                    "restitution": 0.2,
+                    "friction": 0.5,
+                },
+                "mechanic_bindings": [],
+                "tags": ["interactable", "grabbable", "auto"],
+            }
+        # Static dressing prop.
+        return {
+            "id": f"auto_{asset.id}",
+            "name": asset.name or asset.id,
+            "transform": {
+                "position": [x, 0.0, z],
+                "rotation": [0.0, 0.0, 0.0, 1.0],
+                "scale": 1.0,
+            },
+            "mesh": base_mesh,
+            "physics": {
+                "kind": "static",
+                "mass_kg": 1.0,
+                "collision_shape": "aabb",
+                "restitution": 0.2,
+                "friction": 0.5,
+            },
+            "mechanic_bindings": [],
+            "tags": ["static", "auto"],
+        }
+
+    if asset.category == AssetCategory.fx:
+        return {
+            "id": f"auto_{asset.id}",
+            "name": asset.name or asset.id,
+            "transform": {
+                "position": [0.0, 1.2, -1.0],
+                "rotation": [0.0, 0.0, 0.0, 1.0],
+                "scale": 1.0,
+            },
+            "mesh": base_mesh,
+            "physics": None,
+            "mechanic_bindings": [],
+            "tags": ["vfx", "auto"],
+        }
+
+    # ui and any future categories: world-anchored HUD panel.
+    return {
+        "id": f"auto_{asset.id}",
+        "name": asset.name or asset.id,
+        "transform": {
+            "position": [0.0, 1.5, -1.2],
+            "rotation": [0.0, 0.0, 0.0, 1.0],
+            "scale": 1.0,
+        },
+        "mesh": base_mesh,
+        "physics": None,
+        "mechanic_bindings": [],
+        "tags": ["hud", "auto"],
+    }
+
+
+def _resolve_glb_path(
+    asset_id: str,
+    manifest_path_hint: str | None,
+    normalization_report: dict[str, dict[str, Any]],
+) -> str | None:
+    """Best-effort GLB path lookup for an unreferenced asset.
+
+    Falls back to the asset-normalization report (which is the source of
+    truth populated by stage_asset_normalize). Returns None if no .glb is
+    on disk for this asset, in which case we skip auto-instantiation
+    rather than emit a broken mesh reference.
+    """
+
+    norm = normalization_report.get(asset_id, {}) or {}
+    candidate = norm.get("glb_path") or manifest_path_hint
+    return candidate or None
 
 
 def compile_scene_json(
@@ -43,6 +286,7 @@ def compile_scene_json(
     asset_by_id = {a.id: a for a in manifest.items}
     plan_by_id = {it.id: it for it in plan.items}
     nrep = normalization_report or {}
+    referenced_asset_ids: set[str] = set()
 
     entities_out: list[dict[str, Any]] = []
     for e in scene.entities:
@@ -60,6 +304,7 @@ def compile_scene_json(
                     asset.collision_shape if asset is not None else "aabb"
                 ),
             }
+            referenced_asset_ids.add(e.mesh.asset_id)
         bindings: list[dict[str, Any]] = []
         for b in e.mechanic_bindings:
             item = plan_by_id.get(b.mechanic_id.split(".", 1)[-1])
@@ -103,6 +348,26 @@ def compile_scene_json(
                 "tags": list(e.tags),
             }
         )
+
+    # ---- Safety net: every AssetItem MUST appear in the compiled scene. ----
+    # If the LLM-generated SceneSpec dropped an asset, auto-instantiate a
+    # category-appropriate default so the .glb still ships into the running
+    # game. This is what makes "the generated city is the world the player
+    # spawns in" robust even when the planner forgets.
+    auto_index = 0
+    for asset in manifest.items:
+        if asset.id in referenced_asset_ids:
+            continue
+        glb_path = _resolve_glb_path(asset.id, None, nrep)
+        if not glb_path:
+            # No .glb on disk yet (e.g. the Tripo stage failed for this
+            # asset). Skip rather than emit a dangling mesh path that the
+            # engine's GLB loader would reject.
+            continue
+        entities_out.append(
+            _default_entity_for_asset(asset, glb_path, auto_index)
+        )
+        auto_index += 1
 
     return {
         "version": SCENE_JSON_VERSION,

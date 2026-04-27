@@ -12,7 +12,7 @@ from pathlib import Path
 
 from ptv_schemas import CodeTask, CodeTaskKind, ProjectStage, ProjectStatus
 
-from .bounds import assert_path_allowed, filter_cpp_only
+from .bounds import assert_path_allowed, filter_cpp_only, repair_generated_cpp
 from .context import PipelineContext, StageResult
 from .llm import make_llm
 from .prompts import CODE_TASK_SYSTEM
@@ -59,6 +59,16 @@ def run(ctx: PipelineContext) -> StageResult:
         )
         code = _strip_code_fences(resp.raw_text)
         code = filter_cpp_only(code)
+
+        # Auto-repair pass: fix known LLM slip-ups (e.g. Transform::scale =
+        # Vec3{...}) before the file ever reaches the C++ compiler.
+        code, repair_notes = repair_generated_cpp(code)
+        for note in repair_notes:
+            ctx.emit(
+                ProjectStage.code_generation,
+                "info",
+                f"{task.id}: auto-repair {note}",
+            )
 
         # Boundary guard: path must be under engine/generated/{mechanics,ai,dialogue}/
         assert_path_allowed(out_path, gen_root)

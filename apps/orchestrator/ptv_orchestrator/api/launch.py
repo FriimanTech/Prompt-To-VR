@@ -1,4 +1,18 @@
-"""Local launcher: starts the built executable."""
+"""Local launcher: starts the built executable.
+
+The built runtime (``ptv_starter_room.exe``) is a generic VR host that
+loads whatever ``scene.json`` is handed to it. CMake POST_BUILD copies
+the starter-room's own ``scene.json`` next to the exe as a convenience
+for double-clicking, which means that if we launch the exe with no
+arguments we always get the starter room -- *even when we set the
+PTV_SCENE_JSON env var*, because the runtime's ``main.cpp`` assigns
+the sidecar path into ``Config::scene_json_path`` first.
+
+To guarantee "Launch latest build" opens the *project's* scene, we
+pass the scene path as ``argv[1]`` (the app's top-priority source)
+and also set ``PTV_SCENE_JSON`` as a belt-and-braces fallback for any
+future custom entry points that don't parse argv.
+"""
 
 from __future__ import annotations
 
@@ -12,10 +26,13 @@ def launch_exe(exe: Path, *, scene_json: Path | None = None) -> int:
     if not exe.exists():
         raise FileNotFoundError(f"Executable not found: {exe}")
     env = {**os.environ}
+    argv: list[str] = [str(exe)]
     if scene_json is not None:
-        env["PTV_SCENE_JSON"] = str(scene_json)
+        scene_str = str(scene_json)
+        env["PTV_SCENE_JSON"] = scene_str
+        argv.append(scene_str)
     # DETACHED: we do not wait; the GUI runs in its own window.
-    subprocess.Popen([str(exe)], cwd=str(exe.parent), env=env)
+    subprocess.Popen(argv, cwd=str(exe.parent), env=env)
     return 0
 
 

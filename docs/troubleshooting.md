@@ -53,10 +53,34 @@ The Tripo wrapper polls every 3 s with a 600 s timeout by default. You can
 raise the ceiling by editing `TripoConfig.timeout_s`. Very large models
 with `texture_quality="detailed"` can take 60-120 s per asset.
 
+## Tripo stage logs `No module named 'aiohttp'` for every asset
+
+The `tripo3d` PyPI package lists `aiohttp` as an *optional* dependency even
+though its async HTTP paths (upload / poll / download) import it at runtime.
+If your venv was created before this was pinned, install aiohttp manually:
+
+```powershell
+.\vrvenv\Scripts\pip.exe install "aiohttp>=3.8.0"
+```
+
+`ptv-provider-clients` now declares `aiohttp>=3.8.0` as a direct dependency
+so fresh installs will always pick it up.
+
+## Tripo stage fails with `[2010] You don't have enough credit`
+
+Your Tripo account is out of generation credits. Buy more at
+<https://platform.tripo3d.ai/billing>, then click **Resume** in the web UI
+on the affected project — the pipeline will restart from the Tripo stage,
+produce the GLBs, and continue through asset normalization, code generation,
+and the CMake build.
+
 ## "No GLB file found" during asset normalization
 
 The Tripo stage silently skipped the asset (often: missing API key, or
-bad reference image). Check `projects/<id>/logs/tripo_models.log`.
+bad reference image). Check `projects/<id>/logs/tripo_models.log`. Since
+April 2026 the Tripo stage hard-fails (status `failed`) if *any* reference
+images were produced upstream but *zero* GLBs came back, so this should no
+longer let an empty asset set slip through to normalization.
 
 ## Frontend: "Orchestrator unreachable"
 

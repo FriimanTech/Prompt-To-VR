@@ -11,6 +11,7 @@ from ptv_orchestrator.pipeline.bounds import (
     GeneratedBoundsError,
     assert_path_allowed,
     filter_cpp_only,
+    repair_generated_cpp,
 )
 from ptv_orchestrator.pipeline.stage_scene_compile import compile_scene_json
 from ptv_orchestrator.storage import ProjectStore
@@ -140,6 +141,194 @@ def test_scene_compile_resolves_builtin_and_mesh():
     assert e["physics"]["kind"] == "dynamic"
 
 
+def test_scene_compile_auto_instantiates_unreferenced_assets():
+    """Part 3 of apps/adjustments.md: every Tripo-produced asset must end
+    up inside the running VR game. If the LLM-composed SceneSpec drops one,
+    the deterministic compiler auto-instantiates a category-appropriate
+    default entity for it so the .glb still ships."""
+
+    # Manifest: one asset per category. Style notes deliberately cue the
+    # role-detection heuristics for the character / prop categories.
+    manifest = AssetManifest(
+        prompt_id="demo",
+        items=[
+            AssetItem(
+                id="metropolis_city",
+                name="Metropolis City",
+                category=AssetCategory.environment,
+                style_notes="dense skyscraper city as the world environment",
+                reference=ReferenceImageRequest(prompt="a sci-fi city skyline"),
+                target_scale_meters=24.0,
+                collision_shape="mesh",
+            ),
+            AssetItem(
+                id="superman_avatar",
+                name="Superman",
+                category=AssetCategory.character,
+                style_notes="Player avatar: Superman, full body in flight pose",
+                reference=ReferenceImageRequest(prompt="Superman, full body, hero pose"),
+                target_scale_meters=1.9,
+            ),
+            AssetItem(
+                id="villain_drone",
+                name="Hostile Drone",
+                category=AssetCategory.character,
+                style_notes="Hostile enemy training drone",
+                reference=ReferenceImageRequest(prompt="hostile combat drone"),
+                target_scale_meters=0.4,
+            ),
+            AssetItem(
+                id="merchant_npc",
+                name="Merchant",
+                category=AssetCategory.character,
+                style_notes="friendly merchant NPC standing behind a counter",
+                reference=ReferenceImageRequest(prompt="merchant NPC, idle pose"),
+                target_scale_meters=1.8,
+            ),
+            AssetItem(
+                id="power_ring",
+                name="Power Ring",
+                category=AssetCategory.prop,
+                style_notes="grabbable, wearable power ring artifact",
+                reference=ReferenceImageRequest(prompt="glowing alien power ring"),
+                target_scale_meters=0.08,
+            ),
+            AssetItem(
+                id="lamp_dressing",
+                name="Street Lamp",
+                category=AssetCategory.prop,
+                style_notes="static dressing prop, decorative street lamp",
+                reference=ReferenceImageRequest(prompt="ornate street lamp"),
+                target_scale_meters=2.4,
+            ),
+            AssetItem(
+                id="blast_beam_vfx",
+                name="Blast Beam",
+                category=AssetCategory.fx,
+                style_notes="energy beam vfx impostor",
+                reference=ReferenceImageRequest(prompt="green energy beam vfx"),
+                target_scale_meters=1.0,
+            ),
+            AssetItem(
+                id="ring_hud_panel",
+                name="Ring HUD",
+                category=AssetCategory.ui,
+                style_notes="world-anchored hud panel showing ring energy",
+                reference=ReferenceImageRequest(prompt="circular HUD panel mockup"),
+                target_scale_meters=0.5,
+            ),
+        ],
+    )
+
+    # Empty SceneSpec: the planner forgot to instantiate ANYTHING.
+    empty_scene = SceneSpec(
+        prompt_id="demo",
+        scene_id="room",
+        name="Room",
+        entities=[],
+    )
+
+    # Synthetic asset-normalization report: pretend Tripo succeeded for
+    # every asset and dropped a .glb on disk. Without this the safety net
+    # refuses to fabricate a mesh entity (correctly).
+    normalization = {
+        a.id: {"glb_path": f"projects/demo/assets/{a.id}/model_pbr.glb"}
+        for a in manifest.items
+    }
+
+    doc = compile_scene_json(
+        _build_spec(), manifest, _plan(), empty_scene, normalization
+    )
+
+    ents = {e["id"]: e for e in doc["entities"]}
+    # Every asset became at least one entity.
+    for asset in manifest.items:
+        auto_id = f"auto_{asset.id}"
+        assert auto_id in ents, f"{asset.id} was silently dropped from the scene"
+
+    # Environment is the world the player spawns in: origin + static + mesh col.
+    env = ents["auto_metropolis_city"]
+    assert env["transform"]["position"] == [0.0, 0.0, 0.0]
+    assert env["physics"]["kind"] == "static"
+    assert env["physics"]["collision_shape"] == "mesh"
+    assert "environment" in env["tags"]
+    assert env["mesh"]["glb_path"].endswith("metropolis_city/model_pbr.glb")
+
+    # Player avatar -> tagged player_avatar, no physics body.
+    avatar = ents["auto_superman_avatar"]
+    assert avatar["physics"] is None
+    assert "player_avatar" in avatar["tags"]
+
+    # Enemy character -> dynamic capsule, tagged enemy.
+    enemy = ents["auto_villain_drone"]
+    assert enemy["physics"]["kind"] == "dynamic"
+    assert enemy["physics"]["collision_shape"] == "capsule"
+    assert "enemy" in enemy["tags"]
+
+    # Plain character -> NPC default, static capsule.
+    npc = ents["auto_merchant_npc"]
+    assert npc["physics"]["kind"] == "static"
+    assert npc["physics"]["collision_shape"] == "capsule"
+    assert "npc" in npc["tags"]
+
+    # Grabbable prop -> dynamic, interactable.
+    ring = ents["auto_power_ring"]
+    assert ring["physics"]["kind"] == "dynamic"
+    assert "interactable" in ring["tags"] and "grabbable" in ring["tags"]
+
+    # Static dressing prop -> static AABB, tagged static.
+    lamp = ents["auto_lamp_dressing"]
+    assert lamp["physics"]["kind"] == "static"
+    assert "static" in lamp["tags"]
+
+    # FX -> no physics, tagged vfx.
+    fx = ents["auto_blast_beam_vfx"]
+    assert fx["physics"] is None
+    assert "vfx" in fx["tags"]
+
+    # UI -> no physics, tagged hud.
+    hud = ents["auto_ring_hud_panel"]
+    assert hud["physics"] is None
+    assert "hud" in hud["tags"]
+
+
+def test_scene_compile_does_not_duplicate_referenced_assets():
+    """If the SceneSpec already places an asset, the safety net must not
+    add a second 'auto_*' copy."""
+
+    doc = compile_scene_json(_build_spec(), _manifest(), _plan(), _scene_spec())
+    ids = [e["id"] for e in doc["entities"]]
+    assert "auto_cube" not in ids
+    # Original entity is preserved untouched.
+    assert "cube1" in ids
+
+
+def test_scene_compile_skips_unreferenced_assets_without_glb():
+    """If the asset has no .glb on disk (Tripo failed for it), the safety
+    net must NOT emit a dangling mesh entity that would crash the loader."""
+
+    manifest = AssetManifest(
+        prompt_id="demo",
+        items=[
+            AssetItem(
+                id="missing_city",
+                name="Missing City",
+                category=AssetCategory.environment,
+                style_notes="city environment but Tripo never produced it",
+                reference=ReferenceImageRequest(prompt="a city"),
+                target_scale_meters=20.0,
+            )
+        ],
+    )
+    empty_scene = SceneSpec(
+        prompt_id="demo", scene_id="room", name="Room", entities=[]
+    )
+    doc = compile_scene_json(
+        _build_spec(), manifest, _plan(), empty_scene, normalization_report={}
+    )
+    assert doc["entities"] == []
+
+
 # ---------------------------------------------------------------------------
 # Generated-code bounds
 # ---------------------------------------------------------------------------
@@ -202,6 +391,11 @@ def test_tripo_stage_fails_when_zero_models_produced(tmp_path: Path, monkeypatch
         def __init__(self, *a, **kw):  # noqa: D401 - test double
             pass
 
+        def get_balance(self):
+            # Plenty of credits so the preflight passes; each individual
+            # generation call then blows up instead.
+            return {"balance": 10000.0, "frozen": 0.0}
+
         def image_to_model(self, **kwargs):
             raise RuntimeError("no credits on account")
 
@@ -228,6 +422,134 @@ def test_tripo_stage_fails_when_zero_models_produced(tmp_path: Path, monkeypatch
 
     with pytest.raises(RuntimeError, match="produced 0 models"):
         stage_tripo_models.run(ctx)
+
+
+def test_tripo_stage_preflight_fails_on_insufficient_balance(tmp_path: Path, monkeypatch):
+    """Regression for 'user wastes 9 image-to-3D requests on a 0-balance
+    account': the preflight balance call must halt the stage BEFORE any
+    image_to_model / text_to_model request is fired."""
+
+    from ptv_orchestrator.events import EventBus
+    from ptv_orchestrator.pipeline import stage_tripo_models
+    from ptv_orchestrator.pipeline.context import PipelineContext
+    from ptv_orchestrator.settings import Settings
+
+    calls: list[str] = []
+
+    class _ZeroBalanceTripo:
+        def __init__(self, *a, **kw):
+            pass
+
+        def get_balance(self):
+            return {"balance": 0.0, "frozen": 0.0}
+
+        def image_to_model(self, **kwargs):
+            calls.append("image_to_model")
+            raise RuntimeError("should never be called; preflight must halt first")
+
+        def text_to_model(self, **kwargs):
+            calls.append("text_to_model")
+            raise RuntimeError("should never be called; preflight must halt first")
+
+    monkeypatch.setattr(stage_tripo_models, "TripoClient", _ZeroBalanceTripo)
+
+    settings = Settings(repo_root=tmp_path, projects_dir=tmp_path / "projects")
+    store = ProjectStore(settings.projects_dir)
+    state = store.create("Zero Balance", "a tiny prompt for the test")
+    store.save_asset_manifest(state.project_id, _manifest())
+
+    ctx = PipelineContext(
+        project_id=state.project_id,
+        settings=settings,
+        store=store,
+        bus=EventBus(),
+    )
+
+    with pytest.raises(RuntimeError, match="Insufficient Tripo credits"):
+        stage_tripo_models.run(ctx)
+
+    assert calls == [], f"Preflight failed but generation was still attempted: {calls}"
+
+
+def test_artifact_id_accepts_vcpkg_leading_underscore_filenames(tmp_path: Path):
+    """Regression for ValidationError on ``_features.hpp`` and friends that
+    vcpkg drops into the build tree. ``list_artifacts`` must produce a valid
+    ``IdStr`` for every file under the project without raising."""
+
+    from ptv_orchestrator.storage import _artifact_id
+
+    assert _artifact_id("_features.hpp") == "features.hpp"
+    assert _artifact_id(".ninja_deps") == "ninja_deps"
+    assert _artifact_id("---weird").startswith("weird")
+    assert _artifact_id("OK_Name.JSON") == "ok_name.json"
+    # First char must be [a-z0-9] to satisfy the IdStr regex.
+    import re
+
+    pat = re.compile(r"^[a-z0-9][a-z0-9_.\-]{0,63}$")
+    for raw in ("_features.hpp", ".gitkeep", "---", "CMakeCache.txt", "build_spec.json"):
+        assert pat.match(_artifact_id(raw)), f"bad id for {raw!r}: {_artifact_id(raw)!r}"
+
+
+def test_repair_rewrites_transform_scale_vec3_to_float():
+    """Regression for the Green Lantern construct_quick_select_mechanic
+    build break: Claude wrote ``ct.t.scale = Vec3{1.0f, 1.0f, 1.0f};`` and
+    MSVC died with C2440. The repair pass MUST rewrite this to a scalar
+    float assignment before the file is ever written to disk."""
+
+    src = (
+        "void f(World& w, std::uint32_t e) {\n"
+        "    auto& tr = w.get<CTransform>(e).t;\n"
+        "    ct.t.scale = Vec3{1.0f, 1.0f, 1.0f};\n"
+        "    tr.scale = Vec3{2.5f, 1.0f, 1.0f};\n"
+        "    tr.scale = Vec3(1.0f + 0.1f * std::sin(t), 1.0f, 1.0f);\n"
+        "}\n"
+    )
+    repaired, notes = repair_generated_cpp(src)
+
+    # Vec3 forms are gone.
+    assert "Vec3{" not in repaired
+    assert "Vec3(" not in repaired
+    # First numeric / expression argument is preserved (so animated scales
+    # like ``1.0f + 0.1f * std::sin(t)`` keep their behaviour).
+    assert "ct.t.scale = 1.0f;" in repaired
+    assert "tr.scale = 2.5f;" in repaired
+    assert "tr.scale = 1.0f + 0.1f * std::sin(t);" in repaired
+    # Each rewrite leaves a marker comment so reviewers can spot it.
+    assert repaired.count("[ptv-repair]") == 3
+    # Stage emits exactly one human-readable note when any repair fires.
+    assert len(notes) == 1
+    assert "Transform::scale" in notes[0]
+
+
+def test_repair_is_noop_on_clean_code():
+    """If the LLM gets it right the first time, the repair pass must not
+    mangle the source. No notes, no replacements."""
+
+    clean = (
+        "void f(World& w, std::uint32_t e) {\n"
+        "    auto& tr = w.get<CTransform>(e).t;\n"
+        "    tr.scale = 1.0f;\n"
+        "    tr.scale = 1.0f + std::sin(t) * 0.1f;\n"
+        "}\n"
+    )
+    repaired, notes = repair_generated_cpp(clean)
+    assert repaired == clean
+    assert notes == []
+
+
+def test_repair_preserves_unrelated_vec3_uses():
+    """The repair must NOT touch legitimate Vec3 uses (positions, custom
+    structs that happen to have a 'scale' field of type Vec3, etc.). It
+    only rewrites assignments where 'scale' is the field being written."""
+
+    src = (
+        "Vec3 dir = Vec3{0.0f, 0.0f, -1.0f};\n"
+        "tr.position = Vec3{1.0f, 2.0f, 3.0f};\n"
+        "Vec3 v = Vec3(0.5f, 0.5f, 0.5f);\n"
+    )
+    repaired, notes = repair_generated_cpp(src)
+    assert repaired == src
+    assert notes == []
 
 
 def test_filter_cpp_only_strips_hallucinated_ptv_api_headers():

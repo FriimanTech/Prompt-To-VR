@@ -24,6 +24,7 @@ class ProjectStage(str, Enum):
     scene_compile = "scene_compile"
     cmake_configure = "cmake_configure"
     cmake_build = "cmake_build"
+    engine_promotion = "engine_promotion"
     ready_to_launch = "ready_to_launch"
     failed = "failed"
 
