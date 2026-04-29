@@ -540,6 +540,11 @@ void Renderer::destroy_gltf_meshes() {
     gltf_path_to_slot_.clear();
 }
 
+int Renderer::load_glb(const std::string& resolved_path,
+                       float target_scale_meters) {
+    return ensure_gltf_mesh(resolved_path, target_scale_meters);
+}
+
 int Renderer::ensure_gltf_mesh(const std::string& resolved_path,
                                float target_scale_meters) {
     if (!vk_ || resolved_path.empty()) return -1;

@@ -105,11 +105,17 @@ private:
     struct Menu {
         MenuPage page{MenuPage::Root};
         int highlighted{-1};        // -1 = nothing, 0/1 = per-page options
+        // Which controller is currently aiming at the highlighted pad
+        // (-1 = neither). Both controllers can drive the menu; whichever
+        // hand is pointing closer to a pad wins, and that hand's trigger
+        // edge confirms the selection.
+        int active_hand{-1};
         float confirm_cooldown_s{0.5f};    // debounce so the menu doesn't
                                            // instantly eat the first click
-        float prev_left_trigger{0.0f};
+        float prev_trigger[2]{0.0f, 0.0f}; // [0]=left, [1]=right
         // The menu panel is placed once (when first shown) in front of the
-        // spawn pose so the user doesn't have to turn to find it.
+        // user's eyes (HMD position). Default is a fallback used only
+        // until the first valid HMD pose has been observed.
         Vec3 world_anchor{0.0f, 1.55f, -1.2f}; // default in-stage pose
         float yaw_rad{0.0f};
         bool anchor_set{false};
@@ -144,6 +150,20 @@ private:
     // updated each rendered frame from the HMD pose. Used for head-relative
     // sliding (OpenXR ``/user/head`` aim projected onto the floor).
     Vec3 last_head_forward_xz_{0.0f, 0.0f, -1.0f};
+    // Latest cached HMD eye world position (full XYZ). Updated inside the
+    // render-frame callback each frame. Used to anchor the locomotion menu
+    // at a comfortable eye-relative height (Meta Horizon "Head -> Comfort"
+    // guidance: place primary UI ~1.5m forward, slightly below eye level).
+    Vec3 last_head_world_pos_{0.0f, 1.7f, 0.0f};
+    bool last_head_pose_valid_{false};
+
+    // Pre-loaded GLB icons for the locomotion menu (root: Walking + Teleport,
+    // submenu: Head-Relative + Controller-Relative). -1 = not loaded yet
+    // (renderer falls back to procedural icons in that case).
+    int menu_icon_walking_slot_{-1};
+    int menu_icon_teleport_slot_{-1};
+    int menu_icon_head_relative_slot_{-1};
+    int menu_icon_controller_relative_slot_{-1};
 
     // Comfort acceleration ramp for sliding locomotion. Meta's design
     // guide recommends easing into and out of motion to reduce vection

@@ -82,6 +82,14 @@ public:
      *  GLB geometry on first use; others use the procedural unit cube. */
     void build_items_from_world(World& world, std::vector<DrawItem>& out);
 
+    /** Pre-load (or fetch from cache) a GLB mesh for use as a UI icon /
+     *  manually-placed DrawItem. Returns the cache slot to set on
+     *  ``DrawItem::mesh_slot``, or -1 on failure (file not found, no
+     *  triangles, etc.). The mesh is rescaled so its longest axis is
+     *  ``target_scale_meters`` -- see GltfMeshLoad. Safe to call multiple
+     *  times with the same path; the second call returns the cached slot. */
+    int load_glb(const std::string& resolved_path, float target_scale_meters);
+
     VkFormat color_format() const { return color_format_; }
     VkRenderPass render_pass() const { return render_pass_; }
 

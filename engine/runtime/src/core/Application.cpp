@@ -162,6 +162,29 @@ static void resolve_project_mesh_paths(World& w, const std::string& scene_path) 
     });
 }
 
+// Locate the repository's ``3D_Objects/`` directory by walking up from
+// the running executable. Returns an empty string if we can't find one
+// within ten parents (in which case the locomotion menu falls back to
+// procedural icons). Windows-only (matches the rest of the runtime).
+static std::string find_3d_objects_dir() {
+    namespace fs = std::filesystem;
+    wchar_t buf[MAX_PATH] = {};
+    DWORD n = GetModuleFileNameW(nullptr, buf, MAX_PATH);
+    if (n == 0 || n == MAX_PATH) return {};
+    fs::path dir = fs::path(std::wstring(buf, n)).parent_path();
+    std::error_code ec;
+    for (int i = 0; i < 12 && !dir.empty(); ++i) {
+        fs::path candidate = dir / "3D_Objects";
+        if (fs::is_directory(candidate, ec)) {
+            return fs::absolute(candidate, ec).string();
+        }
+        const fs::path parent = dir.parent_path();
+        if (parent == dir) break;
+        dir = parent;
+    }
+    return {};
+}
+
 // ---------------------------------------------------------------------------
 // Procedural hand visual: palm + wrist stub + thumb extrusion.
 //
@@ -276,12 +299,17 @@ static Mat4 yaw_only_matrix(const Vec3& pos, float yaw_rad) {
 }
 
 // Draw a teleport / walking option pad at ``local_offset`` in the menu frame.
-// ``icon`` chooses the 3D icon variant; returns the hit-test bounding center
-// in world space via ``out_world_center`` so click detection can reuse it.
+//
+// ``glb_slot`` is the renderer's pre-loaded mesh slot for the icon's 3D
+// model; pass -1 to fall back to the procedural cube icon selected by
+// ``procedural_icon`` (0=teleport portal, 1=person, 2=headset, 3=joystick).
+// Returns the hit-test bounding center in world space via
+// ``out_world_center`` so click detection can reuse it.
 static void push_menu_pad(std::vector<Renderer::DrawItem>& out,
                           const Mat4& menu_world,
                           const Vec3& local_offset,
-                          int icon,
+                          int glb_slot,
+                          int procedural_icon,
                           bool highlighted,
                           Vec3* out_world_center) {
     const Vec4 backdrop_idle{0.18f, 0.14f, 0.28f, 1.0f};   // muted violet
@@ -294,6 +322,34 @@ static void push_menu_pad(std::vector<Renderer::DrawItem>& out,
     // Icon sits just in front of the backdrop so it's visible from the user.
     const Vec3 icon_origin = local_offset + Vec3(0, 0, 0.04f);
 
+    // Preferred path: the user supplied a labelled 3D model (Walking /
+    // Teleport / Head-Relative / Controller-Relative GLB). The renderer
+    // already pre-scaled the GLB so its longest axis is ``kIconScale`` (set
+    // at load time in Application::initialize), so all four icons fit a
+    // 0.30m pad consistently.
+    if (glb_slot >= 0) {
+        Renderer::DrawItem di{};
+        Mat4 local = glm::translate(Mat4(1.0f), icon_origin);
+        di.model = menu_world * local;
+        di.mesh_slot = glb_slot;
+        // Slight highlight pop when the user is aiming at this pad so the
+        // selection cue is unmistakable in VR.
+        di.color = highlighted
+                       ? Vec4(1.10f, 1.10f, 1.10f, 1.0f)
+                       : Vec4(0.95f, 0.95f, 0.95f, 1.0f);
+        di.material_id = 0.0f;
+        out.push_back(di);
+        if (out_world_center) {
+            Vec4 p = menu_world * Vec4(local_offset, 1.0f);
+            *out_world_center = Vec3(p);
+        }
+        return;
+    }
+
+    // Procedural fallback (unchanged from earlier behaviour) -- only used
+    // if the GLB couldn't be loaded (e.g. running from a build that no
+    // longer ships the 3D_Objects/ folder).
+    const int icon = procedural_icon;
     if (icon == 0) {
         // TELEPORT: blue "portal" torus (8 cubes in a ring).
         const Vec4 blue{0.30f, 0.65f, 1.00f, 1.0f};
@@ -532,78 +588,125 @@ int Application::run(const Config& cfg) {
         }
 
         if (menu_open) {
-            // Anchor the panel the first time we show it so it appears in
-            // front of the user's spawn pose (don't re-anchor on page
-            // flips -- that would jerk the panel around mid-decision).
-            if (!menu_.anchor_set) {
-                menu_.world_anchor =
-                    Vec3(rig_.pos_x + 0.0f, 1.55f, rig_.pos_z - 1.2f);
-                menu_.yaw_rad = rig_.yaw_rad;
+            // Anchor the panel the first time we show it (and have a real
+            // HMD pose) so it appears at a comfortable spot in front of
+            // the user's eyes. Don't re-anchor on page flips -- that
+            // would jerk the panel around mid-decision.
+            //
+            // Per Meta Horizon "Head -> Comfort" guidance: place primary
+            // UI 1.5m forward, slightly below eye level (~10-15 deg below
+            // horizon) so the user's natural line of sight rests on it
+            // without neck strain. At 1.5m, 10 deg below = ~0.20m drop.
+            if (!menu_.anchor_set && last_head_pose_valid_) {
+                const Vec3 head = last_head_world_pos_;
+                const Vec3 fwd  = last_head_forward_xz_;  // unit, XZ only
+                constexpr float kMenuDistance      = 1.5f;
+                constexpr float kMenuBelowEyeMeters = 0.20f;
+                menu_.world_anchor = Vec3(
+                    head.x + fwd.x * kMenuDistance,
+                    head.y - kMenuBelowEyeMeters,
+                    head.z + fwd.z * kMenuDistance);
+                // Rotate so the panel's local +Z (where the icons sit)
+                // points back toward the user. yaw_only_matrix(pos, y)
+                // rotates +Z by ``y`` around world Y; we want
+                // R(y)*(0,0,1) == -fwd, hence atan2(-fwd.x, -fwd.z).
+                menu_.yaw_rad = std::atan2(-fwd.x, -fwd.z);
                 menu_.anchor_set = true;
+                PTV_INFO(
+                    "Locomotion menu anchored at ({:.2f}, {:.2f}, {:.2f}) "
+                    "{:.2f}m forward of HMD eye (y={:.2f}m).",
+                    menu_.world_anchor.x, menu_.world_anchor.y,
+                    menu_.world_anchor.z, kMenuDistance, head.y);
             }
 
-            // Hit-test: shoot a ray from the left controller forward,
-            // pick whichever pad's world center is closest to that ray
-            // within 0.45m, and mark it highlighted.
+            // Hit-test: shoot a ray from EACH controller (the user can
+            // point with either hand) and pick whichever pad/hand pair
+            // has the closest distance below ``kHitRadius``. ``active_hand``
+            // remembers which controller drove the highlight so we can
+            // show the right confirmation hint AND so a stray trigger
+            // press from the *other* hand doesn't false-fire.
             menu_.highlighted = -1;
-            if (hand_valid[0]) {
+            menu_.active_hand = -1;
+            {
                 const Mat4 menu_world =
                     yaw_only_matrix(menu_.world_anchor, menu_.yaw_rad);
-                Vec3 pad_a, pad_b;
                 // Compute world centers for the two pads on this page.
                 Vec4 a4 = menu_world * Vec4(-0.35f, 0.0f, 0.0f, 1.0f);
                 Vec4 b4 = menu_world * Vec4( 0.35f, 0.0f, 0.0f, 1.0f);
-                pad_a = Vec3(a4);
-                pad_b = Vec3(b4);
-
-                Vec3 ro = hand_world_pos[0];
-                Vec3 rd = hand_world_rot[0] * Vec3(0, 0, -1); // -Z forward
-                rd = glm::normalize(rd);
-
-                auto ray_dist = [&](const Vec3& p) {
-                    Vec3 v = p - ro;
-                    float t = glm::dot(v, rd);
-                    if (t < 0) return 1e9f;
-                    Vec3 closest = ro + rd * t;
-                    return glm::length(closest - p);
-                };
-                float da = ray_dist(pad_a);
-                float db = ray_dist(pad_b);
+                const Vec3 pad_a(a4);
+                const Vec3 pad_b(b4);
                 const float kHitRadius = 0.35f;
-                if (da < kHitRadius || db < kHitRadius) {
-                    menu_.highlighted = (da <= db) ? 0 : 1;
+                float best_dist = kHitRadius;
+
+                for (int h = 0; h < 2; ++h) {
+                    if (!hand_valid[h]) continue;
+                    Vec3 ro = hand_world_pos[h];
+                    Vec3 rd = hand_world_rot[h] * Vec3(0, 0, -1); // -Z fwd
+                    rd = glm::normalize(rd);
+
+                    auto ray_dist = [&](const Vec3& p) {
+                        Vec3 v = p - ro;
+                        float t = glm::dot(v, rd);
+                        if (t < 0) return 1e9f;
+                        Vec3 closest = ro + rd * t;
+                        return glm::length(closest - p);
+                    };
+                    const float da = ray_dist(pad_a);
+                    const float db = ray_dist(pad_b);
+                    const int hi = (da <= db) ? 0 : 1;
+                    const float d = (hi == 0) ? da : db;
+                    if (d < best_dist) {
+                        best_dist = d;
+                        menu_.highlighted = hi;
+                        menu_.active_hand = h;
+                    }
                 }
             }
 
-            // Confirm: rising edge on left trigger (values in [0,1]).
-            const float trig = input.trigger[0];
-            const bool trig_edge = (menu_.prev_left_trigger < 0.5f) &&
-                                   (trig >= 0.5f);
-            if (trig_edge && menu_.highlighted >= 0 &&
-                menu_.confirm_cooldown_s <= 0.0f) {
-                if (menu_.page == MenuPage::Root) {
-                    if (menu_.highlighted == 0) {
-                        locomotion_ = LocomotionMode::Teleport;
+            // Confirm: rising edge on EITHER trigger. We accept any hand's
+            // trigger so both controllers feel equally responsive (the
+            // visual highlight already tells the user which pad will fire).
+            for (int h = 0; h < 2; ++h) {
+                const float trig = input.trigger[h];
+                const bool trig_edge =
+                    (menu_.prev_trigger[h] < 0.5f) && (trig >= 0.5f);
+                if (trig_edge && menu_.highlighted >= 0 &&
+                    menu_.confirm_cooldown_s <= 0.0f) {
+                    if (menu_.page == MenuPage::Root) {
+                        // Root page layout: LEFT pad = Walking (opens the
+                        // sliding-style sub-menu), RIGHT pad = Teleport.
+                        if (menu_.highlighted == 0) {
+                            menu_.page = MenuPage::SlidingSubmenu;
+                            menu_.confirm_cooldown_s = 0.5f;
+                            PTV_INFO("Menu: sliding submenu.");
+                        } else {
+                            locomotion_ = LocomotionMode::Teleport;
+                            menu_.page = MenuPage::Closed;
+                            PTV_INFO("Locomotion: Teleport selected.");
+                        }
+                    } else if (menu_.page == MenuPage::SlidingSubmenu) {
+                        // Sub-menu: LEFT = Head-Relative, RIGHT = Controller-Relative.
+                        locomotion_ =
+                            (menu_.highlighted == 0)
+                                ? LocomotionMode::SlideHeadRelative
+                                : LocomotionMode::SlideControllerRelative;
                         menu_.page = MenuPage::Closed;
-                        PTV_INFO("Locomotion: Teleport selected.");
-                    } else {
-                        menu_.page = MenuPage::SlidingSubmenu;
-                        menu_.confirm_cooldown_s = 0.5f;
-                        PTV_INFO("Menu: sliding submenu.");
+                        PTV_INFO(
+                            "Locomotion: Sliding ({}) selected.",
+                            (locomotion_ == LocomotionMode::SlideHeadRelative)
+                                ? "head-relative"
+                                : "controller-relative");
                     }
-                } else if (menu_.page == MenuPage::SlidingSubmenu) {
-                    locomotion_ = (menu_.highlighted == 0)
-                                      ? LocomotionMode::SlideHeadRelative
-                                      : LocomotionMode::SlideControllerRelative;
-                    menu_.page = MenuPage::Closed;
-                    PTV_INFO(
-                        "Locomotion: Sliding ({}) selected.",
-                        (locomotion_ == LocomotionMode::SlideHeadRelative)
-                            ? "head-relative"
-                            : "controller-relative");
+                    // Stop scanning the rest of the hands this frame --
+                    // we already committed.
+                    menu_.prev_trigger[h] = trig;
+                    for (int j = h + 1; j < 2; ++j) {
+                        menu_.prev_trigger[j] = input.trigger[j];
+                    }
+                    break;
                 }
+                menu_.prev_trigger[h] = trig;
             }
-            menu_.prev_left_trigger = trig;
         }
 
         // ------------------------------------------------------------
@@ -872,7 +975,13 @@ int Application::run(const Config& cfg) {
             }
 
             // -------- Locomotion menu 3D panel --------
-            if (locomotion_menu_enabled_ && menu_.page != MenuPage::Closed) {
+            // We wait for ``menu_.anchor_set`` (which only flips true once
+            // a real HMD pose has been observed) before drawing so the
+            // panel never appears at the stale default position for a
+            // frame at session start -- it just pops directly into its
+            // comfortable eye-relative anchor.
+            if (locomotion_menu_enabled_ && menu_.page != MenuPage::Closed &&
+                menu_.anchor_set) {
                 const Mat4 menu_world =
                     yaw_only_matrix(menu_.world_anchor, menu_.yaw_rad);
 
@@ -885,13 +994,30 @@ int Application::run(const Config& cfg) {
                 push_cube(items, menu_world, Vec3(0.0f, 0.28f, 0.0f),
                           Vec3(0.80f, 0.07f, 0.03f), title_color);
 
-                int icon_left  = (menu_.page == MenuPage::Root) ? 0 : 2;
-                int icon_right = (menu_.page == MenuPage::Root) ? 1 : 3;
+                // Layout (matches confirm logic above):
+                //   Root page    : LEFT = Walking, RIGHT = Teleport
+                //   Sub-menu page: LEFT = Head-Relative, RIGHT = Controller-Relative
+                // Procedural fallbacks: 1=person, 0=portal, 2=headset, 3=joystick.
+                int slot_left, slot_right;
+                int proc_left, proc_right;
+                if (menu_.page == MenuPage::Root) {
+                    slot_left  = menu_icon_walking_slot_;
+                    slot_right = menu_icon_teleport_slot_;
+                    proc_left  = 1;  // green person
+                    proc_right = 0;  // blue portal
+                } else {
+                    slot_left  = menu_icon_head_relative_slot_;
+                    slot_right = menu_icon_controller_relative_slot_;
+                    proc_left  = 2;  // headset
+                    proc_right = 3;  // joystick
+                }
                 Vec3 wc_a, wc_b;
                 push_menu_pad(items, menu_world, Vec3(-0.35f, 0.0f, 0.0f),
-                              icon_left,  menu_.highlighted == 0, &wc_a);
+                              slot_left,  proc_left,
+                              menu_.highlighted == 0, &wc_a);
                 push_menu_pad(items, menu_world, Vec3( 0.35f, 0.0f, 0.0f),
-                              icon_right, menu_.highlighted == 1, &wc_b);
+                              slot_right, proc_right,
+                              menu_.highlighted == 1, &wc_b);
 
                 // Pulsing green confirm button next to whichever pad is
                 // currently targeted. It's only visible when something
@@ -949,7 +1075,12 @@ int Application::run(const Config& cfg) {
                             eyes[e].fov, 0.05f, 1000.0f);
                     }
                     // Cache HMD forward on the XZ plane for head-referenced
-                    // walking (OpenXR view space: -Z is where the user looks).
+                    // walking (OpenXR view space: -Z is where the user
+                    // looks) AND the full HMD world position so the
+                    // locomotion menu can anchor itself at a comfortable
+                    // eye-relative height (see Meta Horizon "Head -> Comfort"
+                    // guideline: primary UI 1.5m forward, slightly below
+                    // the user's natural line of sight).
                     Mat4 w_from_head =
                         rig_mat * xr_pose_to_matrix(eyes[0].pose);
                     Vec3 head_fwd = Vec3(w_from_head * Vec4(0, 0, -1, 0));
@@ -958,6 +1089,8 @@ int Application::run(const Config& cfg) {
                     if (flen > 1e-4f) {
                         last_head_forward_xz_ = flat / flen;
                     }
+                    last_head_world_pos_ = mat_translation(w_from_head);
+                    last_head_pose_valid_ = true;
                     renderer_.draw_frame(targets, items, scene_.sky_color);
                 });
         }
@@ -1095,6 +1228,50 @@ bool Application::initialize(const Config& cfg) {
                                                xr_.eye_height());
         if (!renderer_ready_) {
             PTV_WARN("Renderer init failed; headset will not display content.");
+        }
+    }
+
+    // Pre-load locomotion-menu icons. The four GLBs live in the repo's
+    // 3D_Objects/ folder; we walk up from the running .exe to find it so
+    // both the starter-room sample and orchestrator-built games pick up
+    // the same assets. ``kIconScale`` is the longest-axis size in metres
+    // and is chosen to fit comfortably inside the 0.30 x 0.30 m pad.
+    if (renderer_ready_) {
+        const std::string root = find_3d_objects_dir();
+        if (root.empty()) {
+            PTV_WARN(
+                "3D_Objects/ folder not found by walking up from the exe -- "
+                "locomotion menu will use procedural fallback icons.");
+        } else {
+            namespace fs = std::filesystem;
+            constexpr float kIconScale = 0.22f;
+            auto load = [&](const char* name) -> int {
+                fs::path p = fs::path(root) / name;
+                std::error_code ec;
+                if (!fs::exists(p, ec)) {
+                    PTV_WARN("Locomotion menu icon missing: {}",
+                             p.string());
+                    return -1;
+                }
+                int slot = renderer_.load_glb(p.string(), kIconScale);
+                if (slot < 0) {
+                    PTV_WARN("Failed to load locomotion menu icon: {}",
+                             p.string());
+                }
+                return slot;
+            };
+            menu_icon_walking_slot_  = load("Walking Locomotion.glb");
+            menu_icon_teleport_slot_ = load("Teleport Locomotion.glb");
+            menu_icon_head_relative_slot_ = load(
+                "Head Relative (Sub Category of Walking Locomotion).glb");
+            menu_icon_controller_relative_slot_ = load(
+                "Controller Relative (Sub Category of Walking Locomotion).glb");
+            PTV_INFO(
+                "Locomotion menu icons loaded (walking={}, teleport={}, "
+                "head-rel={}, controller-rel={}).",
+                menu_icon_walking_slot_, menu_icon_teleport_slot_,
+                menu_icon_head_relative_slot_,
+                menu_icon_controller_relative_slot_);
         }
     }
     return true;
