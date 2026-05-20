@@ -56,6 +56,20 @@
 // Comfort: we apply a circular deadzone (per Meta's input map guidance)
 // and a small acceleration / deceleration ramp on the slide speed so the
 // user doesn't snap from rest to full velocity in a single frame.
+//
+// OpenXR reference spaces (https://registry.khronos.org/OpenXR/specs/1.1/
+// html/xrspec.html#reference-spaces):
+//   * STAGE  -- the play-space; ground-plane origin. Hand poses, view
+//               poses and the rig translation are all expressed here.
+//   * VIEW   -- centered on the HMD; tracks the head pose. We locate
+//               this against STAGE every frame in ``XrRuntime::sync_input``
+//               and surface the result as ``InputState::head``. Locomotion
+//               consumes that single fresh pose before any slide math runs,
+//               so head-relative movement re-steers immediately when the
+//               user turns their head -- there is no fixed world-space
+//               forward, no spawn-yaw fallback, and no stale per-frame
+//               cache anywhere in the slide path. Same applies to the
+//               left controller for controller-relative slide.
 // ---------------------------------------------------------------------------
 
 #include <GLFW/glfw3.h>
@@ -186,15 +200,34 @@ static std::string find_3d_objects_dir() {
 }
 
 // ---------------------------------------------------------------------------
-// Procedural hand visual: palm + wrist stub + thumb extrusion.
+// Procedural hand visual: palm + wrist stub.
 //
-// The mesh is designed in the OpenXR "grip" local frame:
-//   +Z = toward the user's thumb (same for both hands, per the spec)
-//   -Z = toward the user's wrist / forearm
-// The palm is drawn symmetric in X so no per-hand mirroring is needed,
-// at the cost of not visually distinguishing back-of-hand vs palm-side.
-// This reads correctly in VR and matches the level of detail people
-// expect from "controller glove" style visuals.
+// The mesh is designed in the OpenXR /grip/pose local frame, per the
+// 1.1 spec ("Standard pose identifiers"):
+//
+//   -Z = "forward" (sword blade direction, from pinky to index when
+//         the user makes a fist around the controller)
+//   +Z = "backward" (toward the user's forearm / wrist)
+//   +Y = orthogonal-up (right-hand rule of +X and +Z)
+//   +X = palm normal (away from palm for LEFT hand, INTO palm for
+//         RIGHT hand) -- handedness-dependent, so the mesh is kept
+//         symmetric in X to avoid per-hand mirroring.
+//
+// We deliberately render only a palm + wrist stub (no thumb / no
+// finger detail). A protruding thumb would have to flip sign on +X
+// per hand, which would mean rebuilding the mesh twice; the current
+// reusable-symmetric design ships one mesh that reads correctly for
+// both controllers.
+//
+// An older revision of this function had thumb at +Z and wrist at -Z,
+// which is the OPPOSITE of the OpenXR convention. The visible symptom
+// was that the hand model appeared to point "diagonally upward" when
+// the user held the controller flat -- because Touch's /grip pose
+// has -Z aligned with the angled grip handle (~30 deg above horizontal
+// when the body is held flat), so the mesh's "forward" rendered as
+// up-and-forward in world space. Fixing the axis convention puts the
+// fingertips on the user's actual hand-forward direction and the
+// wrist behind, matching anatomy.
 // ---------------------------------------------------------------------------
 static void push_hand_mesh(std::vector<Renderer::DrawItem>& out,
                            const Mat4& grip_world,
@@ -209,19 +242,17 @@ static void push_hand_mesh(std::vector<Renderer::DrawItem>& out,
         out.push_back(item);
     };
 
-    // Palm: oblong rounded-cuboid. Width across (X), height front/back (Y),
-    // length along the thumb->pinky axis (Z).
+    // Palm / closed-fist body: oblong slab centred at the grip origin
+    // (palm centroid). Long axis is Z (wrist <-> fingertips), shorter
+    // along Y (palm <-> back-of-hand) and X (pinky <-> index direction).
     push(Vec3(0.0f, 0.0f, 0.0f),
-         Vec3(0.055f, 0.035f, 0.11f));
+         Vec3(0.050f, 0.045f, 0.10f));
 
-    // Thumb: small box extending along +Z, slightly above/forward of palm.
-    push(Vec3(0.0f, 0.012f, 0.075f),
-         Vec3(0.028f, 0.028f, 0.05f));
-
-    // Wrist / forearm stub: extends along -Z so the hand looks attached
-    // to something instead of floating as a free palm.
-    push(Vec3(0.0f, 0.0f, -0.085f),
-         Vec3(0.045f, 0.045f, 0.07f));
+    // Wrist / forearm stub: extends +Z (toward the forearm, opposite
+    // of the fingertips) so the hand looks anchored to something
+    // instead of floating as a free palm.
+    push(Vec3(0.0f, 0.0f, +0.085f),
+         Vec3(0.040f, 0.040f, 0.07f));
 }
 
 // Extract the XY position in world from a transform matrix (column 3).
@@ -498,6 +529,24 @@ int Application::run(const Config& cfg) {
 
         if (!xr_.poll_events()) running_ = false;
 
+        // ------------------------------------------------------------
+        // OpenXR frame timing.
+        //
+        // ``begin_xr_frame()`` calls xrWaitFrame + xrBeginFrame and
+        // updates ``last_predicted_display_time_`` for THIS frame. We
+        // do this BEFORE ``sync_input`` so the head/hand poses we
+        // locate against the stage are at the *current* frame's
+        // predicted display time, not the previous frame's.
+        //
+        // Returns false when the runtime asked us to skip rendering
+        // (in which case it has already submitted an empty end-frame
+        // and we just bypass the render block below) or the session
+        // is not running yet. We still run sync_input afterwards so
+        // session-state edges (focus, ready) get exercised, but the
+        // values will simply be stale identity until the runtime is
+        // ready.
+        const bool xr_should_render = xr_.begin_xr_frame();
+
         XrRuntime::InputState input;
         xr_.sync_input(input);
 
@@ -535,18 +584,94 @@ int Application::run(const Config& cfg) {
 
         // Compose world-space hand matrices once (reused for grab +
         // rendering to keep visual & physics in perfect lockstep).
+        //
+        // ``hand_*`` come from the OpenXR /grip pose (palm-centric, used
+        // for visualization, grab detection, kinematic follow).
+        // ``aim_*`` come from the OpenXR /aim pose (controller-body-
+        // forward, used for slide direction, teleport arc, ray casts).
+        // The two are different because Touch controllers have an angled
+        // grip handle -- /grip's -Z is along the hand, /aim's -Z is
+        // along the controller body. Locomotion that asks "where is the
+        // controller pointing?" must read /aim, not /grip, or pushing
+        // the stick forward feels like the controller is angled up.
         const bool hand_valid[2] = {input.hand_left_valid, input.hand_right_valid};
         const XrPosef hand_poses[2] = {input.hand_left.pose, input.hand_right.pose};
+        const bool aim_valid[2]  = {input.aim_left_valid, input.aim_right_valid};
+        const XrPosef aim_poses[2] = {input.aim_left.pose, input.aim_right.pose};
+        const Quat rig_yaw_quat = glm::angleAxis(rig_.yaw_rad, Vec3(0, 1, 0));
         Mat4 hand_world[2]{Mat4(1.0f), Mat4(1.0f)};
         Vec3 hand_world_pos[2]{Vec3(0.0f), Vec3(0.0f)};
         Quat hand_world_rot[2]{Quat(1,0,0,0), Quat(1,0,0,0)};
+        Quat aim_world_rot[2]{Quat(1,0,0,0), Quat(1,0,0,0)};
+        bool aim_world_valid[2]{false, false};
         for (int h = 0; h < 2; ++h) {
-            if (!hand_valid[h]) continue;
-            hand_world[h] = rig_mat * xr_pose_to_matrix(hand_poses[h]);
-            hand_world_pos[h] = mat_translation(hand_world[h]);
-            // Rig rotation is yaw only, so we can compose rotations directly.
-            Quat rig_yaw = glm::angleAxis(rig_.yaw_rad, Vec3(0, 1, 0));
-            hand_world_rot[h] = rig_yaw * xr_pose_to_quat(hand_poses[h]);
+            if (hand_valid[h]) {
+                hand_world[h] = rig_mat * xr_pose_to_matrix(hand_poses[h]);
+                hand_world_pos[h] = mat_translation(hand_world[h]);
+                // Rig rotation is yaw only, so we can compose rotations directly.
+                hand_world_rot[h] = rig_yaw_quat * xr_pose_to_quat(hand_poses[h]);
+            }
+            if (aim_valid[h]) {
+                aim_world_rot[h] = rig_yaw_quat * xr_pose_to_quat(aim_poses[h]);
+                aim_world_valid[h] = true;
+            } else if (hand_valid[h]) {
+                // Older Touch profiles or non-aim-bound controllers can
+                // still slide using grip orientation as a fallback (with
+                // the well-known ~30 deg upward bias). We log this once
+                // so the user knows why the angle feels off.
+                aim_world_rot[h] = hand_world_rot[h];
+                aim_world_valid[h] = true;
+            }
+        }
+
+        // ------------------------------------------------------------
+        // Fresh HMD pose (this frame).
+        //
+        // ``input.head`` is the OpenXR VIEW reference space located
+        // against the stage at the just-predicted display time -- i.e.
+        // the latest tracked head pose, in the SAME coordinate system
+        // as the hand poses above. We compose it through ``rig_mat``
+        // to get a world-space head pose, then derive a horizontal
+        // forward vector for head-relative sliding.
+        //
+        // We deliberately do NOT cache a stale ``last_head_forward_xz_``
+        // for use by gameplay code below; we recompute every frame so
+        // turning the head 180 deg immediately re-steers the slide.
+        // (We still write ``last_head_forward_xz_`` /
+        // ``last_head_world_pos_`` at the end of this block so other
+        // systems -- the menu anchor placement, debug overlays -- have
+        // a sensible value when the HMD pose was momentarily invalid.)
+        // ------------------------------------------------------------
+        Vec3 head_world_pos = last_head_world_pos_;
+        Quat head_world_rot = Quat(1, 0, 0, 0);
+        Vec3 head_forward_xz = last_head_forward_xz_;
+        bool head_pose_fresh = false;
+        if (input.head_valid) {
+            const Mat4 head_world_mat =
+                rig_mat * xr_pose_to_matrix(input.head.pose);
+            head_world_pos = mat_translation(head_world_mat);
+            head_world_rot =
+                rig_yaw_quat * xr_pose_to_quat(input.head.pose);
+            // Horizontal HMD forward (project -Z onto XZ, normalize).
+            // The user's head pitch (looking up/down) is intentionally
+            // discarded so head-relative slide stays parallel to the
+            // virtual ground plane regardless of vertical gaze --
+            // matches Meta's locomotion comfort guidance.
+            const Vec3 fwd_world = head_world_rot * Vec3(0.0f, 0.0f, -1.0f);
+            const Vec3 flat(fwd_world.x, 0.0f, fwd_world.z);
+            const float flen = glm::length(flat);
+            if (flen > 1e-4f) {
+                head_forward_xz = flat / flen;
+                head_pose_fresh = true;
+            }
+            last_head_world_pos_ = head_world_pos;
+            last_head_pose_valid_ = true;
+        }
+        // Always mirror the freshest forward we have into the cache so
+        // any consumer reading the member sees the latest value rather
+        // than the pre-snap-turn one.
+        if (head_pose_fresh) {
+            last_head_forward_xz_ = head_forward_xz;
         }
 
         // ------------------------------------------------------------
@@ -563,11 +688,23 @@ int Application::run(const Config& cfg) {
         // Circular deadzone per Meta's locomotion input-map guidance:
         // we measure the *magnitude* of the stick vector and apply a single
         // dead radius, then re-scale the surviving vector. A per-axis
-        // deadzone (the previous behaviour) creates a square dead zone that
-        // can produce strafing while pushing diagonally near rest -- exactly
-        // the comfort issue Meta calls out. 0.15 keeps drift at bay on the
-        // Quest 3 Touch Plus thumbsticks without eating intentional motion.
-        constexpr float kStickDeadRadius = 0.15f;
+        // deadzone alone creates a square dead zone that can produce
+        // strafing while pushing diagonally near rest -- exactly the
+        // comfort issue Meta calls out. 0.18 keeps drift at bay on Quest
+        // 3 Touch Plus thumbsticks (which have noticeable cross-axis
+        // bleed after a few months of use) without eating intentional
+        // motion.
+        //
+        // After the radial pass we apply a *cardinal snap*: when one axis
+        // strongly dominates (>0.5) and the other is small (<0.18), the
+        // small axis is zeroed out. This makes "push pure right" feel
+        // like pure right rather than slow diagonal-right (which is what
+        // the user sees when the stick has 0.10 of off-axis bleed).
+        // Intentional diagonals are preserved because both axes have to
+        // be small for the snap to fire.
+        constexpr float kStickDeadRadius = 0.18f;
+        constexpr float kAxisDominant    = 0.50f;
+        constexpr float kAxisCrossSnap   = 0.18f;
         float lx = 0.0f;
         float ly = 0.0f;
         float left_mag = 0.0f;
@@ -583,7 +720,17 @@ int Application::run(const Config& cfg) {
                 const float s = std::min(scaled, 1.0f) / raw_mag;
                 lx = lxr * s;
                 ly = lyr * s;
-                left_mag = std::min(scaled, 1.0f);
+                // Cardinal snap.
+                if (std::abs(lx) > kAxisDominant && std::abs(ly) < kAxisCrossSnap) {
+                    ly = 0.0f;
+                } else if (std::abs(ly) > kAxisDominant &&
+                           std::abs(lx) < kAxisCrossSnap) {
+                    lx = 0.0f;
+                }
+                // Recompute magnitude after the snap so the speed-ramp
+                // target uses the corrected vector length.
+                left_mag = std::sqrt(lx * lx + ly * ly);
+                left_mag = std::min(left_mag, 1.0f);
             }
         }
 
@@ -598,8 +745,11 @@ int Application::run(const Config& cfg) {
             // horizon) so the user's natural line of sight rests on it
             // without neck strain. At 1.5m, 10 deg below = ~0.20m drop.
             if (!menu_.anchor_set && last_head_pose_valid_) {
-                const Vec3 head = last_head_world_pos_;
-                const Vec3 fwd  = last_head_forward_xz_;  // unit, XZ only
+                // Anchor relative to the freshest head pose we have.
+                const Vec3 head = head_pose_fresh ? head_world_pos
+                                                  : last_head_world_pos_;
+                const Vec3 fwd  = head_pose_fresh ? head_forward_xz
+                                                  : last_head_forward_xz_;
                 constexpr float kMenuDistance      = 1.5f;
                 constexpr float kMenuBelowEyeMeters = 0.20f;
                 menu_.world_anchor = Vec3(
@@ -639,9 +789,12 @@ int Application::run(const Config& cfg) {
                 float best_dist = kHitRadius;
 
                 for (int h = 0; h < 2; ++h) {
-                    if (!hand_valid[h]) continue;
+                    if (!hand_valid[h] || !aim_world_valid[h]) continue;
                     Vec3 ro = hand_world_pos[h];
-                    Vec3 rd = hand_world_rot[h] * Vec3(0, 0, -1); // -Z fwd
+                    // Aim along the controller body (/aim/pose -Z), not
+                    // the angled grip handle (/grip/pose -Z), so the
+                    // user points where the controller visually points.
+                    Vec3 rd = aim_world_rot[h] * Vec3(0, 0, -1);
                     rd = glm::normalize(rd);
 
                     auto ray_dist = [&](const Vec3& p) {
@@ -740,12 +893,15 @@ int Application::run(const Config& cfg) {
                 static Vec3 last_target{0.0f};
                 static bool last_have_target = false;
 
-                if (hand_valid[0] && left_mag > kAimThreshold) {
+                if (hand_valid[0] && aim_world_valid[0] && left_mag > kAimThreshold) {
                     Vec3 origin = hand_world_pos[0];
-                    // Fire the arc slightly downward of the controller's
-                    // forward vector so small tilts produce a comfortable
-                    // medium-range arc (~3-6m) rather than flying off.
-                    Vec3 forward = hand_world_rot[0] * Vec3(0, 0, -1);
+                    // Fire the arc along the controller's AIM direction
+                    // (where the body points) rather than the GRIP -Z
+                    // axis (which is angled up because Touch's grip
+                    // handle is angled). Then bias slightly downward so
+                    // small tilts produce a comfortable medium-range arc
+                    // (~3-6m) rather than flying off.
+                    Vec3 forward = aim_world_rot[0] * Vec3(0, 0, -1);
                     forward.y -= 0.15f;
                     forward = glm::normalize(forward);
 
@@ -775,42 +931,93 @@ int Application::run(const Config& cfg) {
                     last_have_target = false;
                 }
             } else {
-                // Sliding locomotion on the XZ plane. OpenXR thumbstick Y is
-                // **negative** when the user pushes the stick forward
-                // (away from the body) on Quest / Quest Link, matching
-                // Meta's input-map docs and first-party samples.
-                const float forward_axis = -ly;
-                const float strafe_axis = lx;
+                // Sliding locomotion on the XZ plane.
+                //
+                // OpenXR thumbstick convention (1.1 spec, "Standard
+                // input identifiers"): "+1 means all the way right for
+                // x axis or all the way up for y axis." Pushing the
+                // stick forward (away from the body) reads as +Y. So
+                // forward_axis = +ly. (A previous build had this
+                // negated, which is why pushing forward produced
+                // backward motion on Quest Link.)
+                const float forward_axis = ly;
+                const float strafe_axis  = lx;
 
+                // The slide-direction basis is recomputed every frame
+                // from the LATEST tracked pose (HMD or left controller,
+                // depending on mode). There is intentionally NO fixed
+                // world forward, no spawn-yaw fallback, and no stale
+                // cache: turning the head or the controller mid-stride
+                // immediately re-steers movement.
                 Vec3 fwd(0.0f);
                 Vec3 right(0.0f);
                 bool have_basis = false;
 
                 if (locomotion_ == LocomotionMode::SlideHeadRelative) {
-                    // Head-Relative sliding: direction = HMD forward
-                    // projected onto the XZ floor plane. Updated each
-                    // frame from `last_head_forward_xz_` so turning
-                    // the head re-steers in real time.
-                    fwd = last_head_forward_xz_;
-                    const float flen = glm::length(fwd);
+                    // Head-Relative sliding: forward = the HMD's current
+                    // -Z direction, projected onto the XZ ground plane.
+                    //
+                    // We require a *real* head pose source -- either
+                    // freshly located this frame (head_pose_fresh) or a
+                    // cached value previously set from a real fresh
+                    // pose. The cache defaults to the ZERO vector (see
+                    // Application.h) so that until the runtime has
+                    // delivered a single valid VIEW pose, no slide
+                    // direction is available and the player simply
+                    // stands still. There is intentionally no
+                    // fixed-world-space fallback: that bug used to make
+                    // the player slide in world -Z regardless of where
+                    // they were physically looking.
+                    Vec3 candidate(0.0f);
+                    if (head_pose_fresh) {
+                        candidate = head_forward_xz;
+                    } else if (glm::length(last_head_forward_xz_) > 1e-4f) {
+                        candidate = last_head_forward_xz_;
+                    }
+                    const float flen = glm::length(candidate);
                     if (flen > 1e-5f) {
-                        fwd /= flen;
+                        fwd = candidate / flen;
+                        // Right-handed Y-up: when facing fwd=-Z, the
+                        // user's right is +X. The correct formula is
+                        // ``cross(fwd, up)`` (not ``cross(up, fwd)``),
+                        // which gave -X and silently swapped strafe.
                         right = glm::normalize(
-                            glm::cross(Vec3(0.0f, 1.0f, 0.0f), fwd));
+                            glm::cross(fwd, Vec3(0.0f, 1.0f, 0.0f)));
                         have_basis = true;
                     }
                 } else if (locomotion_ == LocomotionMode::SlideControllerRelative) {
-                    // Controller-Relative sliding: direction = the left
-                    // controller's pointing vector (-Z aim) projected
-                    // onto XZ. Head yaw plays no role.
-                    if (hand_valid[0]) {
-                        Vec3 aim = hand_world_rot[0] * Vec3(0.0f, 0.0f, -1.0f);
-                        fwd = Vec3(aim.x, 0.0f, aim.z);
-                        const float flen = glm::length(fwd);
+                    // Controller-Relative sliding: forward = the LEFT
+                    // controller's -Z in the OpenXR /aim/pose frame
+                    // (controller body forward, NOT grip handle), then
+                    // projected onto the XZ ground plane. Independent
+                    // of head yaw -- the user can look anywhere while
+                    // gliding along the controller's aim. Tilt is
+                    // discarded so pointing the controller up/down
+                    // doesn't move the player vertically.
+                    //
+                    // We use /aim instead of /grip because Quest Touch
+                    // controllers have an angled grip handle: /grip's
+                    // -Z is along the user's hand (~30 deg up from
+                    // horizontal when held flat), while /aim's -Z is
+                    // along the controller body (where the user
+                    // intuitively expects to "point"). Using /grip
+                    // here is what made an old build feel like the
+                    // controller was tilted up.
+                    //
+                    // Strictly gated on a fresh left-controller aim
+                    // pose this frame -- if the controller is not
+                    // tracked (not yet woken up, line of sight
+                    // blocked, etc.) the player just doesn't move. We
+                    // never invent a direction.
+                    if (aim_world_valid[0]) {
+                        const Vec3 aim =
+                            aim_world_rot[0] * Vec3(0.0f, 0.0f, -1.0f);
+                        Vec3 candidate(aim.x, 0.0f, aim.z);
+                        const float flen = glm::length(candidate);
                         if (flen > 1e-5f) {
-                            fwd /= flen;
+                            fwd = candidate / flen;
                             right = glm::normalize(
-                                glm::cross(Vec3(0.0f, 1.0f, 0.0f), fwd));
+                                glm::cross(fwd, Vec3(0.0f, 1.0f, 0.0f)));
                             have_basis = true;
                         }
                     }
@@ -843,6 +1050,56 @@ int Application::run(const Config& cfg) {
                     const float vz = fwd.z * fa + right.z * sa;
                     rig_.pos_x += vx * current_slide_speed_mps_ * dt;
                     rig_.pos_z += vz * current_slide_speed_mps_ * dt;
+
+                    // 1 Hz live-trace of the slide basis. Every line
+                    // proves which tracked pose drove motion this
+                    // second: turning the head 180 deg in head-relative
+                    // mode flips the (fx,fz) direction within ~1s; a
+                    // controller-relative slide keeps fx,fz aligned to
+                    // the LEFT controller no matter where you look. If
+                    // you ever see a fixed direction across multiple
+                    // seconds while you physically rotate, something
+                    // upstream is wrong -- file the log.
+                    static float trace_accum = 0.0f;
+                    trace_accum += dt;
+                    if (trace_accum >= 1.0f) {
+                        const char* mode_name =
+                            (locomotion_ == LocomotionMode::SlideHeadRelative)
+                                ? "head_rel"
+                                : "ctrl_rel";
+                        PTV_INFO(
+                            "Slide[{}] fwd=({:+.2f},{:+.2f}) stick=({:+.2f},"
+                            "{:+.2f}) speed={:.2f}m/s rig=({:+.2f},{:+.2f}) "
+                            "head_fresh={}",
+                            mode_name, fwd.x, fwd.z, lx, ly,
+                            current_slide_speed_mps_, rig_.pos_x, rig_.pos_z,
+                            head_pose_fresh ? "yes" : "no");
+                        trace_accum = 0.0f;
+                    }
+                } else if (left_mag > 0.05f && !have_basis) {
+                    // The user is actively pushing the stick but we
+                    // refused to slide because we don't have a fresh
+                    // tracked pose to use as the forward basis.
+                    // Surface this once per second so the runtime log
+                    // tells us *why* the player isn't moving (head
+                    // pose unavailable / left controller not tracked /
+                    // VIEW reference space invalid).
+                    static float warn_accum = 0.0f;
+                    warn_accum += dt;
+                    if (warn_accum >= 1.0f) {
+                        const char* mode_name =
+                            (locomotion_ == LocomotionMode::SlideHeadRelative)
+                                ? "head_rel"
+                                : "ctrl_rel";
+                        PTV_WARN(
+                            "Slide[{}] no basis (head_fresh={}, "
+                            "left_hand_valid={}, head_valid={}). "
+                            "Player won't move until tracking is restored.",
+                            mode_name, head_pose_fresh ? "yes" : "no",
+                            hand_valid[0] ? "yes" : "no",
+                            input.head_valid ? "yes" : "no");
+                        warn_accum = 0.0f;
+                    }
                 }
             }
         } else {
@@ -954,8 +1211,18 @@ int Application::run(const Config& cfg) {
 
         // ------------------------------------------------------------
         // Render frame.
+        //
+        // ``begin_xr_frame()`` already opened the OpenXR frame above,
+        // so ``render_frame()`` reuses the pending FrameState and
+        // skips its own xrWaitFrame/xrBeginFrame. If
+        // ``xr_should_render`` is false the runtime asked us to skip
+        // rendering and ``begin_xr_frame()`` already submitted the
+        // empty end-frame, so we just bypass the render block. If the
+        // renderer is not yet ready (initial frames before Vulkan
+        // swapchains were built) we have to manually submit an empty
+        // end-frame to balance the wait/begin pair.
         // ------------------------------------------------------------
-        if (renderer_ready_ && xr_.is_running()) {
+        if (xr_should_render && renderer_ready_ && xr_.is_running()) {
             renderer_.build_items_from_world(world_, items);
 
             // Hand visuals: procedural palm + wrist + thumb in blue (left)
@@ -1074,25 +1341,20 @@ int Application::run(const Config& cfg) {
                         targets[e].projection = xr_fov_to_projection(
                             eyes[e].fov, 0.05f, 1000.0f);
                     }
-                    // Cache HMD forward on the XZ plane for head-referenced
-                    // walking (OpenXR view space: -Z is where the user
-                    // looks) AND the full HMD world position so the
-                    // locomotion menu can anchor itself at a comfortable
-                    // eye-relative height (see Meta Horizon "Head -> Comfort"
-                    // guideline: primary UI 1.5m forward, slightly below
-                    // the user's natural line of sight).
-                    Mat4 w_from_head =
-                        rig_mat * xr_pose_to_matrix(eyes[0].pose);
-                    Vec3 head_fwd = Vec3(w_from_head * Vec4(0, 0, -1, 0));
-                    Vec3 flat(head_fwd.x, 0.0f, head_fwd.z);
-                    const float flen = glm::length(flat);
-                    if (flen > 1e-4f) {
-                        last_head_forward_xz_ = flat / flen;
-                    }
-                    last_head_world_pos_ = mat_translation(w_from_head);
-                    last_head_pose_valid_ = true;
+                    // NOTE: Head pose cache (last_head_forward_xz_,
+                    // last_head_world_pos_, last_head_pose_valid_) is
+                    // populated up-front from the freshly-located VIEW
+                    // space in sync_input/locomotion -- not here -- so
+                    // locomotion logic always sees this frame's head
+                    // pose, never the previous frame's render snapshot.
                     renderer_.draw_frame(targets, items, scene_.sky_color);
                 });
+        } else if (xr_should_render) {
+            // begin_xr_frame() opened a real frame but renderer isn't
+            // ready (e.g. Vulkan failed to initialize, or session is in
+            // STOPPED). Submit an empty end-frame so we don't leak the
+            // wait/begin pair.
+            xr_.submit_pending_empty_frame();
         }
 
         DebugUI::new_frame();

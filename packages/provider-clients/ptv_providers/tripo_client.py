@@ -5,11 +5,17 @@ Verified April 2026 against tripo3d==0.3.12 (VAST-AI-Research/tripo-python-sdk):
       async. They return a ``task_id`` string; poll with ``wait_for_task``
       and download with ``download_task_models`` (returns a dict with keys
       ``model``, ``base_model``, ``pbr_model`` -- all GLB files).
-    * Textured + PBR + image-aligned + image-oriented output is enforced here:
+    * Highest-fidelity output is enforced here by default (verified Apr 2026
+      against https://platform.tripo3d.ai/docs/generation):
+      ``model_version="v3.1-20260211"`` (latest image-to-3D checkpoint),
       ``texture=True``, ``pbr=True``, ``texture_alignment="original_image"``,
-      ``texture_quality="detailed"`` and ``orientation="align_image"`` (for
-      image-to-3D) by default, so the generated GLBs come out fully colored
-      and oriented to match the reference image.
+      ``texture_quality="detailed"``, ``geometry_quality="detailed"``
+      ("Ultra Mode" mesh reconstruction, v3.x only),
+      ``enable_image_autofix=True`` (Tripo cleans the reference image
+      before generation), and ``orientation="align_image"`` (image-to-3D
+      only). Older SDK releases that don't list every parameter still
+      work because :func:`_accepted_kwargs` filters by signature and
+      forwards only what the installed SDK accepts.
     * The Tripo SDK lists ``aiohttp`` as an OPTIONAL dependency on PyPI even
       though the async HTTP paths it uses for upload / polling / download
       actually require it. We re-declare ``aiohttp>=3.8.0`` as a direct
@@ -32,12 +38,16 @@ from typing import Any
 from .errors import ProviderCallError, ProviderConfigError
 
 
-_DEFAULT_MODEL_VERSION = "v3.0-20250812"
-"""The v3.0 checkpoint is the first Tripo family that exposes
-``geometry_quality="detailed"`` (higher-resolution mesh reconstruction).
-Earlier checkpoints (v2.5 etc.) will reject the parameter, so we track
-this sentinel and only pass ``geometry_quality`` when the requested
-model is v3.0 or newer."""
+_DEFAULT_MODEL_VERSION = "v3.1-20260211"
+"""Tripo's latest image-to-3D checkpoint (per
+https://platform.tripo3d.ai/docs/generation). v3.x is the first family
+that exposes ``geometry_quality="detailed"`` ("Ultra Mode" -- maximum
+mesh detail), and v3.1 is the current best-quality default. Earlier
+checkpoints (v2.5 etc.) reject ``geometry_quality``, so we still gate
+that parameter via :func:`_model_supports_geometry_quality` below.
+
+Override with the ``TRIPO_MODEL_VERSION`` env var if you need to roll
+back to an older checkpoint (e.g. for cost or determinism)."""
 
 
 def _model_supports_geometry_quality(model_version: str | None) -> bool:
@@ -61,15 +71,49 @@ def _model_supports_geometry_quality(model_version: str | None) -> bool:
 
 @dataclass(frozen=True)
 class TripoConfig:
+    """Generation defaults tuned for the highest fidelity Tripo3D output
+    that the API + SDK currently expose. Verified Apr 2026 against
+    https://platform.tripo3d.ai/docs/generation.
+
+    Quality knobs (see :meth:`TripoClient._common_kwargs`):
+
+    * ``texture=True``        -> emit a colored mesh (always on).
+    * ``pbr=True``            -> emit BaseColor / Metallic / Roughness /
+                                 Normal maps so the runtime can shade with
+                                 PBR lighting.
+    * ``texture_quality="detailed"``
+                              -> high-resolution texture maps; "standard"
+                                 is Tripo's lower-cost default.
+    * ``geometry_quality="detailed"``
+                              -> "Ultra Mode" mesh reconstruction (max
+                                 detail). v3.x checkpoints only.
+    * ``enable_image_autofix=True``
+                              -> Tripo pre-cleans the input image
+                                 (background removal / framing / contrast)
+                                 before generation, which materially
+                                 improves results for messy reference
+                                 images. Documented in the platform docs;
+                                 newer SDK releases forward it as a
+                                 first-class parameter, older ones drop
+                                 it silently via ``_accepted_kwargs``.
+    * ``auto_size=True``      -> approximate real-world metric scale so
+                                 VR placement looks plausible.
+    """
+
     api_key: str | None = None
-    # Default to v3.0, the first family that supports detailed geometry.
-    # Users can override via TRIPO_MODEL_VERSION.
+    # Default to v3.1, Tripo's latest+best image-to-3D checkpoint as of
+    # Apr 2026. Override with TRIPO_MODEL_VERSION to roll back if needed.
     model_version: str | None = _DEFAULT_MODEL_VERSION
+    texture: bool = True
+    pbr: bool = True
     texture_quality: str = "detailed"
     # Only sent when the selected model supports it. "detailed" is the
     # highest tier Tripo exposes (internally "Ultra Mode"); standard is
     # the default.
     geometry_quality: str = "detailed"
+    # Tripo's image preprocessing pass -- materially improves outputs
+    # for less-than-pristine reference renders.
+    enable_image_autofix: bool = True
     # Ask Tripo to try to auto-scale the mesh to real-world dimensions.
     # Big quality win in VR because every asset shows up at a plausible
     # meter-scale instead of a unit cube. Safe default, callers can
@@ -208,24 +252,35 @@ class TripoClient:
         # https://platform.tripo3d.ai/docs/generation and the community API
         # reference at 3daistudio.com/Platform/API/Documentation/3d-generation/tripo):
         #
-        #   texture_quality="detailed"  -> HD texture resolution (+20 credits).
-        #   geometry_quality="detailed" -> higher-res mesh, v3.0+ only
-        #                                  (+40 credits). Passed conditionally
-        #                                  below so older model versions like
-        #                                  v2.5 don't reject the request.
+        #   model_version="v3.1-20260211" -> Tripo's latest image-to-3D
+        #                                  checkpoint (highest fidelity).
+        #   texture=True                -> coloured output (default).
         #   pbr=True                    -> emit PBR maps (BaseColor/Metallic/
         #                                  Roughness/Normal) so the VR renderer
         #                                  can light the asset correctly.
+        #   texture_quality="detailed"  -> HD texture resolution (+20 credits).
+        #   geometry_quality="detailed" -> "Ultra Mode" higher-res mesh,
+        #                                  v3.0+ only (+40 credits). Passed
+        #                                  conditionally below so older
+        #                                  model versions like v2.5 don't
+        #                                  reject the request.
+        #   enable_image_autofix=True   -> Tripo pre-cleans the reference
+        #                                  image (bg removal, contrast,
+        #                                  framing) before generation.
+        #                                  Documented platform parameter;
+        #                                  silently dropped by older SDKs
+        #                                  via ``_accepted_kwargs``.
         #   texture_alignment="original_image" and orientation="align_image"
         #                                  (image_to_model only) keep the UVs
         #                                  + pose matching the reference art.
         #   auto_size=True              -> approximate real-world metric scale
         #                                  so VR placement looks plausible.
         kwargs: dict[str, Any] = {
-            "texture": True,
-            "pbr": True,
+            "texture": self.config.texture,
+            "pbr": self.config.pbr,
             "texture_alignment": "original_image",
             "texture_quality": texture_quality or self.config.texture_quality,
+            "enable_image_autofix": self.config.enable_image_autofix,
             "auto_size": self.config.auto_size,
         }
         if self.config.model_version:

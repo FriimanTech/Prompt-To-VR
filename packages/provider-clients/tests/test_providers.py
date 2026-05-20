@@ -285,11 +285,58 @@ def test_tripo_image_to_model_forces_texture_and_pbr(tmp_path):
     assert result.primary_glb.read_bytes() == b"glb!"
 
     kw = fake.last_image_kwargs
+    # Quality defaults verified against Tripo's platform docs
+    # (https://platform.tripo3d.ai/docs/generation, Apr 2026):
+    # textured + PBR, image-aligned, detailed texture+geometry,
+    # autofix on, oriented to the source image, latest v3.1 checkpoint.
     assert kw["texture"] is True
     assert kw["pbr"] is True
     assert kw["texture_alignment"] == "original_image"
     assert kw["texture_quality"] == "detailed"
+    assert kw["geometry_quality"] == "detailed"
+    assert kw["enable_image_autofix"] is True
+    assert kw["auto_size"] is True
+    assert kw["orientation"] == "align_image"
+    assert kw["model_version"] == "v3.1-20260211"
     assert kw["image"] == str(img)
+
+
+def test_tripo_text_to_model_carries_quality_defaults(tmp_path):
+    cfg = TripoConfig(api_key="tripo-key")
+    c = TripoClient(cfg)
+    fake = _FakeTripoSdk(tmp_path)
+    c._sdk = fake
+
+    c.text_to_model(prompt="a brass key", out_dir=tmp_path / "out")
+    kw = fake.last_image_kwargs
+    assert kw["texture"] is True
+    assert kw["pbr"] is True
+    assert kw["texture_quality"] == "detailed"
+    assert kw["geometry_quality"] == "detailed"
+    assert kw["enable_image_autofix"] is True
+    assert kw["model_version"] == "v3.1-20260211"
+    # text_to_model has no ``orientation`` kwarg in the SDK signature,
+    # so the wrapper must NOT inject one.
+    assert "orientation" not in kw
+    assert kw["prompt"] == "a brass key"
+
+
+def test_tripo_geometry_quality_skipped_for_legacy_v25(tmp_path):
+    cfg = TripoConfig(api_key="tripo-key", model_version="v2.5-20250123")
+    c = TripoClient(cfg)
+    fake = _FakeTripoSdk(tmp_path)
+    c._sdk = fake
+
+    img = tmp_path / "ref.png"
+    img.write_bytes(b"PNG")
+    c.image_to_model(image_path=img, out_dir=tmp_path / "out")
+    kw = fake.last_image_kwargs
+    # v2.5 rejects geometry_quality; the wrapper should drop it.
+    assert "geometry_quality" not in kw
+    # All other quality knobs should still be honored.
+    assert kw["texture_quality"] == "detailed"
+    assert kw["enable_image_autofix"] is True
+    assert kw["model_version"] == "v2.5-20250123"
 
 
 def test_tripo_missing_key_raises(tmp_path):

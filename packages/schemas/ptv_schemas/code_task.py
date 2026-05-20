@@ -32,7 +32,13 @@ class CodeTask(StrictModel):
     id: IdStr
     kind: CodeTaskKind
     title: str = Field(..., max_length=200)
-    description: str = Field(..., max_length=4000)
+    # 10 000 chars is enough room for the planner to lay out:
+    #   * the mechanic's behaviour in detail,
+    #   * the exact Quest 3 button bindings (when the prompt names them),
+    #   * the components it reads / writes on the entity,
+    #   * edge cases, comfort rules, failure modes,
+    #   * acceptance hooks the C++ generator should respect.
+    description: str = Field(..., max_length=10_000)
 
     interface: str = Field(
         ...,

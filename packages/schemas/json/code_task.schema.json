@@ -41,7 +41,7 @@
       "type": "string"
     },
     "description": {
-      "maxLength": 4000,
+      "maxLength": 10000,
       "title": "Description",
       "type": "string"
     },
@@ -54,7 +54,7 @@
       "type": "array"
     },
     "headers": {
-      "description": "Whitelisted public engine headers that the generated code may include. Only ptv/api/* and ptv/scene/* are allowed.",
+      "description": "Whitelisted public engine headers that the generated code may include. Allowed: ptv/api/IMechanic.h, ptv/api/IBehaviour.h, ptv/api/IDialogueHook.h, ptv/ecs/World.h, ptv/math/Math.h, plus <entt/entt.hpp>, <nlohmann/json.hpp>, <glm/glm.hpp>.",
       "items": {
         "type": "string"
       },

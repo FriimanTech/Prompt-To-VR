@@ -20,7 +20,7 @@
           "type": "string"
         },
         "summary": {
-          "maxLength": 2000,
+          "maxLength": 4000,
           "title": "Summary",
           "type": "string"
         }
@@ -100,7 +100,7 @@
           "type": "array"
         },
         "summary": {
-          "maxLength": 2000,
+          "maxLength": 4000,
           "title": "Summary",
           "type": "string"
         }
@@ -140,7 +140,7 @@
           "type": "string"
         },
         "summary": {
-          "maxLength": 2000,
+          "maxLength": 4000,
           "title": "Summary",
           "type": "string"
         }
@@ -182,13 +182,12 @@
     }
   },
   "additionalProperties": false,
-  "description": "Top-level specification for a generation run.",
+  "description": "Top-level specification for a generation run.\n\nSizing notes (updated for full VR-game generation):\n\n* ``scenes``  \u2014 1..50. Many prompts describe hub + multiple mission\n  / training / arena spaces, so we lift the cap from 6 -> 50.\n* ``mechanics`` \u2014 1..unbounded. A fully detailed VR game can call\n  for dozens of distinct mechanics (movement, combat, abilities,\n  UI, save / load, NPC interaction, etc.). The planner is\n  responsible for keeping the list realistic.\n* ``assets`` \u2014 1..48. Per-game asset budgets are still bounded by\n  the Tripo / Gemini cost ceiling; this matches the AssetManifest\n  cap.\n* ``acceptance_tests`` \u2014 1..unbounded. The number of checks scales\n  with the number of mechanics.\n* ``constraints`` \u2014 up to 50 free-form rules (raised from 32).",
   "properties": {
     "acceptance_tests": {
       "items": {
         "$ref": "#/$defs/TestEntry"
       },
-      "maxItems": 24,
       "minItems": 1,
       "title": "Acceptance Tests",
       "type": "array"
@@ -210,7 +209,7 @@
       "items": {
         "type": "string"
       },
-      "maxItems": 32,
+      "maxItems": 50,
       "title": "Constraints",
       "type": "array"
     },
@@ -220,7 +219,7 @@
     "hud_summary": {
       "anyOf": [
         {
-          "maxLength": 2000,
+          "maxLength": 4000,
           "type": "string"
         },
         {
@@ -238,7 +237,6 @@
       "items": {
         "$ref": "#/$defs/MechanicEntry"
       },
-      "maxItems": 20,
       "minItems": 1,
       "title": "Mechanics",
       "type": "array"
@@ -246,7 +244,7 @@
     "npc_summary": {
       "anyOf": [
         {
-          "maxLength": 2000,
+          "maxLength": 4000,
           "type": "string"
         },
         {
@@ -278,7 +276,7 @@
       "items": {
         "$ref": "#/$defs/SceneEntry"
       },
-      "maxItems": 6,
+      "maxItems": 50,
       "minItems": 1,
       "title": "Scenes",
       "type": "array"

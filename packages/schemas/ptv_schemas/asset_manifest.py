@@ -56,11 +56,19 @@ class TripoRequest(StrictModel):
 
 
 class ReferenceImageRequest(StrictModel):
-    """Reference image parameters sent to Gemini / Imagen."""
+    """Reference image parameters sent to Gemini / Imagen.
+
+    ``number_of_images`` is intentionally pinned to 1: nothing in the
+    pipeline currently ranks / chooses between multiple candidate
+    reference images for the same asset (the Tripo stage picks the
+    first alphabetically). Allowing >1 just burns API credits with no
+    quality benefit, so we cap the request at one image per asset
+    until a real selection step exists.
+    """
 
     prompt: str = Field(..., max_length=4000)
     aspect_ratio: str = Field(default="1:1", pattern=r"^\d{1,2}:\d{1,2}$")
-    number_of_images: int = Field(default=1, ge=1, le=4)
+    number_of_images: int = Field(default=1, ge=1, le=1)
     negative_prompt: Optional[str] = Field(default=None, max_length=1000)
 
 

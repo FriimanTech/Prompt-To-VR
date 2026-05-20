@@ -51,12 +51,23 @@ The three providers used by the pipeline.
 - Paste into `.env` as `TRIPO_API_KEY`.
 - Python SDK package: `tripo3d`. Installed automatically when you
   `pip install -e packages/provider-clients`.
-- The wrapper **always** sends:
-  - `texture=True`,
-  - `pbr=True`,
-  - `texture_alignment="original_image"`,
-  - `texture_quality="detailed"` (overridable per asset),
-  - `model_version` = `TRIPO_MODEL_VERSION` env var (SDK default if empty).
+- The wrapper **always** sends, by default (verified Apr 2026 against
+  <https://platform.tripo3d.ai/docs/generation>):
+  - `model_version="v3.1-20260211"` — Tripo's latest image-to-3D
+    checkpoint (highest fidelity). Override with the
+    `TRIPO_MODEL_VERSION` env var.
+  - `texture=True` — colored output.
+  - `pbr=True` — emit BaseColor / Metallic / Roughness / Normal maps.
+  - `texture_alignment="original_image"` — UVs match the reference.
+  - `texture_quality="detailed"` — high-resolution texture maps
+    (overridable per asset).
+  - `geometry_quality="detailed"` — "Ultra Mode" mesh reconstruction;
+    only applied when the selected model_version is v3.x or newer.
+  - `enable_image_autofix=True` — Tripo pre-cleans the reference image
+    (background removal, contrast, framing) before generation.
+  - `auto_size=True` — approximate real-world metric scale.
+  - `orientation="align_image"` (image-to-3D only) — output mesh faces
+    the camera in the same way as the reference render.
 
 ## Verifying the keys
 

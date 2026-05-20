@@ -32,6 +32,117 @@ terminal after installing the SDK. Alternatively, set `PATH` per-session:
 $env:PATH = "$env:VULKAN_SDK\Bin;" + $env:PATH
 ```
 
+## Sliding locomotion still moves in a fixed world direction in an existing project
+
+Locomotion logic lives in `engine/runtime/src/core/Application.cpp`
+(search for `LocomotionMode::SlideHeadRelative` /
+`SlideControllerRelative`). The catalog mechanics
+`builtin.locomotion.slide.head_relative` and
+`builtin.locomotion.slide.controller_relative` in
+`engine/runtime/src/mechanics/BuiltinMechanics.cpp` are intentional
+**no-op stubs** (their `tick` methods are empty) -- they exist only so
+each scene's `systems_global` entity can list them without
+`MechanicHost` complaining "no mechanic registered".
+
+That means the engine has **one** locomotion implementation, shared by
+every game. Whenever it changes:
+
+1. The fix lands in `engine/runtime/src/...` -- the engine source.
+2. **Each existing project's `builds/cmake-current/...exe` was built
+   from an older copy of the engine, so it still has the old
+   behaviour** until you rebuild it.
+3. Open the project in the orchestrator UI and click **Resume** /
+   re-run the **CMake Build** stage. CMake will detect the changed
+   sources and recompile `ptv_runtime.lib` plus the launcher exe.
+   Newly generated projects pick up the latest engine automatically.
+
+### Root causes that have shipped at least once
+
+* **`last_head_forward_xz_` defaulted to `(0, 0, -1)`.** The slide path
+  used this cache as a "we don't have a head pose yet" fallback, so
+  early frames before the runtime delivered a valid VIEW pose slid the
+  player along world `-Z`. **Fix:** the cache now defaults to the zero
+  vector, and the slide path explicitly skips motion when its length
+  is zero (no fixed-direction fallback anywhere). See
+  `engine/runtime/include/ptv/core/Application.h`.
+* **`xrWaitFrame` was inside `render_frame`, after `sync_input`.** The
+  predicted display time used to locate `view_space_` against the
+  stage was therefore the *previous* frame's time. On frame 0 it was
+  zero, so `input.head_valid` started false and the cache fallback
+  above kicked in. **Fix:** `XrRuntime::begin_xr_frame()` is now
+  called *before* `sync_input` -- it runs `xrWaitFrame` +
+  `xrBeginFrame`, stores the current frame's predicted display time,
+  and lets `sync_input` locate spaces against it. `render_frame()`
+  reuses the pending state instead of issuing a second `xrWaitFrame`.
+* **Right-vector cross product was `cross(up, fwd)`** (yields `-X`
+  when `fwd = -Z`), silently swapping left/right strafe.
+  **Fix:** uses `cross(fwd, up)` for both head- and controller-
+  relative branches.
+* **`forward_axis = -ly` inverted "push forward".** OpenXR 1.1
+  ("Standard input identifiers") defines thumbstick `+1` on the Y
+  axis as "all the way up", i.e. *forward push*. The runtime had the
+  sign negated, so pushing the stick forward produced backward
+  motion in **both** sliding modes. **Fix:** `forward_axis = +ly` in
+  `Application::run` (the controller-relative path inherits the same
+  variable).
+* **Cross-axis stick bleed leaked into perpendicular motion.**
+  Touch Plus thumbsticks accumulate ~0.10 of off-axis reading after
+  a few months of use. With only a *radial* dead zone, "push pure
+  right" reads as `(+1.0, +0.10)` and the player drifts diagonally.
+  **Fix:** after the radial dead zone (now 0.18) the runtime
+  applies a *cardinal snap* -- when one axis dominates (`>0.5`) and
+  the other is small (`<0.18`), the small axis is forced to zero.
+  Intentional diagonals (both axes large) are preserved unchanged.
+* **Controller-relative slide used `/grip/pose`'s `-Z`.** Quest
+  Touch grips are angled ~30° below the controller body, so
+  `/grip`'s `-Z` is along the user's *hand*, not the controller
+  body. Pushing "forward along the angled hand axis" includes an
+  upward component, which combined with the inverted `forward_axis`
+  produced the "controller looks tilted up + forward = backward"
+  symptom. **Fix:** `XrSession::create_action_set` now binds a
+  separate `aim_pose_action_` to `/aim/pose`, exposed via
+  `InputState::aim_left/right`. `Application::run` reads
+  `aim_world_rot[0] * (0,0,-1)` for controller-relative slide,
+  teleport arc origin direction, and the locomotion menu pointer.
+  `/grip/pose` is still used for hand visualization and grab
+  detection (where palm-centric is what you want).
+* **Procedural hand mesh's `+Z` was placed at the thumb side.** The
+  OpenXR `/grip/pose` spec says `-Z` is the forward (sword-blade)
+  direction and `+Z` is the wrist/forearm direction. The mesh had
+  the thumb stub at `+Z` and the wrist at `-Z`, which is the
+  *opposite* convention. The visible symptom: the hand mesh
+  appeared to "point diagonally upward" when the user held the
+  controller flat. **Fix:** `push_hand_mesh` now puts the wrist
+  stub at `+Z` and removes the thumb stub (the symmetric palm + wrist
+  reads correctly for both hands without per-hand mirroring). See
+  `engine/runtime/src/core/Application.cpp::push_hand_mesh`.
+
+### How to verify the fix is in your current build
+
+Check `projects/<id>/logs/<latest-run>.log` (or stdout if you launched
+the exe directly): the slide path now logs once per second whenever
+the player is actually sliding, e.g.
+
+```
+[info] Slide[head_rel] fwd=(+0.00,-1.00) stick=(+0.00,-0.92) speed=1.38m/s rig=(+0.00,-1.20) head_fresh=yes
+```
+
+Physically turning your head 180 deg flips `fwd` within ~1 s. If `fwd`
+stays constant while you rotate, the build is from before the fix --
+re-run cmake_build.
+
+If the player isn't moving at all when you push the stick, you'll see
+this 1 Hz warning instead -- it tells you exactly which tracked pose
+is missing:
+
+```
+[warn] Slide[head_rel] no basis (head_fresh=no, left_hand_valid=yes, head_valid=no). Player won't move until tracking is restored.
+```
+
+`head_valid=no` means OpenXR didn't return a valid VIEW pose against
+the stage, which usually points at a runtime / Quest Link issue
+(headset asleep, runtime not active, etc.) rather than the engine.
+
 ## The exe starts, opens a desktop mirror, but the headset shows nothing
 
 - Quest Link status must be "Active" in the Meta Quest Link desktop app.

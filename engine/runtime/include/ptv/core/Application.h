@@ -146,15 +146,24 @@ private:
     LocomotionMode locomotion_{LocomotionMode::Teleport};
     Menu menu_{};
     TeleportAim teleport_{};
-    // Horizontal head-facing direction in **stage / world XZ** (Y=0 plane),
-    // updated each rendered frame from the HMD pose. Used for head-relative
-    // sliding (OpenXR ``/user/head`` aim projected onto the floor).
-    Vec3 last_head_forward_xz_{0.0f, 0.0f, -1.0f};
+    // Horizontal head-facing direction in **stage / world XZ** (Y=0 plane).
+    //
+    // CRITICAL: this MUST default to the zero vector so that until we have
+    // observed a real HMD pose, *no* slide direction is available and the
+    // player simply does not move. A non-zero default like (0, 0, -1)
+    // causes "world-based movement": pushing the joystick in head-relative
+    // mode would slide the player in fixed world -Z regardless of where
+    // they're physically looking. The slide path explicitly skips motion
+    // when this length is zero (`glm::length(last_head_forward_xz_) <= 1e-4f`).
+    //
+    // Updated every frame from ``InputState::head`` *before* locomotion
+    // math runs, so head-relative slide always uses the latest HMD yaw.
+    Vec3 last_head_forward_xz_{0.0f, 0.0f, 0.0f};
     // Latest cached HMD eye world position (full XYZ). Updated inside the
-    // render-frame callback each frame. Used to anchor the locomotion menu
+       // input/locomotion block each frame. Used to anchor the locomotion menu
     // at a comfortable eye-relative height (Meta Horizon "Head -> Comfort"
     // guidance: place primary UI ~1.5m forward, slightly below eye level).
-    Vec3 last_head_world_pos_{0.0f, 1.7f, 0.0f};
+    Vec3 last_head_world_pos_{0.0f, 0.0f, 0.0f};
     bool last_head_pose_valid_{false};
 
     // Pre-loaded GLB icons for the locomotion menu (root: Walking + Teleport,

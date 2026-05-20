@@ -40,7 +40,6 @@
       "items": {
         "$ref": "#/$defs/AcceptanceCheck"
       },
-      "maxItems": 32,
       "minItems": 1,
       "title": "Checks",
       "type": "array"

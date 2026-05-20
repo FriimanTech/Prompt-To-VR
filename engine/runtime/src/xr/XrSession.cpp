@@ -212,15 +212,33 @@ bool XrRuntime::create_session(VulkanContext& vk) {
 }
 
 bool XrRuntime::create_reference_space() {
+    // Stage / floor reference space: the engine's "world" for gameplay,
+    // hand poses, and movement. Falls back to LOCAL if the runtime can't
+    // produce a stage (e.g. seated-only setups).
     XrReferenceSpaceCreateInfo ri{XR_TYPE_REFERENCE_SPACE_CREATE_INFO};
     ri.referenceSpaceType = XR_REFERENCE_SPACE_TYPE_STAGE;
     ri.poseInReferenceSpace = {{0.0f, 0.0f, 0.0f, 1.0f}, {0.0f, 0.0f, 0.0f}};
     if (!xr_ok(xrCreateReferenceSpace(xr_session_, &ri, &stage_space_),
                "xrCreateReferenceSpace(STAGE)")) {
-        // Fall back to LOCAL if STAGE is unsupported.
         ri.referenceSpaceType = XR_REFERENCE_SPACE_TYPE_LOCAL;
-        return xr_ok(xrCreateReferenceSpace(xr_session_, &ri, &stage_space_),
-                     "xrCreateReferenceSpace(LOCAL)");
+        if (!xr_ok(xrCreateReferenceSpace(xr_session_, &ri, &stage_space_),
+                   "xrCreateReferenceSpace(LOCAL)")) {
+            return false;
+        }
+    }
+
+    // VIEW reference space: tracks the HMD's center-eye pose. We locate
+    // it against ``stage_space_`` every frame to feed locomotion the
+    // freshest head pose in the same coordinate system as the hands.
+    // OpenXR spec says VIEW is supported by every conformant runtime.
+    XrReferenceSpaceCreateInfo vri{XR_TYPE_REFERENCE_SPACE_CREATE_INFO};
+    vri.referenceSpaceType = XR_REFERENCE_SPACE_TYPE_VIEW;
+    vri.poseInReferenceSpace = {{0.0f, 0.0f, 0.0f, 1.0f}, {0.0f, 0.0f, 0.0f}};
+    if (!xr_ok(xrCreateReferenceSpace(xr_session_, &vri, &view_space_),
+               "xrCreateReferenceSpace(VIEW)")) {
+        // Non-fatal: locomotion will fall back to identity head, but
+        // the rest of the session can still run.
+        view_space_ = XR_NULL_HANDLE;
     }
     return true;
 }
@@ -254,6 +272,7 @@ bool XrRuntime::create_action_set() {
     };
 
     make_action(XR_ACTION_TYPE_POSE_INPUT, "hand_pose", "Hand Pose", hand_pose_action_, true);
+    make_action(XR_ACTION_TYPE_POSE_INPUT, "aim_pose", "Aim Pose", aim_pose_action_, true);
     make_action(XR_ACTION_TYPE_FLOAT_INPUT, "trigger", "Trigger", trigger_action_, true);
     make_action(XR_ACTION_TYPE_FLOAT_INPUT, "grip", "Grip", grip_action_, true);
     make_action(XR_ACTION_TYPE_VECTOR2F_INPUT, "thumbstick", "Thumbstick",
@@ -274,6 +293,8 @@ bool XrRuntime::create_action_set() {
     std::vector<XrActionSuggestedBinding> sug{
         {hand_pose_action_, path("/user/hand/left/input/grip/pose")},
         {hand_pose_action_, path("/user/hand/right/input/grip/pose")},
+        {aim_pose_action_,  path("/user/hand/left/input/aim/pose")},
+        {aim_pose_action_,  path("/user/hand/right/input/aim/pose")},
         {trigger_action_, path("/user/hand/left/input/trigger/value")},
         {trigger_action_, path("/user/hand/right/input/trigger/value")},
         {grip_action_, path("/user/hand/left/input/squeeze/value")},
@@ -291,14 +312,24 @@ bool XrRuntime::create_action_set() {
     xr_ok(xrSuggestInteractionProfileBindings(xr_instance_, &ipb),
           "xrSuggestInteractionProfileBindings");
 
-    // Hand pose spaces.
+    // Hand (grip) pose spaces.
     for (int i = 0; i < 2; ++i) {
         XrActionSpaceCreateInfo spi{XR_TYPE_ACTION_SPACE_CREATE_INFO};
         spi.action = hand_pose_action_;
         spi.subactionPath = hand_paths_[i];
         spi.poseInActionSpace.orientation.w = 1.0f;
         xr_ok(xrCreateActionSpace(xr_session_, &spi, &hand_space_[i]),
-              "xrCreateActionSpace");
+              "xrCreateActionSpace(grip)");
+    }
+    // Aim pose spaces -- separate from grip because the runtime applies
+    // a different (controller-body-aligned) rotation.
+    for (int i = 0; i < 2; ++i) {
+        XrActionSpaceCreateInfo spi{XR_TYPE_ACTION_SPACE_CREATE_INFO};
+        spi.action = aim_pose_action_;
+        spi.subactionPath = hand_paths_[i];
+        spi.poseInActionSpace.orientation.w = 1.0f;
+        xr_ok(xrCreateActionSpace(xr_session_, &spi, &aim_space_[i]),
+              "xrCreateActionSpace(aim)");
     }
 
     XrSessionActionSetsAttachInfo attach{XR_TYPE_SESSION_ACTION_SETS_ATTACH_INFO};
@@ -434,18 +465,78 @@ void XrRuntime::end_frame_no_render() {
     xrEndFrame(xr_session_, &fei);
 }
 
-bool XrRuntime::render_frame(const RenderCallback& render) {
+bool XrRuntime::begin_xr_frame() {
     if (!is_running_) return false;
+    if (frame_started_) {
+        // Defensive: a prior begin_xr_frame() didn't get paired. Treat
+        // the existing state as still authoritative so we don't double
+        // up xrWaitFrame (which would deadlock in some runtimes).
+        return pending_frame_state_.shouldRender;
+    }
 
-    // ---- xrWaitFrame + xrBeginFrame ------------------------------------
-    XrFrameState fs{XR_TYPE_FRAME_STATE};
+    pending_frame_state_ = XrFrameState{XR_TYPE_FRAME_STATE};
     XrFrameWaitInfo fwi{XR_TYPE_FRAME_WAIT_INFO};
-    if (!xr_ok(xrWaitFrame(xr_session_, &fwi, &fs), "xrWaitFrame")) return false;
+    if (!xr_ok(xrWaitFrame(xr_session_, &fwi, &pending_frame_state_),
+               "xrWaitFrame")) {
+        return false;
+    }
 
     XrFrameBeginInfo fbi{XR_TYPE_FRAME_BEGIN_INFO};
     xr_ok(xrBeginFrame(xr_session_, &fbi), "xrBeginFrame");
 
-    last_predicted_display_time_ = fs.predictedDisplayTime;
+    last_predicted_display_time_ = pending_frame_state_.predictedDisplayTime;
+    frame_started_ = true;
+
+    if (!pending_frame_state_.shouldRender) {
+        // Submit empty frame immediately so the runtime keeps the session
+        // alive and the caller doesn't need a "skip render this frame"
+        // branch.
+        XrFrameEndInfo fei{XR_TYPE_FRAME_END_INFO};
+        fei.displayTime = pending_frame_state_.predictedDisplayTime;
+        fei.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
+        fei.layerCount = 0;
+        fei.layers = nullptr;
+        xrEndFrame(xr_session_, &fei);
+        frame_started_ = false;
+        return false;
+    }
+    return true;
+}
+
+void XrRuntime::submit_pending_empty_frame() {
+    if (!frame_started_) return;
+    XrFrameEndInfo fei{XR_TYPE_FRAME_END_INFO};
+    fei.displayTime = pending_frame_state_.predictedDisplayTime;
+    fei.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
+    fei.layerCount = 0;
+    fei.layers = nullptr;
+    xrEndFrame(xr_session_, &fei);
+    frame_started_ = false;
+}
+
+bool XrRuntime::render_frame(const RenderCallback& render) {
+    if (!is_running_) return false;
+
+    // ---- xrWaitFrame + xrBeginFrame ------------------------------------
+    //
+    // If begin_xr_frame() was already called this iteration (the
+    // recommended path because it lets sync_input use a fresh
+    // predicted display time), reuse the pending FrameState.
+    // Otherwise fall back to the legacy single-call flow.
+    XrFrameState fs{XR_TYPE_FRAME_STATE};
+    if (frame_started_) {
+        fs = pending_frame_state_;
+        frame_started_ = false;
+    } else {
+        XrFrameWaitInfo fwi{XR_TYPE_FRAME_WAIT_INFO};
+        if (!xr_ok(xrWaitFrame(xr_session_, &fwi, &fs), "xrWaitFrame"))
+            return false;
+
+        XrFrameBeginInfo fbi{XR_TYPE_FRAME_BEGIN_INFO};
+        xr_ok(xrBeginFrame(xr_session_, &fbi), "xrBeginFrame");
+
+        last_predicted_display_time_ = fs.predictedDisplayTime;
+    }
 
     // If the runtime asks us not to render (e.g. app not focused), submit
     // an empty composition to keep the session alive and return.
@@ -564,24 +655,24 @@ void XrRuntime::sync_input(InputState& out) {
     // VALID bits on the resulting XrSpaceLocation. Without this controllers
     // that are not yet tracked (e.g. still sleeping in their charging dock)
     // would silently report the origin.
-    auto read_hand = [&](int i, XrSpaceLocation& loc, bool& valid) {
+    auto read_pose = [&](XrAction action, XrSpace space, int i,
+                         XrSpaceLocation& loc, bool& valid) {
         loc = XrSpaceLocation{XR_TYPE_SPACE_LOCATION};
         loc.pose.orientation.w = 1.0f;
         valid = false;
 
         XrActionStatePose ps{XR_TYPE_ACTION_STATE_POSE};
         XrActionStateGetInfo gi{XR_TYPE_ACTION_STATE_GET_INFO};
-        gi.action = hand_pose_action_;
+        gi.action = action;
         gi.subactionPath = hand_paths_[i];
         if (xrGetActionStatePose(xr_session_, &gi, &ps) != XR_SUCCESS ||
             !ps.isActive) {
             return;
         }
         if (last_predicted_display_time_ == 0) return;
-        if (hand_space_[i] == XR_NULL_HANDLE || stage_space_ == XR_NULL_HANDLE)
-            return;
+        if (space == XR_NULL_HANDLE || stage_space_ == XR_NULL_HANDLE) return;
 
-        XrResult r = xrLocateSpace(hand_space_[i], stage_space_,
+        XrResult r = xrLocateSpace(space, stage_space_,
                                    last_predicted_display_time_, &loc);
         if (!XR_SUCCEEDED(r)) return;
         const auto flags = loc.locationFlags;
@@ -590,8 +681,43 @@ void XrRuntime::sync_input(InputState& out) {
             valid = true;
         }
     };
-    read_hand(0, out.hand_left, out.hand_left_valid);
-    read_hand(1, out.hand_right, out.hand_right_valid);
+    read_pose(hand_pose_action_, hand_space_[0], 0,
+              out.hand_left, out.hand_left_valid);
+    read_pose(hand_pose_action_, hand_space_[1], 1,
+              out.hand_right, out.hand_right_valid);
+    read_pose(aim_pose_action_, aim_space_[0], 0,
+              out.aim_left, out.aim_left_valid);
+    read_pose(aim_pose_action_, aim_space_[1], 1,
+              out.aim_right, out.aim_right_valid);
+
+    // ---- HMD pose (VIEW reference space) in stage space ---------------
+    //
+    // Locating ``view_space_`` against ``stage_space_`` at the predicted
+    // display time gives us a fresh head pose every frame, in the SAME
+    // coordinate system as the hand poses above. This is what Meta's
+    // and Unity XR's locomotion samples consume directly: head and hand
+    // both expressed in the play-space stage, so there's no LOCAL/STAGE
+    // /VIEW mixing for downstream gameplay code to get wrong.
+    //
+    // (The render path still calls xrLocateViews separately for the
+    // per-eye projection poses; that's fine -- locomotion just needs a
+    // single center-eye pose ASAP, before locomotion logic runs.)
+    out.head = XrSpaceLocation{XR_TYPE_SPACE_LOCATION};
+    out.head.pose.orientation.w = 1.0f;
+    out.head_valid = false;
+    if (view_space_ != XR_NULL_HANDLE && stage_space_ != XR_NULL_HANDLE &&
+        last_predicted_display_time_ != 0) {
+        XrSpaceLocation hloc{XR_TYPE_SPACE_LOCATION};
+        if (XR_SUCCEEDED(xrLocateSpace(view_space_, stage_space_,
+                                       last_predicted_display_time_, &hloc))) {
+            const auto flags = hloc.locationFlags;
+            if ((flags & XR_SPACE_LOCATION_POSITION_VALID_BIT) &&
+                (flags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT)) {
+                out.head = hloc;
+                out.head_valid = true;
+            }
+        }
+    }
 
     auto read_float = [&](XrAction a, XrPath sub, float& v) {
         XrActionStateFloat st{XR_TYPE_ACTION_STATE_FLOAT};
@@ -627,17 +753,24 @@ void XrRuntime::shutdown() {
         if (sc) xrDestroySwapchain(sc);
     color_swapchains_.clear();
     color_images_.clear();
-    for (int i = 0; i < 2; ++i)
+    for (int i = 0; i < 2; ++i) {
         if (hand_space_[i]) xrDestroySpace(hand_space_[i]);
+        if (aim_space_[i]) xrDestroySpace(aim_space_[i]);
+    }
+    if (view_space_) xrDestroySpace(view_space_);
     if (stage_space_) xrDestroySpace(stage_space_);
     if (action_set_) xrDestroyActionSet(action_set_);
     if (xr_session_) xrDestroySession(xr_session_);
     if (xr_instance_) xrDestroyInstance(xr_instance_);
     stage_space_ = XR_NULL_HANDLE;
+    view_space_ = XR_NULL_HANDLE;
     hand_space_[0] = hand_space_[1] = XR_NULL_HANDLE;
+    aim_space_[0] = aim_space_[1] = XR_NULL_HANDLE;
     action_set_ = XR_NULL_HANDLE;
     xr_session_ = XR_NULL_HANDLE;
     xr_instance_ = XR_NULL_HANDLE;
+    frame_started_ = false;
+    last_predicted_display_time_ = 0;
 }
 
 }  // namespace ptv

@@ -1,9 +1,7 @@
 ---
 name: cpp-coder
-description: Generates bounded C++ gameplay modules from a CodeTask. Only writes under engine/generated/{mechanics,ai,dialogue}/.
 model: inherit
-readonly: false
-is_background: false
+description: Generates bounded C++ gameplay modules from a CodeTask. Only writes under engine/generated/{mechanics,ai,dialogue}/.
 ---
 
 You write C++20 code for a single `CodeTask`. Output files MUST be placed

@@ -1,0 +1,18 @@
+{
+        "version": 1, "prompt_id": "t", "scene_id": "s", "title": "T", "name": "S",
+        "player": {"height_meters": 1.7, "locomotion": "teleport", "comfort": "comfort",
+                    "spawn": {"position": [0,0,0], "rotation": [0,0,0,1]}},
+        "sky_color": [0,0,0], "ambient_intensity": 0.1,
+        "lights": [],
+        "entities": [
+          {"id": "cube", "name": "Cube",
+           "transform": {"position": [0,1,-1], "rotation": [0,0,0,1], "scale": 1.0},
+           "mesh": {"asset_id": "cube", "glb_path": "missing.glb",
+                    "target_scale_meters": 0.2, "collision_shape": "aabb"},
+           "physics": {"kind": "dynamic", "mass_kg": 0.5, "restitution": 0.2,
+                        "friction": 0.5, "collision_shape": "aabb"},
+           "mechanic_bindings": [{"id": "builtin.grab", "builtin_id": "builtin.grab",
+                                  "params": {}}],
+           "tags": []}
+        ]
+    }

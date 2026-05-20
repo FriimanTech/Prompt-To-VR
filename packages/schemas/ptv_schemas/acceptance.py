@@ -18,4 +18,7 @@ class AcceptanceCheck(StrictModel):
 
 class AcceptanceTestPlan(StrictModel):
     prompt_id: IdStr
-    checks: List[AcceptanceCheck] = Field(..., min_length=1, max_length=32)
+    # No upper bound: the check count tracks BuildSpec.acceptance_tests
+    # which itself scales with the number of generated mechanics in a
+    # full VR game.
+    checks: List[AcceptanceCheck] = Field(..., min_length=1)

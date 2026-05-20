@@ -59,13 +59,42 @@ public:
     };
 
     struct InputState {
-        // Hand poses expressed in the runtime's stage reference space.
+        // **Grip** poses expressed in the runtime's stage reference space.
+        //
+        // OpenXR's ``/grip/pose`` is "the user's palm centroid when
+        // making a fist". On Quest Touch the grip handle is angled
+        // ~30-40 deg below the controller body, so grip's -Z axis is
+        // aligned with the user's HAND, NOT with the controller body.
+        // We use grip pose for "where is the hand" -- visualization,
+        // grab interaction, kinematic follow.
+        //
         // ``hand_*_valid`` is true only when the runtime reports the pose
         // as both tracked AND position/orientation valid.
         XrSpaceLocation hand_left{XR_TYPE_SPACE_LOCATION};
         XrSpaceLocation hand_right{XR_TYPE_SPACE_LOCATION};
         bool hand_left_valid{false};
         bool hand_right_valid{false};
+        // **Aim** poses expressed in the same stage reference space.
+        //
+        // OpenXR's ``/aim/pose`` is "what direction is the user
+        // pointing the input source", with -Z aligned with the
+        // controller's *body* (not the angled grip handle). This is
+        // what locomotion code should use whenever it asks "which way
+        // is the controller pointing?" -- e.g. controller-relative
+        // sliding direction, teleport arc origin, ray casts.
+        XrSpaceLocation aim_left{XR_TYPE_SPACE_LOCATION};
+        XrSpaceLocation aim_right{XR_TYPE_SPACE_LOCATION};
+        bool aim_left_valid{false};
+        bool aim_right_valid{false};
+        // HMD (head) pose expressed in the **same** stage reference space
+        // as the hand poses. This is OpenXR's ``XR_REFERENCE_SPACE_TYPE_VIEW``
+        // located against the stage space at the predicted display time --
+        // i.e. exactly the space-pair Meta and OpenXR recommend for
+        // gameplay logic that must stay coordinate-compatible with the
+        // hands. Locomotion code MUST consume this field every frame; do
+        // not cache or fall back to a fixed world-space forward vector.
+        XrSpaceLocation head{XR_TYPE_SPACE_LOCATION};
+        bool head_valid{false};
         float trigger[2]{0.0f, 0.0f};   // [0]=left, [1]=right
         float grip[2]{0.0f, 0.0f};
         XrVector2f thumbstick[2]{};     // [0]=left, [1]=right
@@ -108,6 +137,31 @@ public:
     bool poll_events();                     // returns false when the session is exiting
     bool begin_frame(Views& views);         // returns false when the frame should be skipped
     void end_frame_no_render();             // submit an empty frame (e.g. when not focused)
+
+    /** Phase 1 of the XR frame loop.
+     *
+     *  Calls ``xrWaitFrame`` + ``xrBeginFrame`` and stores the predicted
+     *  display time so the *very next* ``sync_input`` call locates head /
+     *  hand spaces at the *current* frame's predicted time -- not at the
+     *  previous frame's time, which is what happens when ``render_frame``
+     *  is the only thing calling ``xrWaitFrame``.
+     *
+     *  Returns ``true`` when the runtime says we should render. When it
+     *  returns ``false`` it has already submitted an empty end-frame so
+     *  the caller only needs to skip rendering for this iteration --
+     *  do **not** call ``render_frame`` afterwards.
+     *
+     *  When this returns ``true``, the caller MUST eventually call
+     *  ``render_frame`` (or ``submit_pending_empty_frame``) to balance
+     *  the wait/begin pair. Calling ``render_frame`` after this will
+     *  reuse the pending state and skip its own ``xrWaitFrame``. */
+    bool begin_xr_frame();
+
+    /** If a ``begin_xr_frame`` is pending and the caller decided not to
+     *  render this iteration after all, submit an empty end-frame to
+     *  keep the wait/begin pairing balanced. Safe to call when no
+     *  begin is pending (no-op). */
+    void submit_pending_empty_frame();
     void sync_input(InputState& out);
 
     // Per-eye swapchain resources exposed to the renderer.
@@ -150,10 +204,22 @@ private:
     XrSystemId xr_system_{XR_NULL_SYSTEM_ID};
     ::XrSession xr_session_{XR_NULL_HANDLE};
     XrSpace stage_space_{XR_NULL_HANDLE};
+    // ``XR_REFERENCE_SPACE_TYPE_VIEW``. Located against ``stage_space_``
+    // every frame in ``sync_input`` so locomotion always sees the latest
+    // HMD pose in the same coordinate system as the hand poses (no
+    // mixing of LOCAL / STAGE / VIEW). Per OpenXR spec the runtime
+    // updates VIEW continuously to track the user's head.
+    XrSpace view_space_{XR_NULL_HANDLE};
+    // GRIP-pose action spaces (palm-centric, used for hand visualization
+    // / grab interaction). See InputState::hand_*.
     XrSpace hand_space_[2]{XR_NULL_HANDLE, XR_NULL_HANDLE};
+    // AIM-pose action spaces (controller-body forward, used for slide
+    // direction / teleport arc / ray casts). See InputState::aim_*.
+    XrSpace aim_space_[2]{XR_NULL_HANDLE, XR_NULL_HANDLE};
 
     XrActionSet action_set_{XR_NULL_HANDLE};
-    XrAction hand_pose_action_{XR_NULL_HANDLE};
+    XrAction hand_pose_action_{XR_NULL_HANDLE};   // bound to /grip/pose
+    XrAction aim_pose_action_{XR_NULL_HANDLE};    // bound to /aim/pose
     XrAction trigger_action_{XR_NULL_HANDLE};
     XrAction grip_action_{XR_NULL_HANDLE};
     XrAction thumbstick_action_{XR_NULL_HANDLE};
@@ -171,9 +237,16 @@ private:
     bool is_running_{false};
     uint32_t runtime_min_vk_api_{0};
     uint32_t runtime_max_vk_api_{0};
-    // Updated inside ``begin_frame`` / ``render_frame``; used by
-    // ``sync_input`` when it calls ``xrLocateSpace`` for the hand poses.
+    // Updated inside ``begin_frame`` / ``begin_xr_frame`` / ``render_frame``;
+    // used by ``sync_input`` when it calls ``xrLocateSpace`` for the head /
+    // hand poses.
     XrTime last_predicted_display_time_{0};
+    // True between ``begin_xr_frame`` and the matching ``render_frame`` /
+    // ``submit_pending_empty_frame``. When set, ``render_frame`` reuses
+    // ``pending_frame_state_`` instead of issuing its own
+    // ``xrWaitFrame`` + ``xrBeginFrame``.
+    bool frame_started_{false};
+    XrFrameState pending_frame_state_{XR_TYPE_FRAME_STATE};
 };
 
 }  // namespace ptv

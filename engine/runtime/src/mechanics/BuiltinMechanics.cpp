@@ -65,7 +65,21 @@ PTV_REGISTER_MECHANIC("builtin.teleport", TeleportMechanic)
 PTV_REGISTER_MECHANIC("builtin.locomotion.teleport", TeleportMechanic)
 
 // ---------------------------------------------------------------------------
-// Smooth locomotion
+// Smooth (sliding) locomotion -- catalog stub.
+//
+// IMPORTANT: ``tick`` here is INTENTIONALLY empty. The real Head-Relative /
+// Controller-Relative slide logic lives in ``Application.cpp`` (search for
+// ``LocomotionMode::SlideHeadRelative`` / ``SlideControllerRelative``),
+// where it has direct access to the per-frame OpenXR pose, the thumbstick
+// input, and the player rig transform. We only register these mechanic
+// IDs so that every game's ``scene.json`` -- starter room, generated
+// Green-Lantern, any future project -- can attach them on the
+// ``systems_global`` entity without ``MechanicHost`` logging
+// "no mechanic registered for ...".
+//
+// Do NOT add movement code here -- doing so would double-apply input
+// (Application.cpp already moves the rig) and would leave the Head-Relative
+// vs Controller-Relative branching out of sync with the rest of the engine.
 // ---------------------------------------------------------------------------
 class SmoothLocomotionMechanic : public BuiltinMechanicBase<SmoothLocomotionMechanic> {
 public:
@@ -78,6 +92,11 @@ private:
     float speed_{1.5f};
 };
 PTV_REGISTER_MECHANIC("builtin.smooth_locomotion", SmoothLocomotionMechanic)
+// Catalog-aligned aliases. The actual Head-Relative slide reads the latest
+// HMD pose every frame in Application.cpp via XR_REFERENCE_SPACE_TYPE_VIEW
+// located against the play-space stage; the actual Controller-Relative
+// slide reads the latest left grip pose. Both are pose-relative, never
+// world-fixed -- see docs/locomotion.md.
 PTV_REGISTER_MECHANIC("builtin.locomotion.slide.head_relative",
                       SmoothLocomotionMechanic)
 PTV_REGISTER_MECHANIC("builtin.locomotion.slide.controller_relative",

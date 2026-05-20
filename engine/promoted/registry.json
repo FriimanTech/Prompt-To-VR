@@ -33,6 +33,28 @@
       "project_id": "20260424-233636-green-lantern-game",
       "promoted_at": "2026-04-25T00:06:36.556769+00:00",
       "params": {}
+    },
+    {
+      "id": "promoted.ring_charge_and_recharge",
+      "summary": "Provides a ring_energy resource system and a proximity-activated recharge ritual at the Recharge Station pedestal. Features: ring_energy pool with configurable max and regen=0 by default; cost + per-second drain APIs for other mechanics (constructs, flight). When the player places the ring hand into the pedestal socket volume, begin a short recharge sequence: escalating haptics, rising green beam, UI fill on ring HUD, and playback of original (non-copyright) recharge line from the ring voice pack. On completion, set ring_energy to 100%. Prevents recharge when already full and enforces a brief ",
+      "category": "mechanic",
+      "kind": "mechanics",
+      "source_path": "engine/generated/mechanics/20260429-221856-enhanced-green-lantern-game/ring_charge_and_recharge.cpp",
+      "code_task_id": "ring_charge_and_recharge",
+      "project_id": "20260429-221856-enhanced-green-lantern-game",
+      "promoted_at": "2026-04-29T22:50:06.563474+00:00",
+      "params": {}
+    },
+    {
+      "id": "promoted.ring_construct_core",
+      "summary": "Implements the Green Lantern ring construct loop with three layers: (A) Instant constructs (energy bolt, fist, sword, round shield, barrier wall); (B) Sustained constructs (dome shield, energy cage, continuous beam) draining ring_energy over time; (C) Guided freeform shaping for simple walls/platforms via right-grip shaping with translucent previews, size/orient, and finalize on right-trigger. Input: hold Y to open a radial category wheel (categories: Attack, Defense/Control, Utility); release to select; Right Trigger activates/spawns; Right Grip scales/orients during preview; Left Trigger tog",
+      "category": "mechanic",
+      "kind": "mechanics",
+      "source_path": "engine/generated/mechanics/20260429-221856-enhanced-green-lantern-game/ring_construct_core.cpp",
+      "code_task_id": "ring_construct_core",
+      "project_id": "20260429-221856-enhanced-green-lantern-game",
+      "promoted_at": "2026-04-29T22:50:06.563742+00:00",
+      "params": {}
     }
   ]
 }

@@ -36,6 +36,34 @@ A concrete example prompt lives in the `NewProjectPage` sample text.
 | `ArtifactMetadata` | returned from `/api/projects/<id>/artifacts` | Orchestrator |
 | `AcceptanceTestPlan` | `acceptance_test_plan.json` | (optional) Claude Sonnet |
 
+## Stage caps (updated for full VR-game generation)
+
+The schemas no longer cap the pipeline to a single-room demo. The
+current limits per artifact are:
+
+| Artifact | Field | Old cap | New cap |
+|---|---|---|---|
+| `BuildSpec` | `scenes` (count) | 6 | **50** |
+| `BuildSpec` | `mechanics` (count) | 20 | **unbounded** |
+| `BuildSpec` | `assets` (count) | 48 | 48 |
+| `BuildSpec` | `acceptance_tests` (count) | 24 | **unbounded** |
+| `BuildSpec` | `constraints` (count) | 32 | **50** |
+| `BuildSpec` | `SceneEntry.summary` length | 2 000 | **4 000** |
+| `BuildSpec` | `MechanicEntry.summary` length | 2 000 | **4 000** |
+| `BuildSpec` | `AssetEntry.summary` length | 2 000 | **4 000** |
+| `BuildSpec` | `npc_summary` / `hud_summary` length | 2 000 | **4 000** |
+| `AssetManifest` | `ReferenceImageRequest.number_of_images` | 1..4 | **pinned to 1** |
+| `AssetManifest` | `items` (count) | 48 | 48 |
+| `MechanicPlan` | `items` (count) | 20 | **unbounded** |
+| `MechanicPlan` / `CodeTask` | `description` length | 4 000 | **10 000** |
+| `SceneSpec` | `entities` (count) | 256 | **1 000** |
+| `AcceptanceTestPlan` | `checks` (count) | 32 | **unbounded** |
+
+`number_of_images` is intentionally pinned to 1 -- nothing currently
+ranks / chooses between multiple candidate reference images, so
+generating more than one just burns API credits. Lift the cap when a
+real selection step exists.
+
 ## Built-in mechanic ids (reuse these)
 
 ```

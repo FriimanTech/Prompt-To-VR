@@ -75,7 +75,7 @@ class SceneSpec(StrictModel):
     name: str = Field(..., max_length=128)
 
     player_spawn: PlayerSpawn = Field(default_factory=PlayerSpawn)
-    entities: List[EntitySpec] = Field(..., min_length=0, max_length=256)
+    entities: List[EntitySpec] = Field(..., min_length=0, max_length=1000)
     lights: List[LightSpec] = Field(default_factory=list, max_length=32)
 
     sky_color: List[float] = Field(

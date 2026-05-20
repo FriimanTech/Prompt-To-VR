@@ -282,7 +282,7 @@
       "items": {
         "$ref": "#/$defs/EntitySpec"
       },
-      "maxItems": 256,
+      "maxItems": 1000,
       "minItems": 0,
       "title": "Entities",
       "type": "array"

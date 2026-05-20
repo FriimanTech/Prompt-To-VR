@@ -60,6 +60,8 @@ class MechanicPlanItem(StrictModel):
 
 class MechanicPlan(StrictModel):
     prompt_id: IdStr
-    items: List[MechanicPlanItem] = Field(
-        ..., min_length=1, max_length=20
-    )
+    # No upper bound on items: a full VR game can map to dozens of
+    # mechanics (locomotion variants, combat, abilities, UI, save /
+    # load, NPC interaction, dialogue hooks, ...). The planner is
+    # responsible for keeping each entry meaningful.
+    items: List[MechanicPlanItem] = Field(..., min_length=1)

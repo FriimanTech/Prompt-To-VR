@@ -83,7 +83,7 @@
     },
     "ReferenceImageRequest": {
       "additionalProperties": false,
-      "description": "Reference image parameters sent to Gemini / Imagen.",
+      "description": "Reference image parameters sent to Gemini / Imagen.\n\n``number_of_images`` is intentionally pinned to 1: nothing in the\npipeline currently ranks / chooses between multiple candidate\nreference images for the same asset (the Tripo stage picks the\nfirst alphabetically). Allowing >1 just burns API credits with no\nquality benefit, so we cap the request at one image per asset\nuntil a real selection step exists.",
       "properties": {
         "aspect_ratio": {
           "default": "1:1",
@@ -106,7 +106,7 @@
         },
         "number_of_images": {
           "default": 1,
-          "maximum": 4,
+          "maximum": 1,
           "minimum": 1,
           "title": "Number Of Images",
           "type": "integer"
