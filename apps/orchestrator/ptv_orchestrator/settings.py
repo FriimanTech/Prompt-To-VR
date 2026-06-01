@@ -45,6 +45,16 @@ class Settings(BaseSettings):
     gemini_image_model: str = "gemini-2.5-flash-image"
     tripo_model_version: str | None = None
 
+    # --- Code-generation stage (Stage 8, multi-agent) --------------------
+    # How many OpenAI Agents SDK sessions may be in flight at the same
+    # time. Each worker claims one ``CodeTask`` from the shared
+    # ``codegen_board.json`` ledger, runs one ``Runner.run_sync``
+    # session (with the hosted ``WebSearchTool`` enabled, NO cap on
+    # search calls), writes the multi-file result, and claims the next
+    # eligible task. Default 3 matches Part B of the multi-agent
+    # update spec.
+    codegen_max_parallel_agents: int = Field(default=3, ge=1, le=16)
+
     # --- Build toolchain -------------------------------------------------
     vcpkg_root: str | None = None
     cmake_generator: str = "Visual Studio 18 2026"

@@ -18,6 +18,11 @@ dependencies = [
     "anyio>=4",
     "ptv-schemas",
     "ptv-provider-clients",
+    # OpenAI Agents SDK powers the multi-agent code-generation stage.
+    # Verified against https://openai.github.io/openai-agents-python/
+    # (Apr/May 2026). The SDK ships the hosted ``WebSearchTool`` and
+    # Pydantic-typed structured outputs used by ``codegen_agent.py``.
+    "openai-agents>=0.17,<1.0",
 ]
 
 [project.optional-dependencies]

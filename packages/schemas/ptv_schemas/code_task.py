@@ -59,6 +59,24 @@ class CodeTask(StrictModel):
         max_length=32,
     )
 
+    # Other CodeTask ids in the SAME MechanicPlan that this task depends on.
+    # The codegen ledger (``projects/<id>/codegen_board.json``) gates each
+    # task: a task with any unresolved dependency stays ``blocked`` and is
+    # promoted to ``pending`` only when every dep has reached ``done``.
+    #
+    # The planner is encouraged to set this whenever one ``generate`` task
+    # builds on another (e.g. a weapon profile depends on a shooting-hub
+    # task in the same plan). Empty list = no deps, task starts pending.
+    depends_on: List[IdStr] = Field(
+        default_factory=list,
+        max_length=32,
+        description=(
+            "IDs of other CodeTasks in the same MechanicPlan that this task"
+            " depends on. The codegen ledger blocks this task until every"
+            " dep is 'done'."
+        ),
+    )
+
     files: List[CodeTaskFile] = Field(default_factory=list, max_length=16)
     test_files: List[CodeTaskFile] = Field(default_factory=list, max_length=8)
 

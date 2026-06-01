@@ -40,6 +40,17 @@
       "title": "Acceptance Notes",
       "type": "string"
     },
+    "depends_on": {
+      "description": "IDs of other CodeTasks in the same MechanicPlan that this task depends on. The codegen ledger blocks this task until every dep is 'done'.",
+      "items": {
+        "description": "Snake-case identifier, max 64 chars.",
+        "pattern": "^[a-z0-9][a-z0-9_.\\-]{0,63}$",
+        "type": "string"
+      },
+      "maxItems": 32,
+      "title": "Depends On",
+      "type": "array"
+    },
     "description": {
       "maxLength": 10000,
       "title": "Description",

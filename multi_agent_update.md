@@ -643,7 +643,7 @@ Add **`docs/codegen-agents.md`** (or extend `docs/prompt-schema.md`) covering:
 ### Acceptance checklist
 
 - [ ] `CODEGEN_MAX_PARALLEL_AGENTS=3` runs up to three Agents SDK sessions on distinct `pending` tasks
-- [ ] `codegen_board.json` shows `agent_id`, statuses, `files_written`, `exports`
+- [ ] `codegen_board.json` shows `agent_id`, statuses, `files_written`, `exports`  
 - [ ] Task B with `depends_on: ["A"]` stays `blocked` until A is `done`, then becomes `pending`
 - [ ] No duplicate claims under parallel load
 - [ ] Each task uses the **OpenAI Agents SDK** with the **web search** hosted tool enabled
@@ -653,7 +653,7 @@ Add **`docs/codegen-agents.md`** (or extend `docs/prompt-schema.md`) covering:
 - [ ] `CODE_TASK_SYSTEM` and any related prompts no longer require single-file output or cap line counts
 - [ ] `CodeTask.test_files[]` still unused
 - [ ] Codegen does **not** call Claude
-- [ ] No second orchestrator service
+- [ ] No second orchestrator service  
 - [ ] Existing `pytest` passes + new tests green
 - [ ] Equip / Shooting Hub / Repulsor mechanics are **not** added to the engine in this PR (illustrative only)
 
