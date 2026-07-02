@@ -1,87 +1,57 @@
 #include "ptv/api/IMechanic.h"
 #include "ptv/ecs/World.h"
 #include "ptv/math/Math.h"
+
 #include <entt/entt.hpp>
 #include <nlohmann/json.hpp>
 #include <string>
-#include <unordered_map>
-#include <optional>
-// [ptv-bounds] removed disallowed include: utility_constructs_shared.h
+
+#include "utility_constructs_shared.h"
 
 namespace ptv {
 
-class UtilityConstructs : public IMechanic {
-public:
-    void on_attach(World&, std::uint32_t, const nlohmann::json& params) override {
-        // Defaults; per-frame update reads live params from binding entry
-        scanner_.scan_interval = params.value("scanner_scan_interval_s", 2.0f);
-        scanner_.range = params.value("scanner_range_m", 18.0f);
-        grabber_.pull_force = params.value("grabber_pull_force", 35.0f);
-        repair_.rate = params.value("repair_progress_rate", 0.25f);
-        beacon_.intensity = params.value("beacon_light_intensity", 1.0f);
-        bubble_.default_duration = params.value("civilian_bubble_duration_s", 8.0f);
-        bubble_.default_hp = params.value("civilian_bubble_hp", 50.0f);
-    }
-
-    void on_update(World& w, std::uint32_t ring_entity, float dt) override;
-    void on_detach(World& w, std::uint32_t) override {
-        cleanup_spawned(w);
-    }
-    std::string id() const override { return "generated.utility_constructs"; }
-
-private:
-    // Feature entry points implemented in other translation units
-    void tick_scanner(World& w, std::uint32_t ring_entity, const nlohmann::json& live, float dt);
-    void tick_grabber(World& w, std::uint32_t ring_entity, const nlohmann::json& live, float dt);
-    void tick_repair(World& w, std::uint32_t ring_entity, const nlohmann::json& live, float dt);
-    void tick_beacon(World& w, std::uint32_t ring_entity, const nlohmann::json& live, float dt);
-    void tick_bubble(World& w, std::uint32_t ring_entity, const nlohmann::json& live, float dt);
-
-    void cleanup_spawned(World& w);
-
-    utility_internal::ScannerState scanner_{};
-    utility_internal::GrabberState grabber_{};
-    utility_internal::RepairState repair_{};
-    utility_internal::BeaconState beacon_{};
-    utility_internal::BubbleState bubble_{};
-};
-
-void UtilityConstructs::on_update(World& w, std::uint32_t ring_entity, float dt) {
-    // Read live params_json from our binding entry if present
-    nlohmann::json live{};
-    if (w.has<CMechanicBinding>(ring_entity)) {
-        auto& mb = w.get<CMechanicBinding>(ring_entity);
-        for (const auto& e : mb.entries) {
-            if (e.id == id()) {
-                live = nlohmann::json::parse(e.params_json, nullptr, false);
-                break;
-            }
-        }
-    }
-    // Dismiss input shared across constructs
-    const bool dismiss_pressed = live.is_object() ? live.value("b_button_dismiss", false) : false;
-    if (dismiss_pressed) {
-        cleanup_spawned(w);
-        // Soft feedback tag to ring for tests
-        if (w.valid(ring_entity)) utility_internal::add_tag(w, ring_entity, "utility:dismiss");
-    }
-
-    tick_scanner(w, ring_entity, live, dt);
-    tick_grabber(w, ring_entity, live, dt);
-    tick_repair(w, ring_entity, live, dt);
-    tick_beacon(w, ring_entity, live, dt);
-    tick_bubble(w, ring_entity, live, dt);
+void UtilityConstructs::on_attach(World& w, std::uint32_t e, const nlohmann::json& p) {
+    // Defaults from params
+    scanner_.interval_s = p.value("scanner_scan_interval_s", 2.0f);
+    scanner_.range_m    = p.value("scanner_range_m", 18.0f);
+    grabber_.pull_force = p.value("grabber_pull_force", 35.0f);
+    repair_.rate_per_s  = p.value("repair_progress_rate", 0.25f);
+    beacon_.intensity   = p.value("beacon_light_intensity", 1.0f);
+    bubble_.ttl_s       = p.value("civilian_bubble_duration_s", 8.0f);
+    bubble_.hp          = p.value("civilian_bubble_hp", 50.0f);
 }
 
-void UtilityConstructs::cleanup_spawned(World& w) {
+void UtilityConstructs::dismiss_all(World& w) {
     auto& reg = w.registry();
-    if (scanner_.drone != entt::null && reg.valid(scanner_.drone)) reg.destroy(scanner_.drone);
-    scanner_.drone = entt::null; scanner_.t_accum = 0.0f;
-    if (grabber_.hand != entt::null && reg.valid(grabber_.hand)) reg.destroy(grabber_.hand);
-    grabber_.hand = entt::null; grabber_.latched = entt::null;
-    if (beacon_.beacon != entt::null && reg.valid(beacon_.beacon)) reg.destroy(beacon_.beacon);
-    beacon_.beacon = entt::null; beacon_.head_rot_t = 0.0f;
-    repair_.current = entt::null; repair_.progress.clear();
+    auto kill = [&](entt::entity x){ if (x!=entt::null && reg.valid(x)) reg.destroy(x); };
+    kill(scanner_.e); scanner_ = ScannerState{ };
+    kill(grabber_.e); grabber_ = GrabberState{ };
+    kill(beacon_.e);  beacon_  = BeaconState{ };
+    kill(bubble_.e);  bubble_  = BubbleState{ };
+    repair_ = RepairState{ };
+}
+
+void UtilityConstructs::on_update(World& w, std::uint32_t e, float dt) {
+    // Read live binding params for input-like signals
+    nlohmann::json p = read_self_params(w, e, id());
+
+    // Global dismiss (B button per spec). Accept either dismiss:true or action:"dismiss"
+    const bool do_dismiss = p.value("dismiss", false) || (p.value("action", std::string("")) == std::string("dismiss"));
+    if (do_dismiss) {
+        dismiss_all(w);
+        // Soft haptics feedback (publish to dependency protocol)
+        add_tag(w, static_cast<entt::entity>(e), "haptics.publish:{\"pattern_id\":\"hover_light\",\"hand\":\"right\",\"intensity_scale\":0.6,\"duration_s\":0.05}");
+    }
+
+    utility::update_scanner(w, e, *this, p, dt);
+    utility::update_grabber(w, e, *this, p, dt);
+    utility::update_repair (w, e, *this, p, dt);
+    utility::update_beacon (w, e, *this, p, dt);
+    utility::update_bubble (w, e, *this, p, dt);
+}
+
+void UtilityConstructs::on_detach(World& w, std::uint32_t) {
+    dismiss_all(w);
 }
 
 } // namespace ptv

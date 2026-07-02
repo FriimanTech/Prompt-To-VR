@@ -1,0 +1,19 @@
+Save/Load Tag Protocol (emitted/consumed via CTag.tags)
+
+Inputs (from other systems):
+- save.request:{"slot":"manual|auto|..."}
+- load.request:{"slot":"manual|auto|..."}
+- mission.complete:{...}          -> triggers auto-slot save
+- recharge.complete:{...}         -> triggers auto-slot save
+- save.register:{"section":"progression|settings|..."}
+- save.section.push:{"section":"id","data":{...}}
+
+Outputs (on SavePersistence entity):
+- save.collect.start:{"slot":"...","window_s":0.15}
+- save.completed:{"slot":"...","bytes":N}
+- load.section:{"section":"id","data":{...}}
+- load.completed:{"slot":"...","sections":N,"status":"ok|empty|malformed"}
+
+Notes:
+- This implementation is local-first and session-local (no disk IO in this stage). Downstream can swap SaveStore to a file-backed store later without changing the protocol.
+- Providers should listen for save.collect.start and immediately emit one or more save.section.push with their latest state. If they forget to register, the first push implicitly registers.

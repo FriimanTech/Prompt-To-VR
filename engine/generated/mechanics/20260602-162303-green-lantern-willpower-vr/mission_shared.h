@@ -1,61 +1,105 @@
 #pragma once
 
+#include "ptv/api/IMechanic.h"
+#include "ptv/ecs/World.h"
+#include "ptv/math/Math.h"
+
+#include <nlohmann/json.hpp>
 #include <string>
 #include <vector>
 #include <unordered_map>
 #include <optional>
-#include <cstdint>
+#include <algorithm>
 
 namespace ptv {
-struct MissionMedalThresholds {
-    // Time in seconds for time-trial style medals, or score thresholds otherwise.
-    // Lower is better for time, higher is better for score. We treat smaller_is_better flag per-mission.
-    float bronze{0.0f};
-    float silver{0.0f};
-    float gold{0.0f};
-    bool smaller_is_better{true};
+
+// Lightweight mission/objective schema local to this task
+struct ObjectiveDef {
+    std::string id;            // e.g., "defend_reactors"
+    std::string type;          // e.g., "defend|escort|cleanse|disable|rescue|defeat"
+    int target_count{1};       // count-based objectives (kills, rescues, pylons, etc.)
 };
 
-struct ObjectiveDef {
-    std::string id;          // unique within mission
-    std::string kind;        // defend / escort / cleanse / disable / rescue / defeat_boss / reach_gate / time_trial
-    float target_value{1.0f}; // e.g., count to reach, seconds to survive, etc.
-    std::string description; // short description for HUD
+struct ChallengeDef {
+    std::string id;            // optional challenge id
+    std::string rule;          // free-form rule id (e.g., "no_damage", "time_under")
+    float threshold{0.0f};
+};
+
+struct DifficultyTier {
+    std::string id;            // "easy|normal|hard|legendary" (free-form)
+    float ai_scale{1.0f};      // used by AI packs to scale aggression/spawns via tags
+    float spawn_multiplier{1.0f};
+    float score_multiplier{1.0f};
 };
 
 struct MissionDef {
-    std::string id;                    // e.g., zero_g_flight_gauntlet
-    std::vector<std::string> scenes;   // scene ids in order
-    std::vector<ObjectiveDef> chain;   // ordered list; simple linear for now
-    std::optional<MissionMedalThresholds> medals; // optional medal rules
-    std::string difficulty_profile;    // name of profile family to scale others with
+    std::string id;
+    std::vector<std::string> scenes;                 // ordered scene ids for travel
+    std::vector<ObjectiveDef> objectives;            // linear for MVP; branches in future
+    std::vector<ChallengeDef> challenges;            // optional
+    std::vector<DifficultyTier> tiers;               // difficulty options
+    int base_reward_xp{0};                           // baseline XP before multipliers
+};
+
+struct MedalThresholds {
+    // per-mission thresholds (seconds for time trials, or score numbers)
+    // map: mission_id -> { bronze, silver, gold }
+    struct Trio { float bronze{0}, silver{0}, gold{0}; };
+    std::unordered_map<std::string, Trio> by_mission;
+};
+
+struct ObjectiveProgress {
+    int current{0};
+    int target{1};
+    bool completed{false};
 };
 
 struct MissionRuntimeState {
-    bool mission_active{false};
-    std::string mission_id;
-    int current_obj_index{-1};
-    float current_obj_progress{0.0f};
-    float score{0.0f};
-    float elapsed_s{0.0f};
+    bool has_selection{false};
+    std::string selected_mission_id;
     std::string selected_difficulty{"normal"};
-    std::string last_awarded_medal; // bronze / silver / gold
+    std::size_t objective_index{0};
+    std::unordered_map<std::string, ObjectiveProgress> objective_progress; // by objective id
+    float elapsed_s{0.0f};
+    bool in_progress{false};
+    bool finished{false};
+    bool failed{false};
+    int score{0};
+    std::optional<std::string> medal; // "bronze|silver|gold"
 };
 
-// Lightweight DB holding all configured missions.
-struct MissionDB {
-    std::unordered_map<std::string, MissionDef> by_id;
-};
+// Local helper utilities (declarations)
+namespace mission_util {
 
-namespace mission_api {
-// Public surface for other mechanics.
-void post_objective_progress(std::uint32_t actor_entity, float amount); // advances current objective by amount
-void set_score_delta(float amount);
-std::string current_mission_id();
-std::string current_objective_id();
-bool mission_in_progress();
-std::string current_difficulty();
-float mission_elapsed();
+inline void push_tag(World& w, std::uint32_t e, const std::string& tag) {
+    if (!w.valid(e)) return;
+    if (!w.has<CTag>(e)) {
+        w.emplace_or_replace<CTag>(e, CTag{});
+    }
+    auto& tags = w.get<CTag>(e).tags;
+    tags.emplace_back(tag);
 }
+
+inline std::string make_tag(const std::string& prefix, const nlohmann::json& payload) {
+    return prefix + payload.dump();
+}
+
+// Parse helpers
+void parse_missions(const nlohmann::json& j, std::unordered_map<std::string, MissionDef>& out);
+MedalThresholds parse_medal_thresholds(const nlohmann::json& j);
+
+// Runtime helpers
+void reset_runtime_for_mission(const MissionDef& def, MissionRuntimeState& rt);
+void tick_objectives_from_tags(World& w, MissionRuntimeState& rt, const MissionDef& def, const std::string& objectiveProgressPrefix, std::uint32_t selfEntity);
+void maybe_award_medal_and_persist(World& w, std::uint32_t e, const MissionDef& def, MissionRuntimeState& rt, const MedalThresholds& thresholds,
+                                   const std::string& saveSectionPushPrefix, const std::string& saveRequestPrefix,
+                                   const std::string& uiToastPrefix, const std::string& missionCompletePrefix);
+
+// UI helpers
+void ensure_wrist_page_registered(World& w, std::uint32_t e, const std::string& uiPageRegisterPrefix);
+void update_wrist_status(World& w, std::uint32_t e, const MissionDef* def, const MissionRuntimeState& rt, const std::string& uiToastPrefix, float toastCooldownReset);
+
+} // namespace mission_util
 
 } // namespace ptv

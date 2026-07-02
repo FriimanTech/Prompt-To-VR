@@ -1,67 +1,65 @@
-#include "ptv/api/IMechanic.h"
-#include "ptv/ecs/World.h"
-#include "ptv/math/Math.h"
-#include <entt/entt.hpp>
-#include <nlohmann/json.hpp>
+#include "utility_constructs_shared.h"
+
 #include <algorithm>
-#include <unordered_map>
-// [ptv-bounds] removed disallowed include: utility_constructs_shared.h
 
-using namespace utility_internal;
+namespace ptv { namespace utility {
 
-namespace {
-std::optional<std::pair<std::uint32_t, float>> find_repair_target(ptv::World& w, std::uint32_t ring_entity) {
-    if (!w.has<ptv::CTransform>(ring_entity)) return std::nullopt;
-    const auto& rt = w.get<ptv::CTransform>(ring_entity).t;
-    const ptv::Vec3 fwd = rotate(rt.rotation, ptv::Vec3{0,0,1});
+static std::optional<entt::entity> find_repairable_in_front(World& w, std::uint32_t ring_e, float max_dist_m) {
+    if (!w.has<CTransform>(ring_e)) return std::nullopt;
+    const auto& hand = w.get<CTransform>(ring_e).t;
+    // Approximate forward from ring rotation (0,0,1) rotated by hand.rotation is not provided; use +Z in local: assume facing scene forward.
+    Vec3 fwd{0.0f, 0.0f, 1.0f};
     auto& reg = w.registry();
-    auto view = reg.view<ptv::CTransform, ptv::CTag>();
-    float bestDot = 0.0f;
-    std::uint32_t bestU = 0;
-    bool found = false;
+    auto view = reg.view<CTag, CTransform>();
+    entt::entity best = entt::null; float best_d = max_dist_m;
     for (auto e : view) {
-        std::uint32_t u = static_cast<std::uint32_t>(e);
-        if (!w.has<ptv::CTag>(u)) continue;
-        auto& tags = w.get<ptv::CTag>(u).tags;
-        if (std::find(tags.begin(), tags.end(), "repairable") == tags.end()) continue;
-        const auto& tr = w.get<ptv::CTransform>(u).t;
-        if (!utility_internal::in_forward_cone(rt, fwd, tr.position, 12.0f, std::cos(0.35f))) continue;
-        const ptv::Vec3 dir = normalize(tr.position - rt.position);
-        float d = dot(dir, fwd);
-        if (!found || d > bestDot) { found = true; bestDot = d; bestU = u; }
+        if (static_cast<std::uint32_t>(e) == ring_e) continue;
+        const auto& tags = view.get<CTag>(e).tags;
+        bool is_rep=false; for (const auto& s: tags){ if (s=="repairable") { is_rep=true; break; } }
+        if (!is_rep) continue;
+        const auto& tr = view.get<CTransform>(e).t;
+        Vec3 d = tr.position - hand.position;
+        float dist = std::sqrt(d.x*d.x + d.y*d.y + d.z*d.z);
+        if (dist > max_dist_m) continue;
+        // simple facing check
+        float facing = (d.x*fwd.x + d.y*fwd.y + d.z*fwd.z) / std::max(1e-4f, dist);
+        if (facing < 0.5f) continue;
+        if (dist < best_d) { best_d = dist; best = e; }
     }
-    if (!found) return std::nullopt;
-    return std::make_optional(std::make_pair(bestU, bestDot));
-}
+    if (best==entt::null) return std::nullopt; else return best;
 }
 
-namespace ptv {
-
-void UtilityConstructs::tick_repair(World& w, std::uint32_t ring_entity, const nlohmann::json& live, float dt) {
-    const bool activate = utility_internal::jflag(live, "activate_repair_tool", false);
-    const bool channel = utility_internal::jflag(live, "right_trigger_channel", false);
-
-    if (!activate) { repair_.current = entt::null; return; }
-
-    // Pick target in a forward cone
-    auto cand = find_repair_target(w, ring_entity);
-    if (!cand.has_value()) { repair_.current = entt::null; return; }
-
-    std::uint32_t target = cand->first;
-    if (channel) {
-        float& p = repair_.progress[static_cast<entt::entity>(target)];
-        p += repair_.rate * dt;
-        utility_internal::add_tag(w, target, "ui:repair_in_progress");
-        if (p >= 1.0f) {
-            p = 1.0f;
-            utility_internal::remove_tag(w, target, "ui:repair_in_progress");
-            utility_internal::add_tag(w, target, "repaired");
-            utility_internal::add_tag(w, target, "opened"); // door/panel open hook for tests
+void update_repair(World& w, std::uint32_t ring_e, UtilityConstructs& uc, const nlohmann::json& p, float dt) {
+    const bool begin = p.value("spawn_repair", false) || (p.value("selected", std::string("")) == std::string("construct_repair_tool_arm") && p.value("rt_confirm", false));
+    if (begin && !uc.repair_.channel) {
+        // No separate entity needed; start channel on target
+        auto target = find_repairable_in_front(w, ring_e, 4.0f);
+        if (target) {
+            uc.repair_.channel = true;
+            uc.repair_.target = *target;
+            uc.repair_.progress01 = 0.0f;
+            add_tag(w, static_cast<entt::entity>(ring_e), "haptics.publish:{\"pattern_id\":\"hover_light\",\"hand\":\"right\",\"intensity_scale\":0.7,\"duration_s\":0.05}");
         }
-    } else {
-        // Show aim hint
-        utility_internal::add_tag(w, target, "ui:repair_hint");
+    }
+
+    if (!uc.repair_.channel) return;
+
+    // If player stops aiming (very rough), gently decay channel
+    if (!find_repairable_in_front(w, ring_e, 4.5f).has_value() || find_repairable_in_front(w, ring_e, 4.5f).value()!=uc.repair_.target) {
+        uc.repair_.progress01 = std::max(0.0f, uc.repair_.progress01 - dt*0.2f);
+        return;
+    }
+
+    uc.repair_.progress01 = std::min(1.0f, uc.repair_.progress01 + dt * std::max(0.05f, uc.repair_.rate_per_s));
+    add_tag(w, uc.repair_.target, "hud.progress:update:{\"channel\":\"repair\"}");
+    add_tag(w, static_cast<entt::entity>(ring_e), "ring.energy:consume:{\"amount\":0.3}");
+
+    if (uc.repair_.progress01 >= 1.0f) {
+        // Fire completion event the door/panel logic can consume
+        add_tag(w, uc.repair_.target, "event.repair:complete");
+        add_tag(w, uc.repair_.target, "door.open");
+        uc.repair_ = RepairState{};
     }
 }
 
-} // namespace ptv
+}} // namespace ptv::utility

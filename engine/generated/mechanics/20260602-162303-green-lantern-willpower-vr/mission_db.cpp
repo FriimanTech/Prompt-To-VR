@@ -1,138 +1,86 @@
-#include "ptv/api/IMechanic.h"
-#include "ptv/ecs/World.h"
-#include "ptv/math/Math.h"
+#include "mission_shared.h"
 
-#include <nlohmann/json.hpp>
-#include <string>
-#include <vector>
-#include <unordered_map>
-#include <optional>
+#include <cstddef>
 
-namespace ptv {
+namespace ptv { namespace mission_util {
 
-struct ObjectiveDef {
-    std::string id;
-    std::string kind;
-    float target_value{1.0f};
-    std::string description;
-};
-
-struct MissionMedalThresholds {
-    float bronze{0.0f};
-    float silver{0.0f};
-    float gold{0.0f};
-    bool smaller_is_better{false};
-};
-
-struct MissionDef {
-    std::string id;
-    std::vector<std::string> scenes;
-    std::vector<ObjectiveDef> chain;
-    std::optional<MissionMedalThresholds> medals;
-    std::string difficulty_profile;
-};
-
-struct MissionDB {
-    std::unordered_map<std::string, MissionDef> by_id;
-};
-
-namespace {
-
-static MissionDef make_zero_g_gauntlet_default() {
-    MissionDef m;
-    m.id = "zero_g_flight_gauntlet";
-    m.scenes = {"zero_g_flight_gauntlet"};
-    m.chain = {
-        ObjectiveDef{ "reach_gate", "time_trial", 1.0f, "Sprint through the gauntlet and finish fast." }
-    };
-    MissionMedalThresholds t;
-    // Reasonable placeholder thresholds (seconds): Bronze 90, Silver 70, Gold 55
-    t.bronze = 90.0f; t.silver = 70.0f; t.gold = 55.0f; t.smaller_is_better = true;
-    m.medals = t;
-    m.difficulty_profile = "flight_gauntlet";
-    return m;
-}
-
-static MissionDef make_civilian_rescue_default() {
-    MissionDef m;
-    m.id = "civilian_rescue_zone";
-    m.scenes = {"civilian_rescue_zone"};
-    m.chain = {
-        ObjectiveDef{ "rescue_civilians", "rescue", 5.0f, "Rescue 5 civilians." }
-    };
-    m.medals.reset();
-    m.difficulty_profile = "rescue_ops";
-    return m;
-}
-
-static MissionDef make_alien_city_defense_default() {
-    MissionDef m;
-    m.id = "alien_city_attack";
-    m.scenes = {"alien_city_attack"};
-    m.chain = {
-        ObjectiveDef{ "defend_city", "defend", 100.0f, "Hold for 100 seconds." }
-    };
-    m.medals.reset();
-    m.difficulty_profile = "defense";
-    return m;
-}
-
-static void try_parse_medals(const nlohmann::json& j, MissionMedalThresholds& out) {
-    if (j.contains("bronze")) out.bronze = j.at("bronze").get<float>();
-    if (j.contains("silver")) out.silver = j.at("silver").get<float>();
-    if (j.contains("gold")) out.gold = j.at("gold").get<float>();
-    if (j.contains("smaller_is_better")) out.smaller_is_better = j.at("smaller_is_better").get<bool>();
-}
-
-static void try_parse_objectives(const nlohmann::json& arr, std::vector<ObjectiveDef>& chain) {
-    for (const auto& oj : arr) {
-        if (!oj.is_object()) continue;
-        ObjectiveDef o;
-        o.id = oj.value("id", std::string{});
-        o.kind = oj.value("kind", std::string{"custom"});
-        o.target_value = oj.value("target", 1.0f);
-        o.description = oj.value("description", std::string{});
-        if (!o.id.empty()) chain.push_back(o);
+static ObjectiveDef parse_objective(const nlohmann::json& j) {
+    ObjectiveDef o;
+    if (j.is_object()) {
+        o.id = j.value("id", std::string{});
+        o.type = j.value("type", std::string{"generic"});
+        o.target_count = j.value("target_count", 1);
     }
+    return o;
 }
 
-} // namespace
+static DifficultyTier parse_tier(const nlohmann::json& j) {
+    DifficultyTier t;
+    if (j.is_object()) {
+        t.id = j.value("id", std::string{"normal"});
+        t.ai_scale = j.value("ai_scale", 1.0f);
+        t.spawn_multiplier = j.value("spawn_multiplier", 1.0f);
+        t.score_multiplier = j.value("score_multiplier", 1.0f);
+    }
+    return t;
+}
 
-// Build DB either from binding params or fall back to defaults.
-static MissionDB build_db_from_params(const nlohmann::json& params) {
-    MissionDB db;
-    if (params.is_object() && params.contains("missions") && params.at("missions").is_array()) {
-        for (const auto& mj : params.at("missions")) {
-            if (!mj.is_object()) continue;
-            MissionDef m;
-            m.id = mj.value("id", std::string{});
-            if (m.id.empty()) continue;
-            if (mj.contains("scenes") && mj.at("scenes").is_array()) {
-                for (const auto& s : mj.at("scenes")) m.scenes.push_back(s.get<std::string>());
-            }
-            if (mj.contains("objectives") && mj.at("objectives").is_array()) {
-                try_parse_objectives(mj.at("objectives"), m.chain);
-            }
-            if (mj.contains("medal_thresholds") && mj.at("medal_thresholds").is_object()) {
-                MissionMedalThresholds t{}; try_parse_medals(mj.at("medal_thresholds"), t); m.medals = t;
-            }
-            m.difficulty_profile = mj.value("difficulty_profile", std::string{"default"});
-            db.by_id.emplace(m.id, std::move(m));
+void parse_missions(const nlohmann::json& j, std::unordered_map<std::string, MissionDef>& out) {
+    out.clear();
+    if (!j.is_array()) return;
+    for (const auto& m : j) {
+        if (!m.is_object()) continue;
+        MissionDef def;
+        def.id = m.value("id", std::string{});
+        def.base_reward_xp = m.value("base_reward_xp", 0);
+        if (m.contains("scenes") && m["scenes"].is_array()) {
+            for (const auto& s : m["scenes"]) def.scenes.emplace_back(s.get<std::string>());
         }
+        if (m.contains("objectives") && m["objectives"].is_array()) {
+            for (const auto& o : m["objectives"]) def.objectives.emplace_back(parse_objective(o));
+        }
+        if (m.contains("challenges") && m["challenges"].is_array()) {
+            for (const auto& c : m["challenges"]) {
+                if (!c.is_object()) continue;
+                ChallengeDef ch; ch.id = c.value("id", std::string{}); ch.rule = c.value("rule", std::string{}); ch.threshold = c.value("threshold", 0.0f);
+                def.challenges.emplace_back(std::move(ch));
+            }
+        }
+        if (m.contains("difficulty_tiers") && m["difficulty_tiers"].is_array()) {
+            for (const auto& t : m["difficulty_tiers"]) def.tiers.emplace_back(parse_tier(t));
+        }
+        if (!def.id.empty()) out[def.id] = std::move(def);
     }
-
-    // Ensure key demo missions exist for test hooks
-    if (!db.by_id.count("zero_g_flight_gauntlet")) db.by_id.emplace("zero_g_flight_gauntlet", make_zero_g_gauntlet_default());
-    if (!db.by_id.count("civilian_rescue_zone")) db.by_id.emplace("civilian_rescue_zone", make_civilian_rescue_default());
-    if (!db.by_id.count("alien_city_attack")) db.by_id.emplace("alien_city_attack", make_alien_city_defense_default());
-    return db;
 }
 
-// Expose to other translation units in this mechanic.
-MissionDB g_mission_db; // defined here, referenced in register/runtime files
-
-void mission_db_ensure_built_from(const nlohmann::json& params) {
-    g_mission_db = build_db_from_params(params);
+MedalThresholds parse_medal_thresholds(const nlohmann::json& j) {
+    MedalThresholds mt;
+    if (!j.is_object()) return mt;
+    for (auto it = j.begin(); it != j.end(); ++it) {
+        const std::string mid = it.key();
+        MedalThresholds::Trio trio{};
+        if (it.value().is_object()) {
+            trio.bronze = it.value().value("bronze", 0.0f);
+            trio.silver = it.value().value("silver", 0.0f);
+            trio.gold   = it.value().value("gold",   0.0f);
+        }
+        mt.by_mission[mid] = trio;
+    }
+    return mt;
 }
 
-} // namespace ptv
+void reset_runtime_for_mission(const MissionDef& def, MissionRuntimeState& rt) {
+    rt.objective_index = 0;
+    rt.in_progress = false;
+    rt.finished = false;
+    rt.failed = false;
+    rt.elapsed_s = 0.0f;
+    rt.score = 0;
+    rt.medal.reset();
+    rt.objective_progress.clear();
+    for (const auto& o : def.objectives) {
+        rt.objective_progress[o.id] = ObjectiveProgress{0, std::max(1, o.target_count), false};
+    }
+}
+
+}} // namespace ptv::mission_util

@@ -5,307 +5,225 @@
 #include <nlohmann/json.hpp>
 #include <entt/entt.hpp>
 #include <string>
-#include <vector>
 #include <unordered_map>
-#include <variant>
-#include <cmath>
-#include <algorithm>
 #include <optional>
 
+#include "hazards_shared.h"
+
 namespace ptv {
-
-namespace mission_api {
-    void post_objective_progress(std::uint32_t actor_entity, float amount);
-    void set_score_delta(float amount);
-    bool mission_in_progress();
-}
-
-struct HazardConfig {
-    float radius{5.0f};
-    float period_s{3.0f};
-    float strength{1.0f};
-    bool laser_reflectable{true};
-    float laser_progress_rate{0.1f};
-    float vent_burst_duty{0.4f};
-    float vent_pull_mps{2.0f};
-    float debris_interval_s{4.0f};
-    float debris_telegraph_s{1.5f};
-    float debris_hit_radius{1.0f};
-};
-
-static void parse_hazard_config(const nlohmann::json& params, HazardConfig& cfg) {
-    if (!params.is_object()) return;
-    cfg.radius = params.value("radius", cfg.radius);
-    cfg.period_s = params.value("period_s", cfg.period_s);
-    cfg.strength = params.value("strength", cfg.strength);
-    cfg.laser_reflectable = params.value("laser_reflectable", cfg.laser_reflectable);
-    cfg.laser_progress_rate = params.value("laser_progress_rate", cfg.laser_progress_rate);
-    cfg.vent_burst_duty = params.value("vent_burst_duty", cfg.vent_burst_duty);
-    cfg.vent_pull_mps = params.value("vent_pull_mps", cfg.vent_pull_mps);
-    cfg.debris_interval_s = params.value("debris_interval_s", cfg.debris_interval_s);
-    cfg.debris_telegraph_s = params.value("debris_telegraph_s", cfg.debris_telegraph_s);
-    cfg.debris_hit_radius = params.value("debris_hit_radius", cfg.debris_hit_radius);
-}
-
-static bool entity_has_tag(World& w, std::uint32_t e, const std::string& tag) {
-    if (!w.has<CTag>(e)) return false;
-    const auto& tags = w.get<CTag>(e).tags;
-    return std::find(tags.begin(), tags.end(), tag) != tags.end();
-}
-
-static void ensure_tag(World& w, std::uint32_t e, const std::string& tag) {
-    CTag ct;
-    if (w.has<CTag>(e)) ct = w.get<CTag>(e);
-    if (std::find(ct.tags.begin(), ct.tags.end(), tag) == ct.tags.end()) {
-        ct.tags.push_back(tag);
-        w.emplace_or_replace<CTag>(e, ct);
-    }
-}
-
-static void remove_tag(World& w, std::uint32_t e, const std::string& tag) {
-    if (!w.has<CTag>(e)) return;
-    auto ct = w.get<CTag>(e);
-    ct.tags.erase(std::remove(ct.tags.begin(), ct.tags.end(), tag), ct.tags.end());
-    w.emplace_or_replace<CTag>(e, ct);
-}
-
-static std::optional<std::uint32_t> find_first_player(World& w) {
-    auto& reg = w.registry();
-    auto view = reg.view<CTag>();
-    for (auto ent : view) {
-        const auto& tags = reg.get<CTag>(ent).tags;
-        if (std::find(tags.begin(), tags.end(), "player_avatar") != tags.end() ||
-            std::find(tags.begin(), tags.end(), "player") != tags.end()) {
-            return static_cast<std::uint32_t>(ent);
-        }
-    }
-    return std::nullopt;
-}
-
-static float dist(const Vec3& a, const Vec3& b) {
-    float dx = a.x - b.x, dy = a.y - b.y, dz = a.z - b.z;
-    return std::sqrt(dx * dx + dy * dy + dz * dz);
-}
-
-static void approach(float& current, float target, float speed, float dt) {
-    current += (target - current) * std::min(1.0f, speed * dt);
-}
-
-static float segment_point_distance(const Vec3& a, const Vec3& b, const Vec3& p) {
-    Vec3 ab{b.x - a.x, b.y - a.y, b.z - a.z};
-    Vec3 ap{p.x - a.x, p.y - a.y, p.z - a.z};
-    float ab_dot = ab.x * ab.x + ab.y * ab.y + ab.z * ab.z;
-    if (ab_dot < 1e-8f) return dist(a, p);
-    float t = std::max(0.0f, std::min(1.0f, (ap.x * ab.x + ap.y * ab.y + ap.z * ab.z) / ab_dot));
-    Vec3 proj{a.x + t * ab.x, a.y + t * ab.y, a.z + t * ab.z};
-    return dist(proj, p);
-}
-
-enum class HazardType { kUnknown, kLaser, kVent, kDebris, kYellow };
-
-struct LaserState {
-    float t{0.f};
-    float progress{0.f};
-    bool last_reflected{false};
-};
-struct VentState {
-    float t{0.f};
-};
-struct DebrisState {
-    float t{0.f};
-    bool telegraph{false};
-    float telegraph_t{0.f};
-};
-struct YellowState {
-    float level{0.f};
-    bool inside{false};
-};
-
-using StateVariant = std::variant<std::monostate, LaserState, VentState, DebrisState, YellowState>;
 
 class EnvironmentalHazards : public IMechanic {
 public:
     void on_attach(World& w, std::uint32_t e, const nlohmann::json& params) override {
-        type_ = HazardType::kUnknown;
-        if (entity_has_tag(w, e, "laser")) type_ = HazardType::kLaser;
-        else if (entity_has_tag(w, e, "vent")) type_ = HazardType::kVent;
-        else if (entity_has_tag(w, e, "yellow_zone")) type_ = HazardType::kYellow;
-        else if (entity_has_tag(w, e, "hazard")) type_ = HazardType::kDebris;
-
-        parse_hazard_config(params, cfg_);
-
-        if (params.contains("debris")) {
-            auto d = params.at("debris");
-            if (d.contains("spawn_local")) debris_spawn_local_ = to_vec3(d.at("spawn_local"));
-            if (d.contains("impact_local")) debris_impact_local_ = to_vec3(d.at("impact_local"));
-        }
-
-        switch (type_) {
-            case HazardType::kLaser: state_ = LaserState{}; break;
-            case HazardType::kVent: state_ = VentState{}; break;
-            case HazardType::kDebris: state_ = DebrisState{}; break;
-            case HazardType::kYellow: state_ = YellowState{}; break;
-            default: state_ = std::monostate{}; break;
+        auto& rt = state_[e];
+        rt.kind = infer_hazard_kind(w, e, params);
+        // Configure from params when present
+        if (rt.kind == HazardKind::Laser) {
+            if (params.is_object()) {
+                if (params.contains("laser_dir")) {
+                    auto dv = j_vec3(params, "laser_dir");
+                    if (dv) rt.laser.dir = safe_normalize(*dv);
+                }
+                rt.laser.max_range_m = params.value("laser_range_m", rt.laser.max_range_m);
+                rt.laser.pulse_period_s = params.value("laser_pulse_period_s", rt.laser.pulse_period_s);
+                if (params.contains("power_node_id")) rt.laser.power_node_id = params.at("power_node_id").get<std::string>();
+            }
+        } else if (rt.kind == HazardKind::Vent) {
+            if (params.is_object()) {
+                rt.vent.period_s = params.value("period_s", rt.vent.period_s);
+                rt.vent.on_s = params.value("on_s", rt.vent.on_s);
+                rt.vent.suction_strength = params.value("strength", rt.vent.suction_strength);
+                rt.vent.fail_respawn = params.value("fail_respawn", rt.vent.fail_respawn);
+            }
+        } else if (rt.kind == HazardKind::DebrisSpawner) {
+            if (params.is_object()) {
+                rt.debris.interval_s = params.value("interval_s", rt.debris.interval_s);
+                rt.debris.warn_s = params.value("warn_s", rt.debris.warn_s);
+                rt.debris.speed_mps = params.value("speed_mps", rt.debris.speed_mps);
+                rt.debris.ttl_s = params.value("ttl_s", rt.debris.ttl_s);
+            }
+        } else if (rt.kind == HazardKind::YellowZone) {
+            if (params.is_object()) {
+                rt.yellow.drain_multiplier = params.value("drain_multiplier", rt.yellow.drain_multiplier);
+                rt.yellow.tether_break_add = params.value("tether_break_add", rt.yellow.tether_break_add);
+            }
         }
     }
 
     void on_update(World& w, std::uint32_t e, float dt) override {
         if (!w.valid(e)) return;
-        if (!w.has<CTransform>(e)) return;
-        auto& tr = w.get<CTransform>(e).t;
+        auto it = state_.find(e);
+        if (it == state_.end()) return;
 
-        switch (type_) {
-            case HazardType::kLaser: tick_laser(w, e, tr, dt); break;
-            case HazardType::kVent: tick_vent(w, e, tr, dt); break;
-            case HazardType::kDebris: tick_debris(w, e, tr, dt); break;
-            case HazardType::kYellow: tick_yellow(w, e, tr, dt); break;
+        // Read live params from this binding's entry (for trigger zones etc.)
+        nlohmann::json live_params;
+        if (w.has<CMechanicBinding>(e)) {
+            const auto& mb = w.get<CMechanicBinding>(e);
+            for (const auto& entry : mb.entries) {
+                if (entry.id == id()) {
+                    live_params = nlohmann::json::parse(entry.params_json, nullptr, false);
+                    break;
+                }
+            }
+        }
+
+        switch (it->second.kind) {
+            case HazardKind::Laser:   update_laser(w, e, dt, it->second, live_params); break;
+            case HazardKind::Vent:    update_vent(w, e, dt, it->second, live_params); break;
+            case HazardKind::DebrisSpawner: update_debris(w, e, dt, it->second, live_params); break;
+            case HazardKind::YellowZone: update_yellow(w, e, dt, it->second, live_params); break;
             default: break;
         }
     }
 
     void on_detach(World& w, std::uint32_t e) override {
-        if (type_ == HazardType::kYellow) {
-            if (auto pe = find_first_player(w)) {
-                remove_tag(w, *pe, "yellow_suppression_active");
-                remove_tag(w, *pe, "ring_drain_x1.5");
-                remove_tag(w, *pe, "control_tether_unstable");
-            }
-        }
+        state_.erase(e);
     }
 
     std::string id() const override { return "generated.environmental_hazards"; }
 
 private:
-    static Vec3 to_vec3(const nlohmann::json& j) {
-        Vec3 v{0,0,0};
-        if (j.is_array() && j.size()==3) { v.x=j[0].get<float>(); v.y=j[1].get<float>(); v.z=j[2].get<float>(); }
-        else if (j.is_object()) {
-            v.x = j.value("x", 0.0f); v.y = j.value("y", 0.0f); v.z = j.value("z", 0.0f);
-        }
-        return v;
+    std::unordered_map<std::uint32_t, HazardRuntime> state_;
+
+    static ptv::Vec3 forward_from_rot(const ptv::Quat& q) {
+        // Assuming engine Quat is w,x,y,z
+        // Forward vector of Transform (0,0,1) rotated by q
+        // Minimal, not allocating matrices
+        float w_ = q.w, x = q.x, y = q.y, z = q.z;
+        // Rotate vector (0,0,1)
+        float vx = 2.0f*(x*z + w_*y);
+        float vy = 2.0f*(y*z - w_*x);
+        float vz = 1.0f - 2.0f*(x*x + y*y);
+        return ptv::Vec3{vx, vy, vz};
     }
 
-    void tick_laser(World& w, std::uint32_t e, Transform& tr, float dt) {
-        auto& s = std::get<LaserState>(state_);
-        s.t += dt;
-
-        bool reflected = false;
-        if (cfg_.laser_reflectable) {
-            reflected = find_barrier_nearby(w, tr.position, 4.0f);
-        }
-
-        if (reflected) {
-            s.progress += cfg_.laser_progress_rate * dt;
-            if (mission_api::mission_in_progress()) {
-                mission_api::post_objective_progress(e, s.progress);
+    void update_laser(World& w, std::uint32_t e, float dt, HazardRuntime& rt, const nlohmann::json& p) {
+        if (!w.has<CTransform>(e)) return;
+        auto& tr = w.get<CTransform>(e).t;
+        // Base direction from params or entity rotation
+        ptv::Vec3 dir = rt.laser.dir;
+        if (dir.x==0 && dir.y==0 && dir.z==0) dir = safe_normalize(forward_from_rot(tr.rotation));
+        // Optional reflection normal supplied by tests / barrier wall
+        ptv::Vec3 out_dir = dir;
+        if (p.is_object() && p.contains("reflection_normal")) {
+            auto n = j_vec3(p, "reflection_normal");
+            if (n) {
+                auto nrm = safe_normalize(*n);
+                out_dir = reflect(safe_normalize(dir), nrm);
             }
         }
-        s.last_reflected = reflected;
-
-        if (reflected) ensure_tag(w, e, "laser_reflected");
-        else remove_tag(w, e, "laser_reflected");
-    }
-
-    bool find_barrier_nearby(World& w, const Vec3& pos, float r) {
-        auto& reg = w.registry();
-        auto view = reg.view<CTag, CTransform>();
-        for (auto ent : view) {
-            std::uint32_t x = static_cast<std::uint32_t>(ent);
-            if (!entity_has_tag(w, x, "defense")) continue;
-            if (entity_has_tag(w, x, "barrier_wall") || entity_has_tag(w, x, "dome_shield") || entity_has_tag(w, x, "round_shield")) {
-                const auto& tp = w.get<CTransform>(x).t.position;
-                if (dist(tp, pos) <= r) return true;
-            }
+        // Pulse VFX hint (emit lightweight tag)
+        rt.laser.pulse_timer += dt;
+        if (rt.laser.pulse_timer >= rt.laser.pulse_period_s) {
+            rt.laser.pulse_timer = 0.0f;
+            nlohmann::json jvfx = {
+                {"id", "mining_laser_pulse"},
+                {"pos", {{"x", tr.position.x},{"y", tr.position.y},{"z", tr.position.z}}},
+                {"dir", {{"x", out_dir.x},{"y", out_dir.y},{"z", out_dir.z}}},
+                {"ttl", 0.35f}
+            };
+            hazards_push_tag(w, e, "vfx.spawn:", jvfx);
         }
-        return false;
-    }
-
-    void tick_vent(World& w, std::uint32_t e, Transform& tr, float dt) {
-        auto& s = std::get<VentState>(state_);
-        s.t += dt;
-        auto pe = find_first_player(w);
-        if (!pe) return;
-        if (!w.has<CTransform>(*pe)) return;
-        auto& ptr = w.get<CTransform>(*pe).t;
-        float d = dist(ptr.position, tr.position);
-        if (d > cfg_.radius) { remove_tag(w, *pe, "vent_suction_active"); return; }
-
-        float phase = std::fmod(s.t, cfg_.period_s) / std::max(0.001f, cfg_.period_s);
-        bool burst = phase < cfg_.vent_burst_duty;
-        if (!burst) { remove_tag(w, *pe, "vent_suction_active"); return; }
-
-        ensure_tag(w, *pe, "vent_suction_active");
-        Vec3 dir{tr.position.x - ptr.position.x, tr.position.y - ptr.position.y, tr.position.z - ptr.position.z};
-        float invd = 1.0f / std::max(0.001f, d);
-        dir.x *= invd; dir.y *= invd; dir.z *= invd;
-        float pull = cfg_.vent_pull_mps * (1.0f - d / std::max(0.001f, cfg_.radius));
-        ptr.position.x += dir.x * pull * dt;
-        ptr.position.y += dir.y * pull * dt;
-        ptr.position.z += dir.z * pull * dt;
-
-        if (d < 0.4f) {
-            ensure_tag(w, *pe, "checkpoint_respawn_requested");
-        }
-    }
-
-    void tick_debris(World& w, std::uint32_t e, Transform& tr, float dt) {
-        auto& s = std::get<DebrisState>(state_);
-        s.t += dt;
-        float cycle = std::fmod(s.t, cfg_.debris_interval_s);
-        if (cycle < cfg_.debris_telegraph_s) {
-            s.telegraph = true; s.telegraph_t = cycle; ensure_tag(w, e, "debris_telegraph");
-        } else {
-            if (s.telegraph) {
-                s.telegraph = false; remove_tag(w, e, "debris_telegraph");
-                resolve_debris_impact(w, e, tr);
+        // Power node alignment: if provided and roughly aimed within 8 degrees
+        if (!rt.laser.powered_once && !rt.laser.power_node_id.empty()) {
+            auto node_e = w.find(rt.laser.power_node_id);
+            if (node_e != entt::null && w.has<CTransform>(static_cast<std::uint32_t>(node_e))) {
+                auto& nt = w.get<CTransform>(static_cast<std::uint32_t>(node_e)).t;
+                ptv::Vec3 to_node{ nt.position.x - tr.position.x, nt.position.y - tr.position.y, nt.position.z - tr.position.z };
+                auto dn = safe_normalize(to_node);
+                auto od = safe_normalize(out_dir);
+                float dot = dn.x*od.x + dn.y*od.y + dn.z*od.z;
+                if (dot > std::cos(8.0f * 3.14159265f/180.0f)) {
+                    // Emit objective progress via Mission System contract
+                    nlohmann::json jo = {
+                        {"id", "laser_power_node"},
+                        {"amount", 1.0f},
+                        {"source", "mining_laser"}
+                    };
+                    hazards_push_tag(w, e, kObjectiveProgress, jo);
+                    rt.laser.powered_once = true;
+                    hazards_push_tag(w, e, "ui.toast:", nlohmann::json{{"text","Power node energized"},{"ttl",1.5f}});
+                }
             }
         }
     }
 
-    void resolve_debris_impact(World& w, std::uint32_t e, Transform& tr) {
-        Vec3 a{tr.position.x + debris_spawn_local_.x, tr.position.y + debris_spawn_local_.y, tr.position.z + debris_spawn_local_.z};
-        Vec3 b{tr.position.x + debris_impact_local_.x, tr.position.y + debris_impact_local_.y, tr.position.z + debris_impact_local_.z};
-        if (auto pe = find_first_player(w)) {
-            if (!w.has<CTransform>(*pe)) return;
-            auto pp = w.get<CTransform>(*pe).t.position;
-            float dd = segment_point_distance(a, b, pp);
-            if (dd <= cfg_.debris_hit_radius) {
-                ensure_tag(w, *pe, "debris_hit");
-                mission_api::set_score_delta(-5.0f * cfg_.strength);
+    void update_vent(World& w, std::uint32_t e, float dt, HazardRuntime& rt, const nlohmann::json& p) {
+        if (!w.has<CTransform>(e)) return;
+        auto& tr = w.get<CTransform>(e).t;
+        rt.vent.t += dt;
+        float phase = std::fmod(rt.vent.t, std::max(0.001f, rt.vent.period_s));
+        bool vent_on = (phase < rt.vent.on_s);
+
+        // If trigger system supplies inside flag, honor it
+        bool inside = p.is_object() ? p.value("inside", false) : false;
+
+        if (vent_on) {
+            // Pull toward vent center
+            nlohmann::json jf = {
+                {"dir", {{"x", -tr.position.x},{"y", -tr.position.y},{"z", -tr.position.z}}}, // world to origin-ish; scenes place vents at breach walls, acceptable heuristic
+                {"strength", rt.vent.suction_strength},
+                {"ttl", 0.2f}
+            };
+            hazards_push_tag(w, e, kHazardForce, jf);
+            // Telegraph
+            hazards_push_tag(w, e, "vfx.toggle:", nlohmann::json{{"id","vent_suction"},{"state","on"},{"ttl", rt.vent.on_s}});
+        }
+        if (!vent_on) {
+            hazards_push_tag(w, e, "vfx.toggle:", nlohmann::json{{"id","vent_suction"},{"state","off"},{"ttl", 0.1f}});
+        }
+        if (inside && p.is_object() && p.value("fail_volume", false)) {
+            // Request a respawn via a lightweight checkpoint hook
+            hazards_push_tag(w, e, "checkpoint.respawn.request:", nlohmann::json{{"reason","decompression"}});
+        }
+    }
+
+    void update_debris(World& w, std::uint32_t e, float dt, HazardRuntime& rt, const nlohmann::json& p) {
+        if (!w.has<CTransform>(e)) return;
+        auto& tr = w.get<CTransform>(e).t;
+        rt.debris.t += dt;
+        if (rt.debris.t >= rt.debris.interval_s) {
+            rt.debris.t = 0.0f;
+            // Warn
+            nlohmann::json jw = {
+                {"id", "debris_warning"},
+                {"pos", {{"x", tr.position.x},{"y", tr.position.y+3.0f},{"z", tr.position.z}}},
+                {"ttl", rt.debris.warn_s}
+            };
+            hazards_push_tag(w, e, "vfx.spawn:", jw);
+            // Spawn a moment later implied by consumer; include sequence to vary
+            ptv::Vec3 dir = p.is_object() && p.contains("spawn_dir") ? safe_normalize(*j_vec3(p, "spawn_dir")) : ptv::Vec3{0,-1,0};
+            nlohmann::json js = {
+                {"id", "asteroid_debris"},
+                {"seq", rt.debris.sequence++},
+                {"pos", {{"x", tr.position.x},{"y", tr.position.y+8.0f},{"z", tr.position.z}}},
+                {"dir", {{"x", dir.x},{"y", dir.y},{"z", dir.z}}},
+                {"speed", rt.debris.speed_mps},
+                {"ttl", rt.debris.ttl_s}
+            };
+            hazards_push_tag(w, e, kSpawnerRequest, js);
+        }
+    }
+
+    void update_yellow(World& w, std::uint32_t e, float, HazardRuntime& rt, const nlohmann::json& p) {
+        bool inside = p.is_object() ? p.value("inside", false) : false;
+        if (inside) {
+            // Ring drain multiplier request
+            hazards_push_tag(w, e, kRingDrainMultiplier, nlohmann::json{{"mult", rt.yellow.drain_multiplier},{"ttl", 0.2f}});
+            // Control suppression
+            hazards_push_tag(w, e, kControlSuppression, nlohmann::json{{"tether_break_add", rt.yellow.tether_break_add},{"ttl", 0.2f}});
+            // HUD indicator amber suppression
+            hazards_push_tag(w, e, kHudIndicator, nlohmann::json{{"id","suppression"},{"color","amber"},{"state","on"},{"ttl",0.3f}});
+            if (!rt.yellow.active_last) {
+                hazards_push_tag(w, e, "ui.toast:", nlohmann::json{{"text","Yellow energy suppresses constructs"},{"ttl",2.0f}});
             }
+            rt.yellow.active_last = true;
+        } else if (rt.yellow.active_last) {
+            // Turn off indicator on exit
+            hazards_push_tag(w, e, kHudIndicator, nlohmann::json{{"id","suppression"},{"state","off"},{"ttl",0.3f}});
+            rt.yellow.active_last = false;
         }
     }
-
-    void tick_yellow(World& w, std::uint32_t e, Transform& tr, float dt) {
-        auto& s = std::get<YellowState>(state_);
-        auto pe = find_first_player(w);
-        if (!pe || !w.has<CTransform>(*pe)) return;
-        auto pp = w.get<CTransform>(*pe).t.position;
-        float d = dist(pp, tr.position);
-        bool inside = d <= cfg_.radius * tr.scale;
-        s.inside = inside;
-        approach(s.level, inside ? 1.0f : 0.0f, 3.0f, dt);
-
-        if (s.level > 0.01f) {
-            ensure_tag(w, *pe, "yellow_suppression_active");
-            ensure_tag(w, *pe, "ring_drain_x1.5");
-            ensure_tag(w, *pe, "control_tether_unstable");
-        } else {
-            remove_tag(w, *pe, "yellow_suppression_active");
-            remove_tag(w, *pe, "ring_drain_x1.5");
-            remove_tag(w, *pe, "control_tether_unstable");
-        }
-
-        if (inside) ensure_tag(w, e, "yellow_zone_active"); else remove_tag(w, e, "yellow_zone_active");
-    }
-
-private:
-    HazardType type_{HazardType::kUnknown};
-    HazardConfig cfg_{};
-    StateVariant state_{};
-
-    Vec3 debris_spawn_local_{0.f, 3.f, 0.f};
-    Vec3 debris_impact_local_{0.f, 0.f, 0.f};
 };
 
 } // namespace ptv

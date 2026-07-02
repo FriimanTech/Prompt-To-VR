@@ -24,10 +24,15 @@ using DialogueHookFactory = std::function<std::unique_ptr<IDialogueHook>()>;
 
 bool register_dialogue_hook(const std::string& id, DialogueHookFactory factory);
 
+#define PTV_DETAIL_CONCAT_D_(a, b) a##b
+#define PTV_DETAIL_CONCAT_D(a, b) PTV_DETAIL_CONCAT_D_(a, b)
+
 #define PTV_REGISTER_DIALOGUE_HOOK(id_literal, TypeName)                                           \
     namespace {                                                                                    \
-        const bool _ptv_regd_##TypeName = ::ptv::register_dialogue_hook(                           \
-            id_literal, [] { return std::unique_ptr<::ptv::IDialogueHook>(new TypeName()); });     \
+        const bool PTV_DETAIL_CONCAT_D(_ptv_regd_, PTV_DETAIL_CONCAT_D(__LINE__, __COUNTER__)) =   \
+            ::ptv::register_dialogue_hook(                                                          \
+                id_literal,                                                                         \
+                [] { return std::unique_ptr<::ptv::IDialogueHook>(new TypeName()); });              \
     }
 
 }  // namespace ptv

@@ -6,7 +6,7 @@ Prompt-To-Native-VR pipeline:
 | Provider | Wrapper | Default model / version |
 |---|---|---|
 | Anthropic | `AnthropicClient` | `claude-opus-4-7` / `claude-sonnet-4-6` |
-| Google GenAI | `GoogleImageClient` | `imagen-4.0-generate-001` + `gemini-2.5-flash-image` fallback |
+| Google GenAI | `GoogleImageClient` | `gemini-3.1-flash-image` via `generate_content` |
 | Tripo | `TripoClient` | defaults to the SDK's latest `model_version`; always textured + PBR + image-aligned |
 
 All three wrappers are safe to import even if the corresponding SDK is not

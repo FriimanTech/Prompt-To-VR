@@ -34,14 +34,18 @@ The three providers used by the pipeline.
   orchestrator re-validates the result with the same Pydantic model Claude
   would have been validated against, so artifact integrity is preserved.
 
-## Google (Gemini + Imagen)
+## Google (Gemini image generation)
 
 - Get an API key at <https://aistudio.google.com/app/apikey>.
 - Paste into `.env` as `GOOGLE_API_KEY` (the SDK also accepts
   `GEMINI_API_KEY`; both work).
-- Default models:
-  - `IMAGEN_MODEL=imagen-4.0-generate-001` (primary).
-  - `GEMINI_IMAGE_MODEL=gemini-2.5-flash-image` (fallback).
+- Default model:
+  - `GEMINI_IMAGE_MODEL=gemini-3.1-flash-image` (text-to-image via
+    `generate_content` with `response_modalities=["IMAGE"]`).
+- Imagen 4 endpoints (`imagen-4.0-generate-001`, `imagen-4.0-ultra-*`,
+  `imagen-4.0-fast-*`) are discontinued after **2026-08-17**. If your
+  `.env` still has `IMAGEN_MODEL=...`, remove it and set
+  `GEMINI_IMAGE_MODEL=gemini-3.1-flash-image` instead.
 - Python SDK package: `google-genai`. Installed automatically when you
   `pip install -e packages/provider-clients`.
 
@@ -100,7 +104,7 @@ Pills are red with ✗ if a key is missing.
 | AssetManifest | Anthropic `claude-sonnet-4-6` | OpenAI `gpt-5-mini` | JSON schema |
 | MechanicPlan | Anthropic `claude-opus-4-7` | OpenAI `gpt-5` | JSON schema |
 | SceneSpec (per scene) | Anthropic `claude-opus-4-7` | OpenAI `gpt-5` | JSON schema |
-| Reference image (primary) | Google `imagen-4.0-generate-001` | Google `gemini-2.5-flash-image` | — |
+| Reference image | Google `gemini-3.1-flash-image` | — | — |
 | Image-to-3D | Tripo (default latest, configurable) | — | textured + PBR |
 | C++ module | Anthropic `claude-opus-4-7` | OpenAI `gpt-5` | free-form, guarded by boundaries |
 
@@ -128,13 +132,12 @@ it, either:
 * raise `OpenAIConfig.max_tokens` (or pass `max_tokens=...` on the call), or
 * set `OPENAI_HARD_MODEL=gpt-5-mini` (faster, cheaper, smaller reasoning budget needed for our schemas).
 
-### `Imagen request failed: ... negative_prompt ...`
+### `negative_prompt` on reference images
 
-`negative_prompt` is a Vertex-AI-only knob on `imagen-4.0-*`. The Gemini
-Developer API (what `GOOGLE_API_KEY` typically points at) rejects it. The
-client automatically retries without it on 400s, but if you supply a
-`negative_prompt` in an `AssetRef` and see this in the logs, just leave the
-field blank.
+Asset manifests may carry a `negative_prompt` field (a holdover from the old
+Imagen path). Gemini image models do not accept a separate negative-prompt
+parameter. The client folds it into the text prompt as
+``Avoid in the image: …`` instead.
 
 ### Claude says nothing, OpenAI is used instead
 

@@ -2,115 +2,116 @@
 
 #include "ptv/ecs/World.h"
 #include "ptv/math/Math.h"
-#include <cstdint>
-#include <string>
-#include <vector>
-#include <unordered_set>
-#include <unordered_map>
-#include <optional>
 #include <nlohmann/json.hpp>
+#include <string>
+#include <optional>
+#include <vector>
+#include <cmath>
 
 namespace ptv {
 
-// Mission API forward decls (provided by mission_system task)
-namespace mission_api {
-void post_objective_progress(std::uint32_t objective_id, float progress);
-bool mission_in_progress();
-std::uint32_t current_objective_id();
-float mission_elapsed();
-int current_difficulty();
-void set_score_delta(float v);
+// Lightweight publisher: push a CTag protocol string "prefix{json}"
+inline void hazards_push_tag(World& w, std::uint32_t e, const std::string& prefix, const nlohmann::json& j) {
+    CTag tag{};
+    if (w.has<CTag>(e)) tag = w.get<CTag>(e);
+    tag.tags.emplace_back(prefix + j.dump());
+    w.emplace_or_replace<CTag>(e, std::move(tag));
 }
 
-struct HazardConfig {
-    // Common
-    float radius{4.0f};        // meters; for zones (vents/yellow)
-    float strength{1.0f};      // generic scalar
-    float period_s{3.0f};      // generic period
-    // Laser
-    bool laser_reflectable{true};
-    float laser_progress_rate{0.25f}; // per second toward objective
-    // Vent
-    float vent_pull_mps{2.0f};
-    float vent_burst_duty{0.5f};
-    // Debris
-    float debris_interval_s{6.0f};
-    float debris_telegraph_s{1.2f};
-    float debris_hit_radius{0.6f};
-    // Yellow zone
-    float yellow_drain_multiplier{1.5f};
+inline std::optional<ptv::Vec3> j_vec3(const nlohmann::json& j, const char* key) {
+    if (!j.is_object() || !j.contains(key)) return std::nullopt;
+    auto& o = j.at(key);
+    if (!o.is_object() || !o.contains("x") || !o.contains("y") || !o.contains("z")) return std::nullopt;
+    return ptv::Vec3{ o.at("x").get<float>(), o.at("y").get<float>(), o.at("z").get<float>() };
+}
+
+inline ptv::Vec3 safe_normalize(const ptv::Vec3& v) {
+    float len2 = v.x*v.x + v.y*v.y + v.z*v.z;
+    if (len2 < 1e-6f) return ptv::Vec3{0,0,0};
+    float inv = 1.0f / std::sqrt(len2);
+    return ptv::Vec3{v.x*inv, v.y*inv, v.z*inv};
+}
+
+inline ptv::Vec3 reflect(const ptv::Vec3& d, const ptv::Vec3& n) {
+    // r = d - 2(d·n)n ; assume d is incident direction (unit) and n is unit normal
+    float dn = d.x*n.x + d.y*n.y + d.z*n.z;
+    return ptv::Vec3{ d.x - 2.0f*dn*n.x, d.y - 2.0f*dn*n.y, d.z - 2.0f*dn*n.z };
+}
+
+struct LaserState {
+    ptv::Vec3 dir{0,0,1};
+    float max_range_m{50.0f};
+    bool powered_once{false};
+    float pulse_timer{0.0f};
+    float pulse_period_s{0.5f};
+    std::string power_node_id; // optional, empty if none
 };
 
-inline void parse_hazard_config(const nlohmann::json& p, HazardConfig& out) {
-    out.radius = p.value("radius_m", out.radius);
-    out.strength = p.value("strength", out.strength);
-    out.period_s = p.value("period_s", out.period_s);
-    out.laser_reflectable = p.value("laser_reflectable", out.laser_reflectable);
-    out.laser_progress_rate = p.value("laser_progress_rate", out.laser_progress_rate);
-    out.vent_pull_mps = p.value("vent_pull_mps", out.vent_pull_mps);
-    out.vent_burst_duty = p.value("vent_burst_duty", out.vent_burst_duty);
-    out.debris_interval_s = p.value("debris_interval_s", out.debris_interval_s);
-    out.debris_telegraph_s = p.value("debris_telegraph_s", out.debris_telegraph_s);
-    out.debris_hit_radius = p.value("debris_hit_radius_m", out.debris_hit_radius);
-    out.yellow_drain_multiplier = p.value("yellow_drain_multiplier", out.yellow_drain_multiplier);
-}
+struct VentState {
+    float period_s{3.0f};
+    float on_s{1.2f};
+    float suction_strength{6.0f}; // m/s impulse suggestion
+    float t{0.0f};
+    bool fail_respawn{true};
+};
 
-inline bool entity_has_tag(World& w, std::uint32_t e, const std::string& tag) {
-    if (!w.has<CTag>(e)) return false;
-    const auto& tags = w.get<CTag>(e).tags;
-    for (const auto& t : tags) if (t == tag) return true;
-    return false;
-}
+struct DebrisSpawnerState {
+    float interval_s{5.0f};
+    float warn_s{1.0f};
+    float speed_mps{18.0f};
+    float ttl_s{6.0f};
+    float t{0.0f};
+    int sequence{0};
+};
 
-inline void ensure_tag(World& w, std::uint32_t e, const std::string& tag) {
-    auto& ct = w.has<CTag>(e) ? w.get<CTag>(e) : (w.emplace_or_replace<CTag>(e, CTag{}), w.get<CTag>(e));
-    for (const auto& t : ct.tags) if (t == tag) return;
-    ct.tags.push_back(tag);
-}
+struct YellowZoneState {
+    float drain_multiplier{1.5f}; // +50%
+    float tether_break_add{0.2f};
+    bool active_last{false};
+};
 
-inline void remove_tag(World& w, std::uint32_t e, const std::string& tag) {
-    if (!w.has<CTag>(e)) return;
-    auto& ct = w.get<CTag>(e);
-    auto& v = ct.tags;
-    v.erase(std::remove(v.begin(), v.end(), tag), v.end());
-}
+enum class HazardKind { Unknown, Laser, Vent, DebrisSpawner, YellowZone };
 
-inline std::optional<std::uint32_t> find_first_player(World& w) {
-    auto& reg = w.registry();
-    auto view = reg.view<CTag, CTransform>();
-    for (auto ent : view) {
-        std::uint32_t e = static_cast<std::uint32_t>(ent);
-        if (entity_has_tag(w, e, "player_avatar")) return e;
+struct HazardRuntime {
+    HazardKind kind{HazardKind::Unknown};
+    LaserState laser;
+    VentState vent;
+    DebrisSpawnerState debris;
+    YellowZoneState yellow;
+};
+
+inline HazardKind infer_hazard_kind(World& w, std::uint32_t e, const nlohmann::json& params) {
+    // Explicit param has priority
+    if (params.is_object() && params.contains("kind")) {
+        auto k = params.at("kind").get<std::string>();
+        if (k == "laser") return HazardKind::Laser;
+        if (k == "vent") return HazardKind::Vent;
+        if (k == "debris") return HazardKind::DebrisSpawner;
+        if (k == "yellow_zone") return HazardKind::YellowZone;
     }
-    return std::nullopt;
+    // Fallback: use presence of scene tags on this entity
+    if (w.has<CTag>(e)) {
+        const auto& tags = w.get<CTag>(e).tags;
+        auto has = [&](const char* s){ return std::find(tags.begin(), tags.end(), std::string(s)) != tags.end(); };
+        if (has("laser")) return HazardKind::Laser;
+        if (has("vent")) return HazardKind::Vent;
+        if (has("yellow_zone") || has("suppression_zone")) return HazardKind::YellowZone;
+        if (has("hazard") || has("trigger")) return HazardKind::DebrisSpawner; // generic fallback
+    }
+    return HazardKind::Unknown;
 }
 
-// Distance helper
-inline float dist(const Vec3& a, const Vec3& b) {
-    float dx = a.x - b.x; float dy = a.y - b.y; float dz = a.z - b.z;
-    return std::sqrt(dx*dx + dy*dy + dz*dz);
-}
-
-// Clamp
-inline float clamp01(float x){ return x < 0.f ? 0.f : (x > 1.f ? 1.f : x); }
-
-// Smooth step toward target
-inline void approach(float& v, float target, float rate_per_s, float dt) {
-    float delta = target - v;
-    float step = rate_per_s * dt;
-    if (std::fabs(delta) <= step) { v = target; return; }
-    v += (delta > 0 ? step : -step);
-}
-
-// Debris path closest distance (segment point distance)
-inline float segment_point_distance(const Vec3& a, const Vec3& b, const Vec3& p) {
-    Vec3 ab{b.x - a.x, b.y - a.y, b.z - a.z};
-    Vec3 ap{p.x - a.x, p.y - a.y, p.z - a.z};
-    float ab2 = ab.x*ab.x + ab.y*ab.y + ab.z*ab.z;
-    float t = ab2 > 1e-6f ? (ab.x*ap.x + ab.y*ap.y + ab.z*ap.z)/ab2 : 0.0f;
-    if (t < 0.0f) t = 0.0f; else if (t > 1.0f) t = 1.0f;
-    Vec3 c{a.x + ab.x*t, a.y + ab.y*t, a.z + ab.z*t};
-    return dist(c, p);
-}
+// Mission System tag (from dependency exports): "objective.progress:"
+static constexpr const char* kObjectiveProgress = "objective.progress:";
+// HUD indicator lightweight protocol
+static constexpr const char* kHudIndicator = "hud.indicator:"; // {id:"suppression",color:"amber",state:"on|off",ttl}
+// Ring charge/recharge protocol (request form; consumed by promoted.ring_charge_and_recharge)
+static constexpr const char* kRingDrainMultiplier = "ring.drain.multiplier:"; // {mult, ttl}
+// Control suppression (for tether break chance tweaks)
+static constexpr const char* kControlSuppression = "control.suppression:"; // {tether_break_add, ttl}
+// Hazard forces (for locomotion/hover aids to optionally consume)
+static constexpr const char* kHazardForce = "hazard.force:"; // {dir{x,y,z}, strength, ttl}
+// Spawner requests (seen elsewhere in project: portal_travel uses spawner.request)
+static constexpr const char* kSpawnerRequest = "spawner.request:"; // {id, pos{x,y,z}, dir{x,y,z}, speed, ttl}
 
 } // namespace ptv

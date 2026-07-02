@@ -1,52 +1,30 @@
-#include "ptv/api/IMechanic.h"
-#include "ptv/ecs/World.h"
-#include "ptv/math/Math.h"
+#include "haptics_shared.h"
 
-#include <nlohmann/json.hpp>
+#include <unordered_map>
 #include <string>
-#include <vector>
-#include <optional>
-#include <array>
-#include <algorithm>
 
-// This file provides a convenience publish alias and a tiny helper to read pattern presence via params, so
-// other generated mechanics can call without depending on the manager class type.
+namespace ptv_haptics {
 
-namespace ptv {
-namespace haptics {
-
-// Decls from service
-enum class Pattern : std::uint8_t;
-bool has_pattern(const std::string& id);
-void publish(const std::string& pattern_id, const std::string& hand, float intensity_scale, std::optional<float> duration_s);
-
-// Lightweight wrapper: accepts params JSON like { "pattern_id": "bolt_fire_sharp", "hand": "right", "intensity_scale": 1.0, "duration_s": 0.08 }
-inline void publish_from_params(const nlohmann::json& j) {
-    if (!j.is_object()) return;
-    std::string id = j.value("pattern_id", std::string());
-    if (id.empty()) return;
-    std::string hand = j.value("hand", std::string("both"));
-    float scale = j.value("intensity_scale", 1.0f);
-    std::optional<float> dur;
-    if (j.contains("duration_s")) dur = j.at("duration_s").get<float>();
-    publish(id, hand, scale, dur);
+static std::unordered_map<std::string, PatternDef> build_default_patterns() {
+    // Tuned intuitively for VR controllers; amplitudes are relative and will be
+    // multiplied by user/global/caller scales.
+    std::unordered_map<std::string, PatternDef> m;
+    m["hover_light"]             = PatternDef{0.25f, 0.040f, 0.002f, 0.020f};
+    m["bolt_fire_sharp"]        = PatternDef{0.85f, 0.055f, 0.001f, 0.030f};
+    m["construct_form_heavy"]   = PatternDef{1.00f, 0.120f, 0.004f, 0.060f};
+    m["recharge_rhythm"]        = PatternDef{0.35f, 0.300f, 0.010f, 0.120f}; // single beat; callers can re-publish to sustain
+    m["block_impact_strong"]    = PatternDef{0.95f, 0.090f, 0.002f, 0.050f};
+    m["sprint_start"]           = PatternDef{0.70f, 0.080f, 0.003f, 0.040f};
+    m["sprint_end"]             = PatternDef{0.55f, 0.070f, 0.003f, 0.035f};
+    m["flight_boost"]           = PatternDef{0.80f, 0.100f, 0.004f, 0.050f};
+    m["evade_burst"]            = PatternDef{0.90f, 0.070f, 0.002f, 0.030f};
+    return m;
 }
 
-// Utility: common names array (can be used by tests or debuggers)
-static inline const std::array<const char*, 9>& all_patterns() {
-    static const std::array<const char*, 9> k = {
-        "hover_light",
-        "bolt_fire_sharp",
-        "construct_form_heavy",
-        "recharge_rhythm",
-        "block_impact_strong",
-        "sprint_start",
-        "sprint_end",
-        "flight_boost",
-        "evade_burst"
-    };
+// Accessor for a single static instance
+const std::unordered_map<std::string, PatternDef>& pattern_map() {
+    static std::unordered_map<std::string, PatternDef> k = build_default_patterns();
     return k;
 }
 
-} // namespace haptics
-} // namespace ptv
+} // namespace ptv_haptics

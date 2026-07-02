@@ -1,62 +1,35 @@
-#include "ptv/api/IMechanic.h"
-#include "ptv/ecs/World.h"
-#include "ptv/math/Math.h"
-#include <entt/entt.hpp>
-#include <nlohmann/json.hpp>
+#include "utility_constructs_shared.h"
+
 #include <algorithm>
-// [ptv-bounds] removed disallowed include: utility_constructs_shared.h
 
-using namespace utility_internal;
+namespace ptv { namespace utility {
 
-namespace {
-entt::entity spawn_beacon(ptv::World& w, const ptv::Transform& at) {
-    auto& reg = w.registry();
-    entt::entity e = reg.create();
-    std::uint32_t u = static_cast<std::uint32_t>(e);
-    w.emplace_or_replace<ptv::CTransform>(u, ptv::CTransform{at});
-    ptv::CTag tag; tag.tags = {"utility","beacon","searchlight"};
-    w.emplace_or_replace<ptv::CTag>(u, std::move(tag));
-    return e;
-}
+static entt::entity ensure_beacon(World& w, std::uint32_t ring_e, UtilityConstructs& uc) {
+    if (uc.beacon_.active && uc.beacon_.e != entt::null && w.registry().valid(uc.beacon_.e)) return uc.beacon_.e;
+    Transform t{}; if (w.has<CTransform>(ring_e)) t = w.get<CTransform>(ring_e).t;
+    t.position += Vec3{0.0f, -0.05f, 0.8f};
+    uc.beacon_.e = make_child(w, "construct.utility:beacon", t);
+    uc.beacon_.active = true;
+    add_tag(w, static_cast<entt::entity>(ring_e), "haptics.publish:{\"pattern_id\":\"construct_form_heavy\",\"hand\":\"right\",\"intensity_scale\":0.7,\"duration_s\":0.06}");
+    return uc.beacon_.e;
 }
 
-namespace ptv {
+void update_beacon(World& w, std::uint32_t ring_e, UtilityConstructs& uc, const nlohmann::json& p, float dt) {
+    const bool spawn = p.value("spawn_beacon", false) || (p.value("selected", std::string("")) == std::string("construct_beacon_searchlight") && p.value("rt_confirm", false));
+    if (spawn) ensure_beacon(w, ring_e, uc);
+    if (!uc.beacon_.active) return;
 
-void UtilityConstructs::tick_beacon(World& w, std::uint32_t ring_entity, const nlohmann::json& live, float dt) {
-    const bool activate = utility_internal::jflag(live, "activate_beacon", false);
-
-    if (activate && beacon_.beacon == entt::null) {
-        if (!w.has<ptv::CTransform>(ring_entity)) return;
-        auto at = w.get<ptv::CTransform>(ring_entity).t;
-        at.position += ptv::Vec3{0.0f, 0.0f, 2.0f};
-        at.scale = 1.0f;
-        beacon_.beacon = spawn_beacon(w, at);
-        utility_internal::add_tag(w, ring_entity, "utility:beacon:spawned");
+    // Idle rotate head
+    uc.beacon_.yaw_rad += dt * 0.7f;
+    Transform* bt = get_tr(w, uc.beacon_.e);
+    if (bt) {
+        // Simple circular drift for visual interest
+        bt->position += Vec3{std::sin(uc.beacon_.yaw_rad)*0.01f, 0.0f, 0.0f};
     }
 
-    if (beacon_.beacon != entt::null) {
-        std::uint32_t b = static_cast<std::uint32_t>(beacon_.beacon);
-        if (!w.has<ptv::CTransform>(b)) return;
-        auto& tr = w.get<ptv::CTransform>(b).t;
-        beacon_.head_rot_t += dt;
-        // Simple rotating head emulation via tag that encodes intensity
-        utility_internal::add_tag(w, b, "light:active");
-        // Affect nearby enemies: add perception debuff tag within cone in front of beacon
-        const ptv::Vec3 fwd = rotate(tr.rotation, ptv::Vec3{0,0,1});
-        auto& reg = w.registry();
-        auto view = reg.view<ptv::CTransform, ptv::CTag>();
-        for (auto e : view) {
-            std::uint32_t u = static_cast<std::uint32_t>(e);
-            if (!w.has<ptv::CTag>(u)) continue;
-            auto& tags = w.get<ptv::CTag>(u).tags;
-            if (std::find(tags.begin(), tags.end(), "enemy") == tags.end()) continue;
-            const auto& etr = w.get<ptv::CTransform>(u).t;
-            if (utility_internal::in_forward_cone(tr, fwd, etr.position, 20.0f, std::cos(0.45f))) {
-                utility_internal::add_tag(w, u, "ai:ambush_reduced");
-                utility_internal::add_tag(w, u, "revealed");
-            }
-        }
-    }
+    // Publish AI perception modifier cone each tick (consumed by AI pack if present)
+    add_tag(w, uc.beacon_.e, std::string("ai.perception:modifier:{\"kind\":\"illum_cone\",\"radius_m\":6.0,\"intensity\":" ) + std::to_string(std::max(0.1f, uc.beacon_.intensity)) + "}");
+    add_tag(w, uc.beacon_.e, "vfx.spawn:searchlight_cone");
 }
 
-} // namespace ptv
+}} // namespace ptv::utility

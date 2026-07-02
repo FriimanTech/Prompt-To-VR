@@ -27,7 +27,21 @@ class AnthropicConfig:
     api_key: str | None = None
     hard_model: str = "claude-opus-4-7"
     light_model: str = "claude-sonnet-4-6"
-    max_tokens: int = 8192
+
+    # ``max_tokens`` on Claude caps visible output ONLY (no hidden
+    # reasoning budget, unlike OpenAI reasoning models). Large structured
+    # outputs -- e.g. a MechanicPlan for a 945-line BuildSpec generating
+    # 25+ mechanics with detailed CodeTasks -- routinely require more
+    # than the previous 8K default. Claude Opus 4.7 supports up to 32K
+    # output tokens out of the box, which is the new default.
+    max_tokens: int = 32_000
+
+    # Per-request timeout in seconds, passed to ``anthropic.Anthropic(
+    # timeout=...)``. The SDK default is 600s (10 minutes); we cap it
+    # lower so a stalled connection cannot silently wedge a pipeline
+    # stage. Override via ``CLAUDE_REQUEST_TIMEOUT_SECONDS``.
+    request_timeout_seconds: float = 300.0
+
     default_system: str = (
         "You are the backend model for a local-first prompt-to-native-VR"
         " pipeline. Always obey the supplied JSON Schema exactly."
@@ -39,7 +53,35 @@ class AnthropicConfig:
             api_key=os.environ.get("ANTHROPIC_API_KEY"),
             hard_model=os.environ.get("CLAUDE_HARD_MODEL", "claude-opus-4-7"),
             light_model=os.environ.get("CLAUDE_LIGHT_MODEL", "claude-sonnet-4-6"),
+            max_tokens=_int_env("CLAUDE_MAX_TOKENS", 32_000),
+            request_timeout_seconds=_float_env(
+                "CLAUDE_REQUEST_TIMEOUT_SECONDS", 300.0
+            ),
         )
+
+
+def _int_env(name: str, default: int) -> int:
+    """Parse an integer environment variable, falling back to ``default``
+    on missing / empty / non-numeric values."""
+    raw = os.environ.get(name)
+    if raw is None or raw.strip() == "":
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return default
+
+
+def _float_env(name: str, default: float) -> float:
+    """Parse a float environment variable, falling back to ``default``
+    on missing / empty / non-numeric values."""
+    raw = os.environ.get(name)
+    if raw is None or raw.strip() == "":
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        return default
 
 
 @dataclass
@@ -79,7 +121,7 @@ class AnthropicClient:
         """
 
         self._ensure_sdk()
-        client = self._sdk.Anthropic(api_key=self._require_key())
+        client = self._make_client()
 
         used_model = model or self.config.hard_model
         try:
@@ -126,7 +168,7 @@ class AnthropicClient:
         """Run a free-form text / code call (no schema)."""
 
         self._ensure_sdk()
-        client = self._sdk.Anthropic(api_key=self._require_key())
+        client = self._make_client()
 
         used_model = model or self.config.hard_model
         try:
@@ -164,6 +206,22 @@ class AnthropicClient:
                 " Run `pip install anthropic` or install ptv-provider-clients."
             ) from e
         self._sdk = anthropic
+
+    def _make_client(self) -> Any:
+        """Construct an ``anthropic.Anthropic`` client with the configured
+        per-request timeout. The SDK's default is 600s (10 minutes); we
+        lower it so a stalled connection surfaces quickly instead of
+        wedging a pipeline stage.
+        """
+
+        timeout = float(self.config.request_timeout_seconds)
+        try:
+            return self._sdk.Anthropic(
+                api_key=self._require_key(), timeout=timeout
+            )
+        except TypeError:
+            # Older SDK without ``timeout`` kwarg; fall back gracefully.
+            return self._sdk.Anthropic(api_key=self._require_key())
 
 
 def _concat_text_blocks(blocks: Iterable[Any]) -> str:

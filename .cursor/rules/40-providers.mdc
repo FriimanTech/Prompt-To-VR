@@ -47,16 +47,17 @@ alwaysApply: false
 - Use `max_completion_tokens` (NOT the legacy `max_tokens`) on Chat Completions
   for GPT-5 family models.
 
-## Google GenAI (Imagen + Gemini image)
+## Google GenAI (Gemini image generation)
 
 - Python SDK: `google-genai` (PyPI: `google-genai`). Import via
   `from google import genai; from google.genai import types`.
 - Client: `genai.Client(api_key=os.environ["GOOGLE_API_KEY"])`.
-- Imagen: `client.models.generate_images(model="imagen-4.0-generate-001",
-  prompt=..., config=types.GenerateImagesConfig(number_of_images=...))`.
-- Gemini multimodal image fallback:
-  `client.models.generate_content(model="gemini-2.5-flash-image",
-  contents=..., config=types.GenerateContentConfig(response_modalities=["IMAGE"]))`.
+- Reference images (Stage 5): `client.models.generate_content(
+  model="gemini-3.1-flash-image", contents=..., config=types.GenerateContentConfig(
+  response_modalities=["IMAGE"],
+  image_config=types.ImageConfig(aspect_ratio=...)))`.
+- Imagen 4 endpoints (`imagen-4.0-generate-001` and siblings) are
+  discontinued after 2026-08-17; do not add new Imagen call sites.
 
 ## Tripo
 

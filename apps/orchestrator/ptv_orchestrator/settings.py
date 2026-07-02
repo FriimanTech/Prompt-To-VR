@@ -41,9 +41,40 @@ class Settings(BaseSettings):
     claude_light_model: str = "claude-sonnet-4-6"
     openai_hard_model: str = "gpt-5"
     openai_light_model: str = "gpt-5-mini"
-    imagen_model: str = "imagen-4.0-generate-001"
-    gemini_image_model: str = "gemini-2.5-flash-image"
+    # Reference images (Stage 5): Gemini native image generation. Imagen 4
+    # endpoints are discontinued after 2026-08-17; Google recommends
+    # ``gemini-3.1-flash-image`` via ``generate_content``.
+    gemini_image_model: str = "gemini-3.1-flash-image"
     tripo_model_version: str | None = None
+
+    # --- LLM output budgets ---------------------------------------------
+    # Caps the visible output (Claude) and the COMBINED reasoning +
+    # visible output (OpenAI gpt-5 / o-series) per call. Pipeline stages
+    # that produce large structured artifacts (BuildSpec, MechanicPlan,
+    # SceneSpec, CodeTask) rely on these being generous enough that a
+    # 900+ line user prompt does not silently truncate. The OpenAI
+    # client also auto-retries with a doubled budget on
+    # ``finish_reason='length'`` up to ``openai_max_tokens_ceiling``
+    # (default 128K, the per-call max for ``gpt-5``).
+    openai_max_tokens: int = Field(default=96_000, ge=4_000, le=200_000)
+    openai_max_tokens_ceiling: int = Field(
+        default=128_000, ge=4_000, le=200_000
+    )
+    claude_max_tokens: int = Field(default=32_000, ge=4_000, le=200_000)
+
+    # Per-request HTTP timeout for the LLM providers, in seconds. The
+    # OpenAI / Anthropic SDK defaults are 10 minutes which is enough to
+    # make a stalled scene_spec / mechanic_plan call appear hung
+    # indefinitely. We cap at 5 minutes by default; a complex gpt-5
+    # reasoning call against a large schema finishes well under that
+    # budget. Tune via the matching ``*_REQUEST_TIMEOUT_SECONDS`` env
+    # variables when running behind a slow proxy.
+    openai_request_timeout_seconds: float = Field(
+        default=300.0, ge=30.0, le=1800.0
+    )
+    claude_request_timeout_seconds: float = Field(
+        default=300.0, ge=30.0, le=1800.0
+    )
 
     # --- Code-generation stage (Stage 8, multi-agent) --------------------
     # How many OpenAI Agents SDK sessions may be in flight at the same
@@ -54,6 +85,14 @@ class Settings(BaseSettings):
     # eligible task. Default 3 matches Part B of the multi-agent
     # update spec.
     codegen_max_parallel_agents: int = Field(default=3, ge=1, le=16)
+
+    # --- SceneSpec stage (Stage 4) --------------------------------------
+    # SceneSpec emits one structured-output LLM call per
+    # ``BuildSpec.scenes`` entry. A long user prompt can produce 10-15+
+    # scenes, so running them serially makes the stage appear hung.
+    # We fan out across a ``ThreadPoolExecutor`` capped by this knob
+    # (default 3 mirrors the codegen worker default).
+    scene_spec_max_parallel_workers: int = Field(default=3, ge=1, le=16)
 
     # --- Build toolchain -------------------------------------------------
     vcpkg_root: str | None = None

@@ -1,64 +1,72 @@
-#include "ptv/api/IDialogueHook.h"
+#include "mentor_dialogue_shared.h"
 #include "ptv/ecs/World.h"
-#include <nlohmann/json.hpp>
-#include <entt/entt.hpp>
 
+#include <nlohmann/json.hpp>
 #include <string>
-#include <vector>
-#include <unordered_map>
-#include <cstdint>
 
 namespace ptv {
 
-struct MentorState {
-    bool subtitles_only{false};
-    std::string last_line;
+struct ParsedTrigger {
+    std::string topic;
+    std::string scene;
+    std::string failure_kind;
+    bool mute_vo{false};
 };
 
-class MentorGuidanceDialogue final : public IDialogueHook {
-public:
-    void on_enter(World& world, std::uint32_t entity, const nlohmann::json& params) override {
-        MentorState st;
-        st.subtitles_only = params.value("mute_vo", false);
-        states_[entity] = st;
+ParsedTrigger parse_trigger_params(const nlohmann::json& j) {
+    ParsedTrigger out;
+    if (j.is_object()) {
+        out.topic = j.value("topic", std::string{});
+        out.scene = j.value("scene", std::string{});
+        out.failure_kind = j.value("failure_kind", std::string{});
+        out.mute_vo = j.value("mute_vo", false);
+        // Accessibility hint: if subtitles_only true, also mute VO
+        if (j.value("subtitles_only", false)) out.mute_vo = true;
+    }
+    if (out.topic.empty()) out.topic = "onboarding"; // sensible default
+    return out;
+}
 
-        auto mentor = world.find("mentor_npc");
-        if (mentor != entt::null) {
-            world.emplace_or_replace<CTag>(static_cast<std::uint32_t>(mentor),
-                CTag{std::vector<std::string>{"mentor_dialogue_active"}});
+// Emit lightweight tag protocol via CTag strings on the mentor entity.
+// Other systems (HUD, VFX, audio) may consume these.
+//  - subtitle.show:{"speaker":"..","text":"..","ttl":3.0}
+//  - dialogue.play:{"speaker":"..","text":".."}
+//  - vfx.spawn:{"asset_id":"..","ttl_s":2.0}
+void emit_line_tags(World& world, std::uint32_t entity,
+                    const MentorLine& line,
+                    bool mute_vo) {
+    if (!world.valid(entity)) return;
+    // Push subtitles
+    {
+        std::string payload = std::string("subtitle.show:{\"speaker\":\"") + line.speaker +
+                              "\",\"text\":\"" + line.text +
+                              "\",\"ttl\":" + std::to_string(line.ttl_s) + "}";
+        world.emplace_or_replace<CTag>(entity, CTag{ std::vector<std::string>{ payload } });
+    }
+    // Optionally push VO request
+    if (!mute_vo) {
+        std::string payload = std::string("dialogue.play:{\"speaker\":\"") + line.speaker +
+                              "\",\"text\":\"" + line.text + "\"}";
+        if (world.has<CTag>(entity)) {
+            auto tags = world.get<CTag>(entity).tags; // copy then replace with appended
+            tags.push_back(payload);
+            world.emplace_or_replace<CTag>(entity, CTag{ std::move(tags) });
+        } else {
+            world.emplace_or_replace<CTag>(entity, CTag{ std::vector<std::string>{ payload } });
         }
-
-        world.emplace_or_replace<CTag>(entity,
-            CTag{std::vector<std::string>{"subtitle_speaker:Mentor"}});
     }
-
-    void on_line(World& world, std::uint32_t entity, const std::string& line, const nlohmann::json& meta) override {
-        auto it = states_.find(entity);
-        if (it == states_.end()) return;
-        MentorState& st = it->second;
-
-        std::string speaker = meta.value("speaker", std::string("Mentor"));
-        st.last_line = line;
-
-        world.emplace_or_replace<CTag>(entity,
-            CTag{std::vector<std::string>{std::string("subtitle:") + speaker + ": " + line}});
-    }
-
-    void on_exit(World& world, std::uint32_t entity) override {
-        auto mentor = world.find("mentor_npc");
-        if (mentor != entt::null) {
-            world.emplace_or_replace<CTag>(static_cast<std::uint32_t>(mentor),
-                CTag{std::vector<std::string>{}});
+    // Optional VFX hint
+    if (line.vfx_asset_id.has_value()) {
+        std::string payload = std::string("vfx.spawn:{\"asset_id\":\"") + *line.vfx_asset_id +
+                              "\",\"ttl_s\":2.0}";
+        if (world.has<CTag>(entity)) {
+            auto tags = world.get<CTag>(entity).tags;
+            tags.push_back(payload);
+            world.emplace_or_replace<CTag>(entity, CTag{ std::move(tags) });
+        } else {
+            world.emplace_or_replace<CTag>(entity, CTag{ std::vector<std::string>{ payload } });
         }
-        states_.erase(entity);
     }
-
-    std::string id() const override { return "generated.mentor_guidance_dialogue"; }
-
-private:
-    std::unordered_map<std::uint32_t, MentorState> states_;
-};
+}
 
 } // namespace ptv
-
-PTV_REGISTER_DIALOGUE_HOOK("generated.mentor_guidance_dialogue", ptv::MentorGuidanceDialogue)

@@ -130,21 +130,53 @@ def build_default_llm_client(
     claude_light_model: str,
     openai_hard_model: str,
     openai_light_model: str,
+    claude_max_tokens: int | None = None,
+    openai_max_tokens: int | None = None,
+    openai_max_tokens_ceiling: int | None = None,
+    claude_request_timeout_seconds: float | None = None,
+    openai_request_timeout_seconds: float | None = None,
 ) -> LlmClient:
-    """Helper used by the orchestrator to build an LlmClient from settings."""
+    """Helper used by the orchestrator to build an LlmClient from settings.
+
+    The ``*_max_tokens*`` knobs flow into the underlying provider
+    configs. When omitted, the per-provider dataclass defaults apply
+    (96K for OpenAI, 32K for Claude, 128K ceiling for the OpenAI
+    auto-retry).
+
+    ``*_request_timeout_seconds`` cap each HTTP request so a stalled
+    connection cannot wedge a pipeline stage. The SDK defaults are
+    600s (10 min); we use 300s by default. ``None`` means "use the
+    provider config default" (which itself respects the environment
+    variable when present).
+    """
+
+    anthropic_kwargs: dict[str, Any] = {
+        "api_key": anthropic_api_key,
+        "hard_model": claude_hard_model,
+        "light_model": claude_light_model,
+    }
+    if claude_max_tokens is not None:
+        anthropic_kwargs["max_tokens"] = int(claude_max_tokens)
+    if claude_request_timeout_seconds is not None:
+        anthropic_kwargs["request_timeout_seconds"] = float(
+            claude_request_timeout_seconds
+        )
+
+    openai_kwargs: dict[str, Any] = {
+        "api_key": openai_api_key,
+        "hard_model": openai_hard_model,
+        "light_model": openai_light_model,
+    }
+    if openai_max_tokens is not None:
+        openai_kwargs["max_tokens"] = int(openai_max_tokens)
+    if openai_max_tokens_ceiling is not None:
+        openai_kwargs["max_tokens_ceiling"] = int(openai_max_tokens_ceiling)
+    if openai_request_timeout_seconds is not None:
+        openai_kwargs["request_timeout_seconds"] = float(
+            openai_request_timeout_seconds
+        )
+
     return LlmClient(
-        anthropic=AnthropicClient(
-            AnthropicConfig(
-                api_key=anthropic_api_key,
-                hard_model=claude_hard_model,
-                light_model=claude_light_model,
-            )
-        ),
-        openai=OpenAIClient(
-            OpenAIConfig(
-                api_key=openai_api_key,
-                hard_model=openai_hard_model,
-                light_model=openai_light_model,
-            )
-        ),
+        anthropic=AnthropicClient(AnthropicConfig(**anthropic_kwargs)),
+        openai=OpenAIClient(OpenAIConfig(**openai_kwargs)),
     )

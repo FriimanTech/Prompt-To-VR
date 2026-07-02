@@ -5,56 +5,69 @@
 #include <nlohmann/json.hpp>
 #include <string>
 #include <vector>
-#include <optional>
-#include <algorithm>
+#include <utility>
 
-// Forward declarations to depend-on exports (no extra headers allowed)
-namespace ptv { namespace haptics { float get_user_intensity(); void set_user_intensity(float); } }
-namespace ptv { namespace hud_helpers { void hud_get_settings_json(std::string& out); } }
-namespace ptv { namespace persistence_sections { void merge_shallow(const std::string& section, const std::string& json_blob); std::string tiny_digest(const std::string& json_blob); } }
-
-// Helpers implemented in accessibility_runtime.cpp
-namespace ptv { namespace accessibility_internal {
-    // Applies key=value tags to CTag and touches other systems (haptics)
-    void apply_to_world(World& w, std::uint32_t e, const nlohmann::json& st);
-    // Pull latest overlay from Wrist Menu/HUD; returns true if found any settings blob
-    bool fetch_overlay(nlohmann::json& out);
-    // Persist to SavePersistence section
-    void persist(const nlohmann::json& st);
-} }
+#include "accessibility_shared.h"
 
 namespace ptv {
 
-// Mechanic: reads params and wrist-menu overlay; pushes comfort/accessibility tags; persists.
-class AccessibilitySettings final : public IMechanic {
-public:
-    void on_attach(World& world, std::uint32_t entity, const nlohmann::json& params) override {
-        (void)world; (void)entity;
-        state_ = defaults_from_params(params);
-        // Try overlay from HUD (user's previous save restored by HUD or SavePersistence)
-        nlohmann::json overlay;
-        if (accessibility_internal::fetch_overlay(overlay) && overlay.is_object()) {
-            merge_into(state_, overlay);
+static inline void push_tag(World& w, std::uint32_t e, const std::string& s) {
+    if (!w.has<CTag>(e)) { w.emplace_or_replace<CTag>(e, CTag{}); }
+    auto& tag = w.get<CTag>(e);
+    tag.tags.emplace_back(s);
+}
+
+static nlohmann::json get_live_params(World& w, std::uint32_t e, const std::string& mech_id) {
+    if (!w.has<CMechanicBinding>(e)) return nlohmann::json{};
+    auto& mb = w.get<CMechanicBinding>(e);
+    for (const auto& entry : mb.entries) {
+        if (entry.id == mech_id || entry.builtin_id == mech_id) {
+            auto j = nlohmann::json::parse(entry.params_json, nullptr, false);
+            if (j.is_discarded()) return nlohmann::json{};
+            return j;
         }
-        // Cache digest to avoid redundant work, then apply immediately and persist
-        last_digest_ = digest(state_);
-        accessibility_internal::apply_to_world(world, entity, state_);
-        accessibility_internal::persist(state_);
+    }
+    return nlohmann::json{};
+}
+
+class AccessibilitySettings : public IMechanic {
+public:
+    void on_attach(World& w, std::uint32_t e, const nlohmann::json& params) override {
+        state_ = AccessibilityState::from_defaults_json(params);
+        entity_ = e;
+        // Register Wrist Menu page (via HUD contract)
+        nlohmann::json jpage; jpage["id"] = "accessibility"; jpage["title"] = "Accessibility & Comfort"; jpage["order"] = 20;
+        push_tag(w, e, std::string("ui.page.register:") + jpage.dump());
+        // Apply defaults immediately
+        publish_all(w, e, /*with_toast=*/true);
+        // Optionally persist immediately if params request it
+        if (params.value("persist_on_attach", false)) {
+            persist_now(w, e, "init");
+        }
     }
 
-    void on_update(World& world, std::uint32_t entity, float /*dt*/) override {
-        // Poll HUD/Wrist settings json each frame; apply only when changed
-        nlohmann::json overlay;
-        if (accessibility_internal::fetch_overlay(overlay) && overlay.is_object()) {
-            nlohmann::json merged = state_;
-            merge_into(merged, overlay);
-            std::string d = digest(merged);
-            if (d != last_digest_) {
-                state_ = merged;
-                last_digest_ = d;
-                accessibility_internal::apply_to_world(world, entity, state_);
-                accessibility_internal::persist(state_);
+    void on_update(World& w, std::uint32_t e, float) override {
+        auto j = get_live_params(w, e, id());
+
+        bool request_save = false;
+        bool menu_closed_persist = false;
+
+        if (j.is_object()) {
+            state_.any_changed = false;
+            apply_updates_from_params(state_, j);
+
+            request_save = j.value("request_save", false);
+            menu_closed_persist = j.value("menu_closed", false);
+
+            if (state_.any_changed) {
+                publish_all(w, e, /*with_toast=*/false);
             }
+        }
+
+        if (request_save || menu_closed_persist) {
+            persist_now(w, e, request_save ? std::string("explicit_request") : std::string("menu_close"));
+            nlohmann::json jt; jt["text"] = std::string("Accessibility settings saved"); jt["ttl"] = 1.0f;
+            push_tag(w, e, std::string("ui.toast:") + jt.dump());
         }
     }
 
@@ -63,36 +76,60 @@ public:
     std::string id() const override { return "generated.accessibility_settings"; }
 
 private:
-    static nlohmann::json defaults_from_params(const nlohmann::json& p) {
-        nlohmann::json j = nlohmann::json::object();
-        j["vignette_intensity"]        = p.value("vignette_intensity", 0.45f);
-        j["turn_mode"]                 = p.value("turn_mode", std::string("snap"));               // snap | smooth
-        j["smooth_turn_speed_degps"]   = p.value("smooth_turn_speed_degps", 120.0f);
-        j["snap_angle_deg"]            = p.value("snap_angle_deg", 45.0f);
-        j["flight_assist_strength"]    = p.value("flight_assist_strength", 0.5f);
-        j["haptics_user_intensity"]    = p.value("haptics_user_intensity", 0.8f);
-        j["subtitle_scale"]            = p.value("subtitle_scale", 1.0f);                         // 0.75..1.5
-        j["colorblind_mode"]           = p.value("colorblind_mode", std::string("none"));        // none|protan|deutan|tritan|mono
-        j["seated_y_offset_m"]         = p.value("seated_y_offset_m", 0.0f);
-        j["motion_cue_opacity"]        = p.value("motion_cue_opacity", 0.6f);
-        return j;
-    }
-
-    static void merge_into(nlohmann::json& base, const nlohmann::json& overlay) {
-        for (auto it = overlay.begin(); it != overlay.end(); ++it) {
-            // Only accept known keys
-            const std::string& k = it.key();
-            if (base.contains(k)) base[k] = it.value();
+    void publish_all(World& w, std::uint32_t e, bool with_toast) {
+        // Comfort vignette (shared prefix from locomotion_options_ui)
+        {
+            nlohmann::json j; j["intensity01"] = state_.vignette01; j["ttl"] = 0.2f;
+            push_tag(w, e, std::string("comfort.vignette:") + j.dump());
+        }
+        // Turn settings (shared with locomotion systems)
+        {
+            nlohmann::json j; j["mode"] = state_.turn_mode; j["speed_dps"] = state_.smooth_turn_speed_dps; j["snap_degrees"] = state_.snap_turn_degrees;
+            push_tag(w, e, std::string("locomotion.turn:") + j.dump());
+        }
+        // Flight assist broadcast (for flight/hover comfort modules)
+        {
+            nlohmann::json j; j["assist01"] = state_.flight_assist01;
+            push_tag(w, e, std::string("flight.assist:") + j.dump());
+        }
+        // Haptics overall amplitude setting (consumed by haptics manager or mechanics honoring it)
+        {
+            nlohmann::json j; j["amp01"] = state_.haptics_amp01;
+            push_tag(w, e, std::string("haptics.settings:") + j.dump());
+        }
+        // Subtitles size + colorblind mode (HUD may consume)
+        {
+            nlohmann::json j; j["size"] = state_.subtitles_size; push_tag(w, e, std::string("ui.subtitles:") + j.dump());
+        }
+        {
+            nlohmann::json j; j["mode"] = state_.colorblind_mode; push_tag(w, e, std::string("ui.colorblind:") + j.dump());
+        }
+        // Seated height calibration
+        {
+            nlohmann::json j; j["meters"] = state_.seated_height_offset_m;
+            push_tag(w, e, std::string("player.height_offset:") + j.dump());
+        }
+        // Motion cues opacity (for overlays, speed lines, etc.)
+        {
+            nlohmann::json j; j["opacity01"] = state_.motion_cue_opacity01;
+            push_tag(w, e, std::string("ui.motion_cue:") + j.dump());
+        }
+        if (with_toast) {
+            nlohmann::json j; j["text"] = std::string("Applied Accessibility & Comfort"); j["ttl"] = 1.0f;
+            push_tag(w, e, std::string("ui.toast:") + j.dump());
         }
     }
 
-    static std::string digest(const nlohmann::json& j) {
-        return persistence_sections::tiny_digest(j.dump());
+    void persist_now(World& w, std::uint32_t e, const std::string& reason) {
+        nlohmann::json sec; sec["section"] = "accessibility"; sec["data"] = state_.to_json();
+        push_tag(w, e, std::string("save.section.push:") + sec.dump());
+        nlohmann::json req; req["reason"] = reason; req["who"] = "generated.accessibility_settings";
+        push_tag(w, e, std::string("save.request:") + req.dump());
     }
 
 private:
-    nlohmann::json state_{};
-    std::string last_digest_{};
+    AccessibilityState state_{};
+    std::uint32_t entity_{0};
 };
 
 } // namespace ptv

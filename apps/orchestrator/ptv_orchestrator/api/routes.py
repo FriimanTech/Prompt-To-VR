@@ -51,7 +51,6 @@ def public_settings():
         "claude_light_model": s.claude_light_model,
         "openai_hard_model": s.openai_hard_model,
         "openai_light_model": s.openai_light_model,
-        "imagen_model": s.imagen_model,
         "gemini_image_model": s.gemini_image_model,
         "cmake_generator": s.cmake_generator,
         "projects_dir": str(s.projects_dir),

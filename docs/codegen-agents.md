@@ -15,7 +15,7 @@ and is supported by:
 | `pipeline/codegen_board.py` | The per-project ledger (`codegen_board.json`), atomic claim, dependency DAG |
 | `pipeline/codegen_agent.py` | The OpenAI Agents SDK wrapper used for each claimed `CodeTask` |
 | `pipeline/prompts.py` | `CODE_TASK_SYSTEM` and `MECHANIC_PLAN_SYSTEM` prompts |
-| `pipeline/bounds.py` | Per-file safety: `filter_cpp_only`, `repair_generated_cpp`, `assert_path_allowed` |
+| `pipeline/bounds.py` | Per-file safety: `validate_includes`, `validate_header_content`, `filter_cpp_only`, `repair_generated_cpp`, `assert_path_allowed` |
 | `packages/schemas/ptv_schemas/code_task.py` | `CodeTask` schema, including `depends_on` |
 
 ## High-level architecture
@@ -68,8 +68,9 @@ instructions) and the per-task user message built by
    references are fine.
 4. **Implement multi-file C++.** Decide the natural file split. Emit
    one entry per file in the structured `files[]` (1..16 entries).
-   Single-file output is a fallback, not the default. Paths must live
-   under `engine/generated/{mechanics|ai|dialogue}/<project_id>/`.
+   Files may be `.cpp`, `.h`, or `.hpp`. Single-file output is a
+   fallback, not the default. Paths must live under
+   `engine/generated/{mechanics|ai|dialogue}/<project_id>/`.
 
 If any step is skipped (e.g. the agent dumps everything into a single
 `.cpp` when the mechanic clearly separates), the implementation is
@@ -249,20 +250,28 @@ network call (used by every test in
 
 ## Multi-file output (`CodeTask.files[]`)
 
-`CodeTask.files` is the sole disk-write contract. After the agent
-returns:
+`CodeTask.files` is the sole disk-write contract. Files may be
+`.cpp`, `.h`, or `.hpp`. After the agent returns:
 
 1. The orchestrator validates `1 <= len(files) <= 16`.
-2. For each `files[*]` entry:
+2. Collects the set of `.h`/`.hpp` filenames from the result (the
+   task's "local headers").
+3. For each `files[*]` entry:
    * Normalises the path to
      `engine/generated/<kind>/<project_id>/<name>`.
-   * Runs `filter_cpp_only` → `repair_generated_cpp`.
+   * Runs `validate_includes(code, local_headers=...)` — if any include
+     is disallowed, the task **fails with a clear error** (fail-loudly;
+     includes are never silently stripped).
+   * For `.h`/`.hpp` files, runs `validate_header_content` to reject
+     registration macros in headers.
+   * Runs `filter_cpp_only` → `repair_generated_cpp` (secondary
+     safety-net).
    * Runs `assert_path_allowed(abs_path, gen_root)` (boundary check).
-   * Writes the file (UTF-8, trailing newline normalised).
-   * Appends the path to the board row's `files_written`.
-3. Writes a `.codetask.json` sidecar populated with the final
+4. Writes all validated files to disk (UTF-8, trailing newline
+   normalised). Appends each path to the board row's `files_written`.
+5. Writes a `.codetask.json` sidecar populated with the final
    `files[]` content; the promotion stage reads it.
-4. Calls `board.mark_done(task_id, files_written, exports)`.
+6. Calls `board.mark_done(task_id, files_written, exports)`.
 
 ### File-split guidance
 
@@ -272,6 +281,7 @@ The agent decides the actual split per mechanic. Common patterns:
 |---------|-------------|
 | Registration + metadata | `<id>_register.cpp` |
 | Per-tick simulation | `<id>_simulation.cpp` |
+| Shared types / helpers header | `<id>_shared.h` |
 | Weapon profile / config | `<id>_profile.cpp` |
 | VFX hookup | `<id>_vfx.cpp` |
 | Helpers private to the mechanic | `<id>_math.cpp` |
@@ -279,6 +289,27 @@ The agent decides the actual split per mechanic. Common patterns:
 The agent is **not** forced to use these specific names — it picks
 whatever matches the mechanic. The prompt explicitly states that
 **single-file output is a fallback, not the default**.
+
+### Generated headers (same-task, same-directory)
+
+Agents may emit `.h`/`.hpp` header files in their `files[]` output.
+These headers are for sharing structs, enums, constants, and helper
+declarations across the `.cpp` files of a single CodeTask.
+
+**Security model:**
+
+* Headers must live in the same directory as the task's `.cpp` files
+  (`engine/generated/<kind>/<project_id>/`).
+* Include with `#include "filename.h"` (quotes, bare filename, no
+  path separators).
+* Only headers produced by the same task are whitelisted. An
+  `#include "other_task_header.h"` is rejected if `other_task_header.h`
+  is not in the same task's `files[]`.
+* Registration macros (`PTV_REGISTER_MECHANIC`, etc.) must NOT appear
+  in header files — they belong in `.cpp` only.
+* Headers must not define new `ptv::` engine API types.
+* Cross-project header includes are blocked (no `../other_project/`
+  paths).
 
 ### `test_files[]` is unused
 

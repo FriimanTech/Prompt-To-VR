@@ -67,10 +67,35 @@ class OpenAIConfig:
     api_key: str | None = None
     hard_model: str = "gpt-5"
     light_model: str = "gpt-5-mini"
-    # Reasoning models spend tokens on hidden "reasoning" output before they
-    # emit the final answer, so we size the cap generously. For plain
-    # non-reasoning models this is just a ceiling.
-    max_tokens: int = 16384
+
+    # Reasoning models (gpt-5, o1/o3/o4, gpt-5-codex, ...) spend tokens on
+    # invisible "reasoning" output BEFORE they emit the final answer.
+    # ``max_completion_tokens`` caps the TOTAL of reasoning + visible
+    # output, so a low cap silently truncates large structured outputs
+    # (e.g. a MechanicPlan for a 945-line BuildSpec).
+    #
+    # OpenAI explicitly recommends reserving at least 25K tokens for any
+    # reasoning-model call. We default to 96K so the typical large
+    # BuildSpec / MechanicPlan / SceneSpec call has plenty of headroom
+    # for both reasoning AND the visible JSON. For plain non-reasoning
+    # models this is just a high ceiling that is almost never hit.
+    max_tokens: int = 96_000
+
+    # Hard upper bound on the auto-retry doubling logic in
+    # ``OpenAIClient._call_with_length_retry``. ``gpt-5`` supports up to
+    # ~128K output tokens; the ceiling guards against runaway costs and
+    # respects the model's hard limit.
+    max_tokens_ceiling: int = 128_000
+
+    # Per-request timeout in seconds, passed to ``openai.OpenAI(timeout=...)``.
+    # A reasoning model on a complex schema can legitimately take 60-90s
+    # so the default is generous. The default SDK timeout (10 minutes)
+    # is what made a stalled scene_spec call appear hung indefinitely:
+    # with no progress feedback in the UI, 10 minutes of waiting reads
+    # as "frozen". Override via ``OPENAI_REQUEST_TIMEOUT_SECONDS`` env
+    # var when running on a flaky network or behind a slow proxy.
+    request_timeout_seconds: float = 300.0
+
     default_system: str = (
         "You are the backend model for a local-first prompt-to-native-VR"
         " pipeline. Always obey the supplied JSON Schema exactly."
@@ -82,7 +107,38 @@ class OpenAIConfig:
             api_key=os.environ.get("OPENAI_API_KEY"),
             hard_model=os.environ.get("OPENAI_HARD_MODEL", "gpt-5"),
             light_model=os.environ.get("OPENAI_LIGHT_MODEL", "gpt-5-mini"),
+            max_tokens=_int_env("OPENAI_MAX_TOKENS", 96_000),
+            max_tokens_ceiling=_int_env(
+                "OPENAI_MAX_TOKENS_CEILING", 128_000
+            ),
+            request_timeout_seconds=_float_env(
+                "OPENAI_REQUEST_TIMEOUT_SECONDS", 300.0
+            ),
         )
+
+
+def _int_env(name: str, default: int) -> int:
+    """Parse an integer environment variable, falling back to ``default``
+    on missing / empty / non-numeric values."""
+    raw = os.environ.get(name)
+    if raw is None or raw.strip() == "":
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return default
+
+
+def _float_env(name: str, default: float) -> float:
+    """Parse a float environment variable, falling back to ``default``
+    on missing / empty / non-numeric values."""
+    raw = os.environ.get(name)
+    if raw is None or raw.strip() == "":
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        return default
 
 
 class OpenAIClient:
@@ -112,7 +168,7 @@ class OpenAIClient:
         """
 
         self._ensure_sdk()
-        client = self._sdk.OpenAI(api_key=self._require_key())
+        client = self._make_client()
         used_model = model or self.config.hard_model
 
         base_system = system or self.config.default_system
@@ -125,19 +181,18 @@ class OpenAIClient:
                 {"role": "user", "content": prompt},
             ],
             "response_format": {"type": "json_object"},
-            "max_completion_tokens": max_tokens or self.config.max_tokens,
         }
         # Reasoning models (gpt-5 family + o-series) reject sampling params.
         # Only pass temperature when the target model supports it.
         if not is_reasoning_model(used_model):
             kwargs["temperature"] = temperature
 
-        try:
-            resp = client.chat.completions.create(**kwargs)
-        except Exception as e:  # pragma: no cover - network error
-            raise ProviderCallError(f"OpenAI request failed: {e}") from e
+        resp = self._call_with_length_retry(
+            client,
+            base_kwargs=kwargs,
+            initial_cap=max_tokens or self.config.max_tokens,
+        )
 
-        _check_finish(resp)
         text = _extract_text(resp)
         try:
             data = json.loads(text)
@@ -160,7 +215,7 @@ class OpenAIClient:
         """Free-form text / code call (no schema)."""
 
         self._ensure_sdk()
-        client = self._sdk.OpenAI(api_key=self._require_key())
+        client = self._make_client()
         used_model = model or self.config.hard_model
 
         kwargs: dict[str, Any] = {
@@ -169,17 +224,16 @@ class OpenAIClient:
                 {"role": "system", "content": system or self.config.default_system},
                 {"role": "user", "content": prompt},
             ],
-            "max_completion_tokens": max_tokens or self.config.max_tokens,
         }
         if not is_reasoning_model(used_model):
             kwargs["temperature"] = temperature
 
-        try:
-            resp = client.chat.completions.create(**kwargs)
-        except Exception as e:  # pragma: no cover - network error
-            raise ProviderCallError(f"OpenAI request failed: {e}") from e
+        resp = self._call_with_length_retry(
+            client,
+            base_kwargs=kwargs,
+            initial_cap=max_tokens or self.config.max_tokens,
+        )
 
-        _check_finish(resp)
         text = _extract_text(resp)
         usage = dict(getattr(resp, "usage", {}) or {})
         return StructuredCall(data=None, raw_text=text, model=used_model, usage=usage)
@@ -219,6 +273,93 @@ class OpenAIClient:
             ) from e
         self._sdk = openai
 
+    def _make_client(self) -> Any:
+        """Construct an ``openai.OpenAI`` client with the configured
+        per-request timeout. The SDK's default is 600s (10 minutes)
+        and applies independently to connect+read; we lower it so a
+        stalled connection cannot wedge a pipeline stage. Callers can
+        override via ``OPENAI_REQUEST_TIMEOUT_SECONDS``.
+        """
+
+        timeout = float(self.config.request_timeout_seconds)
+        try:
+            return self._sdk.OpenAI(
+                api_key=self._require_key(), timeout=timeout
+            )
+        except TypeError:
+            # Very old SDK versions don't accept ``timeout`` here. Fall
+            # back to the default (no timeout) so the call site still
+            # works; the user gets the slow-hang behavior, which is the
+            # pre-fix status quo rather than a crash.
+            return self._sdk.OpenAI(api_key=self._require_key())
+
+    # ------------------------------------------------------------------
+    # Length-aware retry
+    # ------------------------------------------------------------------
+    def _call_with_length_retry(
+        self,
+        client: Any,
+        *,
+        base_kwargs: dict[str, Any],
+        initial_cap: int,
+    ) -> Any:
+        """Call ``client.chat.completions.create`` with automatic retry on
+        ``finish_reason='length'``.
+
+        Reasoning models (gpt-5 family, o-series) spend tokens on hidden
+        reasoning output BEFORE emitting visible text. When the
+        ``max_completion_tokens`` cap is hit by the combined reasoning +
+        output budget, the response comes back with ``finish_reason=
+        'length'`` and (usually) empty visible text. The legacy behaviour
+        was to raise immediately; that meant a single under-sized cap
+        wedged the entire pipeline.
+
+        The new behaviour: on truncation we DOUBLE the cap and retry, up
+        to ``OpenAIConfig.max_tokens_ceiling`` (default 128K, the
+        per-call max for ``gpt-5``). If the ceiling itself truncates,
+        we raise a clear error that points the user at
+        ``OPENAI_MAX_TOKENS`` / ``OpenAIConfig.max_tokens`` and the
+        schema-complexity knob.
+
+        ``content_filter`` finish reasons always raise (no retry).
+        """
+
+        ceiling = max(initial_cap, int(self.config.max_tokens_ceiling))
+        cap = max(1024, min(int(initial_cap), ceiling))
+
+        while True:
+            kwargs = {**base_kwargs, "max_completion_tokens": cap}
+            try:
+                resp = client.chat.completions.create(**kwargs)
+            except Exception as e:  # pragma: no cover - network error
+                raise ProviderCallError(f"OpenAI request failed: {e}") from e
+
+            reason = _finish_reason(resp)
+            if reason == "content_filter":
+                raise ProviderCallError(
+                    "OpenAI response blocked by content filter."
+                )
+            if reason != "length":
+                # Either 'stop' (clean finish), 'tool_calls', or some other
+                # non-truncation reason -- return and let the caller parse.
+                return resp
+
+            # Truncated. Retry with a bigger budget if we still have
+            # headroom; otherwise surface a clear error.
+            if cap >= ceiling:
+                raise ProviderCallError(
+                    "OpenAI response was truncated at "
+                    f"max_completion_tokens={cap} (the configured "
+                    "ceiling). Raise OpenAIConfig.max_tokens_ceiling or "
+                    "OPENAI_MAX_TOKENS_CEILING above "
+                    f"{ceiling}, raise OPENAI_MAX_TOKENS, or simplify "
+                    "the prompt / schema. Reasoning models like gpt-5 "
+                    "spend reasoning tokens from this budget BEFORE "
+                    "emitting visible output, which is why even a "
+                    "large cap can run out on a complex schema."
+                )
+            cap = min(cap * 2, ceiling)
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -242,27 +383,21 @@ def _with_schema_hint(system: str, schema: Mapping[str, Any]) -> str:
     )
 
 
-def _check_finish(resp: Any) -> None:
-    """Fail loudly when OpenAI hit the length cap before emitting output.
+def _finish_reason(resp: Any) -> str | None:
+    """Return the ``finish_reason`` of the first choice (or ``None`` if
+    the response shape is unrecognised).
 
-    Reasoning models spend tokens thinking before they produce text; if the
-    cap is too low the response comes back empty with
-    ``finish_reason == "length"``. Without this guard we'd parse empty text
-    as invalid JSON and emit a confusing error.
+    The retry helper uses this to decide whether to widen the
+    ``max_completion_tokens`` budget. Unlike the prior ``_check_finish``
+    helper, this does NOT raise on truncation -- truncation handling
+    lives in :py:meth:`OpenAIClient._call_with_length_retry`.
     """
 
     try:
         choice = resp.choices[0]
     except Exception:
-        return
-    reason = getattr(choice, "finish_reason", None)
-    if reason == "length":
-        raise ProviderCallError(
-            "OpenAI response was truncated (finish_reason='length'). "
-            "Raise OpenAIConfig.max_tokens or simplify the schema."
-        )
-    if reason == "content_filter":
-        raise ProviderCallError("OpenAI response blocked by content filter.")
+        return None
+    return getattr(choice, "finish_reason", None)
 
 
 def _extract_text(resp: Any) -> str:

@@ -371,11 +371,14 @@ disk.
    ``files[]`` output. Single-file output is a FALLBACK, not the
    default -- a real VR mechanic typically separates registration,
    per-tick simulation, profile / config, helpers, and VFX hookup. The
-   schema allows up to 16 files (each up to 120 000 chars). You decide
-   the names; suggested patterns:
+   schema allows up to 16 files (each up to 120 000 chars). You may
+   emit both ``.cpp`` source files AND ``.h``/``.hpp`` header files.
+   You decide the names; suggested patterns:
 
      <id>_register.cpp     // class declaration + PTV_REGISTER_MECHANIC
      <id>_simulation.cpp   // per-tick logic
+     <id>_shared.h         // structs, enums, helpers shared across your .cpp files
+     <id>_types.h          // type definitions local to this mechanic
      <id>_profile.cpp      // weapon profile / config registration
      <id>_vfx.cpp          // visual-effects hookup
      <id>_math.cpp         // helpers private to this mechanic
@@ -389,6 +392,36 @@ disk.
    mechanic across the file set. Keep all registrations consistent
    (e.g. the same string id passed to the macro and returned from
    ``id()``).
+
+# Generated headers (same-task, same-directory)
+
+IMPORTANT: If you split code across multiple ``.cpp`` files that share
+types, structs, enums, constants, or helper function declarations, you
+MUST put the shared declarations in a ``.h`` header and ``#include`` it
+from each ``.cpp`` that needs them. Each ``.cpp`` file is compiled
+independently -- a function defined in ``foo_register.cpp`` is NOT
+visible from ``foo_runtime.cpp`` unless declared in a shared header.
+
+You may create ``.h`` and ``.hpp`` header files as part of your
+``files[]`` output.  These headers are for sharing structs, enums,
+constants, and helper declarations across the ``.cpp`` files of THIS
+task only.  Rules:
+
+  * Headers MUST be in the same directory as your ``.cpp`` files
+    (i.e. under ``engine/generated/<kind>/<project_id>/``).
+  * Include them with ``#include "filename.h"`` (quotes, bare
+    filename, NO path segments -- no ``../``, no subdirectories).
+  * You MUST emit the header in your ``files[]`` output alongside the
+    ``.cpp`` files that use it.  If you ``#include "foo.h"`` but do
+    not also emit ``foo.h`` in ``files[]``, the boundary checker will
+    reject the task and your code will NOT compile.
+  * Do NOT put ``PTV_REGISTER_MECHANIC`` (or sibling macros) in a
+    header -- registration must live in a ``.cpp`` file.
+  * Do NOT define new ``ptv::`` engine API types in headers.  Your
+    headers are for task-local helpers only.
+  * Do NOT include headers from other tasks or other projects.
+    Cross-task reuse goes through the ``depends_on`` / ``exports``
+    ledger, not shared headers.
 
 # Output format
 
@@ -446,12 +479,15 @@ C++ standard library (common ones, use as needed):
   <unordered_map> <unordered_set> <map> <set>
   <algorithm> <functional> <memory> <utility> <chrono> <type_traits> <numeric>
 
+Same-task generated headers (your own .h/.hpp files emitted in files[]):
+  #include "your_shared_header.h"   // bare filename, quotes, same directory
+
 DO NOT include any header that is not in the lists above. In particular
 there is NO ptv/api/input.h, no ptv/api/locomotion.h, no ptv/api/haptics.h,
 no ptv/api/ui.h, no ptv/api/time.h, no ptv/api/audio_capture.h, no
 ptv/api/http.h, no ptv/api/save_state.h, no ptv/scene/node.h, no
-ptv/scene/volume.h. These do not exist. The boundary checker will strip
-them and your code will fail to compile.
+ptv/scene/volume.h. These do not exist. The boundary checker will REJECT
+your task (not silently strip) and you will see a clear error message.
 
 # Exact interface signatures (copy these verbatim)
 
@@ -473,7 +509,18 @@ For kind=mechanic (most common):
 
 Registration macro (use EXACTLY this spelling, NOT ``REGISTER_MECHANIC``):
 
-    PTV_REGISTER_MECHANIC("generated.<code_task_id>", YourClassName);
+    PTV_REGISTER_MECHANIC("generated.<code_task_id>", YourClassName)
+
+CRITICAL: The registration macro MUST be called INSIDE ``namespace ptv``
+with the UNQUALIFIED class name. The macro uses C++ token pasting (``##``)
+internally. If you write ``ptv::YourClassName`` the ``##`` operator produces
+an invalid identifier like ``_ptv_regm_ptv::YourClassName`` and compilation
+fails. Correct pattern:
+
+    namespace ptv {
+    class MyMechanic : public IMechanic { ... };
+    PTV_REGISTER_MECHANIC("generated.my_mechanic", MyMechanic)
+    }  // namespace ptv
 
 For kind=ai replace IMechanic with IBehaviour (`on_tick` instead of
 `on_update`) and `PTV_REGISTER_BEHAVIOUR`. For kind=dialogue use
@@ -503,6 +550,9 @@ helpers above are the only correct way.
 If you really need to iterate a view, call ``world.registry()`` and work with
 ``entt::entity`` values yielded by ``reg.view<...>()`` directly — those are
 already the right type.
+
+GLM NOTE: ``glm::length2`` does NOT exist. To compute squared length use
+``glm::dot(v, v)`` instead. This is a common error that fails to compile.
 
 Available components (defined in ptv/ecs/World.h):
 
@@ -598,19 +648,22 @@ the macro called EXACTLY ONCE across the entire file set).
         float period_{1.0f};
     };
 
-    }  // namespace ptv
+    PTV_REGISTER_MECHANIC("generated.example_blink", ExampleBlink)
 
-    PTV_REGISTER_MECHANIC("generated.example_blink", ptv::ExampleBlink)
+    }  // namespace ptv
 
 # Hard rules
 
-1. Do NOT ``#include`` anything outside the lists above. The boundary
-   checker strips disallowed includes and the file then fails to compile.
+1. Do NOT ``#include`` anything outside the allowed lists above (engine
+   allowlist + standard library + third-party + your own same-task
+   headers emitted in ``files[]``). The boundary checker will REJECT
+   your task with a clear error -- it does NOT silently strip includes.
 2. Do NOT redefine ``IMechanic`` / ``IBehaviour`` / ``IDialogueHook``; just
    ``#include`` the header and subclass the real type.
 3. Use ``PTV_REGISTER_MECHANIC`` (or ``PTV_REGISTER_BEHAVIOUR`` /
    ``PTV_REGISTER_DIALOGUE_HOOK``) EXACTLY ONCE per generated mechanic
-   across your file set. Pass the CodeTask id as the string literal.
+   across your file set, and ONLY in a ``.cpp`` file (never in a
+   header). Pass the CodeTask id as the string literal.
    NOT ``REGISTER_MECHANIC``.
 4. Do NOT write ``class X : public ptv::IMechanic`` with custom method
    names like ``OnStart`` / ``Configure`` / ``Update(ctx)``. The only
@@ -619,10 +672,22 @@ the macro called EXACTLY ONCE across the entire file set).
    / ``ctx.time`` / ``ctx.save`` / ``ctx.ui``. No such context exists.
 6. There is NO per-file line cap and NO requirement to use a single
    .cpp. Use the natural file split for the mechanic. When you split
-   across files, keep one class declaration per file or use a shared
-   internal header you also emit -- whichever is clearer. Stub
-   genuinely-missing engine capability with a ``params``-driven
+   across files, use a shared ``.h`` header that you also emit in your
+   ``files[]`` output (see the "Generated headers" section above).
+   Include it with ``#include "your_header.h"`` (bare filename, quotes).
+   Stub genuinely-missing engine capability with a ``params``-driven
    fallback and a one-line TODO comment.
 7. Re-use exports from ``depends_on`` tasks rather than re-implementing
    them. The ledger gives you those exports; plug into them.
+8. Do NOT define a class in one ``.cpp`` file and then define its
+   methods in a DIFFERENT ``.cpp`` file. Each ``.cpp`` is compiled
+   independently. If a class method is split across files, the class
+   definition MUST be in a shared ``.h`` header.
+9. Do NOT mark functions ``inline`` or ``static`` in a ``.cpp`` if
+   other ``.cpp`` files in your task need to call them. ``inline``
+   and ``static`` give internal linkage — the function becomes
+   invisible to other translation units. Instead, declare the
+   function in your shared ``.h`` header.
+10. ``nlohmann::json`` has no ``set_object()`` method. To create an
+    empty JSON object, use ``nlohmann::json::object()``.
 """

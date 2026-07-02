@@ -196,11 +196,12 @@ def test_google_imagen_writes_png(tmp_path, monkeypatch):
     _install_fake_genai(monkeypatch)
     cfg = GoogleImageConfig(api_key="key", imagen_model="imagen-4.0-generate-001")
     c = GoogleImageClient(cfg)
-    results = c.generate_with_imagen(
-        prompt="a shiny cube",
-        out_dir=tmp_path,
-        number_of_images=1,
-    )
+    with pytest.warns(DeprecationWarning, match="generate_with_imagen"):
+        results = c.generate_with_imagen(
+            prompt="a shiny cube",
+            out_dir=tmp_path,
+            number_of_images=1,
+        )
     assert len(results) == 1
     r = results[0]
     assert r.path.exists()
@@ -208,13 +209,25 @@ def test_google_imagen_writes_png(tmp_path, monkeypatch):
     assert r.model == "imagen-4.0-generate-001"
 
 
-def test_google_gemini_fallback_writes_png(tmp_path, monkeypatch):
+def test_google_gemini_writes_png(tmp_path, monkeypatch):
     _install_fake_genai(monkeypatch)
-    cfg = GoogleImageConfig(api_key="key")
+    cfg = GoogleImageConfig(
+        api_key="key", gemini_image_model="gemini-3.1-flash-image"
+    )
     c = GoogleImageClient(cfg)
     results = c.generate_with_gemini(prompt="a car", out_dir=tmp_path)
     assert len(results) == 1
     assert results[0].path.read_bytes() == b"PNGBYTES"
+    assert results[0].model == "gemini-3.1-flash-image"
+
+
+def test_google_generate_defaults_to_gemini(tmp_path, monkeypatch):
+    _install_fake_genai(monkeypatch)
+    cfg = GoogleImageConfig(api_key="key")
+    c = GoogleImageClient(cfg)
+    results = c.generate(prompt="a tree", out_dir=tmp_path)
+    assert len(results) == 1
+    assert results[0].model == "gemini-3.1-flash-image"
 
 
 def test_google_missing_key_raises(monkeypatch, tmp_path):
@@ -222,7 +235,7 @@ def test_google_missing_key_raises(monkeypatch, tmp_path):
     cfg = GoogleImageConfig(api_key=None)
     c = GoogleImageClient(cfg)
     with pytest.raises(ProviderConfigError):
-        c.generate_with_imagen(prompt="x", out_dir=tmp_path)
+        c.generate_with_gemini(prompt="x", out_dir=tmp_path)
 
 
 # ---------------------------------------------------------------------------

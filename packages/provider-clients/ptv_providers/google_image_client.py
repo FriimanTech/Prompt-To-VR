@@ -1,43 +1,54 @@
-"""GoogleImageClient: Imagen + Gemini multimodal image fallback.
+"""GoogleImageClient: Gemini native image generation.
 
-Verified April 2026:
+Verified June 2026 (Google Imagen 4 deprecation notice):
+    * Imagen 4 endpoints (``imagen-4.0-generate-001``, ``imagen-4.0-ultra-*``,
+      ``imagen-4.0-fast-*``) are discontinued after 2026-08-17. Google
+      recommends migrating to ``gemini-3.1-flash-image``.
     * Python SDK package is ``google-genai`` (``pip install google-genai``).
-    * Imagen: ``client.models.generate_images(model="imagen-4.0-generate-001",
-      prompt=..., config=types.GenerateImagesConfig(number_of_images=...))``.
-    * Gemini multimodal image fallback:
-      ``client.models.generate_content(model="gemini-2.5-flash-image",
-      contents=..., config=types.GenerateContentConfig(response_modalities=["IMAGE"]))``.
+    * Text-to-image uses ``client.models.generate_content`` with
+      ``config=types.GenerateContentConfig(response_modalities=["IMAGE"],
+      image_config=types.ImageConfig(aspect_ratio=...))``.
     * Client auth uses ``GEMINI_API_KEY`` or ``GOOGLE_API_KEY`` (both accepted
       by the SDK). We prefer ``GOOGLE_API_KEY`` because that's what we ask for
       in ``.env.example``.
+
+The legacy ``generate_with_imagen`` helper is retained for callers that still
+invoke it directly, but the pipeline's ``generate()`` entry point uses Gemini
+only.
 """
 
 from __future__ import annotations
 
 import io
 import os
+import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterable, Optional
+from typing import Optional
 
 from .errors import ProviderCallError, ProviderConfigError
+
+# Default model after Imagen 4 → Gemini migration (Google notice, Aug 2026).
+DEFAULT_GEMINI_IMAGE_MODEL = "gemini-3.1-flash-image"
 
 
 @dataclass(frozen=True)
 class GoogleImageConfig:
     api_key: str | None = None
+    gemini_image_model: str = DEFAULT_GEMINI_IMAGE_MODEL
+    # Deprecated: Imagen endpoints are being removed. Kept so older configs
+    # that still pass ``imagen_model=...`` do not crash on construction.
     imagen_model: str = "imagen-4.0-generate-001"
-    gemini_image_model: str = "gemini-2.5-flash-image"
 
     @classmethod
     def from_env(cls) -> "GoogleImageConfig":
         return cls(
             api_key=os.environ.get("GOOGLE_API_KEY")
             or os.environ.get("GEMINI_API_KEY"),
-            imagen_model=os.environ.get("IMAGEN_MODEL", "imagen-4.0-generate-001"),
             gemini_image_model=os.environ.get(
-                "GEMINI_IMAGE_MODEL", "gemini-2.5-flash-image"
+                "GEMINI_IMAGE_MODEL", DEFAULT_GEMINI_IMAGE_MODEL
             ),
+            imagen_model=os.environ.get("IMAGEN_MODEL", "imagen-4.0-generate-001"),
         )
 
 
@@ -60,7 +71,107 @@ class GoogleImageClient:
         self._client = None
 
     # ------------------------------------------------------------------
-    # Primary path: Imagen
+    # Primary path: Gemini native image (gemini-3.1-flash-image)
+    # ------------------------------------------------------------------
+    def generate_with_gemini(
+        self,
+        *,
+        prompt: str,
+        out_dir: str | os.PathLike[str],
+        number_of_images: int = 1,
+        filename_prefix: str = "ref",
+        aspect_ratio: str = "1:1",
+        negative_prompt: Optional[str] = None,
+    ) -> list[ImageResult]:
+        """Text-to-image via ``generate_content`` on a Gemini image model."""
+
+        self._ensure_sdk()
+        client = self._get_client()
+        types = self._types
+
+        composed_prompt = _compose_gemini_prompt(prompt, negative_prompt)
+        count = max(1, int(number_of_images))
+        out = Path(out_dir)
+        out.mkdir(parents=True, exist_ok=True)
+        results: list[ImageResult] = []
+
+        for i in range(count):
+            cfg = types.GenerateContentConfig(
+                response_modalities=["IMAGE"],
+                image_config=types.ImageConfig(aspect_ratio=aspect_ratio),
+            )
+            try:
+                resp = client.models.generate_content(
+                    model=self.config.gemini_image_model,
+                    contents=composed_prompt,
+                    config=cfg,
+                )
+            except Exception as e:  # pragma: no cover - network
+                raise ProviderCallError(
+                    f"Gemini image request failed ({self.config.gemini_image_model}): {e}"
+                ) from e
+
+            batch = _extract_inline_images(
+                resp,
+                out_dir=out,
+                filename_prefix=filename_prefix,
+                start_index=i,
+                model=self.config.gemini_image_model,
+            )
+            if not batch:
+                raise ProviderCallError(
+                    f"Gemini image model {self.config.gemini_image_model!r} "
+                    "returned no inline image parts."
+                )
+            results.extend(batch)
+            if len(results) >= count:
+                break
+
+        if not results:
+            raise ProviderCallError(
+                f"Gemini image model {self.config.gemini_image_model!r} "
+                "returned zero images."
+            )
+        return results[:count]
+
+    def generate(
+        self,
+        *,
+        prompt: str,
+        out_dir: str | os.PathLike[str],
+        number_of_images: int = 1,
+        aspect_ratio: str = "1:1",
+        negative_prompt: Optional[str] = None,
+        filename_prefix: str = "ref",
+        prefer: str = "gemini",
+    ) -> list[ImageResult]:
+        """Generate reference images using the Gemini native image model.
+
+        ``prefer`` is accepted for backward compatibility. Values other than
+        ``"gemini"`` emit a deprecation warning and still route through
+        Gemini because Imagen 4 endpoints are being discontinued.
+        """
+
+        if prefer not in ("gemini", "imagen"):
+            raise ValueError(f"Unknown prefer={prefer!r}; use 'gemini'.")
+        if prefer == "imagen":
+            warnings.warn(
+                "prefer='imagen' is deprecated; Imagen 4 endpoints are being "
+                "removed. Using gemini-3.1-flash-image instead.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+        return self.generate_with_gemini(
+            prompt=prompt,
+            out_dir=out_dir,
+            number_of_images=number_of_images,
+            aspect_ratio=aspect_ratio,
+            negative_prompt=negative_prompt,
+            filename_prefix=filename_prefix,
+        )
+
+    # ------------------------------------------------------------------
+    # Legacy path: Imagen (deprecated — do not use in new code)
     # ------------------------------------------------------------------
     def generate_with_imagen(
         self,
@@ -72,7 +183,18 @@ class GoogleImageClient:
         negative_prompt: Optional[str] = None,
         filename_prefix: str = "ref",
     ) -> list[ImageResult]:
-        """Call Imagen and persist PNGs to ``out_dir``."""
+        """Deprecated. Imagen 4 endpoints are discontinued after 2026-08-17.
+
+        New code should call :meth:`generate_with_gemini` or :meth:`generate`.
+        This method remains for tests and explicit legacy callers.
+        """
+
+        warnings.warn(
+            "generate_with_imagen is deprecated; migrate to "
+            f"generate_with_gemini (model={DEFAULT_GEMINI_IMAGE_MODEL}).",
+            DeprecationWarning,
+            stacklevel=2,
+        )
 
         self._ensure_sdk()
         client = self._get_client()
@@ -82,8 +204,6 @@ class GoogleImageClient:
         if aspect_ratio:
             cfg_kwargs["aspect_ratio"] = aspect_ratio
         if negative_prompt:
-            # negative_prompt is Vertex-AI only on imagen-4*. If the Developer
-            # API rejects it we retry without it below.
             cfg_kwargs["negative_prompt"] = negative_prompt
 
         def _call(cfg_kwargs: dict):
@@ -97,16 +217,15 @@ class GoogleImageClient:
             resp = _call(cfg_kwargs)
         except Exception as e:  # pragma: no cover - network error surfacing
             msg = str(e).lower()
-            # Retry once without negative_prompt if that's what the server
-            # refused; this covers the Gemini Developer API which drops that
-            # kwarg while Vertex AI keeps it.
             if "negative_prompt" in cfg_kwargs and (
                 "negative_prompt" in msg
                 or "not supported" in msg
                 or "unknown field" in msg
                 or "400" in msg
             ):
-                cfg_kwargs = {k: v for k, v in cfg_kwargs.items() if k != "negative_prompt"}
+                cfg_kwargs = {
+                    k: v for k, v in cfg_kwargs.items() if k != "negative_prompt"
+                }
                 try:
                     resp = _call(cfg_kwargs)
                 except Exception as e2:
@@ -131,105 +250,6 @@ class GoogleImageClient:
         if not results:
             raise ProviderCallError("Imagen returned zero images.")
         return results
-
-    # ------------------------------------------------------------------
-    # Fallback path: Gemini multimodal image
-    # ------------------------------------------------------------------
-    def generate_with_gemini(
-        self,
-        *,
-        prompt: str,
-        out_dir: str | os.PathLike[str],
-        filename_prefix: str = "ref",
-        aspect_ratio: str = "1:1",
-    ) -> list[ImageResult]:
-        """Fast iterative multimodal image generation via Gemini Flash Image."""
-
-        self._ensure_sdk()
-        client = self._get_client()
-        types = self._types
-
-        cfg = types.GenerateContentConfig(
-            response_modalities=["IMAGE"],
-            image_config=types.ImageConfig(aspect_ratio=aspect_ratio),
-        )
-        try:
-            resp = client.models.generate_content(
-                model=self.config.gemini_image_model,
-                contents=prompt,
-                config=cfg,
-            )
-        except Exception as e:  # pragma: no cover - network
-            raise ProviderCallError(f"Gemini image request failed: {e}") from e
-
-        out = Path(out_dir)
-        out.mkdir(parents=True, exist_ok=True)
-        results: list[ImageResult] = []
-        idx = 0
-        for cand in resp.candidates or []:
-            parts = getattr(cand.content, "parts", None) or []
-            for part in parts:
-                inline = getattr(part, "inline_data", None)
-                if inline and getattr(inline, "data", None):
-                    data = bytes(inline.data)
-                    mime = getattr(inline, "mime_type", "image/png") or "image/png"
-                    ext = ".png" if mime.endswith("png") else ".jpg"
-                    path = out / f"{filename_prefix}_{idx:02d}{ext}"
-                    path.write_bytes(data)
-                    results.append(
-                        ImageResult(
-                            path=path,
-                            bytes_len=len(data),
-                            model=self.config.gemini_image_model,
-                            mime_type=mime,
-                        )
-                    )
-                    idx += 1
-        if not results:
-            raise ProviderCallError(
-                "Gemini image model returned no inline image parts."
-            )
-        return results
-
-    def generate(
-        self,
-        *,
-        prompt: str,
-        out_dir: str | os.PathLike[str],
-        number_of_images: int = 1,
-        aspect_ratio: str = "1:1",
-        negative_prompt: Optional[str] = None,
-        filename_prefix: str = "ref",
-        prefer: str = "imagen",
-    ) -> list[ImageResult]:
-        """Smart path: try Imagen first, fall back to Gemini on failure."""
-
-        order: Iterable[str] = (
-            ("imagen", "gemini") if prefer == "imagen" else ("gemini", "imagen")
-        )
-        last_err: Exception | None = None
-        for choice in order:
-            try:
-                if choice == "imagen":
-                    return self.generate_with_imagen(
-                        prompt=prompt,
-                        out_dir=out_dir,
-                        number_of_images=number_of_images,
-                        aspect_ratio=aspect_ratio,
-                        negative_prompt=negative_prompt,
-                        filename_prefix=filename_prefix,
-                    )
-                return self.generate_with_gemini(
-                    prompt=prompt,
-                    out_dir=out_dir,
-                    filename_prefix=filename_prefix,
-                    aspect_ratio=aspect_ratio,
-                )
-            except Exception as e:
-                last_err = e
-                continue
-        assert last_err is not None
-        raise ProviderCallError(f"All Google image paths failed: {last_err}")
 
     # ------------------------------------------------------------------
     # Internals
@@ -259,12 +279,55 @@ class GoogleImageClient:
         self._types = _types
 
 
+def _compose_gemini_prompt(prompt: str, negative_prompt: Optional[str]) -> str:
+    """Gemini image models do not accept Imagen's ``negative_prompt`` field.
+
+    When an AssetRef carries one, fold it into the text prompt instead.
+    """
+
+    base = prompt.strip()
+    if not negative_prompt or not str(negative_prompt).strip():
+        return base
+    return f"{base}\n\nAvoid in the image: {str(negative_prompt).strip()}"
+
+
+def _extract_inline_images(
+    resp,
+    *,
+    out_dir: Path,
+    filename_prefix: str,
+    start_index: int,
+    model: str,
+) -> list[ImageResult]:
+    results: list[ImageResult] = []
+    idx = start_index
+    for cand in resp.candidates or []:
+        parts = getattr(cand.content, "parts", None) or []
+        for part in parts:
+            inline = getattr(part, "inline_data", None)
+            if inline and getattr(inline, "data", None):
+                data = bytes(inline.data)
+                mime = getattr(inline, "mime_type", "image/png") or "image/png"
+                ext = ".png" if mime.endswith("png") else ".jpg"
+                path = out_dir / f"{filename_prefix}_{idx:02d}{ext}"
+                path.write_bytes(data)
+                results.append(
+                    ImageResult(
+                        path=path,
+                        bytes_len=len(data),
+                        model=model,
+                        mime_type=mime,
+                    )
+                )
+                idx += 1
+    return results
+
+
 def _read_image_bytes(img_obj) -> bytes:
     """The google-genai SDK returns an Image object; extract raw bytes."""
     data = getattr(img_obj, "image_bytes", None)
     if data is not None:
         return bytes(data)
-    # Fallback: save via PIL
     try:  # pragma: no cover - depends on SDK internals
         from PIL import Image as _PIL
 

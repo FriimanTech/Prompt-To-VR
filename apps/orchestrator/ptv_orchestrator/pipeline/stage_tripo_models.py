@@ -1,4 +1,16 @@
-"""Stage 6: Tripo image-to-3D (or text-to-3D fallback) per asset."""
+"""Stage 6: Tripo image-to-3D (or text-to-3D fallback) per asset.
+
+Idempotency: if an asset already has a valid ``.glb`` under
+``assets/<asset_id>/``, the Tripo call for that asset is skipped. This
+matters a lot here -- each image-to-3D call costs ~20 Tripo credits and
+takes 30-90s to poll. A Resume after a partial run must not re-bill the
+user for work that already landed on disk. Delete the asset's
+sub-directory to force re-generation.
+
+Preflight balance check is scoped to assets that ACTUALLY still need a
+GLB, so a Resume where most assets are already on disk doesn't error
+out on "insufficient credits" when the remaining work would fit.
+"""
 
 from __future__ import annotations
 
@@ -16,6 +28,58 @@ def run(ctx: PipelineContext) -> StageResult:
     ctx.store.record_stage(state, ProjectStage.tripo_models, ProjectStatus.running)
 
     manifest = ctx.asset_manifest or ctx.store.load_asset_manifest(ctx.project_id)
+
+    # ------------------------------------------------------------------
+    # Idempotency pass: figure out which assets still need Tripo. An
+    # asset is considered "done" when its sub-directory under
+    # ``assets/`` already contains a usable GLB. We surface those as
+    # ``produced`` so the artifacts list and downstream stages still
+    # see them.
+    # ------------------------------------------------------------------
+    assets_dir = ctx.project_dir / "assets"
+    produced: list[str] = []
+    skipped: list[str] = []
+    pending = []  # assets that still need a Tripo call
+    for item in manifest.items:
+        if item.strategy.value not in ("image_to_3d", "text_to_3d"):
+            continue
+        item_dir = assets_dir / item.id
+        existing = _existing_glb(item_dir)
+        if existing is not None:
+            produced.append(
+                str(existing.relative_to(ctx.settings.repo_root)).replace("\\", "/")
+            )
+            skipped.append(item.id)
+        else:
+            pending.append(item)
+
+    if skipped:
+        ctx.emit(
+            ProjectStage.tripo_models,
+            "info",
+            f"reusing {len(skipped)} GLB(s) already on disk; "
+            f"{len(pending)} asset(s) still need Tripo",
+        )
+
+    if not pending:
+        # Nothing to do. Stamp success and exit; we never touch the
+        # Tripo client or burn a balance preflight call.
+        ctx.store.record_stage(
+            state,
+            ProjectStage.tripo_models,
+            ProjectStatus.succeeded,
+            message=(
+                f"All {len(produced)} GLB(s) already on disk; no Tripo calls made"
+            ),
+            artifacts=produced,
+        )
+        ctx.emit(
+            ProjectStage.tripo_models,
+            "succeeded",
+            f"{len(produced)} models (reused from disk)",
+        )
+        return StageResult(stage=ProjectStage.tripo_models, artifacts=produced)
+
     client = TripoClient(
         TripoConfig(
             api_key=ctx.settings.tripo_api_key,
@@ -26,12 +90,11 @@ def run(ctx: PipelineContext) -> StageResult:
     # Preflight: check Tripo account balance BEFORE firing N image-to-3D
     # requests. Without this, a user whose account is out of credits would
     # watch every single asset attempt, fail, and wait the full polling
-    # timeout. Each image-to-3D run on v2.5 costs ~20 credits, so we need at
-    # least roughly ``len(items) * 20`` credits to complete the stage. If
-    # the balance call itself fails (bad API key, network), surface that
-    # error immediately so the user can fix it before anything else runs.
-    assets_to_generate = [it for it in manifest.items if it.strategy.value in ("image_to_3d", "text_to_3d")]
-    required_credits = max(20, len(assets_to_generate) * 20)
+    # timeout. Each image-to-3D run on v2.5 costs ~20 credits, so we need
+    # at least roughly ``len(pending) * 20`` credits to complete the
+    # REMAINING work (not the whole manifest -- already-on-disk assets
+    # don't need re-billing).
+    required_credits = max(20, len(pending) * 20)
     try:
         balance_info = client.get_balance()
     except Exception as exc:
@@ -49,28 +112,29 @@ def run(ctx: PipelineContext) -> StageResult:
         "tripo_models",
         f"Tripo balance preflight: available={available:.1f} credits, "
         f"frozen={balance_info.get('frozen', 0.0):.1f}, "
-        f"required_estimate={required_credits} (for {len(assets_to_generate)} assets).",
+        f"required_estimate={required_credits} (for {len(pending)} pending assets, "
+        f"{len(skipped)} already on disk).",
     )
     ctx.emit(
         ProjectStage.tripo_models,
         "info",
-        f"Tripo balance: {available:.0f} credits (need ~{required_credits} for {len(assets_to_generate)} assets)",
+        f"Tripo balance: {available:.0f} credits "
+        f"(need ~{required_credits} for {len(pending)} pending assets)",
     )
     if available < required_credits:
         msg = (
             f"Insufficient Tripo credits: have {available:.1f}, "
-            f"need ~{required_credits} for {len(assets_to_generate)} assets "
+            f"need ~{required_credits} for {len(pending)} assets "
             "(approx 20 credits per image-to-3D job on v2.5). "
             "Top up at https://platform.tripo3d.ai then press Resume."
         )
         ctx.store.append_log(ctx.project_id, "tripo_models", msg)
         raise RuntimeError(msg)
 
-    produced: list[str] = []
     attempted = 0
     per_item_errors: list[str] = []
-    for item in manifest.items:
-        item_dir = ctx.project_dir / "assets" / item.id
+    for item in pending:
+        item_dir = assets_dir / item.id
         item_dir.mkdir(parents=True, exist_ok=True)
         attempted += 1
         try:
@@ -117,27 +181,33 @@ def run(ctx: PipelineContext) -> StageResult:
             ctx.emit(ProjectStage.tripo_models, "warning", f"{item.id}: {e}")
             per_item_errors.append(f"{item.id}: {e}")
 
-    # Hard-fail if the manifest wanted 3D assets but none materialised. Without
-    # this the pipeline would silently steamroll past the Tripo stage,
-    # normalize 0 GLBs, and the C++ build would then compile against an empty
-    # scene. Fail loudly so the UI can show the error and the user can fix
-    # credits / API keys and resume the pipeline from this point.
-    if attempted > 0 and not produced:
+    # Hard-fail if the pending list wanted Tripo work but none materialised.
+    # Without this the pipeline would silently steamroll past the Tripo
+    # stage, normalize 0 new GLBs, and the C++ build would compile against
+    # missing entities. Fail loudly so the UI shows the error and the user
+    # can fix credits / API keys and resume from this point.
+    if attempted > 0 and len(produced) == len(skipped):
+        # produced grew only by the reused-from-disk count; no new GLB
+        # was generated this pass.
         detail = "; ".join(per_item_errors[:6]) if per_item_errors else "unknown"
         msg = (
-            f"Tripo produced 0 models from {attempted} asset(s). "
+            f"Tripo produced 0 NEW models from {attempted} pending asset(s). "
             f"Check TRIPO_API_KEY and account credits. First errors: {detail}"
         )
         raise RuntimeError(msg)
+
+    message = f"{len(produced)} models produced"
+    if skipped:
+        message += f" ({len(skipped)} reused from disk, {attempted} via Tripo)"
 
     ctx.store.record_stage(
         state,
         ProjectStage.tripo_models,
         ProjectStatus.succeeded,
-        message=f"{len(produced)} models produced",
+        message=message,
         artifacts=produced,
     )
-    ctx.emit(ProjectStage.tripo_models, "succeeded", f"{len(produced)} models")
+    ctx.emit(ProjectStage.tripo_models, "succeeded", message)
     return StageResult(stage=ProjectStage.tripo_models, artifacts=produced)
 
 
@@ -152,3 +222,36 @@ def _pick_reference_image(images_dir: Path) -> Path | None:
         ]
     )
     return candidates[0] if candidates else None
+
+
+def _existing_glb(item_dir: Path) -> Path | None:
+    """Return a usable GLB already on disk for this asset, or ``None``.
+
+    We require a real-looking GLB (header magic) so a 0-byte truncated
+    file from a crashed prior run gets RE-GENERATED instead of being
+    treated as "done". Matches the same primary-GLB picking rule as
+    :mod:`stage_asset_normalize`: prefer ``*pbr*`` / ``*model*`` files.
+    """
+
+    if not item_dir.exists():
+        return None
+    glbs = [p for p in item_dir.rglob("*.glb") if p.is_file()]
+    if not glbs:
+        return None
+    glbs.sort(
+        key=lambda p: (
+            0 if "pbr" in p.name.lower() else 1,
+            0 if "model" in p.name.lower() else 1,
+            p.name.lower(),
+        )
+    )
+    for candidate in glbs:
+        try:
+            with candidate.open("rb") as f:
+                header = f.read(4)
+        except OSError:
+            continue
+        # 'glTF' little-endian magic.
+        if header == b"glTF":
+            return candidate
+    return None

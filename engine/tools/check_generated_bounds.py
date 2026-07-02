@@ -1,7 +1,9 @@
 """CI-style guard script.
 
-Ensures that every file under ``engine/generated/`` lives in one of the three
-allowed subdirectories and only includes whitelisted headers.
+Ensures that every generated file (``.cpp``, ``.h``, ``.hpp``) under
+``engine/generated/`` lives in one of the three allowed subdirectories,
+only includes whitelisted headers (plus same-directory generated headers),
+and that header files do not contain registration macros.
 
 Run::
 
@@ -46,19 +48,60 @@ HEADER_EXACT = {
 
 INCLUDE_RE = re.compile(r"""^\s*#\s*include\s*[<"](?P<h>[^">]+)[">]""")
 
+REGISTRATION_RE = re.compile(
+    r"\bPTV_REGISTER_(?:MECHANIC|BEHAVIOUR|DIALOGUE_HOOK)\b"
+)
+
+_GENERATED_EXTS = ("*.cpp", "*.h", "*.hpp")
+
+
+def _local_headers_in(directory: Path) -> frozenset[str]:
+    """Return the set of ``.h``/``.hpp`` filenames present in *directory*."""
+    names: set[str] = set()
+    for ext in ("*.h", "*.hpp"):
+        for hp in directory.glob(ext):
+            names.add(hp.name)
+    return frozenset(names)
+
+
+def _is_bare_local_header(header: str) -> bool:
+    if "/" in header or "\\" in header or ".." in header:
+        return False
+    low = header.lower()
+    return low.endswith(".h") or low.endswith(".hpp")
+
 
 def main(root: Path) -> int:
     gen_root = root / "engine" / "generated"
     if not gen_root.exists():
         return 0
     errors: list[str] = []
-    for p in gen_root.rglob("*.cpp"):
+
+    # Collect all generated files across all three extensions.
+    all_files: list[Path] = []
+    for ext in _GENERATED_EXTS:
+        all_files.extend(gen_root.rglob(ext))
+
+    for p in sorted(all_files):
         rel = p.relative_to(gen_root)
         first = rel.parts[0]
         if first not in ALLOWED_ROOTS:
             errors.append(f"{p}: outside allowed subtrees {ALLOWED_ROOTS}")
             continue
-        for i, line in enumerate(p.read_text(encoding="utf-8").splitlines(), 1):
+
+        is_header = p.suffix.lower() in (".h", ".hpp")
+        local_headers = _local_headers_in(p.parent)
+        text = p.read_text(encoding="utf-8")
+
+        for i, line in enumerate(text.splitlines(), 1):
+            # Check registration macros in headers.
+            if is_header and REGISTRATION_RE.search(line):
+                macro = REGISTRATION_RE.search(line).group(0)  # type: ignore[union-attr]
+                errors.append(
+                    f"{p}:{i}: header files must not contain {macro} "
+                    f"-- move registration to a .cpp file"
+                )
+
             m = INCLUDE_RE.match(line)
             if not m:
                 continue
@@ -69,7 +112,17 @@ def main(root: Path) -> int:
                 continue
             if any(h.startswith(pref) for pref in HEADER_PREFIXES):
                 continue
-            errors.append(f"{p}:{i}: disallowed include '{h}'")
+            # Same-directory generated header (bare filename, must exist).
+            if _is_bare_local_header(h) and h in local_headers:
+                continue
+            if _is_bare_local_header(h):
+                errors.append(
+                    f"{p}:{i}: include \"{h}\" references a header not "
+                    f"found in {p.parent}"
+                )
+            else:
+                errors.append(f"{p}:{i}: disallowed include '{h}'")
+
     if errors:
         for e in errors:
             print(e, file=sys.stderr)

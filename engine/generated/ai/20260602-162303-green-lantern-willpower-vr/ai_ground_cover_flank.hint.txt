@@ -1,0 +1,3 @@
+Note: Helper-only file to explain design. No compile dependency.
+Ground robots/raiders: cover seek -> burst fire -> flank if barriers seen; if caged, break attempt.
+Writes move/aim/fire via CTag string markers the engine test harness reads for motion/pluggable emitters.

@@ -1,59 +1,69 @@
+#include "mentor_dialogue_shared.h"
+
 #include <string>
 #include <vector>
-#include <unordered_map>
-#include <algorithm>
 
-namespace mentor_lines {
+namespace ptv {
 
-// Non-copyrighted, paraphrased guidance lines.
-// Grouped by lightweight context keys consumed by the hook.
-
-static const std::vector<std::string> kOnboard_CentralPlaza = {
-    "Welcome, recruit. This plaza is your staging ground.",
-    "Look toward the Central Battery. Breathe, steady your hands.",
-    "Your ring shapes thought into action. Keep your focus light and direct."
-};
-
-static const std::vector<std::string> kOnboard_TrainingArena = {
-    "Training ground ahead. Start simple: form a shield, then a clean strike.",
-    "Mind your stance. Small movements read sharply in the ring.",
-    "Build rhythm: guard, move, then commit."
-};
-
-static const std::vector<std::string> kTip_RepeatedFailure = {
-    "Easy does it. Read the field before you rush.",
-    "Lead with cover, then counter. Your will guides order into the chaos.",
-    "If you’re pressed, shape a barrier and reset your angle."
-};
-
-static const std::vector<std::string> kPrompt_Recharge = {
-    "Power dipping. Approach the recharge pedestal and align the ring.",
-    "Hold still a moment. Let the current settle and restore your charge.",
-    "When topped up, your constructs land clearer and hit truer."
-};
-
-static const std::vector<std::string> kOnboard_Generic = {
-    "Eyes up. Center your breath, set your intent.",
-    "Your will is the tool; the ring is the lens.",
-    "Keep motions smooth—clean intent shapes clean light."
-};
-
-inline const std::vector<std::string>& select_block(const std::string& context,
-                                                    const std::string& scene_id,
-                                                    const std::string& reason)
-{
-    if (context == "scene_entry") {
-        if (scene_id == "central_battery_plaza") return kOnboard_CentralPlaza;
-        if (scene_id == "training_arena") return kOnboard_TrainingArena;
-        return kOnboard_Generic;
-    }
-    if (context == "repeated_failure" || reason == "repeated_failure") {
-        return kTip_RepeatedFailure;
-    }
-    if (context == "recharge_prompt" || reason == "low_energy_near_station") {
-        return kPrompt_Recharge;
-    }
-    return kOnboard_Generic;
+static std::vector<MentorLine> onboarding_central_plaza() {
+    return {
+        {"Mentor", "Welcome, recruit. Keep your stance relaxed and your gaze level. We'll begin with simple movement.", 4.0f, std::nullopt},
+        {"Mentor", "Hover is enabled here. A light touch goes farther than force.", 3.5f, std::nullopt},
+        {"Mentor", "Your ring shapes intent. Try a basic shield or a bolt to feel the response.", 4.0f, std::nullopt}
+    };
 }
 
-} // namespace mentor_lines
+static std::vector<MentorLine> onboarding_training_arena() {
+    return {
+        {"Mentor", "This arena is for practice. Watch your spacing and read enemy tells.", 3.5f, std::nullopt},
+        {"Mentor", "Form follows focus. Short bursts build confidence—then commit.", 3.5f, std::nullopt},
+        {"Mentor", "Defend, reposition, then strike. You'll set the rhythm, not them.", 3.5f, std::nullopt}
+    };
+}
+
+static std::vector<MentorLine> failure_tip_generic() {
+    return {
+        {"Mentor", "Breathe. Reset your stance. Use a barrier to buy a moment.", 3.0f, std::nullopt},
+        {"Mentor", "Angles matter. Step off the threat line, then answer with purpose.", 3.0f, std::nullopt}
+    };
+}
+
+static std::vector<MentorLine> failure_tip_hazard() {
+    return {
+        {"Mentor", "Hazards punish hurry. Mark the pattern, then move between beats.", 3.2f, std::nullopt},
+        {"Mentor", "A small platform can bridge danger—shape it steady, then cross.", 3.2f, std::nullopt}
+    };
+}
+
+static std::vector<MentorLine> recharge_prompt_lines() {
+    return {
+        {"Mentor", "Your charge is low. Center yourself at the station and let the light flow.", 3.5f, std::nullopt},
+        {"Mentor", "Steady breath in, slow breath out. Focus gathers and the ring answers.", 3.5f, std::nullopt}
+    };
+}
+
+std::vector<MentorLine> build_lines_for_topic(const std::string& topic,
+                                              const std::string& scene,
+                                              const std::string& failure_kind)
+{
+    if (topic == "onboarding") {
+        if (scene == "central_battery_plaza") return onboarding_central_plaza();
+        if (scene == "training_arena") return onboarding_training_arena();
+        // Default onboarding
+        return {
+            {"Mentor", "Welcome. We start simple—move with intent and stay aware.", 3.5f, std::nullopt},
+            {"Mentor", "Test a light construct. Feel how control tracks your focus.", 3.5f, std::nullopt}
+        };
+    }
+    if (topic == "failure_tip") {
+        if (failure_kind == "hazard") return failure_tip_hazard();
+        return failure_tip_generic();
+    }
+    if (topic == "recharge_prompt") {
+        return recharge_prompt_lines();
+    }
+    // Fallback
+    return { {"Mentor", "Steady now. Choose the next clear step and take it.", 3.0f, std::nullopt} };
+}
+
+} // namespace ptv

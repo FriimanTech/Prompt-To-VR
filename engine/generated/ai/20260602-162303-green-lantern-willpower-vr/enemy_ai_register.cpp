@@ -1,138 +1,96 @@
 #include "ptv/api/IBehaviour.h"
 #include "ptv/ecs/World.h"
 #include "ptv/math/Math.h"
-
 #include <nlohmann/json.hpp>
 #include <entt/entt.hpp>
-
 #include <string>
-#include <vector>
-#include <array>
-#include <optional>
-#include <algorithm>
+#include <unordered_map>
+#include <utility>
 #include <cmath>
+#include "enemy_ai_shared.h"
 
-namespace enemy_ai {
-// Forward declarations implemented in separate .cpp files
-void ground_tick(ptv::World& w, std::uint32_t self, const ptv::Vec3& player_pos,
-                 const ptv::Vec3& player_vel, float dt, int tier, float& local_t);
-void drone_tick(ptv::World& w, std::uint32_t self, const ptv::Vec3& player_pos,
-                const ptv::Vec3& player_vel, float dt, int tier, float& local_t);
-void turret_tick(ptv::World& w, std::uint32_t self, const ptv::Vec3& player_pos,
-                 const ptv::Vec3& player_vel, float dt, int tier, float& local_t);
-void brute_tick(ptv::World& w, std::uint32_t self, const ptv::Vec3& player_pos,
-                const ptv::Vec3& player_vel, float dt, int tier, float& local_t);
-}
-
-namespace {
-inline float dot(const ptv::Vec3& a, const ptv::Vec3& b){ return a.x*b.x + a.y*b.y + a.z*b.z; }
-inline float len(const ptv::Vec3& v){ return std::sqrt(dot(v,v)); }
-inline ptv::Vec3 norm(const ptv::Vec3& v){ float l=len(v); return (l>1e-5f)? ptv::Vec3{v.x/l,v.y/l,v.z/l} : ptv::Vec3{0,0,0}; }
-}
+// Declarations of per-role tickers
+namespace ptv { void ai_tick_ground(World&, std::uint32_t, PerEntityState&, const struct GroundParams&, float); }
+namespace ptv { void ai_tick_drone(World&, std::uint32_t, PerEntityState&, const struct DroneParams&, float); }
+namespace ptv { void ai_tick_turret(World&, std::uint32_t, PerEntityState&, const struct TurretParams&, float); }
+namespace ptv { void ai_tick_brute(World&, std::uint32_t, PerEntityState&, const struct BruteParams&, float); }
 
 namespace ptv {
 
-class EnemyAICombatPack final : public IBehaviour {
+// Mirror param structs here (same layout) to avoid separate header exposure
+struct GroundParams { float move_speed{3.5f}; float burst_rate_hz{6.0f}; int burst_size{3}; float flank_distance{4.0f}; };
+struct DroneParams { float strafe_speed{6.0f}; float juke_period{0.9f}; float altitude_bias{1.5f}; float band_min{8.0f}; float band_max{16.0f}; };
+struct TurretParams { float snipe_rate_hz{0.8f}; float telegraph_time{0.8f}; };
+struct BruteParams  { float rush_speed{9.0f}; float aura_radius{5.0f}; float aura_mult{1.35f}; float windup_time{0.7f}; };
+
+class EnemyAICombatPack : public IBehaviour {
 public:
-    void on_attach(World& world, std::uint32_t entity, const nlohmann::json& params) override {
-        tier_ = std::max(1, params.value("mission_tier", 1));
-        role_ = detect_role(world, entity);
-        local_t_ = 0.0f;
-    }
+    void on_attach(World& w, std::uint32_t e, const nlohmann::json& params) override {
+        PerEntityState st{};
+        st.seed = 0.37f + 0.000123f * static_cast<float>(e);
+        // Difficulty by mission_tier (1..5)
+        int tier = std::clamp(params.value("mission_tier", 1), 1, 5);
+        st.difficulty = 0.8f + 0.3f * static_cast<float>(tier);
 
-    void on_tick(World& world, std::uint32_t entity, float dt) override {
-        if (!world.valid(entity)) return;
-        local_t_ += dt;
-
-        // Acquire player reference (nearest entity tagged player_avatar)
-        auto player_info = find_player(world);
-        if (!player_info.has_value()) return;
-        const auto player_e = player_info->first;
-        const auto player_tr = player_info->second;
-        const Vec3 player_pos = player_tr.position;
-        const Vec3 player_vel = estimate_player_velocity(world, player_e);
-
-        switch (role_) {
-            case Role::Ground:
-                enemy_ai::ground_tick(world, entity, player_pos, player_vel, dt, tier_, local_t_);
-                break;
-            case Role::Drone:
-                enemy_ai::drone_tick(world, entity, player_pos, player_vel, dt, tier_, local_t_);
-                break;
-            case Role::Turret:
-                enemy_ai::turret_tick(world, entity, player_pos, player_vel, dt, tier_, local_t_);
-                break;
-            case Role::Brute:
-                enemy_ai::brute_tick(world, entity, player_pos, player_vel, dt, tier_, local_t_);
-                break;
+        // Detect role
+        st.role = EnemyRole::Ground;
+        if (w.has<CMesh>(e)) {
+            const auto& m = w.get<CMesh>(e);
+            const std::string& a = m.asset_id;
+            if (a.find("drone") != std::string::npos) st.role = EnemyRole::Drone;
+            else if (a.find("turret") != std::string::npos) st.role = EnemyRole::Turret;
+            else if (a.find("brute") != std::string::npos)  st.role = EnemyRole::Brute;
+        }
+        if (w.has<CTag>(e)) {
+            const auto& ct = w.get<CTag>(e);
+            for (const auto& s : ct.tags) {
+                if (s == "aerial") st.role = EnemyRole::Drone;
+                if (s == "turret") st.role = EnemyRole::Turret;
+                if (s == "elite")  st.role = EnemyRole::Brute;
+            }
         }
 
-        // Always face the player gently (readability); do not force camera
-        if (world.has<CTransform>(entity)) {
-            auto& t = world.get<CTransform>(entity).t;
-            Vec3 fwd = norm(Vec3{player_pos.x - t.position.x, 0.0f, player_pos.z - t.position.z});
-            (void)fwd; // Rotation not modified here due to Quat ops being engine-defined elsewhere.
+        // Role-specific tunables (allow json override)
+        if (st.role == EnemyRole::Drone) {
+            drone_params_.band_min = params.value("drone_band_min", 8.0f);
+            drone_params_.band_max = params.value("drone_band_max", 16.0f);
+        }
+        if (st.role == EnemyRole::Brute) {
+            brute_params_.aura_radius = params.value("brute_aura_radius", 5.0f);
+            brute_params_.aura_mult   = params.value("brute_aura_mult", 1.35f);
+        }
+
+        states_.emplace(e, st);
+    }
+
+    void on_tick(World& w, std::uint32_t e, float dt) override {
+        auto it = states_.find(e);
+        if (it == states_.end()) return;
+        auto& st = it->second;
+
+        switch (st.role) {
+            case EnemyRole::Ground: ai_tick_ground(w, e, st, ground_params_, dt); break;
+            case EnemyRole::Drone:  ai_tick_drone (w, e, st, drone_params_,  dt); break;
+            case EnemyRole::Turret: ai_tick_turret(w, e, st, turret_params_, dt); break;
+            case EnemyRole::Brute:  ai_tick_brute (w, e, st, brute_params_,  dt); break;
         }
     }
 
-    void on_detach(World&, std::uint32_t) override {}
+    void on_detach(World&, std::uint32_t e) override {
+        states_.erase(e);
+    }
 
     std::string id() const override { return "generated.enemy_ai_combat_pack"; }
 
 private:
-    enum class Role { Ground, Drone, Turret, Brute };
+    std::unordered_map<std::uint32_t, PerEntityState> states_;
 
-    static Role detect_role(World& w, std::uint32_t e) {
-        // Prefer tags for classification; fallback to mesh asset_id
-        if (w.has<CTag>(e)) {
-            const auto& tags = w.get<CTag>(e).tags;
-            if (contains_tag(tags, "turret")) return Role::Turret;
-            if (contains_tag(tags, "aerial")) return Role::Drone;
-            if (contains_tag(tags, "elite") || contains_tag(tags, "suppression_zone")) return Role::Brute;
-        }
-        if (w.has<CMesh>(e)) {
-            const auto& a = w.get<CMesh>(e).asset_id;
-            if (a.find("sniper_turret") != std::string::npos) return Role::Turret;
-            if (a.find("aerial_drone") != std::string::npos) return Role::Drone;
-            if (a.find("fear_corrupted_brute") != std::string::npos) return Role::Brute;
-        }
-        return Role::Ground;
-    }
-
-    static bool contains_tag(const std::vector<std::string>& tags, const std::string& t) {
-        return std::find(tags.begin(), tags.end(), t) != tags.end();
-    }
-
-    static std::optional<std::pair<std::uint32_t, Transform>> find_player(World& w) {
-        std::optional<std::pair<std::uint32_t, Transform>> best;
-        float best_d2 = std::numeric_limits<float>::infinity();
-        auto& reg = w.registry();
-        auto view = reg.view<CTransform, CTag>();
-        for (auto ent : view) {
-            auto eid = static_cast<std::uint32_t>(ent);
-            const auto& tag = view.get<CTag>(ent);
-            if (std::find(tag.tags.begin(), tag.tags.end(), std::string("player_avatar")) == tag.tags.end())
-                continue;
-            const auto& tr = view.get<CTransform>(ent).t;
-            // Prefer closest to origin of enemies if multiple; here just pick nearest to world origin for determinism
-            float d2 = dot(tr.position, tr.position);
-            if (d2 < best_d2) { best_d2 = d2; best = std::make_pair(eid, tr); }
-        }
-        return best;
-    }
-
-    static Vec3 estimate_player_velocity(World& w, std::uint32_t player_e) {
-        // No explicit velocity component provided; simple finite diff cache via a tag is overkill.
-        // Return zero; sub-behaviours can still perform lead via dt-local motion.
-        (void)w; (void)player_e; return Vec3{0,0,0};
-    }
-
-private:
-    Role role_{Role::Ground};
-    int  tier_{1};
-    float local_t_{0.0f};
+    GroundParams ground_params_{};
+    DroneParams  drone_params_{};
+    TurretParams turret_params_{};
+    BruteParams  brute_params_{};
 };
 
-PTV_REGISTER_BEHAVIOUR("generated.enemy_ai_combat_pack", EnemyAICombatPack)
-
 } // namespace ptv
+
+PTV_REGISTER_BEHAVIOUR("generated.enemy_ai_combat_pack", ptv::EnemyAICombatPack)

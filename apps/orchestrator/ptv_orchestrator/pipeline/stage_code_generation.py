@@ -15,10 +15,13 @@ Architecture (see ``docs/codegen-agents.md`` for the full design):
   / ledger -> optional web search with NO cap -> implement multi-file
   C++). The structured result carries ``files[]`` (1..16 files) and
   ``exports`` for the ledger.
-* Each generated file passes ``filter_cpp_only`` ->
+* Each generated file (``.cpp``, ``.h``, ``.hpp``) passes
+  ``validate_includes`` -> ``filter_cpp_only`` ->
   ``repair_generated_cpp`` -> ``assert_path_allowed`` before being
-  written. The board records ``files_written`` and ``exports`` so
-  downstream tasks can plug into them.
+  written. Header files are additionally checked by
+  ``validate_header_content`` (no registration macros in headers).
+  The board records ``files_written`` and ``exports`` so downstream
+  tasks can plug into them.
 
 The CodeTask ``test_files[]`` field is intentionally unused: no disk
 writes, no CMake test targets, no planner prompts for tests.
@@ -27,6 +30,7 @@ writes, no CMake test targets, no planner prompts for tests.
 from __future__ import annotations
 
 import json
+import os
 import re
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -48,6 +52,8 @@ from .bounds import (
     assert_path_allowed,
     filter_cpp_only,
     repair_generated_cpp,
+    validate_header_content,
+    validate_includes,
 )
 from .codegen_agent import (
     CodegenAgentError,
@@ -137,6 +143,18 @@ def run_with_runner(
             f"reset stuck in_progress tasks from previous run: {','.join(reset)}",
         )
 
+    # Also retry previously failed tasks. A failure may have been caused by
+    # a transient issue (e.g. SDK strict schema incompatibility, network
+    # timeout) that is now fixed. Resetting them to pending lets the workers
+    # claim and retry them.
+    reset_failed = board.reset_failed()
+    if reset_failed:
+        ctx.emit(
+            ProjectStage.code_generation,
+            "info",
+            f"reset failed tasks for retry: {','.join(reset_failed)}",
+        )
+
     initial_counts = board.status_counts()
     ctx.emit(
         ProjectStage.code_generation,
@@ -162,6 +180,16 @@ def run_with_runner(
         it.code_task.id: it.code_task  # type: ignore[union-attr]
         for it in codegen_items
     }
+
+    # ------------------------------------------------------------------
+    # Ensure OPENAI_API_KEY is in os.environ for the Agents SDK.
+    # Pydantic BaseSettings reads .env into settings.openai_api_key but
+    # does NOT inject it into os.environ. The OpenAI Agents SDK creates
+    # its own internal client and reads OPENAI_API_KEY from os.environ
+    # directly, so we bridge the gap here.
+    # ------------------------------------------------------------------
+    if ctx.settings.openai_api_key and not os.environ.get("OPENAI_API_KEY"):
+        os.environ["OPENAI_API_KEY"] = ctx.settings.openai_api_key
 
     # ------------------------------------------------------------------
     # Spawn the thread pool and drain the board
@@ -483,7 +511,13 @@ class _StageRuntime:
         ``(absolute_paths_written, repo-relative posix paths)``.
 
         Raises if no files were returned, if any path is out of bounds,
-        or if any contents fail validation."""
+        or if any contents fail validation.
+
+        Generated ``.h``/``.hpp`` files are first-class outputs subject
+        to the same path and include rules as ``.cpp`` files.  Same-task
+        headers are whitelisted so that ``#include "foo_shared.h"`` is
+        preserved when the task also emits ``foo_shared.h``.
+        """
 
         if not result.files:
             raise CodegenAgentError(
@@ -501,9 +535,22 @@ class _StageRuntime:
         out_dir = self.repo_root / rel_dir
         out_dir.mkdir(parents=True, exist_ok=True)
 
+        # -- Collect the set of header filenames this task produces so
+        #    we can whitelist same-task local includes.
+        local_headers: frozenset[str] = frozenset(
+            Path(e.path).name
+            for e in result.files
+            if Path(e.path).suffix.lower() in (".h", ".hpp")
+        )
+
         seen_paths: set[str] = set()
         abs_paths: list[Path] = []
         rel_paths: list[str] = []
+
+        # -- First pass: normalise paths and validate includes/content
+        #    before writing anything to disk (fail-loudly).
+        normalised: list[tuple[str, str]] = []  # (target_rel, cleaned_code)
+        all_violations: list[str] = []
 
         for entry in result.files:
             target_rel = _normalise_target_path(entry.path, task, self.ctx.project_id)
@@ -517,7 +564,26 @@ class _StageRuntime:
             assert_path_allowed(abs_path, self.gen_root)
 
             code = _strip_code_fences(entry.contents)
-            code = filter_cpp_only(code)
+            basename = Path(target_rel).name
+
+            # Validate includes (fail-loudly: collect all violations).
+            inc_violations = validate_includes(
+                code, basename, local_headers=local_headers,
+            )
+            all_violations.extend(
+                f"CodeTask {task.id!r}: {v}" for v in inc_violations
+            )
+
+            # Header-specific content rules.
+            is_header = Path(target_rel).suffix.lower() in (".h", ".hpp")
+            if is_header:
+                hdr_violations = validate_header_content(code, basename)
+                all_violations.extend(
+                    f"CodeTask {task.id!r}: {v}" for v in hdr_violations
+                )
+
+            # Secondary safety-net filter + auto-repair.
+            code = filter_cpp_only(code, local_headers=local_headers)
             code, repair_notes = repair_generated_cpp(code)
             for note in repair_notes:
                 self.ctx.emit(
@@ -526,6 +592,17 @@ class _StageRuntime:
                     f"{task.id} ({target_rel}): auto-repair {note}",
                 )
 
+            normalised.append((target_rel, code))
+
+        if all_violations:
+            raise CodegenAgentError(
+                f"Include / content violations in {task.id!r}:\n"
+                + "\n".join(all_violations)
+            )
+
+        # -- Second pass: write validated files to disk.
+        for target_rel, code in normalised:
+            abs_path = (self.repo_root / target_rel).resolve()
             abs_path.parent.mkdir(parents=True, exist_ok=True)
             abs_path.write_text(code.rstrip() + "\n", encoding="utf-8")
 
@@ -578,10 +655,12 @@ def _strip_code_fences(text: str) -> str:
 
 def _normalise_target_path(raw_path: str, task: CodeTask, project_id: str) -> str:
     """Coerce an agent-supplied path into a canonical
-    ``engine/generated/<kind>/<project_id>/<name>.cpp`` form.
+    ``engine/generated/<kind>/<project_id>/<name>`` form.
+
+    Accepted extensions: ``.cpp``, ``.h``, ``.hpp``.
 
     The agent may emit:
-      * a bare filename (``shooting_hub_register.cpp``)
+      * a bare filename (``shooting_hub_register.cpp``, ``shared.h``)
       * a project-relative path (``mechanics/proj/foo.cpp``)
       * the full path (``engine/generated/mechanics/<id>/foo.cpp``)
 

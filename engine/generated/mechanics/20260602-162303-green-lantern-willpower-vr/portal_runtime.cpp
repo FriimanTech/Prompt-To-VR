@@ -3,269 +3,237 @@
 #include "ptv/math/Math.h"
 
 #include <nlohmann/json.hpp>
+#include <entt/entt.hpp>
 #include <string>
-#include <vector>
-#include <algorithm>
+#include <cstring>
+
+#include "portal_shared.h"
 
 namespace ptv {
 
-// Forward declares (matching symbols exported by deps)
-namespace mission_api {
-    std::string current_mission_id();
-    bool mission_in_progress();
-}
+// Forward from helper unit
+void maybe_emit_practice_spawn(World& world, std::uint32_t self, int max_alive, float& t_since_spawn, float cooldown_s);
 
-// --- Small helpers ---
-bool PortalTravel::j_get_bool(const nlohmann::json& j, const char* k, bool def_v) {
-    return j.is_object() && j.contains(k) ? j.at(k).get<bool>() : def_v;
-}
-int PortalTravel::j_get_int(const nlohmann::json& j, const char* k, int def_v) {
-    return j.is_object() && j.contains(k) ? j.at(k).get<int>() : def_v;
-}
-std::string PortalTravel::j_get_str(const nlohmann::json& j, const char* k, const std::string& def_v) {
-    return j.is_object() && j.contains(k) ? j.at(k).get<std::string>() : def_v;
-}
+class PortalTravel : public IMechanic {
+public:
+    void on_attach(World& world, std::uint32_t entity, const nlohmann::json& params) override {
+        // Register a small Wrist Menu page chip for status/debug.
+        ensure_tags(world, entity);
+        auto& tags = world.get<CTag>(entity).tags;
+        tags.push_back(rt_.tag_ui_page_register + std::string("{\"id\":\"portal\",\"title\":\"Portal\",\"order\":12}"));
 
-static void write_ctag_list(std::vector<std::string>& v, const std::string& key, bool present) {
-    auto it = std::find(v.begin(), v.end(), key);
-    if (present) {
-        if (it == v.end()) v.push_back(key);
-    } else {
-        if (it != v.end()) v.erase(it);
+        // Initial config
+        cfg_.practice_drones = params.value("practice_drones", true);
+        cfg_.practice_max_alive = params.value("practice_max_alive", 3);
+        cfg_.practice_spawn_cooldown_s = params.value("practice_spawn_cooldown_s", 2.0f);
+        rt_.phase = PortalPhase::IdleAtLaunch;
+        rt_.t_fade = 0.0f;
+        rt_.t_since_spawn = 0.0f;
     }
-}
 
-void PortalTravel::ensure_tag(World& w, std::uint32_t e, const std::string& tag) {
-    if (!w.has<CTag>(e)) {
-        CTag t; t.tags = {tag};
-        w.emplace_or_replace<CTag>(e, std::move(t));
-        return;
-    }
-    auto& tags = w.get<CTag>(e).tags;
-    write_ctag_list(tags, tag, true);
-}
+    void on_update(World& world, std::uint32_t entity, float dt) override {
+        // Read per-frame inputs from our binding params (driven by tests):
+        read_inputs_from_binding(world, entity);
 
-void PortalTravel::drop_tag(World& w, std::uint32_t e, const std::string& tag) {
-    if (!w.has<CTag>(e)) return;
-    auto& tags = w.get<CTag>(e).tags;
-    write_ctag_list(tags, tag, false);
-}
+        // Listen for mission_system handshake: portal.travel.request:{ mission_id, scene_id, mission_name }
+        if (rt_.phase == PortalPhase::IdleAtLaunch) {
+            consume_portal_request_if_any(world, entity);
+        }
 
-void PortalTravel::ensure_status_tag(World& w, std::uint32_t e, const std::string& status) {
-    // Normalize by removing any previous portal_status:* tags, then add the new one.
-    if (!w.has<CTag>(e)) {
-        CTag t; t.tags = {std::string("portal_status:") + status};
-        w.emplace_or_replace<CTag>(e, std::move(t));
-        return;
-    }
-    auto& tags = w.get<CTag>(e).tags;
-    // remove old statuses
-    for (auto it = tags.begin(); it != tags.end();) {
-        if (it->rfind("portal_status:", 0) == 0) it = tags.erase(it); else ++it;
-    }
-    tags.push_back(std::string("portal_status:") + status);
-}
-
-// Binding helpers (implemented here; no extra headers allowed)
-void PortalTravel::ensure_practice_spawner_binding(World& w, std::uint32_t e, int max_alive) {
-    CMechanicBinding mb;
-    if (w.has<CMechanicBinding>(e)) {
-        mb = w.get<CMechanicBinding>(e);
-    }
-    bool found = false;
-    for (auto& en : mb.entries) {
-        if (en.id == "practice_drones" && en.builtin_id == "builtin.spawner") { found = true; break; }
-    }
-    if (!found) {
-        CMechanicBinding::Entry en{};
-        en.id = "practice_drones";
-        en.builtin_id = "builtin.spawner";
-        nlohmann::json pj{
-            {"spawn_kind", "drone_practice"},
-            {"max_alive", std::max(0, max_alive)},
-            {"rate_per_s", 0.5},
-            {"notes", "Spawned while in Sector Travel Corridor for target practice."}
-        };
-        en.params_json = pj.dump();
-        mb.entries.push_back(std::move(en));
-        w.emplace_or_replace<CMechanicBinding>(e, std::move(mb));
-    }
-}
-
-void PortalTravel::remove_practice_spawner_binding(World& w, std::uint32_t e) {
-    if (!w.has<CMechanicBinding>(e)) return;
-    auto mb = w.get<CMechanicBinding>(e);
-    auto& v = mb.entries;
-    v.erase(std::remove_if(v.begin(), v.end(), [](const CMechanicBinding::Entry& en){
-        return en.id == "practice_drones" && en.builtin_id == "builtin.spawner";
-    }), v.end());
-    w.emplace_or_replace<CMechanicBinding>(e, std::move(mb));
-}
-
-// --- Lifecycle ---
-void PortalTravel::on_attach(World& world, std::uint32_t entity, const nlohmann::json& params) {
-    practice_mode_ = j_get_bool(params, "practice_mode", true);
-    practice_max_alive_ = j_get_int(params, "practice_max_alive", 4);
-    arm_time_s_  = std::max(0.1f, static_cast<float>(j_get_bool(params, "fast_arm", false) ? 0.2f : 0.5f));
-    fade_time_s_ = std::max(0.2f, static_cast<float>(j_get_bool(params, "fast_fade", false) ? 0.25f : 0.6f));
-    corridor_min_time_s_ = std::max(0.5f, static_cast<float>(params.value("corridor_min_time_s", 3.0)));
-    target_scene_ = j_get_str(params, "target_scene", "");
-
-    // Set initial status for acceptance hooks.
-    ensure_status_tag(world, entity, "IdleAtLaunch");
-    ensure_tag(world, entity, "hud:portal_status_chip"); // UI chip presence (registered via HUD system)
-
-    // Cache a mission label if any
-    mission_name_cache_ = mission_api::current_mission_id();
-    if (!mission_name_cache_.empty()) {
-        ensure_tag(world, entity, std::string("mission:") + mission_name_cache_);
-    }
-}
-
-void PortalTravel::on_update(World& world, std::uint32_t entity, float dt) {
-    // Read per-frame control inputs from params_json of our own binding entry (test harness drives it)
-    bool interact_pressed = false; // "A" on gate console at launch
-    bool b_pressed = false;        // Cancel while in corridor
-    // Scan our binding entry (if any) to pull transient inputs.
-    if (world.has<CMechanicBinding>(entity)) {
-        const auto& mb = world.get<CMechanicBinding>(entity);
-        for (const auto& en : mb.entries) {
-            if (en.id == id()) {
-                auto j = nlohmann::json::parse(en.params_json, nullptr, false);
-                if (j.is_object()) {
-                    interact_pressed = j.value("interact_pressed", false);
-                    b_pressed = j.value("b_pressed", false);
-                    // allow dynamic overrides
-                    if (j.contains("practice_mode")) practice_mode_ = j.value("practice_mode", practice_mode_);
-                    if (j.contains("practice_max_alive")) practice_max_alive_ = j.value("practice_max_alive", practice_max_alive_);
-                    if (j.contains("target_scene")) target_scene_ = j.value("target_scene", target_scene_);
+        switch (rt_.phase) {
+            case PortalPhase::IdleAtLaunch: {
+                // Visual hint when a mission is selected (armed state handled below)
+                break;
+            }
+            case PortalPhase::ArmedAwaitConfirm: {
+                // Show portal VFX hint + HUD toast once upon arming
+                if (!armed_announced_) {
+                    armed_announced_ = true;
+                    show_portal_ready(world, entity);
+                }
+                if (edge_press(cfg_.a_pressed, rt_.a_was_held)) {
+                    // Confirm travel
+                    rt_.phase = PortalPhase::FadeOut;
+                    rt_.t_fade = 0.0f;
+                    publish_portal_activated(world, entity);
+                    fade_out(world, entity, 0.35f);
+                }
+                break;
+            }
+            case PortalPhase::FadeOut: {
+                rt_.t_fade += dt;
+                if (rt_.t_fade >= 0.35f) {
+                    rt_.phase = PortalPhase::LoadingCorridor;
+                    request_scene_load(world, entity, "sector_travel_corridor");
+                }
+                break;
+            }
+            case PortalPhase::LoadingCorridor: {
+                // Give a short grace, then assume corridor active
+                corridor_gate_timer_ += dt;
+                if (corridor_gate_timer_ > 0.25f) {
+                    corridor_gate_timer_ = 0.0f;
+                    rt_.phase = PortalPhase::InCorridor;
+                    // Optional practice targets
+                    if (cfg_.practice_drones) {
+                        maybe_emit_practice_spawn(world, entity, cfg_.practice_max_alive, rt_.t_since_spawn, cfg_.practice_spawn_cooldown_s);
+                    }
+                }
+                break;
+            }
+            case PortalPhase::InCorridor: {
+                // Allow practice spawns on cadence
+                if (cfg_.practice_drones) {
+                    maybe_emit_practice_spawn(world, entity, cfg_.practice_max_alive, rt_.t_since_spawn, cfg_.practice_spawn_cooldown_s);
+                }
+                // Emergency cancel on B
+                if (edge_press(cfg_.b_pressed, rt_.b_was_held)) {
+                    rt_.phase = PortalPhase::Cancelling;
+                    corridor_gate_timer_ = 0.0f;
+                    toast(world, entity, "Travel cancelled — returning to Launch Platform");
+                    request_scene_load(world, entity, "launch_platform");
+                }
+                // Auto-handoff could be triggered by test via a param flag; otherwise leave control here.
+                if (handoff_requested_via_param_) {
+                    rt_.phase = PortalPhase::HandoffToMission;
+                    request_scene_load(world, entity, rt_.target ? rt_.target->scene_id : std::string("training_arena"));
+                }
+                break;
+            }
+            case PortalPhase::Cancelling: {
+                // After scene request, quickly restore idle
+                corridor_gate_timer_ += dt;
+                if (corridor_gate_timer_ > 0.25f) {
+                    reset_to_launch_idle();
+                }
+                break;
+            }
+            case PortalPhase::HandoffToMission: {
+                // After requesting mission scene load, we can clear to idle for next cycle
+                corridor_gate_timer_ += dt;
+                if (corridor_gate_timer_ > 0.25f) {
+                    reset_to_launch_idle();
                 }
                 break;
             }
         }
     }
 
-    t_ += dt;
+    void on_detach(World&, std::uint32_t) override {}
 
-    // Keep HUD chip alive and status visible
-    ensure_tag(world, entity, "hud:portal_status_chip");
+    std::string id() const override { return "generated.portal_travel"; }
 
-    switch (phase_) {
-    case Phase::IdleAtLaunch: {
-        ensure_status_tag(world, entity, "IdleAtLaunch");
-        // Update mission label if mission system has one.
-        {
-            auto mid = mission_api::current_mission_id();
-            if (mid != mission_name_cache_) {
-                mission_name_cache_ = mid;
-                if (!mid.empty()) ensure_tag(world, entity, std::string("mission:") + mid);
-            }
-        }
-        // Gate VFX toggle tag
-        if (!mission_name_cache_.empty()) ensure_tag(world, entity, "portal_vfx:standby");
-        else drop_tag(world, entity, "portal_vfx:standby");
+private:
+    PortalConfig cfg_{};
+    PortalRuntime rt_{};
 
-        if (interact_pressed && !mission_name_cache_.empty()) {
-            phase_ = Phase::Arming;
-            t_ = 0.0f;
-            // Visual cue
-            drop_tag(world, entity, "portal_vfx:standby");
-            ensure_tag(world, entity, "portal_vfx:arming");
-            ensure_status_tag(world, entity, "Arming");
-        }
-        break; }
-    case Phase::Arming: {
-        ensure_status_tag(world, entity, "Arming");
-        if (t_ >= arm_time_s_) {
-            phase_ = Phase::FadingOut;
-            t_ = 0.0f;
-            drop_tag(world, entity, "portal_vfx:arming");
-            ensure_tag(world, entity, "screen_fade:out");
-            ensure_status_tag(world, entity, "FadingOut");
-        }
-        break; }
-    case Phase::FadingOut: {
-        if (t_ >= fade_time_s_) {
-            // Enter corridor pseudo-scene (mask loading via tags/bindings)
-            phase_ = Phase::InCorridor;
-            t_ = 0.0f;
-            drop_tag(world, entity, "screen_fade:out");
-            ensure_tag(world, entity, "scene:sector_travel_corridor");
-            ensure_status_tag(world, entity, "InCorridor");
+    bool armed_announced_ = false;
+    bool handoff_requested_via_param_ = false;
+    float corridor_gate_timer_ = 0.0f;
 
-            // Optional practice spawner while travelling
-            if (practice_mode_ && !practice_bound_) {
-                ensure_practice_spawner_binding(world, entity, practice_max_alive_);
-                practice_bound_ = true;
-            }
-        }
-        break; }
-    case Phase::InCorridor: {
-        ensure_status_tag(world, entity, "InCorridor");
-        ensure_tag(world, entity, "portal_vfx:corridor_active");
-
-        if (b_pressed) {
-            // Emergency cancel: return to launch platform
-            phase_ = Phase::Cancelling;
-            t_ = 0.0f;
-            ensure_status_tag(world, entity, "Cancelling");
-            ensure_tag(world, entity, "screen_fade:out");
-            break;
-        }
-
-        if (t_ >= corridor_min_time_s_) {
-            // Arrive: handoff to mission scene (announce via tags)
-            phase_ = Phase::Arrived;
-            t_ = 0.0f;
-            ensure_status_tag(world, entity, "Arrived");
-            drop_tag(world, entity, "portal_vfx:corridor_active");
-            // Mark pending mission scene; default from params or infer from mission id
-            std::string dest = target_scene_;
-            if (dest.empty()) {
-                // Simple heuristic mapping for tests: choose by mission id prefix
-                const auto mid = mission_name_cache_;
-                if (mid.find("training") != std::string::npos) dest = "training_arena";
-                else if (mid.find("city") != std::string::npos) dest = "alien_city_attack";
-                else if (mid.find("derelict") != std::string::npos) dest = "derelict_space_station";
-                else dest = "open_orbital_battlefield";
-            }
-            ensure_tag(world, entity, std::string("pending_scene:") + dest);
-            ensure_tag(world, entity, "screen_fade:in");
-            // Tear down practice spawner
-            if (practice_bound_) { remove_practice_spawner_binding(world, entity); practice_bound_ = false; }
-        }
-        break; }
-    case Phase::Cancelling: {
-        if (t_ >= fade_time_s_ * 0.5f) {
-            // Restore to launch platform
-            drop_tag(world, entity, "scene:sector_travel_corridor");
-            drop_tag(world, entity, "portal_vfx:corridor_active");
-            ensure_tag(world, entity, "scene:launch_platform");
-            ensure_tag(world, entity, "screen_fade:in");
-            ensure_status_tag(world, entity, "IdleAtLaunch");
-            if (practice_bound_) { remove_practice_spawner_binding(world, entity); practice_bound_ = false; }
-            phase_ = Phase::IdleAtLaunch;
-            t_ = 0.0f;
-        }
-        break; }
-    case Phase::Arrived: {
-        // Idle here; external mission loader can observe pending_scene:* and swap scene.
-        // Keep fade tag for one frame, then clear.
-        if (t_ > 0.2f) drop_tag(world, entity, "screen_fade:in");
-        break; }
+    static void ensure_tags(World& w, std::uint32_t e) {
+        if (!w.has<CTag>(e)) w.emplace_or_replace<CTag>(e, CTag{});
     }
-}
 
-void PortalTravel::on_detach(World& world, std::uint32_t entity) {
-    // Clean up visual/status tags we may have set
-    drop_tag(world, entity, "portal_vfx:standby");
-    drop_tag(world, entity, "portal_vfx:arming");
-    drop_tag(world, entity, "portal_vfx:corridor_active");
-    drop_tag(world, entity, "screen_fade:out");
-    drop_tag(world, entity, "screen_fade:in");
-    drop_tag(world, entity, "scene:sector_travel_corridor");
-    // leave mission:*, pending_scene:* for external systems if desired
-    if (practice_bound_) { remove_practice_spawner_binding(world, entity); practice_bound_ = false; }
-}
+    void toast(World& world, std::uint32_t e, const std::string& msg) {
+        ensure_tags(world, e);
+        world.get<CTag>(e).tags.push_back(rt_.tag_ui_toast + std::string("{\"text\":\"") + msg + std::string("\",\"ttl\":2.0}"));
+    }
+
+    void show_portal_ready(World& world, std::uint32_t e) {
+        if (!rt_.target) return;
+        ensure_tags(world, e);
+        // Enable gate VFX preview and show mission name
+        world.get<CTag>(e).tags.push_back(std::string("vfx.toggle:{\"id\":\"sector_travel_corridor_vfx\",\"enable\":true}"));
+        toast(world, e, std::string("Ready: ") + rt_.target->mission_name + std::string(" — Press A to travel"));
+    }
+
+    void publish_portal_activated(World& world, std::uint32_t e) {
+        if (!rt_.target) return;
+        ensure_tags(world, e);
+        nlohmann::json j{
+            {"mission_id", rt_.target->mission_id},
+            {"scene_id", rt_.target->scene_id}
+        };
+        world.get<CTag>(e).tags.push_back(rt_.tag_portal_activated + j.dump());
+    }
+
+    void fade_out(World& world, std::uint32_t e, float dur) {
+        ensure_tags(world, e);
+        world.get<CTag>(e).tags.push_back(std::string("mask.fade:{\"state\":\"out\",\"dur_s\":") + std::to_string(dur) + std::string("}"));
+    }
+
+    void request_scene_load(World& world, std::uint32_t e, const std::string& scene_id) {
+        ensure_tags(world, e);
+        nlohmann::json j{{"id", scene_id}};
+        world.get<CTag>(e).tags.push_back(std::string("scene.load:") + j.dump());
+    }
+
+    bool edge_press(bool held_now, bool& held_prev) {
+        bool edge = (held_now && !held_prev);
+        held_prev = held_now;
+        return edge;
+    }
+
+    void read_inputs_from_binding(World& world, std::uint32_t entity) {
+        // Default fallbacks
+        cfg_.a_pressed = false;
+        cfg_.b_pressed = false;
+        handoff_requested_via_param_ = false;
+
+        // Pull our binding params_json (if present) from CMechanicBinding on this entity
+        if (!world.has<CMechanicBinding>(entity)) return;
+        auto& mb = world.get<CMechanicBinding>(entity);
+        for (auto& entry : mb.entries) {
+            if (entry.id == id()) {
+                auto j = nlohmann::json::parse(entry.params_json, nullptr, false);
+                if (!j.is_object()) continue;
+                cfg_.a_pressed = j.value("a_pressed", false);
+                cfg_.b_pressed = j.value("b_pressed", false);
+                cfg_.practice_drones = j.value("practice_drones", cfg_.practice_drones);
+                cfg_.practice_max_alive = j.value("practice_max_alive", cfg_.practice_max_alive);
+                cfg_.practice_spawn_cooldown_s = j.value("practice_spawn_cooldown_s", cfg_.practice_spawn_cooldown_s);
+                handoff_requested_via_param_ = j.value("handoff_now", false);
+            }
+        }
+    }
+
+    void consume_portal_request_if_any(World& world, std::uint32_t entity) {
+        // Scan all entities for CTag strings starting with portal.travel.request:
+        auto& reg = world.registry();
+        auto view = reg.view<CTag>();
+        for (auto e : view) {
+            auto& tags = reg.get<CTag>(e).tags;
+            for (auto& s : tags) {
+                auto j = parse_payload_after_prefix(s, rt_.tag_portal_request);
+                if (!j.is_object()) continue;
+                std::string raw = j.dump();
+                if (raw == rt_.last_request_payload) continue; // already consumed
+
+                PortalTarget t{};
+                t.mission_id = j.value("mission_id", std::string("unknown"));
+                t.scene_id = j.value("scene_id", std::string("training_arena"));
+                t.mission_name = j.value("mission_name", std::string("Mission"));
+                rt_.target = t;
+                rt_.last_request_payload = raw;
+                rt_.phase = PortalPhase::ArmedAwaitConfirm;
+                armed_announced_ = false; // allow one-time VFX + toast
+                // Mirror a tiny confirmation toast at the portal gate
+                toast(world, entity, std::string("Selected: ") + t.mission_name);
+                return;
+            }
+        }
+    }
+
+    void reset_to_launch_idle() {
+        rt_.phase = PortalPhase::IdleAtLaunch;
+        rt_.target.reset();
+        corridor_gate_timer_ = 0.0f;
+        rt_.t_fade = 0.0f;
+        rt_.t_since_spawn = 0.0f;
+        armed_announced_ = false;
+        // Keep last_request_payload so we don't immediately re-arm unless a new request arrives
+    }
+};
 
 } // namespace ptv

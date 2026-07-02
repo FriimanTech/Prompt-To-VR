@@ -2,263 +2,187 @@
 #include "ptv/ecs/World.h"
 #include "ptv/math/Math.h"
 
-#include <nlohmann/json.hpp>
 #include <entt/entt.hpp>
-#include <string>
-#include <vector>
+#include <nlohmann/json.hpp>
 #include <cmath>
+#include <string>
 #include <optional>
-#include <algorithm>
 
-namespace ptv { namespace hud_helpers {
-    void hud_get_settings_json(std::string& out_json);
-} }
-
-namespace {
-
-inline float clamp01(float v){ return std::max(0.0f, std::min(1.0f, v)); }
-
-inline float rad2deg(float r){ return r * 57.2957795f; }
-inline float deg2rad(float d){ return d * 0.01745329252f; }
-
-std::optional<float> smallest_positive_root(float a, float b, float c) {
-    if (std::fabs(a) < 1e-6f) {
-        if (std::fabs(b) < 1e-6f) return std::nullopt;
-        float t = -c / b;
-        return t > 0.0f ? std::optional<float>(t) : std::nullopt;
-    }
-    float disc = b*b - 4*a*c;
-    if (disc < 0.0f) return std::nullopt;
-    float s = std::sqrt(disc);
-    float t1 = (-b - s) / (2*a);
-    float t2 = (-b + s) / (2*a);
-    float t = 1e30f;
-    if (t1 > 0.0f) t = std::min(t, t1);
-    if (t2 > 0.0f) t = std::min(t, t2);
-    if (t == 1e30f) return std::nullopt;
-    return t;
-}
-
-ptv::Vec3 lerp(const ptv::Vec3& a, const ptv::Vec3& b, float t){ return ptv::Vec3{ a.x + (b.x-a.x)*t, a.y + (b.y-a.y)*t, a.z + (b.z-a.z)*t }; }
-
-float dot(const ptv::Vec3& a, const ptv::Vec3& b){ return a.x*b.x + a.y*b.y + a.z*b.z; }
-
-float length(const ptv::Vec3& v){ return std::sqrt(dot(v,v)); }
-
-ptv::Vec3 normalize(const ptv::Vec3& v){ float L = length(v); if (L < 1e-6f) return ptv::Vec3{0,0,1}; return ptv::Vec3{ v.x/L, v.y/L, v.z/L }; }
-
-float smoothing_alpha(float dt, float tau){ if (tau <= 0.0f) return 1.0f; return 1.0f - std::exp(-dt / tau); }
-
-struct InputSample {
-    bool left_trigger_held{false};
-    float right_stick_y{0.0f};
-
-    bool have_target{false};
-    ptv::Vec3 target_pos{0,0,0};
-    ptv::Vec3 target_vel{0,0,0};
-    ptv::Vec3 aim_origin{0,0,0};
-    ptv::Vec3 aim_dir{0,0,1};
-    float projectile_speed_mps{20.0f};
-};
-
-InputSample read_input_from_binding(ptv::World& w, std::uint32_t e, float fallback_projectile_speed) {
-    InputSample s; s.projectile_speed_mps = fallback_projectile_speed;
-    if (!w.has<ptv::CMechanicBinding>(e)) return s;
-    const auto& bind = w.get<ptv::CMechanicBinding>(e);
-    for (const auto& entry : bind.entries) {
-        if (entry.id == std::string("generated.aerial_combat_assist")) {
-            auto j = nlohmann::json::parse(entry.params_json, nullptr, false);
-            if (!j.is_object()) continue;
-            s.left_trigger_held = j.value("left_trigger_held", false);
-            s.right_stick_y     = j.value("right_stick_y", 0.0f);
-            s.projectile_speed_mps = j.value("projectile_speed_mps", fallback_projectile_speed);
-            if (j.contains("target") && j["target"].is_object()) {
-                auto jt = j["target"];
-                if (jt.contains("pos") && jt.contains("vel")) {
-                    auto p = jt["pos"]; auto v = jt["vel"];
-                    if (p.is_array() && p.size()==3 && v.is_array() && v.size()==3) {
-                        s.target_pos = ptv::Vec3{ p[0].get<float>(), p[1].get<float>(), p[2].get<float>() };
-                        s.target_vel = ptv::Vec3{ v[0].get<float>(), v[1].get<float>(), v[2].get<float>() };
-                        s.have_target = true;
-                    }
-                }
-            }
-            if (j.contains("aim") && j["aim"].is_object()) {
-                auto ja = j["aim"];
-                if (ja.contains("origin") && ja.contains("dir")) {
-                    auto o = ja["origin"]; auto d = ja["dir"];
-                    if (o.is_array() && o.size()==3 && d.is_array() && d.size()==3) {
-                        s.aim_origin = ptv::Vec3{ o[0].get<float>(), o[1].get<float>(), o[2].get<float>() };
-                        s.aim_dir    = normalize(ptv::Vec3{ d[0].get<float>(), d[1].get<float>(), d[2].get<float>() });
-                    }
-                }
-            }
-            break;
-        }
-    }
-    return s;
-}
-
-std::optional<ptv::Vec3> predict_intercept(const ptv::Vec3& shooter_pos,
-                                           const ptv::Vec3& target_pos,
-                                           const ptv::Vec3& target_vel,
-                                           float projectile_speed)
-{
-    ptv::Vec3 r{ target_pos.x - shooter_pos.x, target_pos.y - shooter_pos.y, target_pos.z - shooter_pos.z };
-    ptv::Vec3 v = target_vel;
-    float vv = dot(v,v);
-    float ss = projectile_speed * projectile_speed;
-    auto t = smallest_positive_root(vv - ss, 2.0f * dot(r,v), dot(r,r));
-    if (!t.has_value()) return std::nullopt;
-    ptv::Vec3 lead{ target_pos.x + v.x * (*t), target_pos.y + v.y * (*t), target_pos.z + v.z * (*t) };
-    return lead;
-}
-
-std::string vec3_to_str(const ptv::Vec3& v){
-    return std::to_string(v.x) + "," + std::to_string(v.y) + "," + std::to_string(v.z);
-}
-
-void put_ctag_kv(ptv::World& w, std::uint32_t e, const std::string& key, const std::string& value){
-    ptv::CTag tag;
-    if (w.has<ptv::CTag>(e)) tag = w.get<ptv::CTag>(e);
-    const std::string needle = key + "=";
-    bool replaced = false;
-    for (auto& t : tag.tags){
-        if (t.rfind(needle, 0) == 0){ t = needle + value; replaced = true; break; }
-    }
-    if (!replaced) tag.tags.push_back(needle + value);
-    w.emplace_or_replace<ptv::CTag>(e, tag);
-}
-
-bool query_ui_enabled_or(std::optional<bool> fallback){
-    std::string blob; ptv::hud_helpers::hud_get_settings_json(blob);
-    if (!blob.empty()){
-        auto j = nlohmann::json::parse(blob, nullptr, false);
-        if (j.is_object()){
-            if (j.contains("combat") && j["combat"].is_object()){
-                auto c = j["combat"];
-                if (c.contains("aerial_assist_enabled")) return c.value("aerial_assist_enabled", fallback.value_or(true));
-                if (c.contains("target_assist"))        return c.value("target_assist",        fallback.value_or(true));
-            }
-            if (j.contains("aerial_assist_enabled")) return j.value("aerial_assist_enabled", fallback.value_or(true));
-            if (j.contains("target_assist"))        return j.value("target_assist",        fallback.value_or(true));
-        }
-    }
-    return fallback.value_or(true);
-}
-
-} // anon
+#include "aerial_assist_shared.h"
 
 namespace ptv {
 
+// Contract (tag strings we emit). Exposed via exports in register file.
+static constexpr const char* kTagHudLead = "hud.lead:";          // JSON: {"x":..,"y":..,"z":..,"ttl":0.2}
+static constexpr const char* kTagAimAssist = "aim.assist:";      // JSON: {"dir":{"x":..,"y":..,"z":..},"strength":..,"ttl":0.05}
+static constexpr const char* kTagUIPageRegister = "ui.page.register:"; // From HUD/Wrist dependency
+
+// Local store singleton (lives in this translation unit)
+static AerialAssistStore g_store;
+
+// Read this binding's params safely (per-frame or on-attach)
+static void read_params(const nlohmann::json& p, AerialAssistParams& out){
+    out.enable = p.value("enable", true);
+    out.lead_stiffness = p.value("lead_stiffness", 0.6f);
+    out.magnetism_cone_deg = p.value("magnetism_cone_deg", 5.0f);
+    out.magnetism_strength = p.value("magnetism_strength", 0.15f);
+    out.altitude_nudge_step_m = p.value("altitude_nudge_step_m", 0.2f);
+    // Optional override if caller provides projectile speed
+    out.projectile_speed_mps = p.value("projectile_speed_mps", 20.0f);
+}
+
+// Find a plausible target in front of shooter entity: choose nearest entity carrying tag "enemy" or "target" within a forward-ish cone.
+static TargetSample find_target(World& w, std::uint32_t shooter){
+    TargetSample best{};
+    if (!w.has<CTransform>(shooter)) return best;
+    const auto& shTr = w.get<CTransform>(shooter).t;
+    const ptv::Vec3 shooter_pos = shTr.position;
+
+    // Best-effort forward. If rotation is identity, +Z is forward in scenes.
+    // We avoid quaternion math dependency; for selection we compare by smallest angle to (target - shooter).
+    const ptv::Vec3 nominal_fwd{0.0f, 0.0f, 1.0f};
+
+    auto& reg = w.registry();
+    auto view = reg.view<CTag, CTransform>();
+    for (auto e : view) {
+        if ((std::uint32_t)e == shooter) continue;
+        const auto& tag = view.get<CTag>(e);
+        bool is_target = false;
+        for (const auto& s : tag.tags) {
+            if (s == "enemy" || s == "target") { is_target = true; break; }
+        }
+        if (!is_target) continue;
+        const auto& tr = view.get<CTransform>(e).t;
+        const ptv::Vec3 toT = ptv::Vec3{tr.position.x - shooter_pos.x, tr.position.y - shooter_pos.y, tr.position.z - shooter_pos.z};
+        float d = len(toT);
+        if (d < 0.1f) continue;
+        float cosA = dot(norm(toT), nominal_fwd);
+        // Require facing-ish (> ~ -60 deg) so we can acquire even when not perfectly aligned during flight
+        if (cosA < -0.5f) continue;
+        if (d < best.dist) {
+            best.dist = d;
+            best.pos = tr.position;
+            // Velocity heuristic: if target has CPhysics with kind=="dynamic" we could infer, but we only have CTransform. Approx as 0.
+            best.vel = ptv::Vec3{0.0f,0.0f,0.0f};
+            best.valid = true;
+        }
+    }
+    return best;
+}
+
+// Push a tag line onto entity (ensures CTag exists)
+static void push_tag(World& w, std::uint32_t e, const std::string& line){
+    if (!w.has<CTag>(e)) {
+        w.emplace_or_replace<CTag>(e, CTag{});
+    }
+    auto& tg = w.get<CTag>(e);
+    tg.tags.push_back(line);
+}
+
 class AerialCombatAssist : public IMechanic {
 public:
-    void on_attach(World& world, std::uint32_t entity, const nlohmann::json& params) override;
-    void on_update(World& world, std::uint32_t entity, float dt) override;
-    void on_detach(World& world, std::uint32_t entity) override;
+    void on_attach(World& w, std::uint32_t e, const nlohmann::json& params) override {
+        auto& st = g_store.map[e];
+        read_params(params, st.p);
+        // Register Wrist Menu page (via dependency contract). One-time hint; menu system dedups by id.
+        nlohmann::json page = {
+            {"id", "combat_assist"}, {"title", "Combat Assist"}, {"order", 35}
+        };
+        push_tag(w, e, std::string(kTagUIPageRegister) + page.dump());
+    }
+
+    void on_update(World& w, std::uint32_t e, float dt) override {
+        if (!w.valid(e)) return;
+        auto it = g_store.map.find(e);
+        if (it == g_store.map.end()) return;
+        auto& st = it->second;
+
+        // Read latest per-frame params from our binding entry (engine test harness drives these)
+        // Find our own binding params in CMechanicBinding by id match
+        if (w.has<CMechanicBinding>(e)) {
+            const auto& mb = w.get<CMechanicBinding>(e);
+            for (const auto& entry : mb.entries) {
+                if (entry.id == id()) {
+                    auto j = nlohmann::json::parse(entry.params_json, nullptr, false);
+                    if (j.is_object()) {
+                        read_params(j, st.p);
+                        // Edge buttons for altitude micro-nudge
+                        bool up = j.value("rs_up_tap", false);
+                        bool down = j.value("rs_down_tap", false);
+                        if (up && !st.rs_up_last && w.has<CTransform>(e)) {
+                            auto& tr = w.get<CTransform>(e).t;
+                            tr.position.y += st.p.altitude_nudge_step_m;
+                        }
+                        if (down && !st.rs_down_last && w.has<CTransform>(e)) {
+                            auto& tr = w.get<CTransform>(e).t;
+                            tr.position.y -= st.p.altitude_nudge_step_m;
+                        }
+                        st.rs_up_last = up; st.rs_down_last = down;
+                        // Left Trigger refine tightens cone and increases strength while held
+                        bool lt = j.value("left_trigger", false);
+                        st.lt_last = lt; // tracked for potential future edges
+                    }
+                    break;
+                }
+            }
+        }
+
+        if (!st.p.enable) return;
+        if (!w.has<CTransform>(e)) return;
+        const auto& tr = w.get<CTransform>(e).t;
+        const ptv::Vec3 shooter_pos = tr.position;
+
+        // Acquire and predict
+        TargetSample tgt = find_target(w, e);
+        if (!tgt.valid) return;
+
+        ptv::Vec3 aim_dir_nominal = norm(ptv::Vec3{0.0f,0.0f,1.0f}); // +Z forward fallback
+        ptv::Vec3 r = ptv::Vec3{tgt.pos.x - shooter_pos.x, tgt.pos.y - shooter_pos.y, tgt.pos.z - shooter_pos.z};
+        float use_speed = st.p.projectile_speed_mps;
+        auto t_hit = lead_time(r, tgt.vel, use_speed);
+        ptv::Vec3 lead_point = tgt.pos;
+        if (t_hit.has_value()) {
+            float th = *t_hit;
+            lead_point = ptv::Vec3{ tgt.pos.x + tgt.vel.x*th, tgt.pos.y + tgt.vel.y*th, tgt.pos.z + tgt.vel.z*th };
+        }
+
+        // Reticle stabilization (low-pass on presented anchor)
+        if (!st.has_anchor) {
+            st.filtered_anchor = lead_point; st.has_anchor = true;
+        } else {
+            float alpha = clamp(1.0f - std::exp(-dt / std::max(0.001f, st.p.lead_stiffness)), 0.0f, 1.0f);
+            st.filtered_anchor = lerp(st.filtered_anchor, lead_point, alpha);
+        }
+
+        // Gentle magnetism within cone
+        ptv::Vec3 raw_dir = norm(r); // what the player is roughly aiming towards (to target center)
+        ptv::Vec3 desired_dir = norm(ptv::Vec3{ st.filtered_anchor.x - shooter_pos.x, st.filtered_anchor.y - shooter_pos.y, st.filtered_anchor.z - shooter_pos.z });
+        float cosCone = cos_deg( (st.lt_last ? std::max(1.0f, st.p.magnetism_cone_deg*0.5f) : st.p.magnetism_cone_deg) );
+        float cosA = dot(norm(raw_dir), norm(desired_dir));
+        if (cosA >= cosCone) {
+            float k = st.p.magnetism_strength * (st.lt_last ? 1.5f : 1.0f);
+            k = clamp(k, 0.0f, 0.6f); // never overpower input
+            ptv::Vec3 nudged = norm( lerp(raw_dir, desired_dir, k) );
+            // Publish assist direction for projectile spawners that honor it
+            nlohmann::json ja = {
+                {"dir", {{"x", nudged.x},{"y", nudged.y},{"z", nudged.z}}},
+                {"strength", k}, {"ttl", 0.05f}
+            };
+            push_tag(w, e, std::string(kTagAimAssist) + ja.dump());
+        }
+
+        // Publish HUD lead indicator world position (ring-style reticle renderer can consume this)
+        nlohmann::json j = {{"x", st.filtered_anchor.x},{"y", st.filtered_anchor.y},{"z", st.filtered_anchor.z},{"ttl", 0.2f}};
+        push_tag(w, e, std::string(kTagHudLead) + j.dump());
+    }
+
+    void on_detach(World& w, std::uint32_t e) override {
+        g_store.map.erase(e);
+    }
+
     std::string id() const override { return "generated.aerial_combat_assist"; }
-
-private:
-    bool  enabled_{true};
-    float lead_stiffness_{0.6f};
-    float magnetism_cone_deg_{5.0f};
-    float magnetism_strength_{0.15f};
-    float altitude_nudge_step_m_{0.2f};
-    float projectile_speed_mps_{20.0f};
-    Vec3 smoothed_lead_{0.0f, 0.0f, 0.0f};
-    bool have_smoothed_{false};
 };
-
-void AerialCombatAssist::on_attach(World&, std::uint32_t, const nlohmann::json& params) {
-    enabled_               = params.value("enable", true);
-    lead_stiffness_        = params.value("lead_stiffness", 0.6f);
-    magnetism_cone_deg_    = params.value("magnetism_cone_deg", 5.0f);
-    magnetism_strength_    = params.value("magnetism_strength", 0.15f);
-    altitude_nudge_step_m_ = params.value("altitude_nudge_step_m", 0.2f);
-    projectile_speed_mps_  = params.value("projectile_speed_mps", 20.0f);
-    smoothed_lead_ = ptv::Vec3{0,0,0};
-    have_smoothed_ = false;
-}
-
-void AerialCombatAssist::on_update(World& w, std::uint32_t e, float dt) {
-    if (!w.valid(e)) return;
-
-    enabled_ = query_ui_enabled_or(enabled_);
-
-    InputSample in = read_input_from_binding(w, e, projectile_speed_mps_);
-
-    if (enabled_ && std::fabs(in.right_stick_y) > 0.5f && w.has<CTransform>(e)) {
-        auto& tr = w.get<CTransform>(e).t;
-        float step = altitude_nudge_step_m_ * (in.right_stick_y > 0.0f ? 1.0f : -1.0f);
-        tr.position.y += step;
-    }
-
-    put_ctag_kv(w, e, "aimassist.enabled", enabled_ ? "1" : "0");
-
-    if (!enabled_ || !in.have_target) {
-        if (have_smoothed_) {
-            float a = clamp01(smoothing_alpha(dt, std::max(0.05f, lead_stiffness_)) * 0.5f);
-            smoothed_lead_ = lerp(smoothed_lead_, ptv::Vec3{ in.aim_origin.x + in.aim_dir.x*5.0f,
-                                                             in.aim_origin.y + in.aim_dir.y*5.0f,
-                                                             in.aim_origin.z + in.aim_dir.z*5.0f }, a);
-            put_ctag_kv(w, e, "aimassist.lead_world", vec3_to_str(smoothed_lead_));
-        }
-        return;
-    }
-
-    auto lead_opt = predict_intercept(in.aim_origin, in.target_pos, in.target_vel, in.projectile_speed_mps);
-    ptv::Vec3 lead = lead_opt.value_or(in.target_pos);
-
-    float alpha = clamp01(smoothing_alpha(dt, std::max(0.02f, lead_stiffness_)));
-    if (!have_smoothed_) { smoothed_lead_ = lead; have_smoothed_ = true; }
-    else                 { smoothed_lead_ = lerp(smoothed_lead_, lead, alpha); }
-
-    put_ctag_kv(w, e, "aimassist.lead_world", vec3_to_str(smoothed_lead_));
-
-    ptv::Vec3 to_lead = ptv::Vec3{ smoothed_lead_.x - in.aim_origin.x,
-                                   smoothed_lead_.y - in.aim_origin.y,
-                                   smoothed_lead_.z - in.aim_origin.z };
-    ptv::Vec3 to_lead_dir = normalize(to_lead);
-    float cosang = clamp01((dot(in.aim_dir, to_lead_dir) + 1.0f) * 0.5f) * 2.0f - 1.0f;
-    float ang_deg = rad2deg(std::acos(clamp01((dot(in.aim_dir, to_lead_dir) + 1.0f)*0.5f)*2.0f - 1.0f));
-
-    float cone = std::max(1.0f, magnetism_cone_deg_);
-    float t = clamp01(1.0f - (ang_deg / cone));
-    float blend = magnetism_strength_ * t;
-
-    ptv::Vec3 magnet_dir = normalize(ptv::Vec3{ in.aim_dir.x * (1.0f - blend) + to_lead_dir.x * blend,
-                                                in.aim_dir.y * (1.0f - blend) + to_lead_dir.y * blend,
-                                                in.aim_dir.z * (1.0f - blend) + to_lead_dir.z * blend });
-
-    if (in.left_trigger_held) {
-        float extra = std::min(0.25f, magnetism_strength_ * 0.5f);
-        float locked_blend = std::min(0.6f, blend + extra);
-        magnet_dir = normalize(ptv::Vec3{ in.aim_dir.x * (1.0f - locked_blend) + to_lead_dir.x * locked_blend,
-                                          in.aim_dir.y * (1.0f - locked_blend) + to_lead_dir.y * locked_blend,
-                                          in.aim_dir.z * (1.0f - locked_blend) + to_lead_dir.z * locked_blend });
-        put_ctag_kv(w, e, "aimassist.lock_refine", "1");
-    } else {
-        put_ctag_kv(w, e, "aimassist.lock_refine", "0");
-    }
-
-    put_ctag_kv(w, e, "aimassist.magnet_dir", vec3_to_str(magnet_dir));
-    put_ctag_kv(w, e, "aimassist.aim_dir",     vec3_to_str(in.aim_dir));
-    (void)cosang;
-}
-
-void AerialCombatAssist::on_detach(World& w, std::uint32_t e) {
-    if (w.has<ptv::CTag>(e)) {
-        auto tag = w.get<ptv::CTag>(e);
-        auto& vec = tag.tags;
-        auto keep = std::vector<std::string>{}; keep.reserve(vec.size());
-        for (const auto& t : vec) {
-            if (t.rfind("aimassist.", 0) != 0) keep.push_back(t);
-        }
-        tag.tags = std::move(keep);
-        w.emplace_or_replace<ptv::CTag>(e, tag);
-    }
-}
 
 } // namespace ptv
 
-PTV_REGISTER_MECHANIC("generated.aerial_combat_assist", ptv::AerialCombatAssist)
+// Registration stays in separate translation unit as advised

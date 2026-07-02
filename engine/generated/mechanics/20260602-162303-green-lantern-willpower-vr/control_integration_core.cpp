@@ -1,44 +1,21 @@
 #include "ptv/ecs/World.h"
-#include "ptv/math/Math.h"
-
-#include <nlohmann/json.hpp>
+#include "control_constructs_shared.h"
 #include <string>
-#include <algorithm>
 
-namespace control_ext_helpers {
+namespace ptv {
 
-static std::string make_params_json_for_entry(const char* kind) {
-    nlohmann::json j;
-    // Provide minimal metadata the core may read; safe defaults
-    if (std::string(kind)=="chain_tether") {
-        j["asset_id"] = "construct_chain_tether";
-        j["category"] = "Control";
-        j["sustained"] = true;
-    } else if (std::string(kind)=="restraining_bands") {
-        j["asset_id"] = "construct_chain_tether"; // reuse material as bands
-        j["category"] = "Control";
-        j["instant"] = true;
-    }
-    return j.dump();
+// Best-effort registration shim: advertise our control entries to the construct core
+// via tag-based message the core can pick up in its own update.
+static void advertise_controls(World& w, std::uint32_t hand_e) {
+    nlohmann::json j1; j1["id"] = "chain_tether"; j1["asset"] = "construct_chain_tether"; j1["category"] = "Control";
+    ensure_tag(w, hand_e, std::string("construct_core.register_control:") + j1.dump());
+    nlohmann::json j2; j2["id"] = "restraining_bands"; j2["asset"] = "construct_chain_tether"; j2["category"] = "Control";
+    ensure_tag(w, hand_e, std::string("construct_core.register_control:") + j2.dump());
 }
 
-void ensure_core_control_entries(ptv::World& w, std::uint32_t hand_entity) {
-    if (!w.valid(hand_entity)) return;
-    if (!w.has<ptv::CMechanicBinding>(hand_entity)) return;
-    auto& mb = w.get<ptv::CMechanicBinding>(hand_entity);
-
-    auto ensure_one = [&](const std::string& id){
-        bool exists=false;
-        for (auto& en : mb.entries) if (en.id == id) { exists=true; break; }
-        if (!exists) {
-            ptv::CMechanicBinding::Entry en; en.id = id; en.builtin_id = ""; en.params_json = make_params_json_for_entry(id.c_str());
-            mb.entries.push_back(std::move(en));
-        }
-    };
-
-    // Register with construct core selection list by id
-    ensure_one("chain_tether");
-    ensure_one("restraining_bands");
+// Exposed helper so main mechanic can call once on attach
+void construct_core_advertise_if_needed(World& w, std::uint32_t hand_e) {
+    advertise_controls(w, hand_e);
 }
 
-} // namespace control_ext_helpers
+} // namespace ptv

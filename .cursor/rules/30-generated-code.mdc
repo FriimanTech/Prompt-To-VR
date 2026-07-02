@@ -6,7 +6,7 @@ alwaysApply: true
 
 # Generated-code boundaries
 
-- Generated C++ may only live under:
+- Generated C++ (`.cpp`, `.h`, `.hpp`) may only live under:
   - `engine/generated/mechanics/`
   - `engine/generated/ai/`
   - `engine/generated/dialogue/`
@@ -15,10 +15,20 @@ alwaysApply: true
   - `IMechanic` for gameplay mechanics.
   - `IBehaviour` for NPC / AI behavior.
   - `IDialogueHook` for dialogue logic.
-- Generated files register themselves with `REGISTER_MECHANIC("id")` (or the
-  sibling macros). They never modify `MechanicRegistry`, the renderer, the
-  XR session loop, the platform layer, memory management, or the ECS core.
+- Generated files register themselves with `PTV_REGISTER_MECHANIC("id")` (or
+  the sibling macros). They never modify `MechanicRegistry`, the renderer,
+  the XR session loop, the platform layer, memory management, or the ECS core.
+- Generated header files (`.h`/`.hpp`) are allowed under the same directories
+  as `.cpp` files, subject to the same include whitelist. They are for
+  task-local helpers, structs, and shared declarations only.
+- Generated headers may only be included via bare filename
+  (`#include "foo.h"`) by files in the same project directory. Cross-project
+  header includes are forbidden.
+- Registration macros (`PTV_REGISTER_MECHANIC`, `PTV_REGISTER_BEHAVIOUR`,
+  `PTV_REGISTER_DIALOGUE_HOOK`) must only appear in `.cpp` files, never in
+  headers.
 - Generated files must not include engine internals other than the public
   `ptv/api/*` headers and the public scene / ECS headers.
-- The orchestrator runs `engine/tools/check-generated-bounds.py` before
-  triggering the build and fails the stage on any violation.
+- The orchestrator validates includes before writing files (fail-loudly)
+  and `engine/tools/check_generated_bounds.py` runs before the build as a
+  secondary check, failing the stage on any violation.

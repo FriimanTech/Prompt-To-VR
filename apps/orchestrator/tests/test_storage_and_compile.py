@@ -420,7 +420,11 @@ def test_tripo_stage_fails_when_zero_models_produced(tmp_path: Path, monkeypatch
         bus=bus,
     )
 
-    with pytest.raises(RuntimeError, match="produced 0 models"):
+    # The stage's error string now includes "NEW" to distinguish "no
+    # work produced this run" from "no GLBs on disk at all" -- both
+    # halt the pipeline, but the second can be a legitimate Resume
+    # after a clean prior run.
+    with pytest.raises(RuntimeError, match=r"produced 0 (NEW )?models"):
         stage_tripo_models.run(ctx)
 
 

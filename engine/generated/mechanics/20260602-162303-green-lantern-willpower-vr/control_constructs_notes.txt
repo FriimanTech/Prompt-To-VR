@@ -1,0 +1,11 @@
+This mechanic uses tag-based interop to emulate CTetherJoint/CStatusEffect:
+- "status.tethered:{...}" attached to target while tether is active.
+- "status.slow_bands:{\"stacks\":N,\"slow_per_stack\":X}" on targets with restraining bands.
+- "vfx.spawn:{...}" generic hint for rendering a line (construct_chain_tether asset).
+- "construct.cage:tighten:{...}" request for Energy Cage systems to tighten.
+- "construct_core.register_control:{...}" advertisement for construct core integration.
+Inputs are read each frame from this binding entry's params_json keys:
+  left_trigger_held, right_trigger_held, left_grip_held, current_target_id,
+  active_control, tether_max_length_m, tether_tension_break_threshold,
+  reel_in_speed_mps, bands_slow_per_stack, bands_max_stacks,
+  fear_zone_resistance_multiplier.

@@ -23,9 +23,14 @@ orchestrator and a reusable Vulkan + OpenXR engine core.
 5. Reuse built-in VR mechanics. The engine ships reusable, data-driven modules
    (teleport, smooth locomotion, grab, throw, trigger zones, etc.). Generated
    code adds mechanics; it does not reimplement basic VR behavior.
-6. Generated C++ is confined to `engine/generated/{mechanics,ai,dialogue}/`. It
-   MUST NOT modify the renderer, XR session loop, platform layer, memory core,
-   or base ECS.
+6. Generated C++ (`.cpp`, `.h`, `.hpp`) is confined to
+   `engine/generated/{mechanics,ai,dialogue}/`. It MUST NOT modify the
+   renderer, XR session loop, platform layer, memory core, or base ECS.
+   Generated headers are allowed for same-task, same-directory use only
+   (bare-filename `#include "foo.h"` includes). Registration macros
+   (`PTV_REGISTER_MECHANIC`, etc.) must only appear in `.cpp` files.
+   Include violations cause the CodeTask to fail loudly (not silently
+   strip).
 7. Use Claude for the hardest gameplay planning and hardest C++ generation
    (`claude-opus-4-7`). Use `claude-sonnet-4-6` for lighter work. If Claude
    is unavailable (missing key or API error) the pipeline transparently
@@ -64,8 +69,8 @@ orchestrator and a reusable Vulkan + OpenXR engine core.
 5. Reference images for each `AssetItem` → Gemini / Imagen.
 6. Reference images → Tripo image-to-3D (textured, PBR).
 7. Assets normalized (scale / materials / collision).
-8. CodeTasks from MechanicPlan → Claude Opus → C++ files in
-   `engine/generated/{mechanics,ai,dialogue}/`.
+8. CodeTasks from MechanicPlan → Claude Opus → C++ files (`.cpp` + optional
+   `.h`/`.hpp` headers) in `engine/generated/{mechanics,ai,dialogue}/`.
 9. Deterministic scene compiler emits `scene.json` and build metadata.
 10. CMake configure + build (Visual Studio 18 2026 generator, toolset v145).
 11. Orchestrator launches the produced `.exe` through OpenXR.
@@ -81,8 +86,10 @@ orchestrator and a reusable Vulkan + OpenXR engine core.
   system prompt; caller re-validates with the same Pydantic model. The
   `LlmClient` wrapper applies the fallback transparently.
 - Google GenAI: Python package `google-genai`. Imagen
-  `imagen-4.0-generate-001`. Gemini multimodal image fallback
-  `gemini-2.5-flash-image` with `response_modalities=["IMAGE"]`.
+- Google GenAI: Python package `google-genai`. Reference images use
+  `gemini-3.1-flash-image` with `generate_content` and
+  `response_modalities=["IMAGE"]` (Imagen 4 endpoints discontinued
+  2026-08-17).
 - Tripo: Python package `tripo3d`. `image_to_model(... texture=True,
   pbr=True, texture_alignment="original_image", texture_quality="detailed")`.
 - Vulkan SDK 1.4.341.x on Windows. Requires VS 2022 or 2026 toolchain.

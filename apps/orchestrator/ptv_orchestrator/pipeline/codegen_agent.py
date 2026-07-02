@@ -209,7 +209,12 @@ def _default_sdk_runner(inp: CodegenAgentInput, model: str) -> CodegenAgentResul
         # The Python SDK package is ``openai-agents`` on PyPI, import
         # path ``agents``. Verified against the official docs at
         # https://openai.github.io/openai-agents-python/.
-        from agents import Agent, Runner, WebSearchTool  # type: ignore
+        from agents import (  # type: ignore
+            Agent,
+            AgentOutputSchema,
+            Runner,
+            WebSearchTool,
+        )
     except ImportError as exc:  # pragma: no cover - exercised only in real runs
         raise CodegenAgentError(
             "openai-agents is not installed. Add `openai-agents` to "
@@ -219,6 +224,15 @@ def _default_sdk_runner(inp: CodegenAgentInput, model: str) -> CodegenAgentResul
 
     user_message = build_user_message(inp)
 
+    # ``CodegenAgentResult.exports`` is a free-form ``dict`` and the
+    # Pydantic fields carry ``max_length`` / ``max_items`` constraints.
+    # These are not compatible with OpenAI strict JSON schema mode.
+    # Wrapping with ``strict_json_schema=False`` lets the model emit
+    # valid JSON freely; the SDK still validates via the Pydantic model.
+    output_schema = AgentOutputSchema(
+        CodegenAgentResult, strict_json_schema=False
+    )
+
     agent = Agent(
         name=f"ptv-codegen-{inp.task_id}",
         instructions=inp.instructions,
@@ -227,7 +241,7 @@ def _default_sdk_runner(inp: CodegenAgentInput, model: str) -> CodegenAgentResul
         # numeric cap on calls — the cap is implicit in the agent's
         # own loop budget. See multi_agent_update.md, Part B5.
         tools=[WebSearchTool()],
-        output_type=CodegenAgentResult,
+        output_type=output_schema,
     )
 
     try:

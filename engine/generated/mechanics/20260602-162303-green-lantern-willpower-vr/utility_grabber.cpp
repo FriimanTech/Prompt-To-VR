@@ -1,93 +1,60 @@
-#include "ptv/api/IMechanic.h"
-#include "ptv/ecs/World.h"
-#include "ptv/math/Math.h"
-#include <entt/entt.hpp>
-#include <nlohmann/json.hpp>
+#include "utility_constructs_shared.h"
+
 #include <algorithm>
-// [ptv-bounds] removed disallowed include: limits
-// [ptv-bounds] removed disallowed include: utility_constructs_shared.h
 
-using namespace utility_internal;
+namespace ptv { namespace utility {
 
-namespace {
-entt::entity spawn_hand(ptv::World& w, const ptv::Transform& at) {
-    auto& reg = w.registry();
-    entt::entity e = reg.create();
-    std::uint32_t u = static_cast<std::uint32_t>(e);
-    w.emplace_or_replace<ptv::CTransform>(u, ptv::CTransform{at});
-    ptv::CTag tag; tag.tags = {"utility","grabber_hand"};
-    w.emplace_or_replace<ptv::CTag>(u, std::move(tag));
-    return e;
+static entt::entity ensure_grabber(World& w, std::uint32_t ring_e, UtilityConstructs& uc) {
+    if (uc.grabber_.active && uc.grabber_.e != entt::null && w.registry().valid(uc.grabber_.e)) return uc.grabber_.e;
+    Transform t{}; if (w.has<CTransform>(ring_e)) t = w.get<CTransform>(ring_e).t;
+    t.position += Vec3{0.0f, 0.05f, 0.25f};
+    uc.grabber_.e = make_child(w, "construct.utility:grabber", t);
+    uc.grabber_.active = true;
+    add_tag(w, static_cast<entt::entity>(ring_e), "haptics.publish:{\"pattern_id\":\"construct_form_heavy\",\"hand\":\"right\",\"intensity_scale\":0.8,\"duration_s\":0.06}");
+    return uc.grabber_.e;
 }
 
-std::pair<entt::entity,float> find_nearest_grabbable(ptv::World& w, const ptv::Vec3& from, float maxR) {
+static void pull_nearby(World& w, std::uint32_t ring_e, entt::entity grabber, float pull_force, float dt) {
+    Transform* gt = get_tr(w, grabber);
+    if (!gt) return;
     auto& reg = w.registry();
-    auto view = reg.view<ptv::CTransform, ptv::CTag>();
-    float best = std::numeric_limits<float>::max();
-    entt::entity bestE = entt::null;
-    const float r2 = maxR*maxR;
+    auto view = reg.view<CTag, CTransform>();
     for (auto e : view) {
-        std::uint32_t u = static_cast<std::uint32_t>(e);
-        if (!w.has<ptv::CTag>(u) || !w.has<ptv::CTransform>(u)) continue;
-        auto& tags = w.get<ptv::CTag>(u).tags;
-        if (std::find(tags.begin(), tags.end(), "grabbable") == tags.end()) continue;
-        const auto& tr = w.get<ptv::CTransform>(u).t;
-        const ptv::Vec3 d = tr.position - from;
-        const float d2 = dot(d,d);
-        if (d2 <= r2 && d2 < best) { best = d2; bestE = e; }
+        if (e == grabber) continue;
+        const auto& tags = view.get<CTag>(e).tags;
+        bool is_small=false;
+        for (const auto& s : tags) { if (s=="grabbable") { is_small=true; break; } }
+        if (!is_small) continue;
+        auto& tr = view.get<CTransform>(e).t;
+        Vec3 d = gt->position - tr.position;
+        float dist2 = d.x*d.x + d.y*d.y + d.z*d.z;
+        if (dist2 > 36.0f) continue; // within 6m
+        // Elastic-like pull (no physics body assumption):
+        float dist = std::sqrt(std::max(1e-4f, dist2));
+        Vec3 dir = (1.0f/dist) * d;
+        float step = std::min(2.0f, pull_force * dt / std::max(0.5f, dist));
+        tr.position = tr.position + dir * step;
+        // Tether VFX hint
+        add_tag(w, e, "vfx.spawn:elastic_tether");
     }
-    return {bestE, best};
+    // light drain per second when active pull requested
+    add_tag(w, static_cast<entt::entity>(ring_e), "ring.energy:consume:{\"amount\":0.2}");
 }
-}
 
-namespace ptv {
+void update_grabber(World& w, std::uint32_t ring_e, UtilityConstructs& uc, const nlohmann::json& p, float dt) {
+    const bool spawn = p.value("spawn_grabber", false) || (p.value("selected", std::string("")) == std::string("construct_grabber_hand") && p.value("rt_confirm", false));
+    if (spawn) ensure_grabber(w, ring_e, uc);
+    if (!uc.grabber_.active) return;
 
-void UtilityConstructs::tick_grabber(World& w, std::uint32_t ring_entity, const nlohmann::json& live, float dt) {
-    const bool activate = utility_internal::jflag(live, "activate_grabber", false);
-    const bool latch = utility_internal::jflag(live, "right_trigger_pull", false);
+    const bool pulling = p.value("right_trigger_hold", false) || p.value("pull_hold", false);
+    if (pulling) pull_nearby(w, ring_e, uc.grabber_.e, uc.grabber_.pull_force, dt);
 
-    if (activate && grabber_.hand == entt::null) {
-        if (!w.has<ptv::CTransform>(ring_entity)) return;
-        auto at = w.get<ptv::CTransform>(ring_entity).t;
-        at.position += ptv::Vec3{0.0f, 0.25f, 0.5f};
-        at.scale = 0.7f;
-        grabber_.hand = spawn_hand(w, at);
-        utility_internal::add_tag(w, ring_entity, "utility:grabber:spawned");
-    }
-
-    if (grabber_.hand != entt::null) {
-        std::uint32_t h = static_cast<std::uint32_t>(grabber_.hand);
-        if (!w.has<ptv::CTransform>(h)) return;
-        auto& handTr = w.get<ptv::CTransform>(h).t;
-
-        // Keep hand near ring
-        if (w.has<ptv::CTransform>(ring_entity)) {
-            const auto& rt = w.get<ptv::CTransform>(ring_entity).t;
-            ptv::Vec3 targetPos = rt.position + ptv::Vec3{0,0.2f,0.6f};
-            handTr.position = handTr.position + (targetPos - handTr.position) * std::min(1.0f, 6.0f*dt);
-        }
-
-        if (grabber_.latched == entt::null && latch) {
-            // Acquire nearest grabbable within 8m
-            auto [e, d2] = find_nearest_grabbable(w, handTr.position, 8.0f);
-            if (e != entt::null) {
-                grabber_.latched = e;
-                utility_internal::add_tag(w, static_cast<std::uint32_t>(e), "tethered_to_ring");
-            }
-        }
-
-        if (grabber_.latched != entt::null) {
-            std::uint32_t u = static_cast<std::uint32_t>(grabber_.latched);
-            if (w.has<ptv::CTransform>(u)) {
-                auto& tr = w.get<ptv::CTransform>(u).t;
-                // Pull toward hand (elastic)
-                const ptv::Vec3 d = handTr.position - tr.position;
-                tr.position += d * std::min(1.0f, (grabber_.pull_force*0.02f)*dt);
-                // Visual hint via tag for core VFX to draw tether line
-                utility_internal::add_tag(w, u, "vfx:tether_line");
-            }
-        }
+    // Follow ring hand softly
+    if (w.has<CTransform>(ring_e)) {
+        Transform* gt = get_tr(w, uc.grabber_.e);
+        const auto& hand = w.get<CTransform>(ring_e).t;
+        if (gt) gt->position = gt->position + (hand.position + Vec3{0,0.05f,0.25f} - gt->position) * std::clamp(dt*8.0f, 0.0f, 1.0f);
     }
 }
 
-} // namespace ptv
+}} // namespace ptv::utility

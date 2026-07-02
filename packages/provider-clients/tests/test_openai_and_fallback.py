@@ -39,22 +39,52 @@ class _FakeResp:
 
 
 class _FakeChatCompletions:
-    def __init__(self, content: str, finish_reason: str = "stop"):
-        self._content = content
-        self._finish_reason = finish_reason
+    """Records every call and replays a scripted sequence of responses.
+
+    ``script`` is a list of ``(content, finish_reason)`` tuples. When the
+    test only needs one fixed response, the legacy positional args
+    ``(content, finish_reason)`` are still supported -- those build a
+    one-element script that is replayed for every call (so retry-loop
+    tests get a stable response on every attempt).
+    """
+
+    def __init__(
+        self,
+        content: str,
+        finish_reason: str = "stop",
+        *,
+        script: list[tuple[str, str]] | None = None,
+    ):
+        self._script = list(script) if script is not None else [(content, finish_reason)]
         self.last_kwargs: dict = {}
+        self.call_kwargs: list[dict] = []
+        self.calls = 0
 
     def create(self, **kwargs):
         self.last_kwargs = kwargs
-        return _FakeResp(self._content, self._finish_reason)
+        self.call_kwargs.append(kwargs)
+        self.calls += 1
+        # Replay the next scripted response, falling back to the last
+        # entry once the script is exhausted (so length-loop tests don't
+        # IndexError when the auto-retry doubles past the ceiling).
+        idx = min(self.calls - 1, len(self._script) - 1)
+        content, finish_reason = self._script[idx]
+        return _FakeResp(content, finish_reason)
 
 
 class _FakeOpenAISdk:
     """Mimics the bits of the ``openai`` module that the client touches."""
 
-    def __init__(self, content: str, finish_reason: str = "stop"):
+    def __init__(
+        self,
+        content: str,
+        finish_reason: str = "stop",
+        *,
+        script: list[tuple[str, str]] | None = None,
+    ):
         self._content = content
         self._finish_reason = finish_reason
+        self._script = script
         self.last_instance: "_FakeOpenAISdk._Instance" | None = None
 
         outer = self
@@ -65,7 +95,13 @@ class _FakeOpenAISdk:
                 self.chat = type(
                     "_Chat",
                     (),
-                    {"completions": _FakeChatCompletions(outer._content, outer._finish_reason)},
+                    {
+                        "completions": _FakeChatCompletions(
+                            outer._content,
+                            outer._finish_reason,
+                            script=outer._script,
+                        )
+                    },
                 )()
                 outer.last_instance = self
 
@@ -152,12 +188,109 @@ def test_openai_generate_code_also_omits_temperature_for_reasoning():
     assert "temperature" not in kw
 
 
-def test_openai_reports_length_truncation():
-    c = OpenAIClient(OpenAIConfig(api_key="sk-test"))
+def test_openai_reports_length_truncation_after_exhausting_ceiling():
+    """When EVERY retry attempt also truncates, the client surfaces a
+    clear error that mentions the ceiling and the env knob, instead of
+    looping forever."""
+    c = OpenAIClient(
+        OpenAIConfig(
+            api_key="sk-test",
+            max_tokens=4096,
+            max_tokens_ceiling=8192,
+        )
+    )
     sdk = _FakeOpenAISdk("", finish_reason="length")
     c._sdk = sdk
     with pytest.raises(ProviderCallError, match="truncated"):
         c.generate_json(prompt="x", schema={"type": "object"})
+
+    cc = sdk.last_instance.chat.completions
+    # We expected attempts at 4096 then 8192 (doubled, clamped to
+    # ceiling), then we raise -- so exactly 2 SDK calls.
+    assert cc.calls == 2, f"expected 2 retries, got {cc.calls}"
+    caps = [k.get("max_completion_tokens") for k in cc.call_kwargs]
+    assert caps == [4096, 8192], caps
+
+
+def test_openai_retries_on_length_then_succeeds():
+    """If the FIRST attempt truncates but a doubled retry succeeds, the
+    caller should get the parsed result transparently -- no error."""
+    c = OpenAIClient(
+        OpenAIConfig(
+            api_key="sk-test",
+            max_tokens=8192,
+            max_tokens_ceiling=65536,
+        )
+    )
+    sdk = _FakeOpenAISdk(
+        "",  # ignored when script is set
+        script=[
+            ("", "length"),  # first attempt: truncated
+            ('{"ok": true}', "stop"),  # retry succeeds
+        ],
+    )
+    c._sdk = sdk
+    result = c.generate_json(prompt="x", schema={"type": "object"})
+
+    assert result.data == {"ok": True}
+    cc = sdk.last_instance.chat.completions
+    assert cc.calls == 2
+    caps = [k.get("max_completion_tokens") for k in cc.call_kwargs]
+    assert caps == [8192, 16384], caps  # doubled on retry
+
+
+def test_openai_no_retry_when_first_attempt_succeeds():
+    """Sanity: the retry loop never re-calls when the first attempt
+    finishes cleanly, so we don't waste tokens / latency."""
+    c = OpenAIClient(OpenAIConfig(api_key="sk-test", max_tokens=8192))
+    sdk = _FakeOpenAISdk('{"ok": true}')  # default finish_reason="stop"
+    c._sdk = sdk
+    c.generate_json(prompt="x", schema={"type": "object"})
+
+    cc = sdk.last_instance.chat.completions
+    assert cc.calls == 1
+    assert cc.call_kwargs[0]["max_completion_tokens"] == 8192
+
+
+def test_openai_per_call_max_tokens_overrides_config():
+    """Stages that need an unusually large budget can pass
+    ``max_tokens=...`` per call."""
+    c = OpenAIClient(OpenAIConfig(api_key="sk-test", max_tokens=8192))
+    sdk = _FakeOpenAISdk('{"ok": true}')
+    c._sdk = sdk
+    c.generate_json(
+        prompt="x",
+        schema={"type": "object"},
+        max_tokens=42_000,
+    )
+    cc = sdk.last_instance.chat.completions
+    assert cc.call_kwargs[0]["max_completion_tokens"] == 42_000
+
+
+def test_openai_content_filter_does_not_retry():
+    """``content_filter`` is a policy decision -- retrying with more
+    tokens won't help, so we raise immediately without burning more
+    calls."""
+    c = OpenAIClient(OpenAIConfig(api_key="sk-test"))
+    sdk = _FakeOpenAISdk("", finish_reason="content_filter")
+    c._sdk = sdk
+    with pytest.raises(ProviderCallError, match="content filter"):
+        c.generate_json(prompt="x", schema={"type": "object"})
+    assert sdk.last_instance.chat.completions.calls == 1
+
+
+def test_openai_default_config_has_generous_max_tokens():
+    """Regression guard: the default cap MUST be high enough for
+    reasoning models. OpenAI explicitly recommends >= 25K, and our
+    large-prompt MechanicPlan calls easily blow past 16K. The previous
+    16384 default broke real 900+ line user prompts in production."""
+    cfg = OpenAIConfig()
+    assert cfg.max_tokens >= 64_000, (
+        f"default max_tokens={cfg.max_tokens} too low for gpt-5 "
+        f"reasoning models -- raise to at least 64K"
+    )
+    assert cfg.max_tokens_ceiling >= cfg.max_tokens
+    assert cfg.max_tokens_ceiling >= 96_000
 
 
 @pytest.mark.parametrize(
@@ -326,3 +459,80 @@ def test_llm_generate_code_fallback_path():
     kw = o_sdk.last_instance.chat.completions.last_kwargs
     # generate_code does NOT constrain response_format.
     assert "response_format" not in kw
+
+
+# ---------------------------------------------------------------------------
+# Configuration: env-var parsing + build_default_llm_client
+# ---------------------------------------------------------------------------
+
+
+def test_openai_max_tokens_loaded_from_env(monkeypatch):
+    """``OPENAI_MAX_TOKENS`` / ``OPENAI_MAX_TOKENS_CEILING`` override the
+    dataclass defaults via :py:meth:`OpenAIConfig.from_env`."""
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    monkeypatch.setenv("OPENAI_MAX_TOKENS", "70000")
+    monkeypatch.setenv("OPENAI_MAX_TOKENS_CEILING", "120000")
+    cfg = OpenAIConfig.from_env()
+    assert cfg.max_tokens == 70_000
+    assert cfg.max_tokens_ceiling == 120_000
+
+
+def test_openai_max_tokens_falls_back_when_env_garbage(monkeypatch):
+    monkeypatch.setenv("OPENAI_MAX_TOKENS", "not-a-number")
+    cfg = OpenAIConfig.from_env()
+    assert cfg.max_tokens == 96_000  # dataclass default
+
+
+def test_anthropic_max_tokens_loaded_from_env(monkeypatch):
+    monkeypatch.setenv("CLAUDE_MAX_TOKENS", "48000")
+    cfg = AnthropicConfig.from_env()
+    assert cfg.max_tokens == 48_000
+
+
+def test_anthropic_default_config_has_generous_max_tokens():
+    """Regression guard: the previous 8K default truncated MechanicPlans
+    for complex prompts on Claude as well as OpenAI."""
+    assert AnthropicConfig().max_tokens >= 16_000
+
+
+def test_build_default_llm_client_propagates_max_tokens():
+    """The orchestrator-side helper must forward the per-provider
+    ``max_tokens`` knobs to the underlying configs, otherwise the
+    ``Settings`` overrides silently do nothing."""
+    from ptv_providers import build_default_llm_client
+
+    client = build_default_llm_client(
+        anthropic_api_key="sk-ant",
+        openai_api_key="sk-test",
+        claude_hard_model="claude-opus-4-7",
+        claude_light_model="claude-sonnet-4-6",
+        openai_hard_model="gpt-5",
+        openai_light_model="gpt-5-mini",
+        claude_max_tokens=50_000,
+        openai_max_tokens=70_000,
+        openai_max_tokens_ceiling=110_000,
+    )
+    assert client.anthropic.config.max_tokens == 50_000
+    assert client.openai.config.max_tokens == 70_000
+    assert client.openai.config.max_tokens_ceiling == 110_000
+
+
+def test_build_default_llm_client_keeps_dataclass_defaults_when_unset():
+    """Omitting the kwargs preserves the per-provider dataclass
+    defaults so callers don't have to keep two sets of numbers in sync."""
+    from ptv_providers import build_default_llm_client
+
+    client = build_default_llm_client(
+        anthropic_api_key="sk-ant",
+        openai_api_key="sk-test",
+        claude_hard_model="claude-opus-4-7",
+        claude_light_model="claude-sonnet-4-6",
+        openai_hard_model="gpt-5",
+        openai_light_model="gpt-5-mini",
+    )
+    assert client.anthropic.config.max_tokens == AnthropicConfig().max_tokens
+    assert client.openai.config.max_tokens == OpenAIConfig().max_tokens
+    assert (
+        client.openai.config.max_tokens_ceiling
+        == OpenAIConfig().max_tokens_ceiling
+    )

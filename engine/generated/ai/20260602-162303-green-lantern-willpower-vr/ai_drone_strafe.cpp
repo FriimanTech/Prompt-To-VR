@@ -1,80 +1,57 @@
+#include "ptv/api/IBehaviour.h"
 #include "ptv/ecs/World.h"
 #include "ptv/math/Math.h"
+#include <nlohmann/json.hpp>
 #include <entt/entt.hpp>
 #include <string>
-#include <vector>
-#include <algorithm>
+#include <unordered_map>
 #include <cmath>
+#include "enemy_ai_shared.h"
 
-namespace {
-inline float dot(const ptv::Vec3& a, const ptv::Vec3& b){ return a.x*b.x + a.y*b.y + a.z*b.z; }
-inline float len(const ptv::Vec3& v){ return std::sqrt(dot(v,v)); }
-inline ptv::Vec3 sub(const ptv::Vec3& a, const ptv::Vec3& b){ return ptv::Vec3{a.x-b.x,a.y-b.y,a.z-b.z}; }
-inline ptv::Vec3 add(const ptv::Vec3& a, const ptv::Vec3& b){ return ptv::Vec3{a.x+b.x,a.y+b.y,a.z+b.z}; }
-inline ptv::Vec3 mul(const ptv::Vec3& v, float s){ return ptv::Vec3{v.x*s,v.y*s,v.z*s}; }
-inline ptv::Vec3 norm(const ptv::Vec3& v){ float l=len(v); return (l>1e-5f)? ptv::Vec3{v.x/l,v.y/l,v.z/l} : ptv::Vec3{0,0,0}; }
-inline float clampf(float v, float a, float b){ return std::max(a, std::min(v,b)); }
+namespace ptv {
 
-static void tag_set(ptv::World& w, std::uint32_t e, const std::string& key, const std::string& value){
-    if (!w.has<ptv::CTag>(e)) { w.emplace_or_replace<ptv::CTag>(e, ptv::CTag{}); }
-    auto& tags = w.get<ptv::CTag>(e).tags;
-    const std::string prefix = key + ":";
-    bool replaced=false;
-    for (auto& t : tags){ if (t.rfind(prefix,0)==0){ t = prefix + value; replaced=true; break; } }
-    if (!replaced) tags.push_back(prefix + value);
+struct DroneParams { float strafe_speed{6.0f}; float juke_period{0.9f}; float altitude_bias{1.5f}; };
+
+inline void ai_tick_drone(World& w, std::uint32_t e, PerEntityState& s, const DroneParams& dp, float dt) {
+    s.t += dt;
+    auto playerE = find_player_entity(w);
+    if (!playerE) return;
+
+    Vec3 me = get_entity_position(w, e);
+    Vec3 pl = get_entity_position(w, *playerE);
+    Vec3 toP = pl - me;
+    Vec3 toPdir = normalize_safe(toP);
+
+    bool dome_present = scene_has_tag(w, "dome_shield");
+
+    // Maintain distance band; move inward/outward
+    float d = std::sqrt(toP.x*toP.x + toP.y*toP.y + toP.z*toP.z);
+    float target_d = std::clamp(d, s.drone.band_min, s.drone.band_max);
+    float rad_err = d - 0.5f*(s.drone.band_min + s.drone.band_max);
+
+    Vec3 up{0,1,0};
+    Vec3 side = normalize_safe(cross(up, toPdir));
+
+    // Pick strafe direction with periodic jukes
+    float wave = std::sin((s.seed*1.7f + s.t) * (2.0f*3.1415926f/dp.juke_period));
+    Vec3 strafe = side * (wave >= 0 ? 1.0f : -1.0f);
+
+    // Altitude bias relative to player
+    float alt = (pl.y + dp.altitude_bias) - me.y;
+
+    // Avoid dome interior by biasing outward if dome present
+    Vec3 radial = toPdir * ((rad_err > 0) ? 1.0f : -1.0f);
+    if (dome_present && rad_err < 0) radial = toPdir; // push outward
+
+    Vec3 vel = radial * 2.0f + strafe * dp.strafe_speed + Vec3{0, alt * 1.5f, 0};
+    Vec3 target = me + vel * dt;
+
+    write_move_tag(w, e, target);
+    write_aim_tag(w, e, toPdir);
+
+    // Light burst fire while strafing
+    float rate = 4.0f * s.difficulty * (0.6f + 0.4f*std::abs(wave));
+    write_fire_tag(w, e, "burst", rate);
 }
 
-static bool inside_dome(ptv::World& w, const ptv::Vec3& p){
-    auto& reg = w.registry();
-    auto view = reg.view<ptv::CTransform, ptv::CMesh>();
-    for (auto ent : view){
-        const auto& m = view.get<ptv::CMesh>(ent);
-        if (m.asset_id != "construct_dome_shield") continue;
-        const auto& c = view.get<ptv::CTransform>(ent).t.position;
-        if (len(sub(p,c)) < 3.5f) return true;
-    }
-    return false;
-}
-}
-
-namespace enemy_ai {
-
-void drone_tick(ptv::World& w, std::uint32_t self, const ptv::Vec3& player_pos,
-                const ptv::Vec3& player_vel, float dt, int tier, float& local_t){
-    (void)player_vel; (void)dt;
-    if (!w.has<ptv::CTransform>(self)) return;
-    auto& t = w.get<ptv::CTransform>(self).t;
-
-    float near_d = 7.0f - 0.5f*(tier-1); // tighter on higher tiers
-    near_d = clampf(near_d, 5.5f, 7.0f);
-    float far_d = near_d + 3.0f;
-
-    ptv::Vec3 to_p = sub(player_pos, t.position);
-    float d = len(to_p);
-
-    // Desired altitude offset and lateral juke
-    float alt = 2.5f + 0.4f*(tier-1);
-    ptv::Vec3 f = norm(to_p);
-    ptv::Vec3 right{f.z, 0.0f, -f.x};
-    float juke = std::sin(local_t*2.3f) * (1.0f + 0.3f*(tier-1));
-    ptv::Vec3 desired = add(player_pos, add(mul(f, -clampf(d<near_d? near_d : (d>far_d? near_d : d), near_d, far_d)), add(mul(right, juke*2.0f), ptv::Vec3{0,alt,0})));
-
-    // Avoid dome interiors: if target would be inside, push outward
-    if (inside_dome(w, desired)){
-        desired = add(desired, mul(f, 4.0f));
-    }
-
-    tag_set(w, self, "ai_state", "strafe");
-    tag_set(w, self, "ai_move_target", std::to_string(desired.x)+","+std::to_string(desired.y)+","+std::to_string(desired.z));
-    tag_set(w, self, "ai_speed_mps", "6.0");
-
-    // Fire: short bursts while outside domes
-    if (!inside_dome(w, t.position)){
-        float rps = 4.0f + 0.5f*(tier-1);
-        tag_set(w, self, "ai_fire", std::string("burst_rps:")+std::to_string(rps));
-    } else {
-        tag_set(w, self, "ai_fire", "hold"); // hold fire if sheltered inside
-    }
-}
-
-} // namespace enemy_ai
+} // namespace ptv

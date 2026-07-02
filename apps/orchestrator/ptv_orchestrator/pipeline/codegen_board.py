@@ -372,3 +372,32 @@ class CodegenBoard:
             if reset:
                 self._save_locked()
             return reset
+
+    def reset_failed(self) -> list[str]:
+        """Reset ``failed`` tasks back to ``pending`` (or ``blocked`` if
+        their deps are not done) so they can be retried on resume.
+        Returns the list of ids that were reset."""
+        with self._lock:
+            reset: list[str] = []
+            done_ids = {
+                tid
+                for tid, row in self._data["tasks"].items()
+                if row.get("status") == "done"
+            }
+            for tid, row in self._data["tasks"].items():
+                if row.get("status") != "failed":
+                    continue
+                row["agent_id"] = None
+                row["claimed_at"] = None
+                row["completed_at"] = None
+                row["error"] = None
+                deps = row.get("depends_on", [])
+                if all(d in done_ids for d in deps):
+                    row["status"] = "pending"
+                else:
+                    row["status"] = "blocked"
+                reset.append(tid)
+            if reset:
+                self._refresh_blocked_locked()
+                self._save_locked()
+            return reset

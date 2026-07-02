@@ -1,4 +1,10 @@
-"""Boundary enforcement for generated C++ code."""
+"""Boundary enforcement for generated C++ code.
+
+Validates that generated files (both ``.cpp`` and ``.h``/``.hpp``) live inside
+``engine/generated/{mechanics,ai,dialogue}/`` and only ``#include`` headers
+from the engine's public API, approved third-party libraries, the C++ standard
+library, or same-task generated headers in the same directory.
+"""
 
 from __future__ import annotations
 
@@ -60,9 +66,22 @@ _HEADER_WHITELIST_EXACT = {
     "numeric",
 }
 
+_REGISTRATION_MACROS = re.compile(
+    r"\bPTV_REGISTER_(?:MECHANIC|BEHAVIOUR|DIALOGUE_HOOK)\b"
+)
+
 
 class GeneratedBoundsError(RuntimeError):
     pass
+
+
+def _is_bare_local_header(header: str) -> bool:
+    """Return ``True`` when *header* is a bare filename ending in ``.h`` or
+    ``.hpp`` with no path separators or back-references."""
+    if "/" in header or "\\" in header or ".." in header:
+        return False
+    low = header.lower()
+    return low.endswith(".h") or low.endswith(".hpp")
 
 
 def assert_path_allowed(path: Path, gen_root: Path) -> None:
@@ -81,19 +100,87 @@ def assert_path_allowed(path: Path, gen_root: Path) -> None:
         )
 
 
-def filter_cpp_only(text: str) -> str:
-    """Reject obviously out-of-bounds includes.
+# ---------------------------------------------------------------------------
+# Include validation (fail-loudly path -- preferred)
+# ---------------------------------------------------------------------------
 
-    The goal is to keep generated modules from reaching into engine internals
-    or arbitrary system headers. If any include fails the whitelist we replace
-    it with a commented-out line so the code still compiles after review.
+
+def validate_includes(
+    text: str,
+    filename: str,
+    *,
+    local_headers: frozenset[str] = frozenset(),
+) -> list[str]:
+    """Scan *text* for ``#include`` directives and return a list of
+    human-readable violation strings.  An empty list means all includes
+    are allowed.
+
+    *local_headers* is the set of bare header filenames emitted by the
+    same CodeTask.  Bare-filename includes that are NOT in this set are
+    rejected (prevents cross-task or hallucinated local headers).
+    """
+    violations: list[str] = []
+    for lineno, line in enumerate(text.splitlines(), 1):
+        m = _ALLOWED_HEADERS.match(line)
+        if not m:
+            continue
+        header = m.group("h")
+        if _header_allowed(header, local_headers):
+            continue
+
+        if _is_bare_local_header(header):
+            violations.append(
+                f"{filename}:{lineno}: include \"{header}\" references a "
+                f"header not produced by this task. "
+                f"This task's headers: {sorted(local_headers)}. "
+                f"Check for typos or emit the header in your files[]."
+            )
+        else:
+            violations.append(
+                f"{filename}:{lineno}: disallowed include '{header}' -- "
+                f"this header is not in the engine allowlist. "
+                f"See the allowed-includes list in CODE_TASK_SYSTEM."
+            )
+    return violations
+
+
+def validate_header_content(text: str, filename: str) -> list[str]:
+    """Check that a generated ``.h``/``.hpp`` file does not contain
+    registration macros (those must live in ``.cpp`` files only).
+    Returns a list of violation strings (empty = OK)."""
+    violations: list[str] = []
+    for lineno, line in enumerate(text.splitlines(), 1):
+        if _REGISTRATION_MACROS.search(line):
+            macro = _REGISTRATION_MACROS.search(line).group(0)  # type: ignore[union-attr]
+            violations.append(
+                f"{filename}:{lineno}: header files must not contain "
+                f"{macro}. Move registration to a .cpp file."
+            )
+    return violations
+
+
+# ---------------------------------------------------------------------------
+# Include filter (secondary safety-net -- belt-and-suspenders)
+# ---------------------------------------------------------------------------
+
+
+def filter_cpp_only(
+    text: str,
+    *,
+    local_headers: frozenset[str] = frozenset(),
+) -> str:
+    """Replace disallowed ``#include`` lines with a comment.
+
+    This is a secondary defence behind :func:`validate_includes` which
+    should already have rejected the file.  ``local_headers`` is the set
+    of bare header filenames produced by the same CodeTask.
     """
     out_lines: list[str] = []
     for line in text.splitlines():
         m = _ALLOWED_HEADERS.match(line)
         if m:
             header = m.group("h")
-            if not _header_allowed(header):
+            if not _header_allowed(header, local_headers):
                 out_lines.append(f"// [ptv-bounds] removed disallowed include: {header}")
                 continue
         out_lines.append(line)
@@ -218,7 +305,10 @@ def repair_generated_cpp(text: str) -> tuple[str, list[str]]:
     return repaired, notes
 
 
-def _header_allowed(header: str) -> bool:
+def _header_allowed(
+    header: str,
+    local_headers: frozenset[str] = frozenset(),
+) -> bool:
     if header in _HEADER_WHITELIST_EXACT:
         return True
     if header in _PTV_API_ALLOWED:
@@ -232,4 +322,6 @@ def _header_allowed(header: str) -> bool:
     for p in _HEADER_WHITELIST_PREFIXES:
         if header.startswith(p):
             return True
+    if _is_bare_local_header(header) and header in local_headers:
+        return True
     return False
