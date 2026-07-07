@@ -210,3 +210,15 @@ Next-step engine work (tracked separately):
 Locomotion and **hiding invisible trigger/template entities** remove the
 biggest "prototype on top of my game" artefacts; per-vertex baseColor
 is the bridge between flat-tinted cubes and full PBR sampling.
+
+## Teleport onto generated environments
+
+Teleport now raycasts the arc against the Jolt physics world (via
+`PhysicsWorld::raycast`) instead of only intersecting a flat `teleport_floor_y`
+plane. The player lands on the actual generated ground / platforms / terrain at
+its real height (the commit sets the rig Y to the hit point), and near-vertical
+surfaces (walls) are rejected as landing spots. This makes agent-generated
+multi-level environments (see [`world-generation.md`](world-generation.md))
+traversable with the default comfort locomotion. Smooth (slide) locomotion is
+still free-fly on XZ; a Jolt `CharacterVirtual` capsule for wall-blocked
+sliding is a tracked follow-up.

@@ -422,6 +422,31 @@ def compile_scene_json(
     }
 
 
+def _merge_world_into_scene(doc: dict, world_doc: dict) -> dict:
+    """Merge the C++-generated environment (world.scene.json) into a compiled
+    gameplay scene doc: environment entities + sky + lights + spawn come from
+    the world; gameplay entities render on top of it."""
+    world_entities = world_doc.get("entities") or []
+    doc["entities"] = list(world_entities) + list(doc.get("entities") or [])
+    if "sky" in world_doc:
+        doc["sky"] = world_doc["sky"]
+    if "sky_color" in world_doc:
+        doc["sky_color"] = world_doc["sky_color"]
+    if "ambient_intensity" in world_doc:
+        doc["ambient_intensity"] = world_doc["ambient_intensity"]
+    world_lights = world_doc.get("lights") or []
+    if world_lights:
+        doc["lights"] = list(world_lights) + list(doc.get("lights") or [])
+    world_player = world_doc.get("player") or {}
+    world_spawn = (
+        world_player.get("spawn") if isinstance(world_player, dict) else None
+    )
+    if isinstance(world_spawn, dict) and "position" in world_spawn:
+        doc.setdefault("player", {})
+        doc["player"]["spawn"] = world_spawn
+    return doc
+
+
 def run(ctx: PipelineContext) -> StageResult:
     ctx.emit(ProjectStage.scene_compile, "running", "Compiling scene JSON")
     state = ctx.store.load_state(ctx.project_id)
@@ -438,6 +463,22 @@ def run(ctx: PipelineContext) -> StageResult:
         else {}
     )
 
+    # The C++-generated environment for this project (from world_generation).
+    world_doc: dict | None = None
+    world_path = ctx.project_dir / "world.scene.json"
+    if world_path.exists():
+        try:
+            world_doc = json.loads(world_path.read_text(encoding="utf-8"))
+        except Exception:
+            world_doc = None
+
+    # The environment merges into the entry-point scene (the launched scene.json).
+    entry_id: str | None = next(
+        (s.id for s in build_spec.scenes if s.entry_point), None
+    )
+    if entry_id is None and build_spec.scenes:
+        entry_id = build_spec.scenes[0].id
+
     builds_dir = ctx.project_dir / "builds" / "scene"
     builds_dir.mkdir(parents=True, exist_ok=True)
     artifacts: list[str] = []
@@ -451,6 +492,8 @@ def run(ctx: PipelineContext) -> StageResult:
             json.loads(spec_path.read_text(encoding="utf-8"))
         )
         doc = compile_scene_json(build_spec, manifest, plan, scene_spec, normalization)
+        if world_doc is not None and scene_entry.id == entry_id:
+            doc = _merge_world_into_scene(doc, world_doc)
         out = builds_dir / f"{scene_entry.id}.scene.json"
         out.write_text(json.dumps(doc, indent=2, sort_keys=True), encoding="utf-8")
         artifacts.append(str(out.relative_to(ctx.settings.repo_root)).replace("\\", "/"))

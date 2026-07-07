@@ -86,6 +86,21 @@ class Settings(BaseSettings):
     # update spec.
     codegen_max_parallel_agents: int = Field(default=3, ge=1, le=16)
 
+    # --- World-generation stage (agentic VR environment) -----------------
+    # A single "world architect" agent (OpenAI Agents SDK) authors ALL the
+    # C++ for the VR environment, bounded to the IWorldBuilder surface and
+    # compiled + run offline in ptv_worldgen. Defaults pin the highest-tier
+    # model + reasoning per the current SDK (gpt-5.5, reasoning effort xhigh).
+    world_model: str = "gpt-5.5"
+    # reasoning.effort: one of none|minimal|low|medium|high|xhigh (model-dep).
+    world_reasoning_effort: str = "xhigh"
+    # How many compile-and-repair rounds the stage will attempt before
+    # falling back to the deterministic world so the project still boots.
+    world_max_repair_rounds: int = Field(default=6, ge=1, le=20)
+    # Turn budget for one Agents SDK run (the agent loop). Generous so the
+    # architect can iterate over each part; not unlimited to bound cost.
+    world_agent_max_turns: int = Field(default=80, ge=4, le=1000)
+
     # --- SceneSpec stage (Stage 4) --------------------------------------
     # SceneSpec emits one structured-output LLM call per
     # ``BuildSpec.scenes`` entry. A long user prompt can produce 10-15+

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <entt/entt.hpp>
 #include <memory>
 #include <string>
@@ -113,6 +114,24 @@ struct CMechanicBinding {
 
 struct CTag {
     std::vector<std::string> tags;
+};
+
+// Procedural primitive geometry authored by the world-generation stage.
+// Rendered as a colored box/plane/cylinder/sphere/ramp sized by ``size``.
+struct CPrimitive {
+    std::string kind{"box"};  // box | plane | cylinder | sphere | ramp
+    Vec3 size{1.0f, 1.0f, 1.0f};
+    Vec3 color{0.8f, 0.8f, 0.82f};
+};
+
+// Arbitrary procedural triangle mesh authored by the world-generation stage.
+// ``positions``/``normals`` are flat xyz triples; ``indices`` is a triangle
+// list. ``normals`` may be empty (renderer/collision compute flat normals).
+struct CInlineMesh {
+    std::vector<float> positions;
+    std::vector<float> normals;
+    std::vector<std::uint32_t> indices;
+    Vec3 color{0.8f, 0.8f, 0.82f};
 };
 
 }  // namespace ptv

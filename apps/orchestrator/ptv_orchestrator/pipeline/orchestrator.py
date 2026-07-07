@@ -22,6 +22,7 @@ from . import (
     stage_scene_compile,
     stage_scene_spec,
     stage_tripo_models,
+    stage_world_generation,
 )
 from .context import PipelineContext, StageResult
 
@@ -57,6 +58,7 @@ _STAGES: list[tuple[ProjectStage, StageFn]] = [
     (ProjectStage.tripo_models, stage_tripo_models.run),
     (ProjectStage.asset_normalization, stage_asset_normalize.run),
     (ProjectStage.code_generation, stage_code_generation.run),
+    (ProjectStage.world_generation, stage_world_generation.run),
     (ProjectStage.scene_compile, stage_scene_compile.run),
     (ProjectStage.cmake_build, stage_cmake.run),
     (ProjectStage.engine_promotion, stage_engine_promotion.run),

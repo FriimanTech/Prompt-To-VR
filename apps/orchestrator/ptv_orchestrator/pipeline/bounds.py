@@ -325,3 +325,112 @@ def _header_allowed(
     if _is_bare_local_header(header) and header in local_headers:
         return True
     return False
+
+
+# ---------------------------------------------------------------------------
+# World-generation bounds (engine/generated/world/)
+#
+# Generated VR-environment code targets the offline ptv_worldgen host, NOT the
+# engine runtime. Its include surface is intentionally tiny: only the single
+# IWorldBuilder interface header, the C++ standard library, and GLM. It may NOT
+# include ECS (entt / ptv/ecs), nlohmann, or any other engine internal, so it
+# can never reach or modify the renderer, XR loop, physics, or ECS core.
+# ---------------------------------------------------------------------------
+
+_WORLD_PTV_API_ALLOWED = frozenset({"ptv/api/IWorldBuilder.h"})
+_WORLD_HEADER_WHITELIST_PREFIXES = ("glm/",)
+
+_WORLD_REGISTRATION_MACRO = re.compile(r"\bPTV_REGISTER_WORLD_BUILDER\b")
+
+
+def _world_header_allowed(
+    header: str,
+    local_headers: frozenset[str] = frozenset(),
+) -> bool:
+    if header in _HEADER_WHITELIST_EXACT:
+        return True
+    if header in _WORLD_PTV_API_ALLOWED:
+        return True
+    if header.lower() == "ptv/api/iworldbuilder.h":
+        return True
+    for p in _WORLD_HEADER_WHITELIST_PREFIXES:
+        if header.startswith(p):
+            return True
+    if _is_bare_local_header(header) and header in local_headers:
+        return True
+    return False
+
+
+def assert_world_path_allowed(path: Path, gen_root: Path) -> None:
+    """Raise if ``path`` is outside ``<repo>/engine/generated/world/``."""
+    rp = path.resolve()
+    gr = gen_root.resolve()
+    if not str(rp).startswith(str(gr)):
+        raise GeneratedBoundsError(f"Generated world file {rp} is outside {gr}")
+    rel = rp.relative_to(gr)
+    first = rel.parts[0] if rel.parts else ""
+    if first != "world":
+        raise GeneratedBoundsError(
+            f"Generated world file must live under world/ (got '{first}')"
+        )
+
+
+def validate_world_includes(
+    text: str,
+    filename: str,
+    *,
+    local_headers: frozenset[str] = frozenset(),
+) -> list[str]:
+    """Like :func:`validate_includes` but for the world-generation surface:
+    only ``ptv/api/IWorldBuilder.h`` + std + GLM + same-task headers."""
+    violations: list[str] = []
+    for lineno, line in enumerate(text.splitlines(), 1):
+        m = _ALLOWED_HEADERS.match(line)
+        if not m:
+            continue
+        header = m.group("h")
+        if _world_header_allowed(header, local_headers):
+            continue
+        if _is_bare_local_header(header):
+            violations.append(
+                f"{filename}:{lineno}: include \"{header}\" references a header "
+                f"not produced by this task. This task's headers: "
+                f"{sorted(local_headers)}."
+            )
+        else:
+            violations.append(
+                f"{filename}:{lineno}: disallowed include '{header}' -- world "
+                f"code may only include \"ptv/api/IWorldBuilder.h\", the C++ "
+                f"standard library, and <glm/...>."
+            )
+    return violations
+
+
+def validate_world_header_content(text: str, filename: str) -> list[str]:
+    """Reject ``PTV_REGISTER_WORLD_BUILDER`` in a header (must be in a .cpp)."""
+    violations: list[str] = []
+    for lineno, line in enumerate(text.splitlines(), 1):
+        if _WORLD_REGISTRATION_MACRO.search(line):
+            violations.append(
+                f"{filename}:{lineno}: header files must not contain "
+                f"PTV_REGISTER_WORLD_BUILDER. Move registration to a .cpp file."
+            )
+    return violations
+
+
+def filter_world_cpp_only(
+    text: str,
+    *,
+    local_headers: frozenset[str] = frozenset(),
+) -> str:
+    """Secondary safety-net: comment out disallowed includes in world code."""
+    out_lines: list[str] = []
+    for line in text.splitlines():
+        m = _ALLOWED_HEADERS.match(line)
+        if m and not _world_header_allowed(m.group("h"), local_headers):
+            out_lines.append(
+                f"// [ptv-bounds] removed disallowed include: {m.group('h')}"
+            )
+            continue
+        out_lines.append(line)
+    return "\n".join(out_lines)

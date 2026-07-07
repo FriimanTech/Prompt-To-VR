@@ -55,6 +55,17 @@
       "project_id": "20260429-221856-enhanced-green-lantern-game",
       "promoted_at": "2026-04-29T22:50:06.563742+00:00",
       "params": {}
+    },
+    {
+      "id": "promoted.hover_mode_mechanic",
+      "summary": "Purpose: Controlled hover for precise positioning with quick entry/exit and stabilization. Used for construct placement and mid-air combat.\n\nBehaviour:\n- Toggle entry: A (Right) double-tap toggles hover on/off. Distinguish double-tap with params.value(\"double_tap_ms\", 350). If on ground and double-tap A, enter hover at current position with vertical lock and subtle bob.\n- Movement while hovering:\n  - Left Thumbstick: strafe/forward movement in chosen locomotion orientation (read from CLocomotionSettings.mode for head or controller relative vectors). Speed limited by params.value(\"hover_max_spe",
+      "category": "mechanic",
+      "kind": "mechanics",
+      "source_path": "engine/generated/mechanics/20260706-212302-vr-environment-test/hover_mode_mechanic.cpp",
+      "code_task_id": "hover_mode_mechanic",
+      "project_id": "20260706-212302-vr-environment-test",
+      "promoted_at": "2026-07-06T23:25:35.850167+00:00",
+      "params": {}
     }
   ]
 }

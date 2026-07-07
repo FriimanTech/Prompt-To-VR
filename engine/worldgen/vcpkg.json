@@ -1,0 +1,9 @@
+{
+  "name": "ptv-worldgen",
+  "version-string": "0.1.0",
+  "description": "Offline host that runs generated IWorldBuilder code and emits scene.json.",
+  "dependencies": [
+    "nlohmann-json",
+    "glm"
+  ]
+}

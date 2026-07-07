@@ -68,6 +68,15 @@ if(EXISTS "${CMAKE_SOURCE_DIR}/generated/CMakeLists.txt")
   add_subdirectory(generated)
 endif()
 
+# Offline world-generation host (ptv_worldgen). Off by default: the
+# orchestrator's world_generation stage usually configures engine/worldgen as a
+# standalone project for fast compile-and-repair rebuilds. This option only
+# makes it visible in the full engine build / IDE.
+option(PTV_BUILD_WORLDGEN "Build the offline world-gen host (ptv_worldgen)" OFF)
+if(PTV_BUILD_WORLDGEN AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/worldgen/CMakeLists.txt")
+  add_subdirectory(worldgen)
+endif()
+
 # Tests.
 enable_testing()
 if(EXISTS "${CMAKE_SOURCE_DIR}/runtime/tests/CMakeLists.txt")

@@ -21,6 +21,7 @@ class ProjectStage(str, Enum):
     tripo_models = "tripo_models"
     asset_normalization = "asset_normalization"
     code_generation = "code_generation"
+    world_generation = "world_generation"
     scene_compile = "scene_compile"
     cmake_configure = "cmake_configure"
     cmake_build = "cmake_build"

@@ -16,7 +16,7 @@ import re
 import sys
 from pathlib import Path
 
-ALLOWED_ROOTS = ("mechanics", "ai", "dialogue")
+ALLOWED_ROOTS = ("mechanics", "ai", "dialogue", "world")
 
 HEADER_PREFIXES = (
     "ptv/ecs/",
@@ -28,6 +28,13 @@ HEADER_PREFIXES = (
     "entt/",
     "nlohmann/",
 )
+
+# The world/ subtree targets the offline ptv_worldgen host and has a tighter
+# include surface: only the IWorldBuilder interface header, the C++ standard
+# library, and GLM.
+WORLD_PTV_API_EXACT = {"ptv/api/IWorldBuilder.h"}
+WORLD_HEADER_PREFIXES = ("glm/",)
+WORLD_REGISTRATION_RE = re.compile(r"\bPTV_REGISTER_WORLD_BUILDER\b")
 
 # Only the three stable interface headers live under ptv/api/. See
 # apps/orchestrator/ptv_orchestrator/pipeline/bounds.py for the matching
@@ -90,13 +97,16 @@ def main(root: Path) -> int:
             continue
 
         is_header = p.suffix.lower() in (".h", ".hpp")
+        is_world = first == "world"
         local_headers = _local_headers_in(p.parent)
         text = p.read_text(encoding="utf-8")
 
+        reg_re = WORLD_REGISTRATION_RE if is_world else REGISTRATION_RE
+
         for i, line in enumerate(text.splitlines(), 1):
             # Check registration macros in headers.
-            if is_header and REGISTRATION_RE.search(line):
-                macro = REGISTRATION_RE.search(line).group(0)  # type: ignore[union-attr]
+            if is_header and reg_re.search(line):
+                macro = reg_re.search(line).group(0)  # type: ignore[union-attr]
                 errors.append(
                     f"{p}:{i}: header files must not contain {macro} "
                     f"-- move registration to a .cpp file"
@@ -108,10 +118,20 @@ def main(root: Path) -> int:
             h = m.group("h")
             if h in HEADER_EXACT:
                 continue
-            if h in PTV_API_EXACT or h.lower() in {x.lower() for x in PTV_API_EXACT}:
-                continue
-            if any(h.startswith(pref) for pref in HEADER_PREFIXES):
-                continue
+            if is_world:
+                if (
+                    h in WORLD_PTV_API_EXACT
+                    or h.lower() in {x.lower() for x in WORLD_PTV_API_EXACT}
+                    or any(h.startswith(pref) for pref in WORLD_HEADER_PREFIXES)
+                ):
+                    continue
+            else:
+                if h in PTV_API_EXACT or h.lower() in {
+                    x.lower() for x in PTV_API_EXACT
+                }:
+                    continue
+                if any(h.startswith(pref) for pref in HEADER_PREFIXES):
+                    continue
             # Same-directory generated header (bare filename, must exist).
             if _is_bare_local_header(h) and h in local_headers:
                 continue

@@ -467,7 +467,8 @@ static bool compute_teleport_arc(const Vec3& origin,
                                  float floor_y,
                                  float max_horizontal_m,
                                  std::vector<Vec3>& out_points,
-                                 Vec3& out_target) {
+                                 Vec3& out_target,
+                                 const PhysicsWorld* physics = nullptr) {
     out_points.clear();
     Vec3 v0 = forward * launch_speed;
 
@@ -483,6 +484,25 @@ static bool compute_teleport_arc(const Vec3& origin,
         vel.y -= gravity * dt;
         pos += vel * dt;
         out_points.push_back(pos);
+
+        // Prefer a real physics hit against the generated environment so the
+        // player can teleport onto ground/platforms/terrain at any height.
+        if (physics != nullptr) {
+            Vec3 seg = pos - prev;
+            float seg_len = glm::length(seg);
+            Vec3 hit, normal;
+            if (seg_len > 1e-5f &&
+                physics->raycast(prev, seg, seg_len, hit, normal)) {
+                out_points.back() = hit;
+                Vec3 horiz = hit - origin;
+                horiz.y = 0.0f;
+                if (glm::length(horiz) > max_horizontal_m) return false;
+                // Reject near-vertical surfaces (walls) as landing spots.
+                if (normal.y < 0.4f) return false;
+                out_target = hit;
+                return true;
+            }
+        }
 
         if (pos.y <= floor_y && prev.y > floor_y) {
             // Linearly interpolate the crossing point.
@@ -912,7 +932,7 @@ int Application::run(const Config& cfg) {
                         /*gravity*/ 9.8f,
                         /*floor_y*/ teleport_floor_y_,
                         /*max_horizontal_m*/ teleport_max_horizontal_m_,
-                        teleport_.arc_points, tgt);
+                        teleport_.arc_points, tgt, &physics_);
                     teleport_.aiming = true;
                     teleport_.have_target = ok;
                     if (ok) teleport_.target = tgt;
@@ -924,8 +944,11 @@ int Application::run(const Config& cfg) {
                     if (last_have_target) {
                         rig_.pos_x = last_target.x;
                         rig_.pos_z = last_target.z;
-                        PTV_INFO("Teleport -> ({:.2f}, {:.2f})",
-                                 last_target.x, last_target.z);
+                        // Land on the surface height so the player can traverse
+                        // onto generated platforms / terrain, not just y=floor.
+                        rig_.pos_y = last_target.y;
+                        PTV_INFO("Teleport -> ({:.2f}, {:.2f}, {:.2f})",
+                                 last_target.x, last_target.y, last_target.z);
                     }
                     was_aiming_prev = false;
                     last_have_target = false;

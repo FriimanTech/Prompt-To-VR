@@ -64,6 +64,13 @@ public:
      *  Only meaningful for dynamic bodies. */
     void apply_impulse(std::uint32_t entity, const Vec3& impulse);
 
+    /** Cast a ray against all physics bodies. ``dir`` need not be normalized;
+     *  the ray extends ``max_dist`` meters along ``normalize(dir)``. On a hit,
+     *  fills ``out_hit`` (world point) + ``out_normal`` and returns true. Used
+     *  by teleport to land on the generated environment at any height. */
+    bool raycast(const Vec3& origin, const Vec3& dir, float max_dist,
+                 Vec3& out_hit, Vec3& out_normal) const;
+
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;

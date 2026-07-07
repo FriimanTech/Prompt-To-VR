@@ -538,6 +538,7 @@ void Renderer::destroy_gltf_meshes() {
     }
     gltf_meshes_.clear();
     gltf_path_to_slot_.clear();
+    inline_mesh_slots_.clear();
 }
 
 int Renderer::load_glb(const std::string& resolved_path,
@@ -603,6 +604,101 @@ int Renderer::ensure_gltf_mesh(const std::string& resolved_path,
     const int slot = static_cast<int>(gltf_meshes_.size());
     gltf_meshes_.push_back(gm);
     gltf_path_to_slot_[resolved_path] = slot;
+    return slot;
+}
+
+int Renderer::ensure_inline_mesh(std::uint32_t key,
+                                 const std::vector<float>& positions,
+                                 const std::vector<float>& normals,
+                                 const std::vector<std::uint32_t>& indices,
+                                 const Vec3& color) {
+    if (!vk_) return -1;
+    auto cached = inline_mesh_slots_.find(key);
+    if (cached != inline_mesh_slots_.end()) return cached->second;
+
+    const size_t vcount = positions.size() / 3;
+    if (vcount < 3 || indices.size() < 3) return -1;
+
+    std::vector<gltf_mesh_load::LitVertex> verts(vcount);
+    const bool have_normals = normals.size() == positions.size();
+    for (size_t i = 0; i < vcount; ++i) {
+        verts[i].pos[0] = positions[i * 3 + 0];
+        verts[i].pos[1] = positions[i * 3 + 1];
+        verts[i].pos[2] = positions[i * 3 + 2];
+        verts[i].normal[0] = have_normals ? normals[i * 3 + 0] : 0.0f;
+        verts[i].normal[1] = have_normals ? normals[i * 3 + 1] : 0.0f;
+        verts[i].normal[2] = have_normals ? normals[i * 3 + 2] : 0.0f;
+        verts[i].color[0] = color.x;
+        verts[i].color[1] = color.y;
+        verts[i].color[2] = color.z;
+        verts[i].color[3] = 1.0f;
+    }
+
+    if (!have_normals) {
+        // Flat/area-weighted normals accumulated per triangle.
+        for (size_t i = 0; i + 2 < indices.size(); i += 3) {
+            const uint32_t a = indices[i], b = indices[i + 1], c = indices[i + 2];
+            if (a >= vcount || b >= vcount || c >= vcount) continue;
+            Vec3 pa{verts[a].pos[0], verts[a].pos[1], verts[a].pos[2]};
+            Vec3 pb{verts[b].pos[0], verts[b].pos[1], verts[b].pos[2]};
+            Vec3 pc{verts[c].pos[0], verts[c].pos[1], verts[c].pos[2]};
+            Vec3 n = glm::cross(pb - pa, pc - pa);
+            for (uint32_t idx : {a, b, c}) {
+                verts[idx].normal[0] += n.x;
+                verts[idx].normal[1] += n.y;
+                verts[idx].normal[2] += n.z;
+            }
+        }
+        for (auto& v : verts) {
+            Vec3 n{v.normal[0], v.normal[1], v.normal[2]};
+            float len = glm::length(n);
+            if (len > 1e-6f) {
+                v.normal[0] = n.x / len;
+                v.normal[1] = n.y / len;
+                v.normal[2] = n.z / len;
+            } else {
+                v.normal[1] = 1.0f;
+            }
+        }
+    }
+
+    auto make_vma_buffer = [&](VkBufferUsageFlags usage, VkDeviceSize size,
+                               VkBuffer& buf, VmaAllocation& alloc) -> bool {
+        VkBufferCreateInfo bci{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+        bci.size = size;
+        bci.usage = usage;
+        bci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        VmaAllocationCreateInfo aci{};
+        aci.usage = VMA_MEMORY_USAGE_AUTO;
+        aci.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT |
+                    VMA_ALLOCATION_CREATE_MAPPED_BIT;
+        return vmaCreateBuffer(vk_->allocator(), &bci, &aci, &buf, &alloc,
+                               nullptr) == VK_SUCCESS;
+    };
+
+    GltfGpuMesh gm{};
+    const VkDeviceSize vb_size =
+        static_cast<VkDeviceSize>(verts.size() * sizeof(verts[0]));
+    const VkDeviceSize ib_size =
+        static_cast<VkDeviceSize>(indices.size() * sizeof(uint32_t));
+    if (!make_vma_buffer(VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, vb_size, gm.vb,
+                         gm.vb_alloc)) {
+        return -1;
+    }
+    upload_buffer(*vk_, gm.vb, gm.vb_alloc, verts.data(),
+                  static_cast<size_t>(vb_size));
+    if (!make_vma_buffer(VK_BUFFER_USAGE_INDEX_BUFFER_BIT, ib_size, gm.ib,
+                         gm.ib_alloc)) {
+        vmaDestroyBuffer(vk_->allocator(), gm.vb, gm.vb_alloc);
+        return -1;
+    }
+    upload_buffer(*vk_, gm.ib, gm.ib_alloc, indices.data(),
+                  static_cast<size_t>(ib_size));
+    gm.index_count = static_cast<uint32_t>(indices.size());
+
+    const int slot = static_cast<int>(gltf_meshes_.size());
+    gltf_meshes_.push_back(gm);
+    inline_mesh_slots_[key] = slot;
     return slot;
 }
 
@@ -681,6 +777,46 @@ void Renderer::build_items_from_world(World& world, std::vector<DrawItem>& out) 
                     out.push_back(it);
                     continue;
                 }
+            }
+        }
+
+        // --- Procedural primitive from the world-generation stage ----------
+        if (world.registry().all_of<CPrimitive>(entity)) {
+            const auto& prim = world.registry().get<CPrimitive>(entity);
+            bool is_ground = false;
+            if (world.registry().all_of<CTag>(entity)) {
+                for (const auto& s : world.registry().get<CTag>(entity).tags) {
+                    if (s == "ground" || s == "teleport_target") {
+                        is_ground = true;
+                        break;
+                    }
+                }
+            }
+            DrawItem it{};
+            Mat4 s = glm::scale(Mat4(1.0f),
+                                Vec3(prim.size.x, prim.size.y, prim.size.z));
+            it.model = ct.matrix() * s;
+            it.color = Vec4{prim.color.x, prim.color.y, prim.color.z, 1.0f};
+            it.material_id = is_ground ? 1.0f : 0.0f;
+            it.mesh_slot = -1;
+            out.push_back(it);
+            continue;
+        }
+
+        // --- Arbitrary procedural mesh from the world-generation stage ------
+        if (world.registry().all_of<CInlineMesh>(entity)) {
+            const auto& im = world.registry().get<CInlineMesh>(entity);
+            int slot = ensure_inline_mesh(static_cast<std::uint32_t>(entity),
+                                          im.positions, im.normals, im.indices,
+                                          im.color);
+            if (slot >= 0) {
+                DrawItem it{};
+                it.model = ct.matrix();
+                it.mesh_slot = slot;
+                it.color = Vec4{1.0f, 1.0f, 1.0f, 1.0f};  // vertex colors drive look
+                it.material_id = 0.0f;
+                out.push_back(it);
+                continue;
             }
         }
 

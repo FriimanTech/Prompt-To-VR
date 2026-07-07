@@ -24,13 +24,19 @@ orchestrator and a reusable Vulkan + OpenXR engine core.
    (teleport, smooth locomotion, grab, throw, trigger zones, etc.). Generated
    code adds mechanics; it does not reimplement basic VR behavior.
 6. Generated C++ (`.cpp`, `.h`, `.hpp`) is confined to
-   `engine/generated/{mechanics,ai,dialogue}/`. It MUST NOT modify the
+   `engine/generated/{mechanics,ai,dialogue,world}/`. It MUST NOT modify the
    renderer, XR session loop, platform layer, memory core, or base ECS.
    Generated headers are allowed for same-task, same-directory use only
    (bare-filename `#include "foo.h"` includes). Registration macros
    (`PTV_REGISTER_MECHANIC`, etc.) must only appear in `.cpp` files.
    Include violations cause the CodeTask to fail loudly (not silently
    strip).
+   The VR **environment** is authored in C++ by a single world-architect
+   agent under `engine/generated/world/` implementing `IWorldBuilder`; that
+   surface has a tighter whitelist (only `ptv/api/IWorldBuilder.h` + std +
+   glm) and is compiled + run OFFLINE in the `ptv_worldgen` host (no
+   Vulkan/OpenXR/Jolt/renderer/ECS linked), emitting `scene.json`. The
+   environment is NOT a Tripo GLB.
 7. Use Claude for the hardest gameplay planning and hardest C++ generation
    (`claude-opus-4-7`). Use `claude-sonnet-4-6` for lighter work. If Claude
    is unavailable (missing key or API error) the pipeline transparently
@@ -47,8 +53,10 @@ orchestrator and a reusable Vulkan + OpenXR engine core.
 - `apps/web` – React + Vite + TypeScript control panel.
 - `apps/orchestrator` – FastAPI backend that runs the pipeline.
 - `engine/runtime` – **hand-authored** reusable C++ VR engine. Stable.
-- `engine/generated/{mechanics,ai,dialogue}` – the **only** directories where
-  LLM-produced C++ lives.
+- `engine/generated/{mechanics,ai,dialogue,world}` – the **only** directories
+  where LLM-produced C++ lives (`world/` = VR environment builders).
+- `engine/worldgen` – offline `ptv_worldgen` host + `WorldContext` that runs
+  generated `IWorldBuilder` code and emits `scene.json`. Links no engine core.
 - `engine/tools` – scene compiler, GLB validator, bounds checker.
 - `packages/schemas` – Pydantic v2 models + JSON Schemas (single source of
   truth for BuildSpec, AssetManifest, MechanicPlan, SceneSpec, CodeTask,
@@ -62,16 +70,23 @@ orchestrator and a reusable Vulkan + OpenXR engine core.
 ## Generation pipeline (order is fixed)
 
 1. Prompt → **BuildSpec** (Claude Opus, structured output).
-2. BuildSpec → **AssetManifest** (Claude Sonnet, structured output).
+2. BuildSpec → **AssetManifest** (Claude Sonnet, structured output). Only
+   OBJECTS (characters, props, fx, ui) — the environment is not a GLB.
 3. AssetManifest + BuildSpec → **MechanicPlan** (Claude Opus). Each mechanic
    must be classified `builtin`, `builtin+config`, or `generate`.
 4. All above → **SceneSpec** (Claude Opus, structured output).
-5. Reference images for each `AssetItem` → Gemini / Imagen.
+5. Reference images for each object `AssetItem` → Gemini / Imagen.
 6. Reference images → Tripo image-to-3D (textured, PBR).
 7. Assets normalized (scale / materials / collision).
 8. CodeTasks from MechanicPlan → Claude Opus → C++ files (`.cpp` + optional
    `.h`/`.hpp` headers) in `engine/generated/{mechanics,ai,dialogue}/`.
-9. Deterministic scene compiler emits `scene.json` and build metadata.
+8b. **World generation**: a single world-architect agent (OpenAI Agents SDK,
+   `gpt-5.5` @ reasoning `xhigh`, `WebSearchTool`) writes `IWorldBuilder` C++
+   in `engine/generated/world/<project_id>/`, compiled + run offline in
+   `ptv_worldgen` under a compile-and-repair loop → `world.scene.json`
+   (deterministic fallback world if the budget is exhausted).
+9. Deterministic scene compiler merges `world.scene.json` (environment) with
+   gameplay entities and emits `scene.json` + build metadata.
 10. CMake configure + build (Visual Studio 18 2026 generator, toolset v145).
 11. Orchestrator launches the produced `.exe` through OpenXR.
 

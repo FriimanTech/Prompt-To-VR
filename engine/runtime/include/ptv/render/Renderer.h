@@ -113,6 +113,16 @@ private:
     /** Return cache slot for ``resolved_path`` (absolute on disk), or -1. */
     int ensure_gltf_mesh(const std::string& resolved_path,
                          float target_scale_meters);
+    /** Upload (or fetch cached) an arbitrary procedural triangle mesh authored
+     *  by the world-generation stage. ``key`` is a stable per-entity id used
+     *  to cache the GPU buffers so we upload once, not every frame. ``normals``
+     *  may be empty (flat normals are computed). Returns a mesh cache slot or
+     *  -1. */
+    int ensure_inline_mesh(std::uint32_t key,
+                           const std::vector<float>& positions,
+                           const std::vector<float>& normals,
+                           const std::vector<std::uint32_t>& indices,
+                           const Vec3& color);
     void destroy_gltf_meshes();
 
     VulkanContext* vk_{nullptr};
@@ -147,6 +157,8 @@ private:
 
     std::vector<GltfGpuMesh> gltf_meshes_;
     std::unordered_map<std::string, int> gltf_path_to_slot_;
+    // Inline procedural meshes (world-gen add_mesh) cached by entity id.
+    std::unordered_map<std::uint32_t, int> inline_mesh_slots_;
 };
 
 }  // namespace ptv

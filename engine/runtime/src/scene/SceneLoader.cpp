@@ -77,6 +77,21 @@ SceneDoc LoadSceneJson(const std::string& path) {
     d.sky_color = read_vec3(j.value("sky_color", Json::array()), d.sky_color);
     d.ambient_intensity = j.value("ambient_intensity", 0.25f);
 
+    if (j.contains("sky") && j["sky"].is_object()) {
+        const auto& s = j["sky"];
+        d.sky.present = true;
+        d.sky.top = read_vec3(s.value("top_color", Json::array()), d.sky.top);
+        d.sky.horizon =
+            read_vec3(s.value("horizon_color", Json::array()), d.sky.horizon);
+        d.sky.sun_direction =
+            read_vec3(s.value("sun_direction", Json::array()), d.sky.sun_direction);
+        d.sky.sun_color =
+            read_vec3(s.value("sun_color", Json::array()), d.sky.sun_color);
+        d.sky.sun_intensity = s.value("sun_intensity", 1.0f);
+        // Keep the flat clear color in sync with the sky horizon.
+        d.sky_color = d.sky.horizon;
+    }
+
     for (const auto& l : j.value("lights", Json::array())) {
         LightSpec ls{};
         ls.id = l.value("id", "");
@@ -84,6 +99,8 @@ SceneDoc LoadSceneJson(const std::string& path) {
         ls.transform = read_transform(l.value("transform", Json::object()));
         ls.color = read_vec3(l.value("color_rgb", Json::array()), Vec3(1.0f));
         ls.intensity = l.value("intensity", 1.0f);
+        ls.direction =
+            read_vec3(l.value("direction", Json::array()), Vec3(0.0f, -1.0f, 0.0f));
         d.lights.push_back(std::move(ls));
     }
 
@@ -99,6 +116,28 @@ SceneDoc LoadSceneJson(const std::string& path) {
             m.target_scale_meters = e["mesh"].value("target_scale_meters", 1.0f);
             m.collision_shape = e["mesh"].value("collision_shape", "aabb");
             es.mesh = std::move(m);
+        }
+        if (e.contains("primitive") && e["primitive"].is_object()) {
+            const auto& pj = e["primitive"];
+            PrimitiveRef pr{};
+            pr.kind = pj.value("kind", "box");
+            pr.size = read_vec3(pj.value("size", Json::array()), Vec3(1.0f));
+            pr.color =
+                read_vec3(pj.value("color_rgb", Json::array()), Vec3(0.8f, 0.8f, 0.82f));
+            es.primitive = std::move(pr);
+        }
+        if (e.contains("mesh_inline") && e["mesh_inline"].is_object()) {
+            const auto& mi = e["mesh_inline"];
+            InlineMeshRef im{};
+            if (mi.contains("positions") && mi["positions"].is_array())
+                im.positions = mi["positions"].get<std::vector<float>>();
+            if (mi.contains("normals") && mi["normals"].is_array())
+                im.normals = mi["normals"].get<std::vector<float>>();
+            if (mi.contains("indices") && mi["indices"].is_array())
+                im.indices = mi["indices"].get<std::vector<std::uint32_t>>();
+            im.color =
+                read_vec3(mi.value("color_rgb", Json::array()), Vec3(0.8f, 0.8f, 0.82f));
+            es.mesh_inline = std::move(im);
         }
         if (e.contains("physics") && e["physics"].is_object()) {
             PhysicsProps p{};
@@ -135,6 +174,16 @@ void ApplySceneToWorld(const SceneDoc& doc, World& world) {
             world.registry().emplace<CMesh>(
                 e, CMesh{es.mesh->asset_id, es.mesh->glb_path,
                          es.mesh->target_scale_meters});
+        }
+        if (es.primitive.has_value()) {
+            world.registry().emplace<CPrimitive>(
+                e, CPrimitive{es.primitive->kind, es.primitive->size,
+                              es.primitive->color});
+        }
+        if (es.mesh_inline.has_value()) {
+            world.registry().emplace<CInlineMesh>(
+                e, CInlineMesh{es.mesh_inline->positions, es.mesh_inline->normals,
+                               es.mesh_inline->indices, es.mesh_inline->color});
         }
         if (es.physics.has_value()) {
             world.registry().emplace<CPhysics>(

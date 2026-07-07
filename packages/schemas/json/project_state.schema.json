@@ -11,6 +11,7 @@
         "tripo_models",
         "asset_normalization",
         "code_generation",
+        "world_generation",
         "scene_compile",
         "cmake_configure",
         "cmake_build",

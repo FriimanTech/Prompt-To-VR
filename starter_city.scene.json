@@ -1,0 +1,2767 @@
+{
+  "ambient_intensity": 0.30000001192092896,
+  "builder_id": "sample.starter_city",
+  "entities": [
+    {
+      "id": "env_0",
+      "name": "ground",
+      "physics": {
+        "collision_shape": "box",
+        "friction": 0.8500000238418579,
+        "kind": "static",
+        "mass_kg": 0.0,
+        "restitution": 0.05000000074505806
+      },
+      "primitive": {
+        "color_rgb": [
+          0.1599999964237213,
+          0.17000000178813934,
+          0.20000000298023224
+        ],
+        "kind": "box",
+        "size": [
+          200.0,
+          0.20000000298023224,
+          200.0
+        ]
+      },
+      "tags": [
+        "ground",
+        "teleport_target"
+      ],
+      "transform": {
+        "position": [
+          0.0,
+          -0.10000000149011612,
+          0.0
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ],
+        "scale": 1.0
+      }
+    },
+    {
+      "id": "env_1",
+      "name": "prim",
+      "physics": {
+        "collision_shape": "box",
+        "friction": 0.8500000238418579,
+        "kind": "static",
+        "mass_kg": 0.0,
+        "restitution": 0.05000000074505806
+      },
+      "primitive": {
+        "color_rgb": [
+          0.30000001192092896,
+          0.33000001311302185,
+          0.41999998688697815
+        ],
+        "kind": "box",
+        "size": [
+          11.0,
+          26.62120246887207,
+          11.0
+        ]
+      },
+      "tags": [
+        "building"
+      ],
+      "transform": {
+        "position": [
+          -70.0,
+          13.310601234436035,
+          -70.0
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ],
+        "scale": 1.0
+      }
+    },
+    {
+      "id": "env_2",
+      "name": "prim",
+      "physics": {
+        "collision_shape": "box",
+        "friction": 0.8500000238418579,
+        "kind": "static",
+        "mass_kg": 0.0,
+        "restitution": 0.05000000074505806
+      },
+      "primitive": {
+        "color_rgb": [
+          0.30000001192092896,
+          0.33000001311302185,
+          0.41999998688697815
+        ],
+        "kind": "box",
+        "size": [
+          11.0,
+          30.413925170898438,
+          11.0
+        ]
+      },
+      "tags": [
+        "building"
+      ],
+      "transform": {
+        "position": [
+          -48.0,
+          15.206962585449219,
+          -70.0
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ],
+        "scale": 1.0
+      }
+    },
+    {
+      "id": "env_3",
+      "name": "prim",
+      "physics": {
+        "collision_shape": "box",
+        "friction": 0.8500000238418579,
+        "kind": "static",
+        "mass_kg": 0.0,
+        "restitution": 0.05000000074505806
+      },
+      "primitive": {
+        "color_rgb": [
+          0.30000001192092896,
+          0.33000001311302185,
+          0.41999998688697815
+        ],
+        "kind": "box",
+        "size": [
+          11.0,
+          36.527809143066406,
+          11.0
+        ]
+      },
+      "tags": [
+        "building"
+      ],
+      "transform": {
+        "position": [
+          -26.0,
+          18.263904571533203,
+          -70.0
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ],
+        "scale": 1.0
+      }
+    },
+    {
+      "id": "env_4",
+      "name": "prim",
+      "physics": {
+        "collision_shape": "box",
+        "friction": 0.8500000238418579,
+        "kind": "static",
+        "mass_kg": 0.0,
+        "restitution": 0.05000000074505806
+      },
+      "primitive": {
+        "color_rgb": [
+          0.30000001192092896,
+          0.33000001311302185,
+          0.41999998688697815
+        ],
+        "kind": "box",
+        "size": [
+          11.0,
+          24.84598731994629,
+          11.0
+        ]
+      },
+      "tags": [
+        "building"
+      ],
+      "transform": {
+        "position": [
+          -4.0,
+          12.422993659973145,
+          -70.0
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ],
+        "scale": 1.0
+      }
+    },
+    {
+      "id": "env_5",
+      "name": "prim",
+      "physics": {
+        "collision_shape": "box",
+        "friction": 0.8500000238418579,
+        "kind": "static",
+        "mass_kg": 0.0,
+        "restitution": 0.05000000074505806
+      },
+      "primitive": {
+        "color_rgb": [
+          0.30000001192092896,
+          0.33000001311302185,
+          0.41999998688697815
+        ],
+        "kind": "box",
+        "size": [
+          11.0,
+          42.999698638916016,
+          11.0
+        ]
+      },
+      "tags": [
+        "building"
+      ],
+      "transform": {
+        "position": [
+          18.0,
+          21.499849319458008,
+          -70.0
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ],
+        "scale": 1.0
+      }
+    },
+    {
+      "id": "env_6",
+      "name": "prim",
+      "physics": {
+        "collision_shape": "box",
+        "friction": 0.8500000238418579,
+        "kind": "static",
+        "mass_kg": 0.0,
+        "restitution": 0.05000000074505806
+      },
+      "primitive": {
+        "color_rgb": [
+          0.30000001192092896,
+          0.33000001311302185,
+          0.41999998688697815
+        ],
+        "kind": "box",
+        "size": [
+          11.0,
+          30.022493362426758,
+          11.0
+        ]
+      },
+      "tags": [
+        "building"
+      ],
+      "transform": {
+        "position": [
+          40.0,
+          15.011246681213379,
+          -70.0
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ],
+        "scale": 1.0
+      }
+    },
+    {
+      "id": "env_7",
+      "name": "prim",
+      "physics": {
+        "collision_shape": "box",
+        "friction": 0.8500000238418579,
+        "kind": "static",
+        "mass_kg": 0.0,
+        "restitution": 0.05000000074505806
+      },
+      "primitive": {
+        "color_rgb": [
+          0.30000001192092896,
+          0.33000001311302185,
+          0.41999998688697815
+        ],
+        "kind": "box",
+        "size": [
+          11.0,
+          32.37315368652344,
+          11.0
+        ]
+      },
+      "tags": [
+        "building"
+      ],
+      "transform": {
+        "position": [
+          62.0,
+          16.18657684326172,
+          -70.0
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ],
+        "scale": 1.0
+      }
+    },
+    {
+      "id": "env_8",
+      "name": "prim",
+      "physics": {
+        "collision_shape": "box",
+        "friction": 0.8500000238418579,
+        "kind": "static",
+        "mass_kg": 0.0,
+        "restitution": 0.05000000074505806
+      },
+      "primitive": {
+        "color_rgb": [
+          0.30000001192092896,
+          0.33000001311302185,
+          0.41999998688697815
+        ],
+        "kind": "box",
+        "size": [
+          11.0,
+          10.878447532653809,
+          11.0
+        ]
+      },
+      "tags": [
+        "building"
+      ],
+      "transform": {
+        "position": [
+          -70.0,
+          5.439223766326904,
+          -48.0
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ],
+        "scale": 1.0
+      }
+    },
+    {
+      "id": "env_9",
+      "name": "prim",
+      "physics": {
+        "collision_shape": "box",
+        "friction": 0.8500000238418579,
+        "kind": "static",
+        "mass_kg": 0.0,
+        "restitution": 0.05000000074505806
+      },
+      "primitive": {
+        "color_rgb": [
+          0.30000001192092896,
+          0.33000001311302185,
+          0.41999998688697815
+        ],
+        "kind": "box",
+        "size": [
+          11.0,
+          44.94794845581055,
+          11.0
+        ]
+      },
+      "tags": [
+        "building"
+      ],
+      "transform": {
+        "position": [
+          -48.0,
+          22.473974227905273,
+          -48.0
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ],
+        "scale": 1.0
+      }
+    },
+    {
+      "id": "env_10",
+      "name": "prim",
+      "physics": {
+        "collision_shape": "box",
+        "friction": 0.8500000238418579,
+        "kind": "static",
+        "mass_kg": 0.0,
+        "restitution": 0.05000000074505806
+      },
+      "primitive": {
+        "color_rgb": [
+          0.30000001192092896,
+          0.33000001311302185,
+          0.41999998688697815
+        ],
+        "kind": "box",
+        "size": [
+          11.0,
+          16.731361389160156,
+          11.0
+        ]
+      },
+      "tags": [
+        "building"
+      ],
+      "transform": {
+        "position": [
+          -26.0,
+          8.365680694580078,
+          -48.0
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ],
+        "scale": 1.0
+      }
+    },
+    {
+      "id": "env_11",
+      "name": "prim",
+      "physics": {
+        "collision_shape": "box",
+        "friction": 0.8500000238418579,
+        "kind": "static",
+        "mass_kg": 0.0,
+        "restitution": 0.05000000074505806
+      },
+      "primitive": {
+        "color_rgb": [
+          0.30000001192092896,
+          0.33000001311302185,
+          0.41999998688697815
+        ],
+        "kind": "box",
+        "size": [
+          11.0,
+          40.813697814941406,
+          11.0
+        ]
+      },
+      "tags": [
+        "building"
+      ],
+      "transform": {
+        "position": [
+          -4.0,
+          20.406848907470703,
+          -48.0
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ],
+        "scale": 1.0
+      }
+    },
+    {
+      "id": "env_12",
+      "name": "prim",
+      "physics": {
+        "collision_shape": "box",
+        "friction": 0.8500000238418579,
+        "kind": "static",
+        "mass_kg": 0.0,
+        "restitution": 0.05000000074505806
+      },
+      "primitive": {
+        "color_rgb": [
+          0.30000001192092896,
+          0.33000001311302185,
+          0.41999998688697815
+        ],
+        "kind": "box",
+        "size": [
+          11.0,
+          31.573333740234375,
+          11.0
+        ]
+      },
+      "tags": [
+        "building"
+      ],
+      "transform": {
+        "position": [
+          18.0,
+          15.786666870117188,
+          -48.0
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ],
+        "scale": 1.0
+      }
+    },
+    {
+      "id": "env_13",
+      "name": "prim",
+      "physics": {
+        "collision_shape": "box",
+        "friction": 0.8500000238418579,
+        "kind": "static",
+        "mass_kg": 0.0,
+        "restitution": 0.05000000074505806
+      },
+      "primitive": {
+        "color_rgb": [
+          0.30000001192092896,
+          0.33000001311302185,
+          0.41999998688697815
+        ],
+        "kind": "box",
+        "size": [
+          11.0,
+          42.48207092285156,
+          11.0
+        ]
+      },
+      "tags": [
+        "building"
+      ],
+      "transform": {
+        "position": [
+          40.0,
+          21.24103546142578,
+          -48.0
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ],
+        "scale": 1.0
+      }
+    },
+    {
+      "id": "env_14",
+      "name": "prim",
+      "physics": {
+        "collision_shape": "box",
+        "friction": 0.8500000238418579,
+        "kind": "static",
+        "mass_kg": 0.0,
+        "restitution": 0.05000000074505806
+      },
+      "primitive": {
+        "color_rgb": [
+          0.30000001192092896,
+          0.33000001311302185,
+          0.41999998688697815
+        ],
+        "kind": "box",
+        "size": [
+          11.0,
+          21.950172424316406,
+          11.0
+        ]
+      },
+      "tags": [
+        "building"
+      ],
+      "transform": {
+        "position": [
+          62.0,
+          10.975086212158203,
+          -48.0
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ],
+        "scale": 1.0
+      }
+    },
+    {
+      "id": "env_15",
+      "name": "prim",
+      "physics": {
+        "collision_shape": "box",
+        "friction": 0.8500000238418579,
+        "kind": "static",
+        "mass_kg": 0.0,
+        "restitution": 0.05000000074505806
+      },
+      "primitive": {
+        "color_rgb": [
+          0.30000001192092896,
+          0.33000001311302185,
+          0.41999998688697815
+        ],
+        "kind": "box",
+        "size": [
+          11.0,
+          18.717578887939453,
+          11.0
+        ]
+      },
+      "tags": [
+        "building"
+      ],
+      "transform": {
+        "position": [
+          -70.0,
+          9.358789443969727,
+          -26.0
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ],
+        "scale": 1.0
+      }
+    },
+    {
+      "id": "env_16",
+      "name": "prim",
+      "physics": {
+        "collision_shape": "box",
+        "friction": 0.8500000238418579,
+        "kind": "static",
+        "mass_kg": 0.0,
+        "restitution": 0.05000000074505806
+      },
+      "primitive": {
+        "color_rgb": [
+          0.30000001192092896,
+          0.33000001311302185,
+          0.41999998688697815
+        ],
+        "kind": "box",
+        "size": [
+          11.0,
+          40.996559143066406,
+          11.0
+        ]
+      },
+      "tags": [
+        "building"
+      ],
+      "transform": {
+        "position": [
+          -48.0,
+          20.498279571533203,
+          -26.0
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ],
+        "scale": 1.0
+      }
+    },
+    {
+      "id": "env_17",
+      "name": "prim",
+      "physics": {
+        "collision_shape": "box",
+        "friction": 0.8500000238418579,
+        "kind": "static",
+        "mass_kg": 0.0,
+        "restitution": 0.05000000074505806
+      },
+      "primitive": {
+        "color_rgb": [
+          0.30000001192092896,
+          0.33000001311302185,
+          0.41999998688697815
+        ],
+        "kind": "box",
+        "size": [
+          11.0,
+          26.67959976196289,
+          11.0
+        ]
+      },
+      "tags": [
+        "building"
+      ],
+      "transform": {
+        "position": [
+          -26.0,
+          13.339799880981445,
+          -26.0
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ],
+        "scale": 1.0
+      }
+    },
+    {
+      "id": "env_18",
+      "name": "prim",
+      "physics": {
+        "collision_shape": "box",
+        "friction": 0.8500000238418579,
+        "kind": "static",
+        "mass_kg": 0.0,
+        "restitution": 0.05000000074505806
+      },
+      "primitive": {
+        "color_rgb": [
+          0.30000001192092896,
+          0.33000001311302185,
+          0.41999998688697815
+        ],
+        "kind": "box",
+        "size": [
+          11.0,
+          33.174346923828125,
+          11.0
+        ]
+      },
+      "tags": [
+        "building"
+      ],
+      "transform": {
+        "position": [
+          -4.0,
+          16.587173461914063,
+          -26.0
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ],
+        "scale": 1.0
+      }
+    },
+    {
+      "id": "env_19",
+      "name": "prim",
+      "physics": {
+        "collision_shape": "box",
+        "friction": 0.8500000238418579,
+        "kind": "static",
+        "mass_kg": 0.0,
+        "restitution": 0.05000000074505806
+      },
+      "primitive": {
+        "color_rgb": [
+          0.30000001192092896,
+          0.33000001311302185,
+          0.41999998688697815
+        ],
+        "kind": "box",
+        "size": [
+          11.0,
+          35.39583206176758,
+          11.0
+        ]
+      },
+      "tags": [
+        "building"
+      ],
+      "transform": {
+        "position": [
+          18.0,
+          17.69791603088379,
+          -26.0
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ],
+        "scale": 1.0
+      }
+    },
+    {
+      "id": "env_20",
+      "name": "prim",
+      "physics": {
+        "collision_shape": "box",
+        "friction": 0.8500000238418579,
+        "kind": "static",
+        "mass_kg": 0.0,
+        "restitution": 0.05000000074505806
+      },
+      "primitive": {
+        "color_rgb": [
+          0.30000001192092896,
+          0.33000001311302185,
+          0.41999998688697815
+        ],
+        "kind": "box",
+        "size": [
+          11.0,
+          16.94204330444336,
+          11.0
+        ]
+      },
+      "tags": [
+        "building"
+      ],
+      "transform": {
+        "position": [
+          40.0,
+          8.47102165222168,
+          -26.0
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ],
+        "scale": 1.0
+      }
+    },
+    {
+      "id": "env_21",
+      "name": "prim",
+      "physics": {
+        "collision_shape": "box",
+        "friction": 0.8500000238418579,
+        "kind": "static",
+        "mass_kg": 0.0,
+        "restitution": 0.05000000074505806
+      },
+      "primitive": {
+        "color_rgb": [
+          0.30000001192092896,
+          0.33000001311302185,
+          0.41999998688697815
+        ],
+        "kind": "box",
+        "size": [
+          11.0,
+          46.09880828857422,
+          11.0
+        ]
+      },
+      "tags": [
+        "building"
+      ],
+      "transform": {
+        "position": [
+          62.0,
+          23.04940414428711,
+          -26.0
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ],
+        "scale": 1.0
+      }
+    },
+    {
+      "id": "env_22",
+      "name": "prim",
+      "physics": {
+        "collision_shape": "box",
+        "friction": 0.8500000238418579,
+        "kind": "static",
+        "mass_kg": 0.0,
+        "restitution": 0.05000000074505806
+      },
+      "primitive": {
+        "color_rgb": [
+          0.30000001192092896,
+          0.33000001311302185,
+          0.41999998688697815
+        ],
+        "kind": "box",
+        "size": [
+          11.0,
+          51.10335159301758,
+          11.0
+        ]
+      },
+      "tags": [
+        "building"
+      ],
+      "transform": {
+        "position": [
+          -70.0,
+          25.55167579650879,
+          -4.0
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ],
+        "scale": 1.0
+      }
+    },
+    {
+      "id": "env_23",
+      "name": "prim",
+      "physics": {
+        "collision_shape": "box",
+        "friction": 0.8500000238418579,
+        "kind": "static",
+        "mass_kg": 0.0,
+        "restitution": 0.05000000074505806
+      },
+      "primitive": {
+        "color_rgb": [
+          0.30000001192092896,
+          0.33000001311302185,
+          0.41999998688697815
+        ],
+        "kind": "box",
+        "size": [
+          11.0,
+          32.189117431640625,
+          11.0
+        ]
+      },
+      "tags": [
+        "building"
+      ],
+      "transform": {
+        "position": [
+          -48.0,
+          16.094558715820313,
+          -4.0
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ],
+        "scale": 1.0
+      }
+    },
+    {
+      "id": "env_24",
+      "name": "prim",
+      "physics": {
+        "collision_shape": "box",
+        "friction": 0.8500000238418579,
+        "kind": "static",
+        "mass_kg": 0.0,
+        "restitution": 0.05000000074505806
+      },
+      "primitive": {
+        "color_rgb": [
+          0.30000001192092896,
+          0.33000001311302185,
+          0.41999998688697815
+        ],
+        "kind": "box",
+        "size": [
+          11.0,
+          35.35075759887695,
+          11.0
+        ]
+      },
+      "tags": [
+        "building"
+      ],
+      "transform": {
+        "position": [
+          -26.0,
+          17.675378799438477,
+          -4.0
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ],
+        "scale": 1.0
+      }
+    },
+    {
+      "id": "env_25",
+      "name": "prim",
+      "physics": {
+        "collision_shape": "box",
+        "friction": 0.8500000238418579,
+        "kind": "static",
+        "mass_kg": 0.0,
+        "restitution": 0.05000000074505806
+      },
+      "primitive": {
+        "color_rgb": [
+          0.30000001192092896,
+          0.33000001311302185,
+          0.41999998688697815
+        ],
+        "kind": "box",
+        "size": [
+          11.0,
+          25.03653335571289,
+          11.0
+        ]
+      },
+      "tags": [
+        "building"
+      ],
+      "transform": {
+        "position": [
+          -4.0,
+          12.518266677856445,
+          -4.0
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ],
+        "scale": 1.0
+      }
+    },
+    {
+      "id": "env_26",
+      "name": "prim",
+      "physics": {
+        "collision_shape": "box",
+        "friction": 0.8500000238418579,
+        "kind": "static",
+        "mass_kg": 0.0,
+        "restitution": 0.05000000074505806
+      },
+      "primitive": {
+        "color_rgb": [
+          0.30000001192092896,
+          0.33000001311302185,
+          0.41999998688697815
+        ],
+        "kind": "box",
+        "size": [
+          11.0,
+          42.684295654296875,
+          11.0
+        ]
+      },
+      "tags": [
+        "building"
+      ],
+      "transform": {
+        "position": [
+          18.0,
+          21.342147827148438,
+          -4.0
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ],
+        "scale": 1.0
+      }
+    },
+    {
+      "id": "env_27",
+      "name": "prim",
+      "physics": {
+        "collision_shape": "box",
+        "friction": 0.8500000238418579,
+        "kind": "static",
+        "mass_kg": 0.0,
+        "restitution": 0.05000000074505806
+      },
+      "primitive": {
+        "color_rgb": [
+          0.30000001192092896,
+          0.33000001311302185,
+          0.41999998688697815
+        ],
+        "kind": "box",
+        "size": [
+          11.0,
+          33.94648742675781,
+          11.0
+        ]
+      },
+      "tags": [
+        "building"
+      ],
+      "transform": {
+        "position": [
+          40.0,
+          16.973243713378906,
+          -4.0
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ],
+        "scale": 1.0
+      }
+    },
+    {
+      "id": "env_28",
+      "name": "prim",
+      "physics": {
+        "collision_shape": "box",
+        "friction": 0.8500000238418579,
+        "kind": "static",
+        "mass_kg": 0.0,
+        "restitution": 0.05000000074505806
+      },
+      "primitive": {
+        "color_rgb": [
+          0.30000001192092896,
+          0.33000001311302185,
+          0.41999998688697815
+        ],
+        "kind": "box",
+        "size": [
+          11.0,
+          10.416481018066406,
+          11.0
+        ]
+      },
+      "tags": [
+        "building"
+      ],
+      "transform": {
+        "position": [
+          62.0,
+          5.208240509033203,
+          -4.0
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ],
+        "scale": 1.0
+      }
+    },
+    {
+      "id": "env_29",
+      "name": "prim",
+      "physics": {
+        "collision_shape": "box",
+        "friction": 0.8500000238418579,
+        "kind": "static",
+        "mass_kg": 0.0,
+        "restitution": 0.05000000074505806
+      },
+      "primitive": {
+        "color_rgb": [
+          0.30000001192092896,
+          0.33000001311302185,
+          0.41999998688697815
+        ],
+        "kind": "box",
+        "size": [
+          11.0,
+          50.44929122924805,
+          11.0
+        ]
+      },
+      "tags": [
+        "building"
+      ],
+      "transform": {
+        "position": [
+          -70.0,
+          25.224645614624023,
+          18.0
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ],
+        "scale": 1.0
+      }
+    },
+    {
+      "id": "env_30",
+      "name": "prim",
+      "physics": {
+        "collision_shape": "box",
+        "friction": 0.8500000238418579,
+        "kind": "static",
+        "mass_kg": 0.0,
+        "restitution": 0.05000000074505806
+      },
+      "primitive": {
+        "color_rgb": [
+          0.30000001192092896,
+          0.33000001311302185,
+          0.41999998688697815
+        ],
+        "kind": "box",
+        "size": [
+          11.0,
+          47.068115234375,
+          11.0
+        ]
+      },
+      "tags": [
+        "building"
+      ],
+      "transform": {
+        "position": [
+          -48.0,
+          23.5340576171875,
+          18.0
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ],
+        "scale": 1.0
+      }
+    },
+    {
+      "id": "env_31",
+      "name": "prim",
+      "physics": {
+        "collision_shape": "box",
+        "friction": 0.8500000238418579,
+        "kind": "static",
+        "mass_kg": 0.0,
+        "restitution": 0.05000000074505806
+      },
+      "primitive": {
+        "color_rgb": [
+          0.30000001192092896,
+          0.33000001311302185,
+          0.41999998688697815
+        ],
+        "kind": "box",
+        "size": [
+          11.0,
+          20.46147918701172,
+          11.0
+        ]
+      },
+      "tags": [
+        "building"
+      ],
+      "transform": {
+        "position": [
+          -26.0,
+          10.23073959350586,
+          18.0
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ],
+        "scale": 1.0
+      }
+    },
+    {
+      "id": "env_32",
+      "name": "prim",
+      "physics": {
+        "collision_shape": "box",
+        "friction": 0.8500000238418579,
+        "kind": "static",
+        "mass_kg": 0.0,
+        "restitution": 0.05000000074505806
+      },
+      "primitive": {
+        "color_rgb": [
+          0.30000001192092896,
+          0.33000001311302185,
+          0.41999998688697815
+        ],
+        "kind": "box",
+        "size": [
+          11.0,
+          36.1722526550293,
+          11.0
+        ]
+      },
+      "tags": [
+        "building"
+      ],
+      "transform": {
+        "position": [
+          -4.0,
+          18.08612632751465,
+          18.0
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ],
+        "scale": 1.0
+      }
+    },
+    {
+      "id": "env_33",
+      "name": "prim",
+      "physics": {
+        "collision_shape": "box",
+        "friction": 0.8500000238418579,
+        "kind": "static",
+        "mass_kg": 0.0,
+        "restitution": 0.05000000074505806
+      },
+      "primitive": {
+        "color_rgb": [
+          0.30000001192092896,
+          0.33000001311302185,
+          0.41999998688697815
+        ],
+        "kind": "box",
+        "size": [
+          11.0,
+          22.11370277404785,
+          11.0
+        ]
+      },
+      "tags": [
+        "building"
+      ],
+      "transform": {
+        "position": [
+          18.0,
+          11.056851387023926,
+          18.0
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ],
+        "scale": 1.0
+      }
+    },
+    {
+      "id": "env_34",
+      "name": "prim",
+      "physics": {
+        "collision_shape": "box",
+        "friction": 0.8500000238418579,
+        "kind": "static",
+        "mass_kg": 0.0,
+        "restitution": 0.05000000074505806
+      },
+      "primitive": {
+        "color_rgb": [
+          0.30000001192092896,
+          0.33000001311302185,
+          0.41999998688697815
+        ],
+        "kind": "box",
+        "size": [
+          11.0,
+          32.07701873779297,
+          11.0
+        ]
+      },
+      "tags": [
+        "building"
+      ],
+      "transform": {
+        "position": [
+          40.0,
+          16.038509368896484,
+          18.0
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ],
+        "scale": 1.0
+      }
+    },
+    {
+      "id": "env_35",
+      "name": "prim",
+      "physics": {
+        "collision_shape": "box",
+        "friction": 0.8500000238418579,
+        "kind": "static",
+        "mass_kg": 0.0,
+        "restitution": 0.05000000074505806
+      },
+      "primitive": {
+        "color_rgb": [
+          0.30000001192092896,
+          0.33000001311302185,
+          0.41999998688697815
+        ],
+        "kind": "box",
+        "size": [
+          11.0,
+          31.734004974365234,
+          11.0
+        ]
+      },
+      "tags": [
+        "building"
+      ],
+      "transform": {
+        "position": [
+          62.0,
+          15.867002487182617,
+          18.0
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ],
+        "scale": 1.0
+      }
+    },
+    {
+      "id": "env_36",
+      "name": "prim",
+      "physics": {
+        "collision_shape": "box",
+        "friction": 0.8500000238418579,
+        "kind": "static",
+        "mass_kg": 0.0,
+        "restitution": 0.05000000074505806
+      },
+      "primitive": {
+        "color_rgb": [
+          0.30000001192092896,
+          0.33000001311302185,
+          0.41999998688697815
+        ],
+        "kind": "box",
+        "size": [
+          11.0,
+          18.92357635498047,
+          11.0
+        ]
+      },
+      "tags": [
+        "building"
+      ],
+      "transform": {
+        "position": [
+          -70.0,
+          9.461788177490234,
+          40.0
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ],
+        "scale": 1.0
+      }
+    },
+    {
+      "id": "env_37",
+      "name": "prim",
+      "physics": {
+        "collision_shape": "box",
+        "friction": 0.8500000238418579,
+        "kind": "static",
+        "mass_kg": 0.0,
+        "restitution": 0.05000000074505806
+      },
+      "primitive": {
+        "color_rgb": [
+          0.30000001192092896,
+          0.33000001311302185,
+          0.41999998688697815
+        ],
+        "kind": "box",
+        "size": [
+          11.0,
+          43.20853805541992,
+          11.0
+        ]
+      },
+      "tags": [
+        "building"
+      ],
+      "transform": {
+        "position": [
+          -48.0,
+          21.60426902770996,
+          40.0
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ],
+        "scale": 1.0
+      }
+    },
+    {
+      "id": "env_38",
+      "name": "prim",
+      "physics": {
+        "collision_shape": "box",
+        "friction": 0.8500000238418579,
+        "kind": "static",
+        "mass_kg": 0.0,
+        "restitution": 0.05000000074505806
+      },
+      "primitive": {
+        "color_rgb": [
+          0.30000001192092896,
+          0.33000001311302185,
+          0.41999998688697815
+        ],
+        "kind": "box",
+        "size": [
+          11.0,
+          16.08243179321289,
+          11.0
+        ]
+      },
+      "tags": [
+        "building"
+      ],
+      "transform": {
+        "position": [
+          -26.0,
+          8.041215896606445,
+          40.0
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ],
+        "scale": 1.0
+      }
+    },
+    {
+      "id": "env_39",
+      "name": "prim",
+      "physics": {
+        "collision_shape": "box",
+        "friction": 0.8500000238418579,
+        "kind": "static",
+        "mass_kg": 0.0,
+        "restitution": 0.05000000074505806
+      },
+      "primitive": {
+        "color_rgb": [
+          0.30000001192092896,
+          0.33000001311302185,
+          0.41999998688697815
+        ],
+        "kind": "box",
+        "size": [
+          11.0,
+          8.765887260437012,
+          11.0
+        ]
+      },
+      "tags": [
+        "building"
+      ],
+      "transform": {
+        "position": [
+          -4.0,
+          4.382943630218506,
+          40.0
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ],
+        "scale": 1.0
+      }
+    },
+    {
+      "id": "env_40",
+      "name": "prim",
+      "physics": {
+        "collision_shape": "box",
+        "friction": 0.8500000238418579,
+        "kind": "static",
+        "mass_kg": 0.0,
+        "restitution": 0.05000000074505806
+      },
+      "primitive": {
+        "color_rgb": [
+          0.30000001192092896,
+          0.33000001311302185,
+          0.41999998688697815
+        ],
+        "kind": "box",
+        "size": [
+          11.0,
+          21.44942283630371,
+          11.0
+        ]
+      },
+      "tags": [
+        "building"
+      ],
+      "transform": {
+        "position": [
+          18.0,
+          10.724711418151855,
+          40.0
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ],
+        "scale": 1.0
+      }
+    },
+    {
+      "id": "env_41",
+      "name": "prim",
+      "physics": {
+        "collision_shape": "box",
+        "friction": 0.8500000238418579,
+        "kind": "static",
+        "mass_kg": 0.0,
+        "restitution": 0.05000000074505806
+      },
+      "primitive": {
+        "color_rgb": [
+          0.30000001192092896,
+          0.33000001311302185,
+          0.41999998688697815
+        ],
+        "kind": "box",
+        "size": [
+          11.0,
+          17.890892028808594,
+          11.0
+        ]
+      },
+      "tags": [
+        "building"
+      ],
+      "transform": {
+        "position": [
+          40.0,
+          8.945446014404297,
+          40.0
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ],
+        "scale": 1.0
+      }
+    },
+    {
+      "id": "env_42",
+      "name": "prim",
+      "physics": {
+        "collision_shape": "box",
+        "friction": 0.8500000238418579,
+        "kind": "static",
+        "mass_kg": 0.0,
+        "restitution": 0.05000000074505806
+      },
+      "primitive": {
+        "color_rgb": [
+          0.30000001192092896,
+          0.33000001311302185,
+          0.41999998688697815
+        ],
+        "kind": "box",
+        "size": [
+          11.0,
+          36.06159973144531,
+          11.0
+        ]
+      },
+      "tags": [
+        "building"
+      ],
+      "transform": {
+        "position": [
+          62.0,
+          18.030799865722656,
+          40.0
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ],
+        "scale": 1.0
+      }
+    },
+    {
+      "id": "env_43",
+      "name": "prim",
+      "physics": {
+        "collision_shape": "box",
+        "friction": 0.8500000238418579,
+        "kind": "static",
+        "mass_kg": 0.0,
+        "restitution": 0.05000000074505806
+      },
+      "primitive": {
+        "color_rgb": [
+          0.30000001192092896,
+          0.33000001311302185,
+          0.41999998688697815
+        ],
+        "kind": "box",
+        "size": [
+          11.0,
+          51.419639587402344,
+          11.0
+        ]
+      },
+      "tags": [
+        "building"
+      ],
+      "transform": {
+        "position": [
+          -70.0,
+          25.709819793701172,
+          62.0
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ],
+        "scale": 1.0
+      }
+    },
+    {
+      "id": "env_44",
+      "name": "prim",
+      "physics": {
+        "collision_shape": "box",
+        "friction": 0.8500000238418579,
+        "kind": "static",
+        "mass_kg": 0.0,
+        "restitution": 0.05000000074505806
+      },
+      "primitive": {
+        "color_rgb": [
+          0.30000001192092896,
+          0.33000001311302185,
+          0.41999998688697815
+        ],
+        "kind": "box",
+        "size": [
+          11.0,
+          23.78514862060547,
+          11.0
+        ]
+      },
+      "tags": [
+        "building"
+      ],
+      "transform": {
+        "position": [
+          -48.0,
+          11.892574310302734,
+          62.0
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ],
+        "scale": 1.0
+      }
+    },
+    {
+      "id": "env_45",
+      "name": "prim",
+      "physics": {
+        "collision_shape": "box",
+        "friction": 0.8500000238418579,
+        "kind": "static",
+        "mass_kg": 0.0,
+        "restitution": 0.05000000074505806
+      },
+      "primitive": {
+        "color_rgb": [
+          0.30000001192092896,
+          0.33000001311302185,
+          0.41999998688697815
+        ],
+        "kind": "box",
+        "size": [
+          11.0,
+          33.596099853515625,
+          11.0
+        ]
+      },
+      "tags": [
+        "building"
+      ],
+      "transform": {
+        "position": [
+          -26.0,
+          16.798049926757813,
+          62.0
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ],
+        "scale": 1.0
+      }
+    },
+    {
+      "id": "env_46",
+      "name": "prim",
+      "physics": {
+        "collision_shape": "box",
+        "friction": 0.8500000238418579,
+        "kind": "static",
+        "mass_kg": 0.0,
+        "restitution": 0.05000000074505806
+      },
+      "primitive": {
+        "color_rgb": [
+          0.30000001192092896,
+          0.33000001311302185,
+          0.41999998688697815
+        ],
+        "kind": "box",
+        "size": [
+          11.0,
+          20.663387298583984,
+          11.0
+        ]
+      },
+      "tags": [
+        "building"
+      ],
+      "transform": {
+        "position": [
+          -4.0,
+          10.331693649291992,
+          62.0
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ],
+        "scale": 1.0
+      }
+    },
+    {
+      "id": "env_47",
+      "name": "prim",
+      "physics": {
+        "collision_shape": "box",
+        "friction": 0.8500000238418579,
+        "kind": "static",
+        "mass_kg": 0.0,
+        "restitution": 0.05000000074505806
+      },
+      "primitive": {
+        "color_rgb": [
+          0.30000001192092896,
+          0.33000001311302185,
+          0.41999998688697815
+        ],
+        "kind": "box",
+        "size": [
+          11.0,
+          16.18669319152832,
+          11.0
+        ]
+      },
+      "tags": [
+        "building"
+      ],
+      "transform": {
+        "position": [
+          18.0,
+          8.09334659576416,
+          62.0
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ],
+        "scale": 1.0
+      }
+    },
+    {
+      "id": "env_48",
+      "name": "prim",
+      "physics": {
+        "collision_shape": "box",
+        "friction": 0.8500000238418579,
+        "kind": "static",
+        "mass_kg": 0.0,
+        "restitution": 0.05000000074505806
+      },
+      "primitive": {
+        "color_rgb": [
+          0.30000001192092896,
+          0.33000001311302185,
+          0.41999998688697815
+        ],
+        "kind": "box",
+        "size": [
+          11.0,
+          32.62200927734375,
+          11.0
+        ]
+      },
+      "tags": [
+        "building"
+      ],
+      "transform": {
+        "position": [
+          40.0,
+          16.311004638671875,
+          62.0
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ],
+        "scale": 1.0
+      }
+    },
+    {
+      "id": "env_49",
+      "name": "prim",
+      "physics": {
+        "collision_shape": "box",
+        "friction": 0.8500000238418579,
+        "kind": "static",
+        "mass_kg": 0.0,
+        "restitution": 0.05000000074505806
+      },
+      "primitive": {
+        "color_rgb": [
+          0.30000001192092896,
+          0.33000001311302185,
+          0.41999998688697815
+        ],
+        "kind": "box",
+        "size": [
+          11.0,
+          8.582014083862305,
+          11.0
+        ]
+      },
+      "tags": [
+        "building"
+      ],
+      "transform": {
+        "position": [
+          62.0,
+          4.291007041931152,
+          62.0
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ],
+        "scale": 1.0
+      }
+    },
+    {
+      "id": "env_50",
+      "name": "prim",
+      "physics": {
+        "collision_shape": "box",
+        "friction": 0.8500000238418579,
+        "kind": "static",
+        "mass_kg": 0.0,
+        "restitution": 0.05000000074505806
+      },
+      "primitive": {
+        "color_rgb": [
+          0.3499999940395355,
+          0.3700000047683716,
+          0.44999998807907104
+        ],
+        "kind": "box",
+        "size": [
+          40.0,
+          3.0,
+          0.4000000059604645
+        ]
+      },
+      "tags": [
+        "wall"
+      ],
+      "transform": {
+        "position": [
+          0.0,
+          1.5,
+          -20.0
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ],
+        "scale": 1.0
+      }
+    },
+    {
+      "id": "env_51",
+      "name": "prim",
+      "physics": {
+        "collision_shape": "box",
+        "friction": 0.8500000238418579,
+        "kind": "static",
+        "mass_kg": 0.0,
+        "restitution": 0.05000000074505806
+      },
+      "primitive": {
+        "color_rgb": [
+          0.3499999940395355,
+          0.3700000047683716,
+          0.44999998807907104
+        ],
+        "kind": "box",
+        "size": [
+          40.0,
+          3.0,
+          0.4000000059604645
+        ]
+      },
+      "tags": [
+        "wall"
+      ],
+      "transform": {
+        "position": [
+          0.0,
+          1.5,
+          20.0
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ],
+        "scale": 1.0
+      }
+    },
+    {
+      "id": "env_52",
+      "name": "prim",
+      "physics": {
+        "collision_shape": "box",
+        "friction": 0.8500000238418579,
+        "kind": "static",
+        "mass_kg": 0.0,
+        "restitution": 0.05000000074505806
+      },
+      "primitive": {
+        "color_rgb": [
+          0.3499999940395355,
+          0.3700000047683716,
+          0.44999998807907104
+        ],
+        "kind": "box",
+        "size": [
+          0.4000000059604645,
+          3.0,
+          40.0
+        ]
+      },
+      "tags": [
+        "wall"
+      ],
+      "transform": {
+        "position": [
+          -20.0,
+          1.5,
+          0.0
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ],
+        "scale": 1.0
+      }
+    },
+    {
+      "id": "env_53",
+      "name": "prim",
+      "physics": {
+        "collision_shape": "box",
+        "friction": 0.8500000238418579,
+        "kind": "static",
+        "mass_kg": 0.0,
+        "restitution": 0.05000000074505806
+      },
+      "primitive": {
+        "color_rgb": [
+          0.3499999940395355,
+          0.3700000047683716,
+          0.44999998807907104
+        ],
+        "kind": "box",
+        "size": [
+          0.4000000059604645,
+          3.0,
+          40.0
+        ]
+      },
+      "tags": [
+        "wall"
+      ],
+      "transform": {
+        "position": [
+          20.0,
+          1.5,
+          0.0
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ],
+        "scale": 1.0
+      }
+    },
+    {
+      "id": "env_54",
+      "name": "prim",
+      "physics": {
+        "collision_shape": "box",
+        "friction": 0.8500000238418579,
+        "kind": "static",
+        "mass_kg": 0.0,
+        "restitution": 0.05000000074505806
+      },
+      "primitive": {
+        "color_rgb": [
+          0.15000000596046448,
+          0.15000000596046448,
+          0.17000000178813934
+        ],
+        "kind": "box",
+        "size": [
+          6.0,
+          0.03999999910593033,
+          140.0
+        ]
+      },
+      "tags": [
+        "path"
+      ],
+      "transform": {
+        "position": [
+          0.0,
+          0.019999999552965164,
+          0.0
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ],
+        "scale": 1.0
+      }
+    },
+    {
+      "id": "env_55",
+      "name": "prim",
+      "physics": {
+        "collision_shape": "box",
+        "friction": 0.8500000238418579,
+        "kind": "static",
+        "mass_kg": 0.0,
+        "restitution": 0.05000000074505806
+      },
+      "primitive": {
+        "color_rgb": [
+          0.15000000596046448,
+          0.15000000596046448,
+          0.17000000178813934
+        ],
+        "kind": "box",
+        "size": [
+          6.0,
+          0.03999999910593033,
+          140.0
+        ]
+      },
+      "tags": [
+        "path"
+      ],
+      "transform": {
+        "position": [
+          0.0,
+          0.019999999552965164,
+          0.0
+        ],
+        "rotation": [
+          0.0,
+          0.7071067690849304,
+          0.0,
+          0.7071067690849304
+        ],
+        "scale": 1.0
+      }
+    },
+    {
+      "id": "env_56",
+      "name": "prim",
+      "physics": {
+        "collision_shape": "box",
+        "friction": 0.8500000238418579,
+        "kind": "static",
+        "mass_kg": 0.0,
+        "restitution": 0.05000000074505806
+      },
+      "primitive": {
+        "color_rgb": [
+          0.30000001192092896,
+          0.33000001311302185,
+          0.3799999952316284
+        ],
+        "kind": "box",
+        "size": [
+          4.0,
+          0.4000000059604645,
+          3.0
+        ]
+      },
+      "tags": [
+        "platform"
+      ],
+      "transform": {
+        "position": [
+          10.0,
+          0.8999999761581421,
+          12.600000381469727
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ],
+        "scale": 1.0
+      }
+    },
+    {
+      "id": "env_57",
+      "name": "prim",
+      "physics": {
+        "collision_shape": "box",
+        "friction": 0.8500000238418579,
+        "kind": "static",
+        "mass_kg": 0.0,
+        "restitution": 0.05000000074505806
+      },
+      "primitive": {
+        "color_rgb": [
+          0.30000001192092896,
+          0.33000001311302185,
+          0.3799999952316284
+        ],
+        "kind": "box",
+        "size": [
+          4.0,
+          0.4000000059604645,
+          3.0
+        ]
+      },
+      "tags": [
+        "platform"
+      ],
+      "transform": {
+        "position": [
+          10.0,
+          1.7999999523162842,
+          15.199999809265137
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ],
+        "scale": 1.0
+      }
+    },
+    {
+      "id": "env_58",
+      "name": "prim",
+      "physics": {
+        "collision_shape": "box",
+        "friction": 0.8500000238418579,
+        "kind": "static",
+        "mass_kg": 0.0,
+        "restitution": 0.05000000074505806
+      },
+      "primitive": {
+        "color_rgb": [
+          0.30000001192092896,
+          0.33000001311302185,
+          0.3799999952316284
+        ],
+        "kind": "box",
+        "size": [
+          4.0,
+          0.4000000059604645,
+          3.0
+        ]
+      },
+      "tags": [
+        "platform"
+      ],
+      "transform": {
+        "position": [
+          10.0,
+          2.6999998092651367,
+          17.799999237060547
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ],
+        "scale": 1.0
+      }
+    },
+    {
+      "id": "env_59",
+      "name": "prim",
+      "physics": {
+        "collision_shape": "box",
+        "friction": 0.8500000238418579,
+        "kind": "static",
+        "mass_kg": 0.0,
+        "restitution": 0.05000000074505806
+      },
+      "primitive": {
+        "color_rgb": [
+          0.30000001192092896,
+          0.33000001311302185,
+          0.3799999952316284
+        ],
+        "kind": "box",
+        "size": [
+          4.0,
+          0.4000000059604645,
+          3.0
+        ]
+      },
+      "tags": [
+        "platform"
+      ],
+      "transform": {
+        "position": [
+          10.0,
+          3.5999999046325684,
+          20.399999618530273
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ],
+        "scale": 1.0
+      }
+    },
+    {
+      "id": "env_60",
+      "name": "prim",
+      "physics": {
+        "collision_shape": "box",
+        "friction": 0.8500000238418579,
+        "kind": "static",
+        "mass_kg": 0.0,
+        "restitution": 0.05000000074505806
+      },
+      "primitive": {
+        "color_rgb": [
+          0.30000001192092896,
+          0.33000001311302185,
+          0.3799999952316284
+        ],
+        "kind": "box",
+        "size": [
+          4.0,
+          0.4000000059604645,
+          3.0
+        ]
+      },
+      "tags": [
+        "platform"
+      ],
+      "transform": {
+        "position": [
+          10.0,
+          4.5,
+          23.0
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ],
+        "scale": 1.0
+      }
+    },
+    {
+      "id": "env_61",
+      "mesh_inline": {
+        "color_rgb": [
+          0.800000011920929,
+          0.699999988079071,
+          0.25
+        ],
+        "indices": [
+          0,
+          1,
+          2,
+          0,
+          2,
+          3,
+          0,
+          4,
+          1,
+          1,
+          4,
+          2,
+          2,
+          4,
+          3,
+          3,
+          4,
+          0
+        ],
+        "positions": [
+          -5.0,
+          0.0,
+          -19.0,
+          5.0,
+          0.0,
+          -19.0,
+          5.0,
+          0.0,
+          -9.0,
+          -5.0,
+          0.0,
+          -9.0,
+          0.0,
+          16.0,
+          -14.0
+        ]
+      },
+      "name": "pyramid",
+      "physics": {
+        "collision_shape": "mesh",
+        "friction": 0.8500000238418579,
+        "kind": "static",
+        "mass_kg": 0.0,
+        "restitution": 0.05000000074505806
+      },
+      "tags": [
+        "landmark"
+      ],
+      "transform": {
+        "position": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ],
+        "scale": 1.0
+      }
+    },
+    {
+      "id": "env_62",
+      "name": "prim",
+      "physics": {
+        "collision_shape": "box",
+        "friction": 0.8500000238418579,
+        "kind": "static",
+        "mass_kg": 0.0,
+        "restitution": 0.05000000074505806
+      },
+      "primitive": {
+        "color_rgb": [
+          0.6000000238418579,
+          0.6200000047683716,
+          0.699999988079071
+        ],
+        "kind": "cylinder",
+        "size": [
+          1.0,
+          5.0,
+          1.0
+        ]
+      },
+      "tags": [
+        "pillar"
+      ],
+      "transform": {
+        "position": [
+          -3.0,
+          2.5,
+          -4.0
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ],
+        "scale": 1.0
+      }
+    },
+    {
+      "id": "env_63",
+      "name": "prim",
+      "physics": {
+        "collision_shape": "box",
+        "friction": 0.8500000238418579,
+        "kind": "static",
+        "mass_kg": 0.0,
+        "restitution": 0.05000000074505806
+      },
+      "primitive": {
+        "color_rgb": [
+          0.6000000238418579,
+          0.6200000047683716,
+          0.699999988079071
+        ],
+        "kind": "cylinder",
+        "size": [
+          1.0,
+          5.0,
+          1.0
+        ]
+      },
+      "tags": [
+        "pillar"
+      ],
+      "transform": {
+        "position": [
+          3.0,
+          2.5,
+          -4.0
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ],
+        "scale": 1.0
+      }
+    }
+  ],
+  "generator": "ptv_worldgen",
+  "lights": [
+    {
+      "color_rgb": [
+        1.0,
+        0.8999999761581421,
+        0.7799999713897705
+      ],
+      "direction": [
+        0.3499999940395355,
+        -0.550000011920929,
+        0.30000001192092896
+      ],
+      "id": "light_0",
+      "intensity": 1.399999976158142,
+      "kind": "directional",
+      "transform": {
+        "position": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ],
+        "scale": 1.0
+      }
+    },
+    {
+      "color_rgb": [
+        0.4000000059604645,
+        0.550000011920929,
+        1.0
+      ],
+      "direction": [
+        0.0,
+        -1.0,
+        0.0
+      ],
+      "id": "light_1",
+      "intensity": 1.0,
+      "kind": "point",
+      "transform": {
+        "position": [
+          0.0,
+          6.0,
+          0.0
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ],
+        "scale": 1.0
+      }
+    }
+  ],
+  "player": {
+    "spawn": {
+      "position": [
+        0.0,
+        0.0,
+        2.0
+      ],
+      "rotation": [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ]
+    }
+  },
+  "sky": {
+    "horizon_color": [
+      0.8500000238418579,
+      0.44999998807907104,
+      0.30000001192092896
+    ],
+    "sun_color": [
+      1.0,
+      0.8500000238418579,
+      0.6499999761581421
+    ],
+    "sun_direction": [
+      0.3499999940395355,
+      -0.550000011920929,
+      0.30000001192092896
+    ],
+    "sun_intensity": 1.2000000476837158,
+    "top_color": [
+      0.03999999910593033,
+      0.05999999865889549,
+      0.14000000059604645
+    ]
+  },
+  "sky_color": [
+    0.8500000238418579,
+    0.44999998807907104,
+    0.30000001192092896
+  ],
+  "version": 2
+}

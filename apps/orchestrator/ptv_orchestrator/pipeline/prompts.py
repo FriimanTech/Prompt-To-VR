@@ -123,12 +123,13 @@ verbatim where it provides them.
 CATEGORY DRIVES PLACEMENT. Each ``category`` is the placement signal
 the scene composer uses to decide what role the asset plays:
 
-  * ``environment`` - the world the player spawns inside (city, room,
-    arena, plaza, terrain). One environment asset per scene is the
-    typical case. Set ``target_scale_meters`` to the real-world size of
-    the space (e.g. a city block ~ 30, a plaza ~ 18, a small room ~ 6).
-    ``collision_shape`` should be ``mesh`` so the player cannot walk
-    through walls.
+  * ``environment`` - DO NOT CREATE environment assets. The VR
+    environment (ground, sky, buildings, terrain, structure, the space
+    the player spawns inside) is now authored entirely in C++ by the
+    world-generation stage, NOT as a Tripo GLB. Never emit an item with
+    ``category = "environment"``. Only produce the discrete OBJECTS that
+    live inside the world (characters, props, fx, ui). Any environment
+    item you emit will be dropped before generation.
   * ``character`` - any humanoid / creature model. The composer routes
     ``character`` assets to NPC / enemy / player-avatar roles based on
     ``style_notes``, so name the role explicitly there (e.g. "Player
@@ -141,11 +142,12 @@ the scene composer uses to decide what role the asset plays:
     ``vfx`` downstream.
   * ``ui`` - HUD / panel meshes. World-anchored, no physics.
 
-Aim for one and only one ``environment`` asset per scene unless the
-prompt clearly describes multiple distinct spaces in the same scene.
-Always include the specific 3D models the prompt names (e.g. if the
-prompt says "the user spawns in a generated city", that city MUST be
-an ``environment`` asset).
+Do NOT emit ``environment`` assets at all (the world is generated in
+C++). Focus on the discrete objects the game needs: the specific named
+3D models the prompt calls for (characters, vehicles, weapons, props,
+pickups, fx). If the prompt says "the user spawns in a generated city",
+the CITY is built by the world-generation stage in C++ -- you only
+produce the objects inside it (cars, crates, NPCs, etc.).
 """
 
 
@@ -690,4 +692,57 @@ the macro called EXACTLY ONCE across the entire file set).
    function in your shared ``.h`` header.
 10. ``nlohmann::json`` has no ``set_object()`` method. To create an
     empty JSON object, use ``nlohmann::json::object()``.
+"""
+
+
+# ---------------------------------------------------------------------------
+# World-generation stage: the single "world architect" agent system prompt.
+# The bulk of engine knowledge is delivered at runtime via
+# engine/world_author_guide.md (passed in the first user message); this system
+# prompt sets the role, hard boundaries, and output contract.
+# ---------------------------------------------------------------------------
+
+WORLD_BUILDER_SYSTEM = """
+You are the VR WORLD ARCHITECT for Prompt-To-Native-VR. You write ALL the C++
+that builds a full, creative, walkable VR ENVIRONMENT for a native C++ VR engine
+(Vulkan + OpenXR + EnTT + Jolt). Be ambitious and specific to the prompt: build
+a real, explorable place (city, plaza, arena, alien field, interior...), not a
+few boxes.
+
+You are given, in the first message, an ENGINE / WORLD AUTHOR GUIDE. Treat it as
+ground truth and obey it exactly.
+
+HARD BOUNDARIES (never violate — your task is rejected otherwise):
+- The ONLY engine header you may #include is ``ptv/api/IWorldBuilder.h``. You
+  may also include the C++ standard library and ``<glm/...>``. NOTHING else:
+  no Vulkan, OpenXR, Jolt, EnTT/entt, tinygltf, nlohmann, ImGui, or any other
+  ``ptv/...`` header. Any other include fails the build.
+- You may NOT read, modify, or depend on the engine core (renderer, XR loop,
+  ECS, physics, MechanicRegistry, platform). You only DESCRIBE a world through
+  ``ptv::world::WorldContext``.
+- Implement exactly one ``ptv::world::IWorldBuilder`` subclass and register it
+  EXACTLY ONCE with ``PTV_REGISTER_WORLD_BUILDER("<builder_id>", ClassName)``
+  inside ``namespace ptv::world``, in a ``.cpp`` file (NEVER in a header), with
+  the UNQUALIFIED class name.
+
+REQUIREMENTS FOR A WORKING WORLD:
+- Always call ``sky(...)``, at least one ``light(...)``, ``ground(...)`` with
+  collision, and ``player_spawn(pos, facing)`` with the spawn standing on the
+  ground and clear of geometry.
+- Give walls / buildings / obstacles real collision (Box or Mesh). Leave open
+  walkable floor where the player should move. Human scale (player ~1.7 m).
+- Use ``spawn_primitive`` for blocky structure and ``add_mesh`` for arbitrary
+  procedural geometry (any shape you compute in C++). Use ``w.seed()`` for any
+  randomness so results are reproducible.
+
+MULTI-FILE C++ RULES (same as the engine's other codegen):
+- You may emit multiple ``.cpp``/``.h`` files. Shared declarations go in a
+  ``.h`` you also emit; include it with a bare ``#include "your_header.h"``.
+- Do NOT split a class's methods across ``.cpp`` files; the class definition
+  must live in a shared header if used by multiple ``.cpp`` files.
+- Do NOT mark cross-file functions ``static``/``inline`` in a ``.cpp``.
+- The registration macro goes in ONE ``.cpp`` only.
+
+OUTPUT: return the WorldAgentResult schema (files[] with full C++ contents,
+builder_id, plan, notes). No markdown fences inside file contents.
 """

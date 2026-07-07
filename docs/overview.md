@@ -32,17 +32,22 @@ Quest Link (Windows PC VR).
 ```
 prompt
   → BuildSpec (Claude Opus)
-  → AssetManifest (Claude Sonnet)
+  → AssetManifest (Claude Sonnet)   # OBJECTS only; the environment is C++
   → MechanicPlan (Claude Opus)
   → SceneSpec (Claude Opus, per scene)
   → reference images (Imagen / Gemini)
-  → Tripo image-to-3D (textured + PBR)
+  → Tripo image-to-3D (textured + PBR)   # objects/props/characters
   → asset normalization (deterministic, local)
   → generated C++ gameplay modules (Claude)
-  → scene compile (deterministic JSON)
+  → world generation (single ChatGPT world-architect agent → C++ VR
+    environment, compiled + run offline → world.scene.json)
+  → scene compile (merge world + gameplay → deterministic JSON)
   → CMake configure + build (Visual Studio 18 2026)
   → launch native .exe via OpenXR
 ```
+
+The VR environment is authored entirely in C++ by an agent (not a Tripo GLB);
+see [`world-generation.md`](world-generation.md).
 
 Every stage writes artifacts to `projects/<project_id>/` and can be resumed.
 

@@ -1,6 +1,8 @@
 #pragma once
 
+#include <cstdint>
 #include <nlohmann/json.hpp>
+#include <optional>
 #include <string>
 #include <vector>
 #include <unordered_map>
@@ -16,6 +18,21 @@ struct MeshRef {
     std::string glb_path;
     float target_scale_meters{1.0f};
     std::string collision_shape{"aabb"};
+};
+
+// Procedural primitive authored by the world-generation stage.
+struct PrimitiveRef {
+    std::string kind{"box"};  // box | plane | cylinder | sphere | ramp
+    Vec3 size{1.0f, 1.0f, 1.0f};
+    Vec3 color{0.8f, 0.8f, 0.82f};
+};
+
+// Arbitrary procedural triangle mesh authored by the world-generation stage.
+struct InlineMeshRef {
+    std::vector<float> positions;
+    std::vector<float> normals;
+    std::vector<std::uint32_t> indices;
+    Vec3 color{0.8f, 0.8f, 0.82f};
 };
 
 struct PhysicsProps {
@@ -37,6 +54,8 @@ struct EntitySpec {
     std::string name;
     Transform transform{};
     std::optional<MeshRef> mesh;
+    std::optional<PrimitiveRef> primitive;
+    std::optional<InlineMeshRef> mesh_inline;
     std::optional<PhysicsProps> physics;
     std::vector<MechanicBinding> bindings;
     std::vector<std::string> tags;
@@ -48,6 +67,18 @@ struct LightSpec {
     Transform transform{};
     Vec3 color{1.0f, 1.0f, 1.0f};
     float intensity{1.0f};
+    Vec3 direction{0.0f, -1.0f, 0.0f};
+};
+
+// Optional gradient sky authored by the world-generation stage. When
+// ``present`` is false the runtime falls back to the flat ``sky_color`` clear.
+struct SkyGradient {
+    bool present{false};
+    Vec3 top{0.05f, 0.07f, 0.15f};
+    Vec3 horizon{0.45f, 0.55f, 0.75f};
+    Vec3 sun_direction{0.30f, -0.82f, 0.30f};
+    Vec3 sun_color{1.0f, 0.97f, 0.9f};
+    float sun_intensity{1.0f};
 };
 
 struct PlayerSpawn {
@@ -84,6 +115,7 @@ struct SceneDoc {
     float snap_turn_cooldown_s{0.30f};
     Vec3 sky_color{0.05f, 0.07f, 0.11f};
     float ambient_intensity{0.25f};
+    SkyGradient sky{};
     std::vector<LightSpec> lights;
     std::vector<EntitySpec> entities;
 };

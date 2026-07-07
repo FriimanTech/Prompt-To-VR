@@ -48,9 +48,17 @@ Thumbs.db
 projects/*/
 !projects/.gitkeep
 
+# CMake build trees (engine + offline world-gen host)
+engine/build/
+engine/worldgen/build/
+**/vcpkg_installed/
+
 # Logs
 *.log
 logs/
 
 # Local cache
 .cache/
+
+# Generated files
+engine/generated/

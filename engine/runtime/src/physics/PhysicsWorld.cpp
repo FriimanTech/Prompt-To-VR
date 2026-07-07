@@ -13,8 +13,19 @@
 #include <Jolt/Physics/PhysicsSystem.h>
 #include <Jolt/Physics/Collision/Shape/BoxShape.h>
 #include <Jolt/Physics/Collision/Shape/SphereShape.h>
+#include <Jolt/Physics/Collision/Shape/MeshShape.h>
+#include <Jolt/Geometry/IndexedTriangle.h>
+#include <Jolt/Math/Float3.h>
 #include <Jolt/Physics/Body/BodyCreationSettings.h>
 #include <Jolt/Physics/Body/BodyInterface.h>
+#include <Jolt/Physics/Body/BodyLock.h>
+#include <Jolt/Physics/Collision/RayCast.h>
+#include <Jolt/Physics/Collision/CastResult.h>
+#include <Jolt/Physics/Collision/NarrowPhaseQuery.h>
+
+#include <algorithm>
+#include <cmath>
+#include <cstdint>
 
 namespace ptv {
 
@@ -66,6 +77,40 @@ public:
         return true;
     }
 };
+
+// Build a static triangle-mesh collision shape from an inline procedural mesh.
+// Returns a null ref on any problem (caller falls back to a box).
+JPH::ShapeRefC build_inline_mesh_shape(const CInlineMesh& im) {
+    const std::size_t vcount = im.positions.size() / 3;
+    if (vcount < 3 || im.indices.size() < 3) return {};
+
+    JPH::VertexList verts;
+    verts.reserve(static_cast<JPH::uint>(vcount));
+    for (std::size_t i = 0; i < vcount; ++i) {
+        verts.push_back(JPH::Float3(im.positions[i * 3 + 0],
+                                    im.positions[i * 3 + 1],
+                                    im.positions[i * 3 + 2]));
+    }
+
+    JPH::IndexedTriangleList tris;
+    const std::size_t tcount = im.indices.size() / 3;
+    tris.reserve(static_cast<JPH::uint>(tcount));
+    for (std::size_t i = 0; i < tcount; ++i) {
+        const std::uint32_t a = im.indices[i * 3 + 0];
+        const std::uint32_t b = im.indices[i * 3 + 1];
+        const std::uint32_t c = im.indices[i * 3 + 2];
+        if (a >= vcount || b >= vcount || c >= vcount) continue;
+        if (a == b || b == c || a == c) continue;  // skip degenerate
+        tris.push_back(JPH::IndexedTriangle(a, b, c, 0));
+    }
+    if (tris.empty()) return {};
+
+    JPH::MeshShapeSettings settings(verts, tris);
+    settings.Sanitize();
+    JPH::ShapeSettings::ShapeResult res = settings.Create();
+    if (res.HasError()) return {};
+    return res.Get();
+}
 
 }  // namespace
 
@@ -126,14 +171,7 @@ void PhysicsWorld::rebuild_from_world(World& world) {
     for (auto entity : view) {
         const auto& t = view.get<CTransform>(entity).t;
         const auto& p = view.get<CPhysics>(entity);
-        JPH::Shape* shape = nullptr;
-        if (p.collision_shape == "sphere") {
-            shape = new JPH::SphereShape(0.5f * t.scale);
-        } else {
-            JPH::Vec3 half{0.25f * t.scale, 0.25f * t.scale, 0.25f * t.scale};
-            shape = new JPH::BoxShape(half);
-        }
-        JPH::ShapeRefC shape_ref = shape;
+
         JPH::EMotionType motion = JPH::EMotionType::Static;
         JPH::ObjectLayer layer = Layers::STATIC;
         if (p.kind == "dynamic") {
@@ -142,6 +180,44 @@ void PhysicsWorld::rebuild_from_world(World& world) {
         } else if (p.kind == "kinematic") {
             motion = JPH::EMotionType::Kinematic;
             layer = Layers::MOVING;
+        }
+
+        JPH::ShapeRefC shape_ref;
+
+        // 1) Inline procedural mesh -> triangle mesh collision (static only;
+        //    Jolt mesh shapes cannot be dynamic/kinematic).
+        if (motion == JPH::EMotionType::Static &&
+            p.collision_shape == "mesh") {
+            const CInlineMesh* im = world.registry().try_get<CInlineMesh>(entity);
+            if (im != nullptr) {
+                shape_ref = build_inline_mesh_shape(*im);
+            }
+        }
+
+        // 2) Primitive -> non-uniform box / sphere sized by its full extents.
+        if (shape_ref.GetPtr() == nullptr) {
+            const CPrimitive* prim = world.registry().try_get<CPrimitive>(entity);
+            if (prim != nullptr) {
+                if (p.collision_shape == "sphere" || prim->kind == "sphere") {
+                    shape_ref = new JPH::SphereShape(
+                        std::max(0.05f, 0.5f * prim->size.x));
+                } else {
+                    JPH::Vec3 half{std::max(0.02f, 0.5f * prim->size.x),
+                                   std::max(0.02f, 0.5f * prim->size.y),
+                                   std::max(0.02f, 0.5f * prim->size.z)};
+                    shape_ref = new JPH::BoxShape(half);
+                }
+            }
+        }
+
+        // 3) Fallback: legacy uniform-scale box / sphere (starter room etc.).
+        if (shape_ref.GetPtr() == nullptr) {
+            if (p.collision_shape == "sphere") {
+                shape_ref = new JPH::SphereShape(0.5f * t.scale);
+            } else {
+                JPH::Vec3 half{0.25f * t.scale, 0.25f * t.scale, 0.25f * t.scale};
+                shape_ref = new JPH::BoxShape(half);
+            }
         }
         JPH::BodyCreationSettings bcs(
             shape_ref,
@@ -235,6 +311,29 @@ void PhysicsWorld::apply_impulse(std::uint32_t entity, const Vec3& impulse) {
     if (it == impl_->entity_to_body.end()) return;
     auto& bi = impl_->system.GetBodyInterface();
     bi.AddImpulse(it->second, JPH::Vec3{impulse.x, impulse.y, impulse.z});
+}
+
+bool PhysicsWorld::raycast(const Vec3& origin, const Vec3& dir, float max_dist,
+                           Vec3& out_hit, Vec3& out_normal) const {
+    if (!impl_) return false;
+    const float len = std::sqrt(dir.x * dir.x + dir.y * dir.y + dir.z * dir.z);
+    if (len < 1e-6f || max_dist <= 0.0f) return false;
+    const JPH::Vec3 d{dir.x / len * max_dist, dir.y / len * max_dist,
+                      dir.z / len * max_dist};
+    JPH::RRayCast ray{JPH::RVec3{origin.x, origin.y, origin.z}, d};
+    JPH::RayCastResult hit;
+    if (!impl_->system.GetNarrowPhaseQuery().CastRay(ray, hit)) return false;
+
+    JPH::RVec3 p = ray.GetPointOnRay(hit.mFraction);
+    out_hit = Vec3{(float)p.GetX(), (float)p.GetY(), (float)p.GetZ()};
+    out_normal = Vec3{0.0f, 1.0f, 0.0f};
+    JPH::BodyLockRead lock(impl_->system.GetBodyLockInterface(), hit.mBodyID);
+    if (lock.Succeeded()) {
+        JPH::Vec3 n = lock.GetBody().GetWorldSpaceSurfaceNormal(
+            hit.mSubShapeID2, p);
+        out_normal = Vec3{n.GetX(), n.GetY(), n.GetZ()};
+    }
+    return true;
 }
 
 }  // namespace ptv

@@ -10,14 +10,23 @@ alwaysApply: true
   - `engine/generated/mechanics/`
   - `engine/generated/ai/`
   - `engine/generated/dialogue/`
+  - `engine/generated/world/` (VR environment builders)
 - Generated code MUST implement one of the abstract interfaces in
   `engine/runtime/include/ptv/api/`:
   - `IMechanic` for gameplay mechanics.
   - `IBehaviour` for NPC / AI behavior.
   - `IDialogueHook` for dialogue logic.
+  - `IWorldBuilder` for VR environment generation (world/ only).
 - Generated files register themselves with `PTV_REGISTER_MECHANIC("id")` (or
-  the sibling macros). They never modify `MechanicRegistry`, the renderer,
-  the XR session loop, the platform layer, memory management, or the ECS core.
+  the sibling macros `PTV_REGISTER_BEHAVIOUR`, `PTV_REGISTER_DIALOGUE_HOOK`,
+  `PTV_REGISTER_WORLD_BUILDER`). They never modify `MechanicRegistry`, the
+  renderer, the XR session loop, the platform layer, memory management, or the
+  ECS core.
+- World builders (`engine/generated/world/`) have a TIGHTER include whitelist:
+  only `ptv/api/IWorldBuilder.h`, the C++ standard library, and `<glm/...>`.
+  They may NOT include ECS (`entt`, `ptv/ecs/`), `nlohmann`, or any other
+  engine header. They are compiled + run OFFLINE in the `ptv_worldgen` host
+  (which links no Vulkan/OpenXR/Jolt/renderer/ECS) and only emit `scene.json`.
 - Generated header files (`.h`/`.hpp`) are allowed under the same directories
   as `.cpp` files, subject to the same include whitelist. They are for
   task-local helpers, structs, and shared declarations only.
@@ -25,8 +34,8 @@ alwaysApply: true
   (`#include "foo.h"`) by files in the same project directory. Cross-project
   header includes are forbidden.
 - Registration macros (`PTV_REGISTER_MECHANIC`, `PTV_REGISTER_BEHAVIOUR`,
-  `PTV_REGISTER_DIALOGUE_HOOK`) must only appear in `.cpp` files, never in
-  headers.
+  `PTV_REGISTER_DIALOGUE_HOOK`, `PTV_REGISTER_WORLD_BUILDER`) must only appear
+  in `.cpp` files, never in headers.
 - Generated files must not include engine internals other than the public
   `ptv/api/*` headers and the public scene / ECS headers.
 - The orchestrator validates includes before writing files (fail-loudly)
