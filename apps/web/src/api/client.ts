@@ -78,6 +78,7 @@ export const api = {
       body: JSON.stringify({ title, prompt }),
     }),
   listArtifacts: (id: string) => req<Artifact[]>(`/projects/${id}/artifacts`),
+  listLogs: (id: string) => req<string[]>(`/projects/${id}/logs`),
   getLog: async (id: string, name: string) => {
     const res = await fetch(BASE + `/projects/${id}/logs/${name}`);
     if (!res.ok) return "";
@@ -99,4 +100,10 @@ export const api = {
 
 export function eventStream(projectId: string): EventSource {
   return new EventSource(`${BASE}/projects/${projectId}/events`);
+}
+
+/** URL for the raw bytes of an artifact (image preview, download, ...). The
+ *  `path` is the artifact's repo-relative path from the /artifacts endpoint. */
+export function fileUrl(projectId: string, path: string): string {
+  return `${BASE}/projects/${projectId}/file?path=${encodeURIComponent(path)}`;
 }

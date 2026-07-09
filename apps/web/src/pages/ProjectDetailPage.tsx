@@ -103,7 +103,7 @@ export default function ProjectDetailPage() {
         </pre>
       )}
       {tab === "artifacts" && (
-        <ArtifactBrowser artifacts={artifacts.data ?? []} />
+        <ArtifactBrowser projectId={id} artifacts={artifacts.data ?? []} />
       )}
       {tab === "logs" && <LogsViewer projectId={id} />}
     </div>

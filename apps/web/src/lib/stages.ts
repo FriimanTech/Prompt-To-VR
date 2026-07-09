@@ -8,6 +8,7 @@ export const STAGE_ORDER = [
   "tripo_models",
   "asset_normalization",
   "code_generation",
+  "world_generation",
   "scene_compile",
   "cmake_configure",
   "cmake_build",
@@ -25,9 +26,10 @@ export const STAGE_LABELS: Record<string, string> = {
   tripo_models: "6. Tripo 3D",
   asset_normalization: "7. Asset normalization",
   code_generation: "8. C++ gameplay codegen",
-  scene_compile: "9. Scene compile",
-  cmake_configure: "10. CMake configure",
-  cmake_build: "11. CMake build",
+  world_generation: "9. VR world generation",
+  scene_compile: "10. Scene compile",
+  cmake_configure: "11. CMake configure",
+  cmake_build: "12. CMake build",
   ready_to_launch: "Ready to launch",
   failed: "Failed",
 };
@@ -45,11 +47,18 @@ export function statusColor(status: string): string {
     case "running":
     case "info":
     case "log":
+    case "agent_turn":
       return "text-accent";
     case "warning":
+    case "warn":
     case "skipped":
+    case "fallback":
+    case "bounds_reject":
+    case "invalid_scene":
       return "text-warn";
     case "failed":
+    case "compile_error":
+    case "run_error":
       return "text-err";
     default:
       return "text-muted";
