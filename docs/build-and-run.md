@@ -48,6 +48,13 @@ On success:
    The FastAPI endpoint `/api/projects/<id>/launch` spawns the built `.exe`
    with `PTV_SCENE_JSON` pointing at `projects/<id>/scene.json`.
 
+   The generated executable is named after the project's title (e.g.
+   `GREEN LANTERN WILLPOWER VR.exe`) rather than the generic
+   `ptv_starter_room.exe`, so each build is easy to identify on disk. The label
+   shown in the Quest Link *recents* list comes from the OpenXR application
+   name, which the runtime sets from the scene's `title` at launch — so the
+   headset shows the project's title regardless of the exe filename.
+
 ## CMake from the IDE
 
 Opening the repo folder in Visual Studio Community 2026 detects the

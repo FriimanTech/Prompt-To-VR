@@ -17,6 +17,8 @@ Design notes
 
 from __future__ import annotations
 
+import json
+import re
 from pathlib import Path
 
 from ptv_schemas import ProjectStage, ProjectStatus
@@ -31,6 +33,37 @@ from .context import PipelineContext, StageResult
 
 _CTRL_C_EXITS = {STATUS_CONTROL_C_EXIT, STATUS_CONTROL_C_EXIT_SIGNED}
 
+# Characters Windows forbids in a file name, plus control chars.
+_ILLEGAL_EXE_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+
+
+def _project_app_name(ctx: PipelineContext) -> str:
+    """Filesystem-safe executable base name for this project.
+
+    Uses the project's own title (the ``title`` field baked into
+    ``scene.json`` by the scene-compile stage -- e.g. ``GREEN LANTERN:
+    WILLPOWER VR``) so each generated game builds as ``<Title>.exe`` and is
+    easy to spot in Windows / Quest Link. Falls back to the project id when no
+    title is available. The returned string is stripped of characters Windows
+    forbids in file names; the human-readable label shown in the headset
+    "recents" list comes separately from the OpenXR application name.
+    """
+    title = ""
+    scene = ctx.project_dir / "scene.json"
+    try:
+        if scene.exists():
+            raw = json.loads(scene.read_text(encoding="utf-8"))
+            title = str(raw.get("title") or "").strip()
+    except (OSError, ValueError):
+        title = ""
+    if not title:
+        title = ctx.project_id
+    # Strip illegal characters, collapse whitespace, and trim trailing dots /
+    # spaces (both invalid at the end of a Windows file name).
+    name = _ILLEGAL_EXE_CHARS.sub(" ", title)
+    name = re.sub(r"\s+", " ", name).strip().strip(".").strip()
+    return name or ctx.project_id
+
 
 def run(ctx: PipelineContext) -> StageResult:
     ctx.emit(ProjectStage.cmake_configure, "running", "Configuring CMake")
@@ -41,6 +74,8 @@ def run(ctx: PipelineContext) -> StageResult:
     # Stable build dir so repeated resumes reuse vcpkg + CMakeCache. This
     # avoids re-installing 22 vcpkg packages on every attempt.
     build_dir = ctx.project_dir / "builds" / "cmake-current"
+    # Per-project exe name (``<Title>.exe``) so builds are identifiable.
+    app_name = _project_app_name(ctx)
     log_path = ctx.project_dir / "logs" / "cmake.log"
     log_path.parent.mkdir(parents=True, exist_ok=True)
     # Truncate the cmake log so the user is only ever looking at THIS run's
@@ -85,6 +120,7 @@ def run(ctx: PipelineContext) -> StageResult:
                 ("PTV_GENERATED_PROJECT_ID", ctx.project_id),
                 ("PTV_SCENE_JSON", str(ctx.project_dir / "scene.json").replace("\\", "/")),
                 ("PTV_PROJECT_DIR", str(ctx.project_dir).replace("\\", "/")),
+                ("PTV_APP_NAME", app_name),
             ),
             on_line=_sink,
         )
@@ -171,7 +207,7 @@ def run(ctx: PipelineContext) -> StageResult:
     status = build_status
 
     if status == ProjectStatus.succeeded:
-        exe = _find_exe(build_dir, ctx.settings.cmake_build_config)
+        exe = _find_exe(build_dir, ctx.settings.cmake_build_config, app_name)
         if exe is not None:
             state.latest_build_exe = str(exe)
             state.latest_build_dir = str(build_dir)
@@ -189,14 +225,18 @@ def run(ctx: PipelineContext) -> StageResult:
     )
 
 
-def _find_exe(build_dir: Path, config: str) -> Path | None:
+def _find_exe(build_dir: Path, config: str, app_name: str | None = None) -> Path | None:
     """Locate the runnable VR binary inside a project's build dir.
 
-    ``ptv_starter_room.exe`` is the shared runtime host for every project:
-    it boots Vulkan + OpenXR and then loads whichever ``scene.json`` is
-    passed via argv[1] / PTV_SCENE_JSON. The project's scene path is stored
+    The starter-room CMake target is the shared runtime host for every
+    project: it boots Vulkan + OpenXR and then loads whichever ``scene.json``
+    is passed via argv[1] / PTV_SCENE_JSON. The project's scene path is stored
     separately in ``state.latest_scene_json`` and handed to ``launch_exe``
     at launch time, so the same exe correctly launches the right game.
+
+    Each project overrides the exe's OUTPUT_NAME to its own title (via
+    ``-DPTV_APP_NAME``), so we look for ``<app_name>.exe`` first and only fall
+    back to the generic ``ptv_starter_room.exe`` for older builds.
 
     We prefer the ``config`` requested (Release/Debug) but fall back to the
     other config if only one was built -- Visual Studio's multi-config
@@ -204,9 +244,16 @@ def _find_exe(build_dir: Path, config: str) -> Path | None:
     what the user built last.
     """
     other = "Debug" if config.lower() == "release" else "Release"
-    roots = [
-        build_dir / "samples" / "starter-room" / config / "ptv_starter_room.exe",
-        build_dir / "samples" / "starter-room" / other / "ptv_starter_room.exe",
+    starter = build_dir / "samples" / "starter-room"
+    exe_names = []
+    if app_name:
+        exe_names.append(f"{app_name}.exe")
+    exe_names.append("ptv_starter_room.exe")
+    roots: list[Path] = []
+    for name in exe_names:
+        roots.append(starter / config / name)
+        roots.append(starter / other / name)
+    roots += [
         build_dir / "apps" / "ptv_game" / config / "ptv_game.exe",
         build_dir / "apps" / "ptv_game" / other / "ptv_game.exe",
     ]

@@ -1,7 +1,10 @@
 """Local launcher: starts the built executable.
 
-The built runtime (``ptv_starter_room.exe``) is a generic VR host that
-loads whatever ``scene.json`` is handed to it. CMake POST_BUILD copies
+The built runtime is a generic VR host that loads whatever ``scene.json``
+is handed to it. For orchestrator-built projects the exe is named after the
+project's title (e.g. ``GREEN LANTERN WILLPOWER VR.exe``) via ``-DPTV_APP_NAME``
+so it's identifiable in Windows / Quest Link; the hand-built starter-room
+sample keeps the ``ptv_starter_room.exe`` name. CMake POST_BUILD copies
 the starter-room's own ``scene.json`` next to the exe as a convenience
 for double-clicking, which means that if we launch the exe with no
 arguments we always get the starter room -- *even when we set the

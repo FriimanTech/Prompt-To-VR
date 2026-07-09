@@ -88,6 +88,14 @@ SceneDoc LoadSceneJson(const std::string& path) {
         d.sky.sun_color =
             read_vec3(s.value("sun_color", Json::array()), d.sky.sun_color);
         d.sky.sun_intensity = s.value("sun_intensity", 1.0f);
+        // Author-controlled environment knobs (default to the struct defaults
+        // when an older world.scene.json omits them).
+        d.sky.ambient_color =
+            read_vec3(s.value("ambient_color", Json::array()), d.sky.ambient_color);
+        d.sky.ambient_intensity =
+            s.value("ambient_intensity", d.ambient_intensity);
+        d.sky.fog_density = s.value("fog_density", d.sky.fog_density);
+        d.sky.exposure = s.value("exposure", d.sky.exposure);
         // Keep the flat clear color in sync with the sky horizon.
         d.sky_color = d.sky.horizon;
     }
@@ -101,6 +109,7 @@ SceneDoc LoadSceneJson(const std::string& path) {
         ls.intensity = l.value("intensity", 1.0f);
         ls.direction =
             read_vec3(l.value("direction", Json::array()), Vec3(0.0f, -1.0f, 0.0f));
+        ls.range = l.value("range", 0.0f);  // <= 0 -> renderer default
         d.lights.push_back(std::move(ls));
     }
 

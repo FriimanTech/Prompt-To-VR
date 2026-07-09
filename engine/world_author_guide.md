@@ -67,13 +67,18 @@ non-uniform; it is baked into geometry for you).
 
 Core (implemented by the host):
 
-- `w.sky(SkyDesc{top, horizon, sun_direction, sun_color, sun_intensity})` -
-  gradient sky. Call once.
+- `w.sky(SkyDesc{top, horizon, sun_direction, sun_color, sun_intensity,
+  ambient_color, ambient_intensity, fog_density, exposure})` - gradient sky
+  PLUS all the global environment/atmosphere knobs. Call once. YOU own every
+  one of these values; the engine renders exactly what you set (there is no
+  hidden brightness floor). See the rendering contract below.
 - `w.ground(GroundDesc{size_m, y, color, grid, collision})` - a floor slab with
   collision so the player stands on it. Call once (a floor is auto-added if you
   forget).
 - `w.light(LightDesc{kind:"directional"|"point", position, direction, color,
-  intensity})` - add as many as you want.
+  intensity, range})` - add as many as you want (up to 8 point lights render).
+  `range` (meters) is the point-light falloff radius YOU control; directional
+  lights ignore it.
 - `w.player_spawn(Vec3 position, Vec3 facing)` - where the player starts. MUST be
   on/above walkable ground and inside the playable area.
 - `w.spawn_primitive(PrimitiveDesc{kind:Box|Plane|Cylinder|Sphere|Ramp, transform,
@@ -95,20 +100,83 @@ API - use them or ignore them): `building_grid`, `wall_shell`, `path`,
 blocky structure, `Mesh` for `add_mesh` geometry the player must not pass
 through, `None` for distant decoration.
 
-## Requirements for a good, walkable world
+## Rendering & lighting contract (READ THIS - it decides how bright things look)
 
-1. Always establish `sky`, at least one `light`, a `ground` with collision, and a
-   `player_spawn` standing on that ground.
-2. Give walls/buildings/obstacles real collision so the player can't walk through
-   them; leave open, walkable floor where the player should move.
-3. Keep the player spawn clear (not inside geometry) and facing something
+The engine is a faithful renderer: it draws EXACTLY what you author and imposes
+NO brightness floor. That means a scene is only as visible as YOU make it - a
+dark game can be genuinely dark, a bright game bright. It also means a world
+lit poorly (near-black albedos + weak/absent lights) will correctly render
+near-black. Author lighting on purpose. Full details in
+[`../docs/rendering.md`](../docs/rendering.md).
+
+How your values reach the screen:
+
+- Color space: all `Color`/`color` values are LINEAR RGB in `0..1`. The engine
+  applies `exposure` -> ACES filmic tone map -> sRGB. A consequence: a surface's
+  final brightness is roughly `albedo x (sun + ambient + point lights)`. If the
+  albedo is near-black (`< ~0.05`) the surface reads black NO MATTER how bright
+  the lights are - so keep visible surfaces around `0.1..0.85` unless you truly
+  want black.
+- `sky.top` / `sky.horizon`: the gradient dome. `horizon` is ALSO the distance-
+  fog color, so distant geometry melts into it - pick a horizon that reads well.
+- `sky.sun_direction`: the direction sunlight TRAVELS (points away from the sun,
+  downward-ish). It positions the sun in the sky AND shades every surface.
+  A near-vertical sun barely lights vertical walls; angle it so it rakes the
+  surfaces you care about. Typical `sun_intensity` is `1..4`.
+- `sky.ambient_color` + `sky.ambient_intensity`: the fill light that reaches
+  surfaces the sun and point lights DON'T (walls facing away, undersides,
+  interiors). This is your main lever for baseline visibility. Bright, readable
+  world: `ambient_intensity ~0.3..0.6`. Dark/moody world: lower it - but then
+  add point lights so focal surfaces still read. `ambient_color` is the lower-
+  hemisphere (ground-bounce) tint; the upper hemisphere blends toward `sky.top`.
+- `light(...)`: the first `directional` light acts as the sun if you omit a full
+  `sky`. Up to **8** `point` lights render, each with smooth falloff to zero at
+  its `range`. Place them NEAR the surfaces/focal points you want lit (lamps,
+  glows, walls, hero props) - not only high overhead, or only the floor lights.
+  `intensity` is a linear multiplier; a handful in the `1..8` range reads better
+  than one giant value.
+- `sky.fog_density`: `0` = none, `~0.01` subtle, higher = thicker haze toward
+  the horizon color.
+- `sky.exposure`: global brightness multiplier before tone mapping (`1.0`
+  neutral, `>1` brighter, `<1` darker). Use it to dial the whole scene at once.
+- `spawn_primitive` `kind` renders as the REAL shape (Sphere, Cylinder, Ramp,
+  Plane), not a box - pick the right kind; collision matches the shape.
+- The engine adds MSAA, a cheap contact-AO term, and the tone map for polish.
+  Don't bake fake shadows into flat dark albedo; let your lights create contrast.
+
+## Minimum requirements for a well-formed environment (MUST satisfy)
+
+These are the non-negotiable minimums for any world you author. They are mood-
+aware: "visible" means visible for the intended mood, not "bright" - a horror
+crypt can be dim, but the player must still be able to see and traverse it.
+
+1. Call `sky(...)` once with a deliberate `sun_direction` AND deliberate
+   `ambient_color` / `ambient_intensity`. Do not leave ambient at accidental
+   near-zero unless the design is intentionally near-black.
+2. Provide enough light that the player can actually SEE and navigate the main
+   play surfaces: the sun, ambient, and/or point lights together must illuminate
+   the floor and the structures the player walks among. If the mood is dark, use
+   point lights near key surfaces so they still read.
+3. Keep albedos (`color` / `color_rgb`) of surfaces the player sees in a visible
+   range (roughly `0.1..0.85`) unless a surface is intentionally black. Never
+   rely on near-black albedo + a huge light to fake brightness (it renders
+   black).
+4. Call `ground(...)` with collision and `player_spawn(pos, facing)` with the
+   spawn standing ON that ground, clear of geometry, facing something
    interesting.
-4. Scale to human proportions (player height ~1.7 m). A room ~6-12 m, a plaza
-   ~20-40 m, a city block ~30-60 m.
-5. Be creative and specific to the prompt (an Iron Man city, a Green Lantern
-   plaza, a bioluminescent alien field) - use procedural loops, noise, color
-   palettes, verticality. The environment is ALL your C++; objects the player
-   picks up come from the separate asset pipeline.
+5. Give walls / buildings / obstacles real collision; leave open, walkable floor
+   where the player should move.
+6. Human scale (player ~1.7 m): room ~6-12 m, plaza ~20-40 m, city block
+   ~30-60 m.
+7. Real density and composition, not a few boxes: use procedural loops, noise,
+   color palettes, verticality, and landmarks specific to the prompt (an Iron
+   Man city, a Green Lantern plaza, a bioluminescent alien field). The
+   environment is ALL your C++; pickup objects come from the separate asset
+   pipeline.
+
+Set `exposure` and per-light `range` as needed to make the above true. You have
+complete creative control over the look; these minimums only ensure the result
+is a coherent, visible, walkable place.
 
 ## The scene.json contract you ultimately produce (for reference)
 
@@ -120,7 +188,10 @@ just what the runtime consumes):
 - Inline mesh entity: `{ transform, mesh_inline:{positions,indices,color_rgb},
   physics:{collision_shape:"mesh"}, tags }`.
 - Object entity: `{ transform, mesh:{asset_id,glb_path}, physics, tags }`.
-- Plus top-level `sky`, `lights`, `player.spawn`.
+- Plus top-level `sky` (`top_color`, `horizon_color`, `sun_direction`,
+  `sun_color`, `sun_intensity`, `ambient_color`, `ambient_intensity`,
+  `fog_density`, `exposure`), `lights` (each with `color_rgb`, `intensity`,
+  `direction`, and point `range`), and `player.spawn`.
 
 The runtime renders primitives/inline-meshes/GLBs, builds Jolt collision from the
 physics block, and drops the player at `player.spawn`. That is the whole surface

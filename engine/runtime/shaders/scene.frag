@@ -1,16 +1,19 @@
 #version 450
 
 // ---------------------------------------------------------------------------
-// Forward lit fragment shader with per-material branches.
+// Forward-lit fragment shader, driven by the scene's environment UBO so the
+// sky / sun / ambient / point lights authored by the world-generation agent
+// actually shape the look.
 //
-//   material 0 : generic lit object (3-point rig + rim + fog)
-//   material 1 : floor (adds world-space grid, soft radial fade)
-//   material 2 : hand / grab highlight (slightly emissive rim pop)
+//   material 0 : generic lit object (sun + hemisphere ambient + points)
+//   material 1 : floor (adds a soft world-space grid on top of the lit result)
+//   material 2 : hand / grab highlight (stronger rim pop)
+//   material 3 : unlit marker (teleport reticle) -- emissive, ignores lighting
 //
-// Lighting rig follows a standard "key + fill + sky" setup used in most
-// stylised real-time renderers. Wrapped (half-Lambert) diffuse keeps
-// shadow sides from crushing to black, which reads better in VR than
-// a physically correct Lambert where half the room is always black.
+// Wrapped (half-Lambert) diffuse keeps shadow sides from crushing to black,
+// which reads better in VR than physically correct Lambert. A cheap in-shader
+// contact term + subtle low-frequency albedo variation + an ACES tonemap give
+// the scene depth without shadow maps or heavy post.
 // ---------------------------------------------------------------------------
 
 layout(location = 0) in vec3 v_world_normal;
@@ -20,71 +23,129 @@ layout(location = 3) in float v_material;
 
 layout(location = 0) out vec4 out_color;
 
-// Smooth anti-aliased grid using screen-space derivatives. Returns ~0 on
-// the line and ~1 elsewhere. ``cell`` is the grid period in world units.
+struct PointLight {
+    vec4 pos_range;        // xyz position, w range (m)
+    vec4 color_intensity;  // rgb color, w intensity
+};
+
+layout(set = 0, binding = 0) uniform EnvUBO {
+    vec4 sun_dir;      // xyz travel direction (normalized), w unused
+    vec4 sun_color;    // rgb color, w intensity
+    vec4 sky_top;      // rgb zenith color, w exposure
+    vec4 sky_horizon;  // rgb horizon/fog color, w fog density
+    vec4 ambient;      // rgb ground bounce color, w ambient intensity
+    vec4 camera_pos;   // xyz camera world pos, w active point-light count
+    PointLight points[8];
+} env;
+
+// Smooth anti-aliased grid using screen-space derivatives. Returns ~0 on the
+// line and ~1 elsewhere. ``cell`` is the grid period in world units.
 float grid_factor(vec2 p, float cell) {
     vec2 q = abs(fract(p / cell - 0.5) - 0.5) / fwidth(p / cell);
-    float line = min(q.x, q.y);
-    return min(line, 1.0);
+    return min(min(q.x, q.y), 1.0);
+}
+
+// Cheap value noise for very-low-frequency albedo variation.
+float hash21(vec2 p) {
+    p = fract(p * vec2(123.34, 456.21));
+    p += dot(p, p + 45.32);
+    return fract(p.x * p.y);
+}
+float vnoise(vec2 p) {
+    vec2 i = floor(p);
+    vec2 f = fract(p);
+    f = f * f * (3.0 - 2.0 * f);
+    float a = hash21(i);
+    float b = hash21(i + vec2(1.0, 0.0));
+    float c = hash21(i + vec2(0.0, 1.0));
+    float d = hash21(i + vec2(1.0, 1.0));
+    return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+}
+
+// Narkowicz ACES filmic tonemap approximation.
+vec3 aces(vec3 x) {
+    const float a = 2.51, b = 0.03, c = 2.43, d = 0.59, e = 0.14;
+    return clamp((x * (a * x + b)) / (x * (c * x + d) + e), 0.0, 1.0);
 }
 
 void main() {
     vec3 n = normalize(v_world_normal);
-
-    // --- 3-point light rig (directional) ------------------------------
-    vec3 key_dir  = normalize(vec3( 0.35,  0.80,  0.40));
-    vec3 fill_dir = normalize(vec3(-0.60,  0.30, -0.50));
-    vec3 sky_dir  = vec3(0.0, 1.0, 0.0);
-
-    vec3 key_col  = vec3(1.00, 0.96, 0.88) * 0.95;   // warm sun
-    vec3 fill_col = vec3(0.45, 0.55, 0.78) * 0.35;   // cool fill
-    vec3 sky_col  = vec3(0.55, 0.68, 0.85) * 0.25;   // zenith
-    vec3 ground_col = vec3(0.20, 0.18, 0.15) * 0.30; // bounce
-
-    // Half-Lambert keeps the dark side readable.
-    float key  = pow(max(dot(n, key_dir),  0.0) * 0.5 + 0.5, 1.6);
-    float fill = max(dot(n, fill_dir), 0.0);
-    // Sky/ground gradient: full sky on top, ground under.
-    float sky_t = n.y * 0.5 + 0.5;
-    vec3 ambient = mix(ground_col, sky_col, sky_t);
-
     vec3 base = v_color.rgb;
+    vec3 cam = env.camera_pos.xyz;
+    vec3 to_cam = cam - v_world_pos;
+    float dist = length(to_cam);
+    vec3 V = dist > 1e-4 ? to_cam / dist : vec3(0.0, 0.0, 1.0);
 
-    // Per-material base color adjustments.
-    if (v_material > 0.5 && v_material < 1.5) {
-        // ---- floor grid ----------------------------------------------
-        // Two-layer grid: 1m major lines and 0.25m minor lines for a
-        // readable sense of scale without looking like a debug scene.
-        float major = 1.0 - grid_factor(v_world_pos.xz, 1.0);
-        float minor = 1.0 - grid_factor(v_world_pos.xz, 0.25);
-        vec3  major_col = vec3(0.60, 0.67, 0.78);
-        vec3  minor_col = vec3(0.32, 0.36, 0.42);
-        base = mix(base, minor_col, minor * 0.45);
-        base = mix(base, major_col, major * 0.85);
+    // Global exposure (author-controlled), applied before tone mapping.
+    float exposure = env.sky_top.w;
 
-        // Soft radial vignette so the infinite floor fades into the sky.
-        float d = length(v_world_pos.xz);
-        float fade = 1.0 - smoothstep(8.0, 22.0, d);
-        base *= mix(0.35, 1.0, fade);
+    // --- material 3: unlit emissive marker ----------------------------
+    if (v_material > 2.5) {
+        out_color = vec4(aces(base * 1.2 * exposure), v_color.a);
+        return;
     }
 
-    vec3 lit = base * (ambient + key_col * key + fill_col * fill);
+    // --- floor grid (blended into albedo before lighting) -------------
+    if (v_material > 0.5 && v_material < 1.5) {
+        float major = 1.0 - grid_factor(v_world_pos.xz, 1.0);
+        float minor = 1.0 - grid_factor(v_world_pos.xz, 0.25);
+        // Subtle, tied to the horizon color so it grounds the scene without
+        // screaming "debug grid".
+        base = mix(base, base * 1.18, minor * 0.20);
+        base = mix(base, mix(base, env.sky_horizon.rgb, 0.5), major * 0.28);
+    }
 
-    // --- Rim light ----------------------------------------------------
-    // View vector reconstructed from world position against the fragment
-    // depth direction is cheap to approximate by using the world-Z pole
-    // as a view proxy (good enough for a rim term in VR stereo).
-    vec3 view_proxy = normalize(vec3(0.0, 0.1, 1.0));
-    float rim_term = pow(1.0 - max(dot(n, view_proxy), 0.0), 3.0);
-    float rim_strength = (v_material > 1.5 && v_material < 2.5) ? 0.55 : 0.18;
-    lit += vec3(0.85, 0.92, 1.00) * rim_term * rim_strength;
+    // --- subtle low-frequency albedo variation (distance-faded) -------
+    float det = vnoise(v_world_pos.xz * 0.15) +
+                0.5 * vnoise(v_world_pos.xz * 0.5 + 13.0);
+    det = det / 1.5 - 0.5;
+    float det_fade = 1.0 - clamp(dist / 40.0, 0.0, 1.0);
+    base *= 1.0 + det * 0.06 * det_fade;
 
-    // --- Distance fog -------------------------------------------------
-    // Exponential fog keeps far objects from popping against the sky.
-    float dist = length(v_world_pos);
-    float fog  = 1.0 - exp(-dist * 0.018);
-    vec3 fog_color = vec3(0.58, 0.70, 0.86);
-    lit = mix(lit, fog_color, clamp(fog, 0.0, 0.75));
+    // --- sun (directional): half-Lambert diffuse + Blinn-Phong spec ---
+    vec3 L = normalize(-env.sun_dir.xyz);
+    float ndl = max(dot(n, L), 0.0);
+    float wrap = dot(n, L) * 0.5 + 0.5;
+    float diff = mix(ndl, wrap * wrap, 0.5);
+    vec3 sun = env.sun_color.rgb * env.sun_color.w * diff;
+    vec3 H = normalize(L + V);
+    float spec = pow(max(dot(n, H), 0.0), 32.0) * ndl;
+    sun += env.sun_color.rgb * env.sun_color.w * spec * 0.15;
 
-    out_color = vec4(lit, v_color.a);
+    // --- hemisphere ambient (ground bounce -> zenith) -----------------
+    float sky_t = n.y * 0.5 + 0.5;
+    vec3 amb = mix(env.ambient.rgb, env.sky_top.rgb, sky_t) * env.ambient.w;
+
+    // --- cheap contact AO: darken low + downward-facing fragments -----
+    float ao = mix(0.72, 1.0, clamp(v_world_pos.y * 0.5 + 0.5, 0.0, 1.0));
+    ao *= mix(0.85, 1.0, clamp(n.y * 0.5 + 0.5, 0.0, 1.0));
+
+    vec3 lit = base * (amb * ao + sun);
+
+    // --- point lights (range-attenuated) ------------------------------
+    int count = int(env.camera_pos.w);
+    for (int i = 0; i < count && i < 8; ++i) {
+        vec3 d = env.points[i].pos_range.xyz - v_world_pos;
+        float dd = length(d);
+        float range = max(env.points[i].pos_range.w, 0.001);
+        float att = clamp(1.0 - dd / range, 0.0, 1.0);
+        att *= att;
+        if (att > 0.0) {
+            vec3 Lp = d / max(dd, 0.001);
+            float nl = max(dot(n, Lp), 0.0);
+            lit += base * env.points[i].color_intensity.rgb *
+                   env.points[i].color_intensity.w * nl * att;
+        }
+    }
+
+    // --- rim light (view-dependent; hand highlight is stronger) --------
+    float rim = pow(1.0 - max(dot(n, V), 0.0), 3.0);
+    float rim_strength = (v_material > 1.5 && v_material < 2.5) ? 0.5 : 0.12;
+    lit += env.sky_top.rgb * rim * rim_strength;
+
+    // --- distance fog toward the horizon color ------------------------
+    float fog = 1.0 - exp(-dist * env.sky_horizon.w);
+    lit = mix(lit, env.sky_horizon.rgb, clamp(fog, 0.0, 0.85));
+
+    out_color = vec4(aces(lit * exposure), v_color.a);
 }

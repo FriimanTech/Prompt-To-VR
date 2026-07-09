@@ -76,6 +76,17 @@ def run_with_architect(
     gen_root = repo_root / "engine" / "generated"
     world_scene_path = ctx.project_dir / "world.scene.json"
 
+    # Persist a detailed world-generation log so the UI Logs tab (and any
+    # post-mortem debugging) shows the FULL agent iteration history and
+    # compiler/host output -- not just the truncated SSE excerpts. Truncated
+    # once per run, like cmake.log.
+    world_log = ctx.project_dir / "logs" / "world.log"
+    world_log.parent.mkdir(parents=True, exist_ok=True)
+    world_log.write_text("", encoding="utf-8")
+
+    def _wlog(text: str) -> None:
+        ctx.store.append_log(project_id, "world", text)
+
     # Bridge OPENAI_API_KEY into os.environ for the Agents SDK (BaseSettings
     # does not export it automatically).
     if ctx.settings.openai_api_key and not os.environ.get("OPENAI_API_KEY"):
@@ -128,17 +139,26 @@ def run_with_architect(
             "agent_turn",
             f"architect attempt {attempt}/{max_rounds}",
         )
+        _wlog(f"\n===== attempt {attempt}/{max_rounds} =====")
         try:
             result = architect.run(message)
         except WorldAgentError as exc:
             last_error = f"agent error: {exc}"
+            _wlog("AGENT ERROR: " + str(exc))
             ctx.emit(ProjectStage.world_generation, "warn", last_error[:240])
             break
+
+        if result.plan:
+            _wlog("PLAN:\n" + result.plan)
+        _wlog("FILES: " + ", ".join(Path(f.path).name for f in result.files))
+        if result.notes:
+            _wlog("NOTES:\n" + result.notes)
 
         # 1) Write + bounds-check the files.
         violations = _write_world_files(result, out_dir, gen_root, project_id, ctx)
         if violations:
             last_error = "bounds violations"
+            _wlog("BOUNDS VIOLATIONS:\n" + "\n".join(violations))
             ctx.emit(
                 ProjectStage.world_generation,
                 "bounds_reject",
@@ -156,6 +176,7 @@ def run_with_architect(
         if not ok:
             last_error = "compile failed"
             excerpt = _error_excerpt(log_text)
+            _wlog("COMPILE FAILED:\n" + log_text)
             ctx.emit(
                 ProjectStage.world_generation,
                 "compile_error",
@@ -163,26 +184,32 @@ def run_with_architect(
             )
             message = build_repair_message(_tail(log_text, 12_000))
             continue
+        _wlog("compile ok")
 
         # 3) Run the host and validate the emitted world.
         ran, run_log = _run_worldgen(ctx, builder_id, seed, assets_json_path,
                                      world_scene_path)
         if not ran:
             last_error = "host run failed"
+            _wlog("HOST RUN FAILED:\n" + run_log)
             ctx.emit(ProjectStage.world_generation, "run_error", run_log[:200])
             message = build_repair_message(
                 "The host failed to run/emit the scene:\n" + _tail(run_log, 4_000)
             )
             continue
+        if run_log.strip():
+            _wlog("HOST OUTPUT:\n" + run_log)
 
         valid, reason = _validate_world_scene(world_scene_path)
         if not valid:
             last_error = f"invalid scene: {reason}"
+            _wlog("INVALID SCENE: " + reason)
             ctx.emit(ProjectStage.world_generation, "invalid_scene", reason[:200])
             message = build_validation_repair_message(reason)
             continue
 
         # Success.
+        _wlog(f"SUCCESS in {attempt} attempt(s): {reason}")
         rel = _rel(world_scene_path, repo_root)
         ctx.store.record_stage(
             state,
@@ -202,12 +229,14 @@ def run_with_architect(
     # Exhausted the repair budget (or agent errored): deterministic fallback
     # so the project still boots into something walkable.
     # ------------------------------------------------------------------
+    _wlog(f"\n===== fallback (agent unavailable: {last_error}) =====")
     ctx.emit(
         ProjectStage.world_generation,
         "fallback",
         f"agent world unavailable ({last_error}); emitting fallback world",
     )
     fb_ok, fb_log = _emit_fallback_world(ctx, seed, world_scene_path)
+    _wlog(("FALLBACK OK\n" if fb_ok else "FALLBACK FAILED\n") + fb_log)
     if not fb_ok:
         ctx.store.record_stage(
             state,

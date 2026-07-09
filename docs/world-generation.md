@@ -60,6 +60,16 @@ procedural triangles), `place_object` (anchor a prop GLB), `seed()`. Header-only
 convenience builders live in `ptv::world::helpers` (`building_grid`, `wall_shell`,
 `path`, `platform_set`).
 
+The environment look is **fully author-controlled** — the engine renders exactly
+what the builder specifies and imposes no brightness floor. `SkyDesc` carries the
+whole global look: `top` / `horizon`, `sun_direction` / `sun_color` /
+`sun_intensity`, `ambient_color` / `ambient_intensity` (baseline fill),
+`fog_density`, and `exposure` (global pre-tonemap multiplier). `LightDesc`
+carries a per-point-light `range` (authored falloff, not derived). See the
+"Rendering & lighting contract" in
+[`../engine/world_author_guide.md`](../engine/world_author_guide.md) for how these
+values read on screen.
+
 ## The offline host (`engine/worldgen/`)
 
 - Standalone CMake project (its own `vcpkg.json`: nlohmann-json + glm). Configure
@@ -70,15 +80,20 @@ convenience builders live in `ptv::world::helpers` (`building_grid`, `wall_shell
 
 ## scene.json additions (version 2)
 
-- `sky`: `{ top_color, horizon_color, sun_direction, sun_color, sun_intensity }`.
+- `sky`: `{ top_color, horizon_color, sun_direction, sun_color, sun_intensity,
+  ambient_color, ambient_intensity, fog_density, exposure }` (`ambient_intensity`
+  is also mirrored at the top level for back-compat).
 - Entities may carry `primitive: { kind, size, color_rgb }` or
   `mesh_inline: { positions, normals?, indices, color_rgb }` in addition to the
   existing GLB `mesh`. Physics `collision_shape` may be `box|sphere|mesh|none`.
-- Lights carry an optional `direction`.
+- Lights carry an optional `direction` and, for point lights, an optional
+  `range` (falloff radius in meters; the runtime uses 20 m when unset).
 
 Runtime support: `SceneLoader` parses these into `CPrimitive` / `CInlineMesh`
-components + `SkyGradient`; `Renderer` draws primitives (colored non-uniform
-boxes) and uploaded inline meshes; `PhysicsWorld` builds non-uniform boxes and
+components + `SkyGradient` (incl. the ambient/fog/exposure knobs) and per-light
+`range`; `Renderer` draws primitives as their real shapes (box/sphere/cylinder/
+ramp/plane) and uploaded inline meshes, lit by the scene-driven lighting UBO
+(see [`rendering.md`](rendering.md)); `PhysicsWorld` builds non-uniform boxes and
 Jolt triangle-mesh shapes; teleport raycasts against the physics world so the
 player lands on the generated ground/platforms/terrain at any height.
 

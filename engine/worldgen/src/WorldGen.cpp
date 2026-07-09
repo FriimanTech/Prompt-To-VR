@@ -75,10 +75,11 @@ public:
         : seed_(seed), asset_map_(std::move(asset_map)) {
         doc_["version"] = 2;
         doc_["generator"] = "ptv_worldgen";
-        doc_["ambient_intensity"] = 0.3f;
         doc_["entities"] = nlohmann::json::array();
         doc_["lights"] = nlohmann::json::array();
-        // Sensible defaults so an empty builder still boots.
+        // Sensible defaults so an empty builder still boots. sky() also
+        // populates the ambient/fog/exposure environment knobs (and mirrors
+        // ambient_intensity to the top level), so it owns those fields.
         sky(SkyDesc{});
         player_spawn(Vec3{0.0f, 0.0f, 0.0f}, Vec3{0.0f, 0.0f, -1.0f});
     }
@@ -90,9 +91,16 @@ public:
             {"sun_direction", vec3_json(d.sun_direction)},
             {"sun_color", color_json(d.sun_color)},
             {"sun_intensity", d.sun_intensity},
+            {"ambient_color", color_json(d.ambient_color)},
+            {"ambient_intensity", d.ambient_intensity},
+            {"fog_density", d.fog_density},
+            {"exposure", d.exposure},
         };
         // Keep the flat clear-color field populated for backwards compat.
         doc_["sky_color"] = color_json(d.horizon);
+        // Mirror ambient intensity at the top level: the runtime SceneLoader
+        // and the scene-compile merge both read it there.
+        doc_["ambient_intensity"] = d.ambient_intensity;
     }
 
     void ground(const GroundDesc& d) override {
@@ -119,6 +127,7 @@ public:
             {"color_rgb", color_json(d.color)},
             {"intensity", d.intensity},
             {"direction", vec3_json(d.direction)},
+            {"range", d.range},
         };
         doc_["lights"].push_back(std::move(l));
     }

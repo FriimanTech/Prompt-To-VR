@@ -1370,7 +1370,7 @@ int Application::run(const Config& cfg) {
                     // space in sync_input/locomotion -- not here -- so
                     // locomotion logic always sees this frame's head
                     // pose, never the previous frame's render snapshot.
-                    renderer_.draw_frame(targets, items, scene_.sky_color);
+                    renderer_.draw_frame(targets, items, render_env_);
                 });
         } else if (xr_should_render) {
             // begin_xr_frame() opened a real frame but renderer isn't
@@ -1393,19 +1393,34 @@ int Application::run(const Config& cfg) {
 }
 
 bool Application::initialize(const Config& cfg) {
+    // Resolve + load the scene up front so the OpenXR application name and the
+    // mirror-window title reflect *this project's* title -- that string is what
+    // shows up in the Quest Link "recents" list. Without this every generated
+    // game would advertise the generic host name (``ptv_starter_room``). The
+    // heavier world / physics application still happens further below once
+    // Vulkan and the physics world are initialized.
+    scene_path_ = resolve_scene_path(cfg);
+    bool scene_loaded = false;
+    if (!scene_path_.empty()) {
+        scene_ = LoadSceneJson(scene_path_);
+        scene_loaded = true;
+    }
+    const std::string display_name =
+        (scene_loaded && !scene_.title.empty()) ? scene_.title : cfg.app_name;
+
     try {
         window_ = std::make_unique<Window>(cfg.mirror_width, cfg.mirror_height,
-                                            cfg.app_name + " [mirror]");
+                                            display_name + " [mirror]");
     } catch (const std::exception& e) {
         PTV_ERROR("Window init: {}", e.what());
         return false;
     }
 
     PTV_INFO("App: beginning OpenXR initialization (phase 1: instance/system)...");
-    bool xr_ready = xr_.init_instance_and_system(cfg.app_name);
+    bool xr_ready = xr_.init_instance_and_system(display_name);
 
     VulkanContext::Config vcfg;
-    vcfg.app_name = cfg.app_name;
+    vcfg.app_name = display_name;
     vcfg.enable_validation = cfg.enable_validation;
     vcfg.required_instance_extensions =
         XrRuntime::required_vulkan_instance_extensions();
@@ -1439,9 +1454,9 @@ bool Application::initialize(const Config& cfg) {
 
     if (!physics_.initialize()) return false;
 
-    scene_path_ = resolve_scene_path(cfg);
-    if (!scene_path_.empty()) {
-        scene_ = LoadSceneJson(scene_path_);
+    if (scene_loaded) {
+        // ``scene_`` was already parsed above (for the window / XR title); now
+        // that physics is live we apply it to the ECS world.
         // Stage / rig origin from authored ``player.spawn`` so generated games
         // can drop the user onto a sensible floor height (e.g. above a GLB).
         rig_.pos_x = scene_.spawn.position.x;
@@ -1502,6 +1517,11 @@ bool Application::initialize(const Config& cfg) {
         PTV_WARN("No scene.json provided. The engine will run idle.");
     }
 
+    // Cache the renderer environment (sky/sun/ambient/fog/point lights) from
+    // the loaded scene so the renderer honors what the world-gen agent
+    // authored. Safe to call whether or not a scene was loaded.
+    build_render_env();
+
     mechanics_.attach_bindings(world_);
     // NOTE: DebugUI is intentionally NOT initialized here. See
     // README / troubleshooting: ImGui >= 1.92 asserts on first Begin()
@@ -1560,6 +1580,71 @@ bool Application::initialize(const Config& cfg) {
         }
     }
     return true;
+}
+
+void Application::build_render_env() {
+    Renderer::RenderEnv env{};
+
+    // The world-generation agent OWNS the look. When it authored a sky block
+    // we take its exact sky / sun / ambient / fog / exposure values -- the
+    // engine imposes no brightness floor or overrides, so a scene can be as
+    // bright or as dark as the agent intends. Defaults below only apply when a
+    // scene authored NO sky (e.g. the hand-built starter room), so it still
+    // looks good without regressing.
+    if (scene_.sky.present) {
+        env.has_sky = true;
+        env.sky_top = scene_.sky.top;
+        env.sky_horizon = scene_.sky.horizon;
+        env.sun_direction = scene_.sky.sun_direction;  // travel dir (downward)
+        env.sun_color = scene_.sky.sun_color;
+        env.sun_intensity = scene_.sky.sun_intensity;
+        env.ambient_ground = scene_.sky.ambient_color;
+        env.ambient_intensity = scene_.sky.ambient_intensity;
+        env.fog_density = scene_.sky.fog_density;
+        env.exposure = scene_.sky.exposure;
+    } else {
+        // No authored sky: derive a pleasant daytime dome. The flat clear
+        // color acts as the horizon so scenes that only set sky_color still
+        // read sensibly, and the starter room gets a soft blue sky.
+        env.has_sky = false;
+        env.sky_top = Vec3(0.35f, 0.52f, 0.80f);
+        env.sky_horizon = Vec3(0.72f, 0.80f, 0.90f);
+        env.sun_direction = glm::normalize(Vec3(-0.35f, -0.80f, -0.40f));
+        env.sun_color = Vec3(1.0f, 0.97f, 0.90f);
+        env.sun_intensity = 1.0f;
+        env.ambient_ground = Vec3(0.20f, 0.21f, 0.24f);
+        env.ambient_intensity = scene_.ambient_intensity;  // top-level default
+        env.fog_density = 0.012f;
+        env.exposure = 1.0f;
+        // First directional light (if any) overrides the default sun so
+        // authored lighting still drives the look without a full sky block.
+        for (const auto& l : scene_.lights) {
+            if (l.kind == "directional") {
+                if (glm::length(l.direction) > 1e-5f) {
+                    env.sun_direction = glm::normalize(l.direction);
+                }
+                env.sun_color = l.color;
+                env.sun_intensity = l.intensity;
+                break;
+            }
+        }
+    }
+
+    // --- Point lights (up to 8) ---------------------------------------
+    // Range is author-controlled; fall back to a sensible default only when a
+    // light left it unset (<= 0).
+    for (const auto& l : scene_.lights) {
+        if (l.kind != "point") continue;
+        if (env.points.size() >= 8) break;
+        Renderer::PointLight p{};
+        p.position = l.transform.position;
+        p.color = l.color;
+        p.intensity = l.intensity;
+        p.range = l.range > 0.0f ? l.range : 20.0f;
+        env.points.push_back(p);
+    }
+
+    render_env_ = std::move(env);
 }
 
 void Application::tick(float /*dt*/) {}

@@ -62,12 +62,39 @@ enum class PrimitiveKind : std::uint8_t { Box, Plane, Cylinder, Sphere, Ramp };
 
 // --- Descriptors -----------------------------------------------------------
 
+// Sky gradient PLUS the global environment/atmosphere knobs that shape the
+// overall look. You control ALL of these; the engine renders exactly what you
+// set here (no hidden brightness floor). See engine/world_author_guide.md for
+// the precise rendering contract and how these read on screen.
 struct SkyDesc {
+    // Visible sky gradient. ``horizon`` also drives the distance-fog color, so
+    // distant geometry melts into the sky.
     Color top{0.05f, 0.07f, 0.15f};
     Color horizon{0.45f, 0.55f, 0.75f};
+
+    // The sun: ``sun_direction`` is the direction the light TRAVELS (points
+    // away from the sun, i.e. downward-ish). It positions the sun in the sky
+    // AND shades every surface, so choose an angle that rakes your key
+    // surfaces. Typical ``sun_intensity`` is ~1-4.
     Vec3 sun_direction{0.30f, -0.82f, 0.30f};
     Color sun_color{1.0f, 0.97f, 0.9f};
     float sun_intensity{1.0f};
+
+    // Ambient fill: the light that reaches surfaces the sun / point lights
+    // miss (walls facing away, undersides, interiors). ``ambient_color`` is the
+    // lower-hemisphere (ground bounce) color; the upper hemisphere blends
+    // toward ``top``. ``ambient_intensity`` scales it. Bright, readable scene:
+    // ~0.3-0.6. Dark / moody: lower it, but then add point lights so focal
+    // surfaces still read. This is YOUR call.
+    Color ambient_color{0.20f, 0.21f, 0.24f};
+    float ambient_intensity{0.30f};
+
+    // Atmosphere. ``fog_density`` fades distant geometry into ``horizon``
+    // (0 = no fog; ~0.01 subtle; higher = thicker). ``exposure`` is a global
+    // brightness multiplier applied before tone mapping (1.0 = neutral; >1
+    // brighter, <1 darker).
+    float fog_density{0.012f};
+    float exposure{1.0f};
 };
 
 struct GroundDesc {
@@ -84,6 +111,11 @@ struct LightDesc {
     Vec3 direction{0.0f, -1.0f, 0.0f};
     Color color{1.0f, 1.0f, 1.0f};
     float intensity{1.0f};
+    // Point-light falloff radius in meters (light fades smoothly to zero at
+    // ``range``). YOU control this directly; place lights near the surfaces
+    // you want lit and size the range to reach them. Ignored for
+    // "directional" lights.
+    float range{20.0f};
 };
 
 struct PrimitiveDesc {

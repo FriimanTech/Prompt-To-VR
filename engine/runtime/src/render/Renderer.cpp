@@ -55,6 +55,30 @@ struct PushConstants {
     Vec4 params;
 };
 
+// Push constant for the fullscreen sky pass (matches sky.frag).
+struct SkyPush {
+    Mat4 inv_view_proj;
+};
+
+constexpr int kMaxPointLights = 8;
+
+// Environment/lighting UBO. Layout MUST match the ``EnvUBO`` block in
+// scene.frag / sky.frag (std140: every member is a vec4 so there is no
+// padding ambiguity).
+struct GpuPointLight {
+    float pos_range[4];        // xyz = world position, w = range (m)
+    float color_intensity[4];  // rgb = color, w = intensity
+};
+struct GpuEnv {
+    float sun_dir[4];      // xyz = travel direction (normalized), w unused
+    float sun_color[4];    // rgb = color, w = intensity
+    float sky_top[4];      // rgb = zenith color, w = exposure
+    float sky_horizon[4];  // rgb = horizon/fog color, w = fog density
+    float ambient[4];      // rgb = ground bounce color, w = ambient intensity
+    float camera_pos[4];   // xyz = camera world pos, w = active point count
+    GpuPointLight points[kMaxPointLights];
+};
+
 // Shared vertex layout for both the procedural cube path and the GLB mesh
 // path. Keeping a single layout means we only need one graphics pipeline
 // and one vertex-input description; the cube simply ships pure-white
@@ -124,6 +148,139 @@ void upload_buffer(VulkanContext& vk, VkBuffer buf, VmaAllocation alloc,
     (void)buf;
 }
 
+// ---------------------------------------------------------------------------
+// Built-in unit primitive meshes for the world-generation ``spawn_primitive``
+// kinds. Each is authored at unit extent (fits the [-0.5, 0.5]^3 box, matching
+// the cube) so ``build_items_from_world`` can scale by the primitive's ``size``
+// exactly like the box path. Vertices ship white so the per-DrawItem tint
+// (the primitive's color) drives the final look, identical to the cube.
+// ---------------------------------------------------------------------------
+
+using LitVertex = gltf_mesh_load::LitVertex;
+
+void push_vertex(std::vector<LitVertex>& v, const Vec3& p, const Vec3& n) {
+    LitVertex lv{};
+    lv.pos[0] = p.x; lv.pos[1] = p.y; lv.pos[2] = p.z;
+    lv.normal[0] = n.x; lv.normal[1] = n.y; lv.normal[2] = n.z;
+    lv.color[0] = lv.color[1] = lv.color[2] = lv.color[3] = 1.0f;
+    v.push_back(lv);
+}
+
+// Emit a flat quad (two triangles) with a single face normal.
+void push_quad(std::vector<LitVertex>& v, std::vector<uint32_t>& idx,
+               const Vec3& a, const Vec3& b, const Vec3& c, const Vec3& d,
+               const Vec3& n) {
+    const uint32_t base = static_cast<uint32_t>(v.size());
+    push_vertex(v, a, n);
+    push_vertex(v, b, n);
+    push_vertex(v, c, n);
+    push_vertex(v, d, n);
+    idx.insert(idx.end(), {base, base + 1, base + 2, base, base + 2, base + 3});
+}
+
+// UV sphere of radius 0.5 (diameter 1) with smooth (positional) normals.
+void make_sphere(std::vector<LitVertex>& v, std::vector<uint32_t>& idx,
+                 int stacks = 12, int slices = 20) {
+    const float r = 0.5f;
+    for (int i = 0; i <= stacks; ++i) {
+        const float phi = 3.14159265358979f * static_cast<float>(i) / stacks;
+        const float y = std::cos(phi);
+        const float rs = std::sin(phi);
+        for (int j = 0; j <= slices; ++j) {
+            const float theta =
+                2.0f * 3.14159265358979f * static_cast<float>(j) / slices;
+            Vec3 n{rs * std::cos(theta), y, rs * std::sin(theta)};
+            push_vertex(v, n * r, n);
+        }
+    }
+    const int cols = slices + 1;
+    for (int i = 0; i < stacks; ++i) {
+        for (int j = 0; j < slices; ++j) {
+            const uint32_t a = static_cast<uint32_t>(i * cols + j);
+            const uint32_t b = static_cast<uint32_t>((i + 1) * cols + j);
+            // CCW-outward winding (matches the cube / glTF convention so back-
+            // face culling keeps the outside visible, not the inside).
+            idx.insert(idx.end(), {a, a + 1, b + 1, a, b + 1, b});
+        }
+    }
+}
+
+// Capped cylinder: diameter 1 in X/Z, height 1 in Y (y in [-0.5, 0.5]).
+void make_cylinder(std::vector<LitVertex>& v, std::vector<uint32_t>& idx,
+                   int seg = 24) {
+    const float r = 0.5f, hy = 0.5f;
+    // Side wall (radial normals), duplicated ring at top/bottom.
+    const uint32_t side_base = static_cast<uint32_t>(v.size());
+    for (int j = 0; j <= seg; ++j) {
+        const float t = 2.0f * 3.14159265358979f * static_cast<float>(j) / seg;
+        const float cx = std::cos(t), cz = std::sin(t);
+        Vec3 n{cx, 0.0f, cz};
+        push_vertex(v, Vec3{cx * r, -hy, cz * r}, n);
+        push_vertex(v, Vec3{cx * r, hy, cz * r}, n);
+    }
+    for (int j = 0; j < seg; ++j) {
+        const uint32_t a = side_base + static_cast<uint32_t>(j * 2);
+        idx.insert(idx.end(), {a, a + 1, a + 2, a + 1, a + 3, a + 2});
+    }
+    // Caps (fans).
+    auto cap = [&](float y, const Vec3& n, bool flip) {
+        const uint32_t center = static_cast<uint32_t>(v.size());
+        push_vertex(v, Vec3{0.0f, y, 0.0f}, n);
+        for (int j = 0; j <= seg; ++j) {
+            const float t =
+                2.0f * 3.14159265358979f * static_cast<float>(j) / seg;
+            push_vertex(v, Vec3{std::cos(t) * r, y, std::sin(t) * r}, n);
+        }
+        for (int j = 0; j < seg; ++j) {
+            const uint32_t a = center + 1 + static_cast<uint32_t>(j);
+            if (flip)
+                idx.insert(idx.end(), {center, a + 1, a});
+            else
+                idx.insert(idx.end(), {center, a, a + 1});
+        }
+    };
+    // Top cap needs the flipped winding and bottom the natural winding to keep
+    // both facing outward (CCW-outward, matching the cube convention).
+    cap(hy, Vec3{0.0f, 1.0f, 0.0f}, true);
+    cap(-hy, Vec3{0.0f, -1.0f, 0.0f}, false);
+}
+
+// Two-sided unit plane in the XZ plane (extent 1x1, y = 0).
+void make_plane(std::vector<LitVertex>& v, std::vector<uint32_t>& idx) {
+    const float h = 0.5f;
+    push_quad(v, idx, {-h, 0.0f, -h}, {-h, 0.0f, h}, {h, 0.0f, h},
+              {h, 0.0f, -h}, {0.0f, 1.0f, 0.0f});
+    push_quad(v, idx, {-h, 0.0f, -h}, {h, 0.0f, -h}, {h, 0.0f, h},
+              {-h, 0.0f, h}, {0.0f, -1.0f, 0.0f});
+}
+
+// Right-triangular-prism ramp inside the unit box: low at -Z, high at +Z.
+void make_ramp(std::vector<LitVertex>& v, std::vector<uint32_t>& idx) {
+    const float h = 0.5f;
+    const Vec3 L0{-h, -h, -h}, L1{-h, -h, h}, L2{-h, h, h};
+    const Vec3 R0{h, -h, -h}, R1{h, -h, h}, R2{h, h, h};
+    push_quad(v, idx, L0, R0, R1, L1, Vec3{0.0f, -1.0f, 0.0f});   // bottom
+    push_quad(v, idx, L1, R1, R2, L2, Vec3{0.0f, 0.0f, 1.0f});    // back wall
+    // Slope normal MUST match push_quad's winding (a=L2,b=R2,c=R0) so the
+    // walkable top face shades up-and-back, not inverted.
+    const Vec3 slope = glm::normalize(glm::cross(R2 - L2, R0 - L2));
+    push_quad(v, idx, L2, R2, R0, L0, slope);                     // slope
+    {  // -X side triangle
+        const uint32_t b = static_cast<uint32_t>(v.size());
+        push_vertex(v, L0, Vec3{-1, 0, 0});
+        push_vertex(v, L1, Vec3{-1, 0, 0});
+        push_vertex(v, L2, Vec3{-1, 0, 0});
+        idx.insert(idx.end(), {b, b + 1, b + 2});
+    }
+    {  // +X side triangle
+        const uint32_t b = static_cast<uint32_t>(v.size());
+        push_vertex(v, R0, Vec3{1, 0, 0});
+        push_vertex(v, R2, Vec3{1, 0, 0});
+        push_vertex(v, R1, Vec3{1, 0, 0});
+        idx.insert(idx.end(), {b, b + 1, b + 2});
+    }
+}
+
 }  // namespace
 
 Renderer::~Renderer() { shutdown(); }
@@ -136,32 +293,56 @@ bool Renderer::initialize(VulkanContext& vk,
     color_format_ = color_format;
     eye_width_ = eye_width;
     eye_height_ = eye_height;
+    samples_ = pick_sample_count();
     if (!create_render_pass()) return false;
+    if (!create_descriptors()) return false;
     if (!create_pipeline()) return false;
+    if (!create_sky_pipeline()) return false;
     if (!create_cube_mesh()) return false;
+    if (!create_primitive_meshes()) return false;
     if (!create_depth_image()) return false;
+    if (!create_msaa_color_image()) return false;
     if (!create_command_resources()) return false;
-    PTV_INFO("Renderer ready: {}x{} per eye, color fmt {}",
-             eye_width_, eye_height_, static_cast<int>(color_format_));
+    PTV_INFO("Renderer ready: {}x{} per eye, color fmt {}, MSAA {}x",
+             eye_width_, eye_height_, static_cast<int>(color_format_),
+             static_cast<int>(samples_));
     return true;
 }
 
+VkSampleCountFlagBits Renderer::pick_sample_count() {
+    VkPhysicalDeviceProperties props{};
+    vkGetPhysicalDeviceProperties(vk_->physical_device(), &props);
+    // Only levels supported for BOTH color and depth framebuffers are usable
+    // for our resolve pass. Cap at 4x per the plan's quality budget.
+    const VkSampleCountFlags counts =
+        props.limits.framebufferColorSampleCounts &
+        props.limits.framebufferDepthSampleCounts;
+    if (counts & VK_SAMPLE_COUNT_4_BIT) return VK_SAMPLE_COUNT_4_BIT;
+    if (counts & VK_SAMPLE_COUNT_2_BIT) return VK_SAMPLE_COUNT_2_BIT;
+    return VK_SAMPLE_COUNT_1_BIT;
+}
+
 bool Renderer::create_render_pass() {
+    const bool msaa = samples_ != VK_SAMPLE_COUNT_1_BIT;
+
+    // Attachment 0: color the subpass renders into (multisampled when MSAA is
+    // on, otherwise the swapchain image directly).
     VkAttachmentDescription color{};
     color.format = color_format_;
-    color.samples = VK_SAMPLE_COUNT_1_BIT;
+    color.samples = samples_;
     color.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-    color.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    // With MSAA the multisampled color is resolved and never stored; without
+    // MSAA this IS the swapchain image and must be stored.
+    color.storeOp = msaa ? VK_ATTACHMENT_STORE_OP_DONT_CARE
+                         : VK_ATTACHMENT_STORE_OP_STORE;
     color.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
     color.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-    // The XR runtime expects the swapchain image to arrive in
-    // COLOR_ATTACHMENT_OPTIMAL; it handles the present transition itself.
     color.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
     color.finalLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
 
     VkAttachmentDescription depth{};
     depth.format = depth_format_;
-    depth.samples = VK_SAMPLE_COUNT_1_BIT;
+    depth.samples = samples_;
     depth.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
     depth.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
     depth.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
@@ -169,23 +350,103 @@ bool Renderer::create_render_pass() {
     depth.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
     depth.finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
 
+    // Attachment 2 (MSAA only): the single-sampled swapchain image the
+    // multisampled color resolves into. The XR runtime expects it in
+    // COLOR_ATTACHMENT_OPTIMAL and handles the present transition itself.
+    VkAttachmentDescription resolve{};
+    resolve.format = color_format_;
+    resolve.samples = VK_SAMPLE_COUNT_1_BIT;
+    resolve.loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+    resolve.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    resolve.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+    resolve.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    resolve.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    resolve.finalLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+
     VkAttachmentReference color_ref{0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
-    VkAttachmentReference depth_ref{1, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL};
+    VkAttachmentReference depth_ref{1,
+        VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL};
+    VkAttachmentReference resolve_ref{2,
+        VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
 
     VkSubpassDescription sub{};
     sub.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
     sub.colorAttachmentCount = 1;
     sub.pColorAttachments = &color_ref;
     sub.pDepthStencilAttachment = &depth_ref;
+    if (msaa) sub.pResolveAttachments = &resolve_ref;
 
-    std::array<VkAttachmentDescription, 2> atts{color, depth};
+    std::array<VkAttachmentDescription, 3> atts{color, depth, resolve};
     VkRenderPassCreateInfo ci{VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO};
-    ci.attachmentCount = static_cast<uint32_t>(atts.size());
+    ci.attachmentCount = msaa ? 3u : 2u;
     ci.pAttachments = atts.data();
     ci.subpassCount = 1;
     ci.pSubpasses = &sub;
     return vkCreateRenderPass(vk_->device(), &ci, nullptr, &render_pass_) ==
            VK_SUCCESS;
+}
+
+bool Renderer::create_descriptors() {
+    // Set 0, binding 0: environment/lighting UBO (fragment stage).
+    VkDescriptorSetLayoutBinding b{};
+    b.binding = 0;
+    b.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+    b.descriptorCount = 1;
+    b.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+    VkDescriptorSetLayoutCreateInfo lci{
+        VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
+    lci.bindingCount = 1;
+    lci.pBindings = &b;
+    if (vkCreateDescriptorSetLayout(vk_->device(), &lci, nullptr,
+                                    &env_set_layout_) != VK_SUCCESS) {
+        return false;
+    }
+
+    // Persistently-mapped host-visible UBO, refreshed once per frame.
+    VkBufferCreateInfo bci{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+    bci.size = sizeof(GpuEnv);
+    bci.usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
+    bci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    VmaAllocationCreateInfo aci{};
+    aci.usage = VMA_MEMORY_USAGE_AUTO;
+    aci.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT |
+                VMA_ALLOCATION_CREATE_MAPPED_BIT;
+    VmaAllocationInfo ainfo{};
+    if (vmaCreateBuffer(vk_->allocator(), &bci, &aci, &env_ubo_, &env_ubo_alloc_,
+                        &ainfo) != VK_SUCCESS) {
+        return false;
+    }
+    env_ubo_mapped_ = ainfo.pMappedData;
+
+    VkDescriptorPoolSize ps{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1};
+    VkDescriptorPoolCreateInfo pci{
+        VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
+    pci.maxSets = 1;
+    pci.poolSizeCount = 1;
+    pci.pPoolSizes = &ps;
+    if (vkCreateDescriptorPool(vk_->device(), &pci, nullptr, &desc_pool_) !=
+        VK_SUCCESS) {
+        return false;
+    }
+
+    VkDescriptorSetAllocateInfo dsi{
+        VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+    dsi.descriptorPool = desc_pool_;
+    dsi.descriptorSetCount = 1;
+    dsi.pSetLayouts = &env_set_layout_;
+    if (vkAllocateDescriptorSets(vk_->device(), &dsi, &env_set_) != VK_SUCCESS) {
+        return false;
+    }
+
+    VkDescriptorBufferInfo dbi{env_ubo_, 0, sizeof(GpuEnv)};
+    VkWriteDescriptorSet w{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+    w.dstSet = env_set_;
+    w.dstBinding = 0;
+    w.descriptorCount = 1;
+    w.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+    w.pBufferInfo = &dbi;
+    vkUpdateDescriptorSets(vk_->device(), 1, &w, 0, nullptr);
+    return true;
 }
 
 bool Renderer::create_pipeline() {
@@ -251,7 +512,7 @@ bool Renderer::create_pipeline() {
 
     VkPipelineMultisampleStateCreateInfo ms{
         VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO};
-    ms.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+    ms.rasterizationSamples = samples_;
 
     VkPipelineDepthStencilStateCreateInfo ds{
         VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO};
@@ -279,6 +540,8 @@ bool Renderer::create_pipeline() {
     pc.size = sizeof(PushConstants);
 
     VkPipelineLayoutCreateInfo plci{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+    plci.setLayoutCount = 1;
+    plci.pSetLayouts = &env_set_layout_;
     plci.pushConstantRangeCount = 1;
     plci.pPushConstantRanges = &pc;
     if (vkCreatePipelineLayout(vk_->device(), &plci, nullptr,
@@ -303,6 +566,192 @@ bool Renderer::create_pipeline() {
     gpci.subpass = 0;
     return vkCreateGraphicsPipelines(vk_->device(), VK_NULL_HANDLE, 1, &gpci,
                                      nullptr, &pipeline_) == VK_SUCCESS;
+}
+
+bool Renderer::create_sky_pipeline() {
+    const std::string base = std::string(PTV_SHADER_DIR);
+    sky_vs_ = make_shader(vk_->device(), base + "/sky.vert.spv");
+    sky_fs_ = make_shader(vk_->device(), base + "/sky.frag.spv");
+    if (!sky_vs_ || !sky_fs_) return false;
+
+    VkPipelineShaderStageCreateInfo stages[2]{};
+    stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
+    stages[0].module = sky_vs_;
+    stages[0].pName = "main";
+    stages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+    stages[1].module = sky_fs_;
+    stages[1].pName = "main";
+
+    // No vertex input: the vertex shader emits a fullscreen triangle from
+    // gl_VertexIndex.
+    VkPipelineVertexInputStateCreateInfo vi{
+        VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
+
+    VkPipelineInputAssemblyStateCreateInfo ia{
+        VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO};
+    ia.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+
+    VkPipelineViewportStateCreateInfo vp{
+        VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO};
+    vp.viewportCount = 1;
+    vp.scissorCount = 1;
+
+    VkPipelineRasterizationStateCreateInfo rs{
+        VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO};
+    rs.polygonMode = VK_POLYGON_MODE_FILL;
+    rs.cullMode = VK_CULL_MODE_NONE;
+    rs.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+    rs.lineWidth = 1.0f;
+
+    VkPipelineMultisampleStateCreateInfo ms{
+        VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO};
+    ms.rasterizationSamples = samples_;
+
+    // Sky fills the background: no depth test, no depth writes (so geometry
+    // drawn afterwards always wins).
+    VkPipelineDepthStencilStateCreateInfo ds{
+        VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO};
+    ds.depthTestEnable = VK_FALSE;
+    ds.depthWriteEnable = VK_FALSE;
+    ds.depthCompareOp = VK_COMPARE_OP_ALWAYS;
+
+    VkPipelineColorBlendAttachmentState cba{};
+    cba.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
+                         VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+    VkPipelineColorBlendStateCreateInfo cb{
+        VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO};
+    cb.attachmentCount = 1;
+    cb.pAttachments = &cba;
+
+    VkDynamicState dyn_states[]{VK_DYNAMIC_STATE_VIEWPORT,
+                                VK_DYNAMIC_STATE_SCISSOR};
+    VkPipelineDynamicStateCreateInfo dyn{
+        VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO};
+    dyn.dynamicStateCount = 2;
+    dyn.pDynamicStates = dyn_states;
+
+    VkPushConstantRange pc{};
+    pc.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+    pc.offset = 0;
+    pc.size = sizeof(SkyPush);
+
+    VkPipelineLayoutCreateInfo plci{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+    plci.setLayoutCount = 1;
+    plci.pSetLayouts = &env_set_layout_;
+    plci.pushConstantRangeCount = 1;
+    plci.pPushConstantRanges = &pc;
+    if (vkCreatePipelineLayout(vk_->device(), &plci, nullptr,
+                               &sky_pipeline_layout_) != VK_SUCCESS) {
+        return false;
+    }
+
+    VkGraphicsPipelineCreateInfo gpci{
+        VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO};
+    gpci.stageCount = 2;
+    gpci.pStages = stages;
+    gpci.pVertexInputState = &vi;
+    gpci.pInputAssemblyState = &ia;
+    gpci.pViewportState = &vp;
+    gpci.pRasterizationState = &rs;
+    gpci.pMultisampleState = &ms;
+    gpci.pDepthStencilState = &ds;
+    gpci.pColorBlendState = &cb;
+    gpci.pDynamicState = &dyn;
+    gpci.layout = sky_pipeline_layout_;
+    gpci.renderPass = render_pass_;
+    gpci.subpass = 0;
+    return vkCreateGraphicsPipelines(vk_->device(), VK_NULL_HANDLE, 1, &gpci,
+                                     nullptr, &sky_pipeline_) == VK_SUCCESS;
+}
+
+int Renderer::create_mesh_slot(const std::vector<gltf_mesh_load::LitVertex>& verts,
+                               const std::vector<std::uint32_t>& indices) {
+    if (!vk_ || verts.empty() || indices.empty()) return -1;
+    auto make_vma_buffer = [&](VkBufferUsageFlags usage, VkDeviceSize size,
+                               VkBuffer& buf, VmaAllocation& alloc) -> bool {
+        VkBufferCreateInfo bci{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+        bci.size = size;
+        bci.usage = usage;
+        bci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        VmaAllocationCreateInfo aci{};
+        aci.usage = VMA_MEMORY_USAGE_AUTO;
+        aci.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT |
+                    VMA_ALLOCATION_CREATE_MAPPED_BIT;
+        return vmaCreateBuffer(vk_->allocator(), &bci, &aci, &buf, &alloc,
+                               nullptr) == VK_SUCCESS;
+    };
+    GltfGpuMesh gm{};
+    const VkDeviceSize vb_size =
+        static_cast<VkDeviceSize>(verts.size() * sizeof(verts[0]));
+    const VkDeviceSize ib_size =
+        static_cast<VkDeviceSize>(indices.size() * sizeof(std::uint32_t));
+    if (!make_vma_buffer(VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, vb_size, gm.vb,
+                         gm.vb_alloc)) {
+        return -1;
+    }
+    upload_buffer(*vk_, gm.vb, gm.vb_alloc, verts.data(),
+                  static_cast<size_t>(vb_size));
+    if (!make_vma_buffer(VK_BUFFER_USAGE_INDEX_BUFFER_BIT, ib_size, gm.ib,
+                         gm.ib_alloc)) {
+        vmaDestroyBuffer(vk_->allocator(), gm.vb, gm.vb_alloc);
+        return -1;
+    }
+    upload_buffer(*vk_, gm.ib, gm.ib_alloc, indices.data(),
+                  static_cast<size_t>(ib_size));
+    gm.index_count = static_cast<uint32_t>(indices.size());
+    const int slot = static_cast<int>(gltf_meshes_.size());
+    gltf_meshes_.push_back(gm);
+    return slot;
+}
+
+bool Renderer::create_primitive_meshes() {
+    std::vector<gltf_mesh_load::LitVertex> v;
+    std::vector<uint32_t> idx;
+
+    v.clear(); idx.clear(); make_sphere(v, idx);
+    prim_slot_sphere_ = create_mesh_slot(v, idx);
+    v.clear(); idx.clear(); make_cylinder(v, idx);
+    prim_slot_cylinder_ = create_mesh_slot(v, idx);
+    v.clear(); idx.clear(); make_plane(v, idx);
+    prim_slot_plane_ = create_mesh_slot(v, idx);
+    v.clear(); idx.clear(); make_ramp(v, idx);
+    prim_slot_ramp_ = create_mesh_slot(v, idx);
+
+    return prim_slot_sphere_ >= 0 && prim_slot_cylinder_ >= 0 &&
+           prim_slot_plane_ >= 0 && prim_slot_ramp_ >= 0;
+}
+
+bool Renderer::create_msaa_color_image() {
+    if (samples_ == VK_SAMPLE_COUNT_1_BIT) return true;  // no MSAA target needed
+    VkImageCreateInfo ici{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
+    ici.imageType = VK_IMAGE_TYPE_2D;
+    ici.format = color_format_;
+    ici.extent = {eye_width_, eye_height_, 1};
+    ici.mipLevels = 1;
+    ici.arrayLayers = 1;
+    ici.samples = samples_;
+    ici.tiling = VK_IMAGE_TILING_OPTIMAL;
+    ici.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+    ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    ici.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    VmaAllocationCreateInfo aci{};
+    aci.usage = VMA_MEMORY_USAGE_AUTO;
+    if (vmaCreateImage(vk_->allocator(), &ici, &aci, &msaa_color_image_,
+                       &msaa_color_alloc_, nullptr) != VK_SUCCESS) {
+        PTV_ERROR("vmaCreateImage(msaa color) failed");
+        return false;
+    }
+    VkImageViewCreateInfo vci{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+    vci.image = msaa_color_image_;
+    vci.viewType = VK_IMAGE_VIEW_TYPE_2D;
+    vci.format = color_format_;
+    vci.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    vci.subresourceRange.levelCount = 1;
+    vci.subresourceRange.layerCount = 1;
+    return vkCreateImageView(vk_->device(), &vci, nullptr, &msaa_color_view_) ==
+           VK_SUCCESS;
 }
 
 bool Renderer::create_cube_mesh() {
@@ -342,7 +791,7 @@ bool Renderer::create_depth_image() {
     ici.extent = {eye_width_, eye_height_, 1};
     ici.mipLevels = 1;
     ici.arrayLayers = 1;
-    ici.samples = VK_SAMPLE_COUNT_1_BIT;
+    ici.samples = samples_;
     ici.tiling = VK_IMAGE_TILING_OPTIMAL;
     ici.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
     ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
@@ -409,12 +858,28 @@ VkImageView Renderer::get_or_create_color_view(VkImage img) {
 VkFramebuffer Renderer::get_or_create_framebuffer(VkImage img) {
     auto it = framebuffers_.find(img);
     if (it != framebuffers_.end()) return it->second;
-    VkImageView color_v = get_or_create_color_view(img);
-    if (!color_v) return VK_NULL_HANDLE;
-    std::array<VkImageView, 2> atts{color_v, depth_view_};
+    VkImageView swap_v = get_or_create_color_view(img);
+    if (!swap_v) return VK_NULL_HANDLE;
+
+    // MSAA: [msaa_color, depth, resolve(swapchain)]. Non-MSAA:
+    // [swapchain, depth]. The MSAA color + depth are shared across eyes; only
+    // the resolve target (swapchain image) differs per image.
+    const bool msaa = samples_ != VK_SAMPLE_COUNT_1_BIT;
+    std::array<VkImageView, 3> atts{};
+    uint32_t att_count = 0;
+    if (msaa) {
+        atts[0] = msaa_color_view_;
+        atts[1] = depth_view_;
+        atts[2] = swap_v;
+        att_count = 3;
+    } else {
+        atts[0] = swap_v;
+        atts[1] = depth_view_;
+        att_count = 2;
+    }
     VkFramebufferCreateInfo fci{VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO};
     fci.renderPass = render_pass_;
-    fci.attachmentCount = static_cast<uint32_t>(atts.size());
+    fci.attachmentCount = att_count;
     fci.pAttachments = atts.data();
     fci.width = eye_width_;
     fci.height = eye_height_;
@@ -430,12 +895,61 @@ VkFramebuffer Renderer::get_or_create_framebuffer(VkImage img) {
 
 void Renderer::draw_frame(const std::array<EyeTarget, 2>& eyes,
                           const std::vector<DrawItem>& items,
-                          const Vec3& sky_color) {
+                          const RenderEnv& env) {
     // Wait for the PREVIOUS frame's GPU work to finish before touching the
     // command buffer or the swapchain-image framebuffers again. The fence is
     // created signaled so the very first frame returns immediately.
     vkWaitForFences(vk_->device(), 1, &frame_fence_, VK_TRUE, UINT64_MAX);
     vkResetFences(vk_->device(), 1, &frame_fence_);
+
+    // ---- Update the environment/lighting UBO (shared by both eyes) --------
+    // We are past the fence wait, so the previous frame is done reading it and
+    // it is safe to overwrite the persistently-mapped buffer.
+    if (env_ubo_mapped_) {
+        Vec3 cam{0.0f};
+        for (const auto& e : eyes) {
+            Mat4 inv = glm::inverse(e.view);
+            cam += Vec3(inv[3]);
+        }
+        cam *= 0.5f;
+
+        Vec3 sun = env.sun_direction;
+        if (glm::length(sun) < 1e-5f) sun = Vec3{0.0f, -1.0f, 0.0f};
+        sun = glm::normalize(sun);
+
+        GpuEnv g{};
+        g.sun_dir[0] = sun.x; g.sun_dir[1] = sun.y; g.sun_dir[2] = sun.z;
+        g.sun_color[0] = env.sun_color.x; g.sun_color[1] = env.sun_color.y;
+        g.sun_color[2] = env.sun_color.z; g.sun_color[3] = env.sun_intensity;
+        g.sky_top[0] = env.sky_top.x; g.sky_top[1] = env.sky_top.y;
+        g.sky_top[2] = env.sky_top.z;
+        g.sky_top[3] = env.exposure;  // global pre-tonemap brightness multiplier
+        // sky_horizon doubles as both the sky-gradient horizon and the fog
+        // color; .w carries fog density.
+        g.sky_horizon[0] = env.sky_horizon.x; g.sky_horizon[1] = env.sky_horizon.y;
+        g.sky_horizon[2] = env.sky_horizon.z; g.sky_horizon[3] = env.fog_density;
+        g.ambient[0] = env.ambient_ground.x; g.ambient[1] = env.ambient_ground.y;
+        g.ambient[2] = env.ambient_ground.z; g.ambient[3] = env.ambient_intensity;
+        const int count =
+            std::min<int>(kMaxPointLights, static_cast<int>(env.points.size()));
+        g.camera_pos[0] = cam.x; g.camera_pos[1] = cam.y; g.camera_pos[2] = cam.z;
+        g.camera_pos[3] = static_cast<float>(count);
+        for (int i = 0; i < count; ++i) {
+            const PointLight& p = env.points[static_cast<size_t>(i)];
+            g.points[i].pos_range[0] = p.position.x;
+            g.points[i].pos_range[1] = p.position.y;
+            g.points[i].pos_range[2] = p.position.z;
+            g.points[i].pos_range[3] = p.range;
+            g.points[i].color_intensity[0] = p.color.x;
+            g.points[i].color_intensity[1] = p.color.y;
+            g.points[i].color_intensity[2] = p.color.z;
+            g.points[i].color_intensity[3] = p.intensity;
+        }
+        std::memcpy(env_ubo_mapped_, &g, sizeof(g));
+        // Make the write visible to the device before submit. No-op on the
+        // coherent host memory VMA usually picks; correct if it doesn't.
+        vmaFlushAllocation(vk_->allocator(), env_ubo_alloc_, 0, sizeof(g));
+    }
 
     vkResetCommandBuffer(cmd_, 0);
     VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
@@ -446,16 +960,22 @@ void Renderer::draw_frame(const std::array<EyeTarget, 2>& eyes,
         VkFramebuffer fb = get_or_create_framebuffer(eye.image);
         if (!fb) continue;
 
-        std::array<VkClearValue, 2> clears{};
-        clears[0].color = {{sky_color.x, sky_color.y, sky_color.z, 1.0f}};
+        // 3 clear values so the index is valid whether or not MSAA adds the
+        // resolve attachment (the resolve slot's clear value is ignored).
+        std::array<VkClearValue, 3> clears{};
+        clears[0].color = {{env.sky_horizon.x, env.sky_horizon.y,
+                            env.sky_horizon.z, 1.0f}};
         clears[1].depthStencil = {1.0f, 0};
+        clears[2].color = clears[0].color;
+        const uint32_t clear_count =
+            samples_ != VK_SAMPLE_COUNT_1_BIT ? 3u : 2u;
 
         VkRenderPassBeginInfo rpi{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
         rpi.renderPass = render_pass_;
         rpi.framebuffer = fb;
         rpi.renderArea.offset = {eye.offset_x, eye.offset_y};
         rpi.renderArea.extent = {eye.width, eye.height};
-        rpi.clearValueCount = static_cast<uint32_t>(clears.size());
+        rpi.clearValueCount = clear_count;
         rpi.pClearValues = clears.data();
         vkCmdBeginRenderPass(cmd_, &rpi, VK_SUBPASS_CONTENTS_INLINE);
 
@@ -471,7 +991,22 @@ void Renderer::draw_frame(const std::array<EyeTarget, 2>& eyes,
         VkRect2D sc{{eye.offset_x, eye.offset_y}, {eye.width, eye.height}};
         vkCmdSetScissor(cmd_, 0, 1, &sc);
 
+        // ---- Sky pass: gradient + sun fills the background --------------
+        vkCmdBindPipeline(cmd_, VK_PIPELINE_BIND_POINT_GRAPHICS, sky_pipeline_);
+        vkCmdBindDescriptorSets(cmd_, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                sky_pipeline_layout_, 0, 1, &env_set_, 0,
+                                nullptr);
+        SkyPush sky_pc{};
+        sky_pc.inv_view_proj = glm::inverse(eye.projection * eye.view);
+        vkCmdPushConstants(cmd_, sky_pipeline_layout_,
+                           VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(sky_pc),
+                           &sky_pc);
+        vkCmdDraw(cmd_, 3, 1, 0, 0);
+
+        // ---- Geometry pass ----------------------------------------------
         vkCmdBindPipeline(cmd_, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_);
+        vkCmdBindDescriptorSets(cmd_, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                pipeline_layout_, 0, 1, &env_set_, 0, nullptr);
 
         Mat4 vp_mat = eye.projection * eye.view;
         for (const auto& it : items) {
@@ -539,6 +1074,10 @@ void Renderer::destroy_gltf_meshes() {
     gltf_meshes_.clear();
     gltf_path_to_slot_.clear();
     inline_mesh_slots_.clear();
+    // Built-in primitive meshes lived in gltf_meshes_; their slots are now
+    // invalid.
+    prim_slot_sphere_ = prim_slot_cylinder_ = prim_slot_plane_ =
+        prim_slot_ramp_ = -1;
 }
 
 int Renderer::load_glb(const std::string& resolved_path,
@@ -567,42 +1106,8 @@ int Renderer::ensure_gltf_mesh(const std::string& resolved_path,
     }
     if (verts.empty() || indices.empty()) return -1;
 
-    auto make_vma_buffer = [&](VkBufferUsageFlags usage, VkDeviceSize size,
-                               VkBuffer& buf, VmaAllocation& alloc) -> bool {
-        VkBufferCreateInfo bci{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
-        bci.size = size;
-        bci.usage = usage;
-        bci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-        VmaAllocationCreateInfo aci{};
-        aci.usage = VMA_MEMORY_USAGE_AUTO;
-        aci.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT |
-                    VMA_ALLOCATION_CREATE_MAPPED_BIT;
-        return vmaCreateBuffer(vk_->allocator(), &bci, &aci, &buf, &alloc,
-                               nullptr) == VK_SUCCESS;
-    };
-
-    GltfGpuMesh gm{};
-    const VkDeviceSize vb_size =
-        static_cast<VkDeviceSize>(verts.size() * sizeof(verts[0]));
-    const VkDeviceSize ib_size =
-        static_cast<VkDeviceSize>(indices.size() * sizeof(uint32_t));
-    if (!make_vma_buffer(VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, vb_size, gm.vb,
-                         gm.vb_alloc)) {
-        return -1;
-    }
-    upload_buffer(*vk_, gm.vb, gm.vb_alloc, verts.data(),
-                  static_cast<size_t>(vb_size));
-    if (!make_vma_buffer(VK_BUFFER_USAGE_INDEX_BUFFER_BIT, ib_size, gm.ib,
-                         gm.ib_alloc)) {
-        vmaDestroyBuffer(vk_->allocator(), gm.vb, gm.vb_alloc);
-        return -1;
-    }
-    upload_buffer(*vk_, gm.ib, gm.ib_alloc, indices.data(),
-                  static_cast<size_t>(ib_size));
-    gm.index_count = static_cast<uint32_t>(indices.size());
-
-    const int slot = static_cast<int>(gltf_meshes_.size());
-    gltf_meshes_.push_back(gm);
+    const int slot = create_mesh_slot(verts, indices);
+    if (slot < 0) return -1;
     gltf_path_to_slot_[resolved_path] = slot;
     return slot;
 }
@@ -662,42 +1167,8 @@ int Renderer::ensure_inline_mesh(std::uint32_t key,
         }
     }
 
-    auto make_vma_buffer = [&](VkBufferUsageFlags usage, VkDeviceSize size,
-                               VkBuffer& buf, VmaAllocation& alloc) -> bool {
-        VkBufferCreateInfo bci{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
-        bci.size = size;
-        bci.usage = usage;
-        bci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-        VmaAllocationCreateInfo aci{};
-        aci.usage = VMA_MEMORY_USAGE_AUTO;
-        aci.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT |
-                    VMA_ALLOCATION_CREATE_MAPPED_BIT;
-        return vmaCreateBuffer(vk_->allocator(), &bci, &aci, &buf, &alloc,
-                               nullptr) == VK_SUCCESS;
-    };
-
-    GltfGpuMesh gm{};
-    const VkDeviceSize vb_size =
-        static_cast<VkDeviceSize>(verts.size() * sizeof(verts[0]));
-    const VkDeviceSize ib_size =
-        static_cast<VkDeviceSize>(indices.size() * sizeof(uint32_t));
-    if (!make_vma_buffer(VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, vb_size, gm.vb,
-                         gm.vb_alloc)) {
-        return -1;
-    }
-    upload_buffer(*vk_, gm.vb, gm.vb_alloc, verts.data(),
-                  static_cast<size_t>(vb_size));
-    if (!make_vma_buffer(VK_BUFFER_USAGE_INDEX_BUFFER_BIT, ib_size, gm.ib,
-                         gm.ib_alloc)) {
-        vmaDestroyBuffer(vk_->allocator(), gm.vb, gm.vb_alloc);
-        return -1;
-    }
-    upload_buffer(*vk_, gm.ib, gm.ib_alloc, indices.data(),
-                  static_cast<size_t>(ib_size));
-    gm.index_count = static_cast<uint32_t>(indices.size());
-
-    const int slot = static_cast<int>(gltf_meshes_.size());
-    gltf_meshes_.push_back(gm);
+    const int slot = create_mesh_slot(verts, indices);
+    if (slot < 0) return -1;
     inline_mesh_slots_[key] = slot;
     return slot;
 }
@@ -798,7 +1269,21 @@ void Renderer::build_items_from_world(World& world, std::vector<DrawItem>& out) 
             it.model = ct.matrix() * s;
             it.color = Vec4{prim.color.x, prim.color.y, prim.color.z, 1.0f};
             it.material_id = is_ground ? 1.0f : 0.0f;
-            it.mesh_slot = -1;
+            // Select the matching unit mesh by kind (all authored at unit
+            // extent so the scale-by-size path above is identical to the box).
+            // "box"/unknown falls back to the cube (mesh_slot = -1). These
+            // mirror the collision shapes built in PhysicsWorld.
+            if (prim.kind == "sphere") {
+                it.mesh_slot = prim_slot_sphere_;
+            } else if (prim.kind == "cylinder") {
+                it.mesh_slot = prim_slot_cylinder_;
+            } else if (prim.kind == "plane") {
+                it.mesh_slot = prim_slot_plane_;
+            } else if (prim.kind == "ramp") {
+                it.mesh_slot = prim_slot_ramp_;
+            } else {
+                it.mesh_slot = -1;  // box / unknown -> unit cube
+            }
             out.push_back(it);
             continue;
         }
@@ -879,10 +1364,40 @@ void Renderer::shutdown() {
     depth_image_ = VK_NULL_HANDLE;
     depth_alloc_ = nullptr;
 
+    if (msaa_color_view_)
+        vkDestroyImageView(vk_->device(), msaa_color_view_, nullptr);
+    if (msaa_color_image_)
+        vmaDestroyImage(vk_->allocator(), msaa_color_image_, msaa_color_alloc_);
+    msaa_color_view_ = VK_NULL_HANDLE;
+    msaa_color_image_ = VK_NULL_HANDLE;
+    msaa_color_alloc_ = nullptr;
+
     if (cube_vb_) vmaDestroyBuffer(vk_->allocator(), cube_vb_, cube_vb_alloc_);
     if (cube_ib_) vmaDestroyBuffer(vk_->allocator(), cube_ib_, cube_ib_alloc_);
     cube_vb_ = cube_ib_ = VK_NULL_HANDLE;
     cube_vb_alloc_ = cube_ib_alloc_ = nullptr;
+
+    // Environment UBO + descriptors (VMA unmaps the persistently-mapped buffer
+    // on destroy).
+    if (env_ubo_) vmaDestroyBuffer(vk_->allocator(), env_ubo_, env_ubo_alloc_);
+    env_ubo_ = VK_NULL_HANDLE;
+    env_ubo_alloc_ = nullptr;
+    env_ubo_mapped_ = nullptr;
+    if (desc_pool_) vkDestroyDescriptorPool(vk_->device(), desc_pool_, nullptr);
+    if (env_set_layout_)
+        vkDestroyDescriptorSetLayout(vk_->device(), env_set_layout_, nullptr);
+    desc_pool_ = VK_NULL_HANDLE;
+    env_set_layout_ = VK_NULL_HANDLE;
+    env_set_ = VK_NULL_HANDLE;
+
+    if (sky_pipeline_) vkDestroyPipeline(vk_->device(), sky_pipeline_, nullptr);
+    if (sky_pipeline_layout_)
+        vkDestroyPipelineLayout(vk_->device(), sky_pipeline_layout_, nullptr);
+    if (sky_vs_) vkDestroyShaderModule(vk_->device(), sky_vs_, nullptr);
+    if (sky_fs_) vkDestroyShaderModule(vk_->device(), sky_fs_, nullptr);
+    sky_pipeline_ = VK_NULL_HANDLE;
+    sky_pipeline_layout_ = VK_NULL_HANDLE;
+    sky_vs_ = sky_fs_ = VK_NULL_HANDLE;
 
     if (pipeline_) vkDestroyPipeline(vk_->device(), pipeline_, nullptr);
     if (pipeline_layout_)

@@ -49,6 +49,11 @@ private:
     bool initialize(const Config& cfg);
     void shutdown();
     void tick(float dt);
+    // Build the renderer's environment (sky/sun/ambient/fog/point lights) from
+    // the loaded ``scene_``. Cached so it isn't rebuilt every frame; defaults
+    // are chosen so scenes without an authored sky/lights (e.g. the starter
+    // room) still look good.
+    void build_render_env();
 
     // ------------------------------------------------------------------
     // Player rig: the virtual transform of the stage origin in world
@@ -140,6 +145,7 @@ private:
     MechanicHost mechanics_{};
     SceneDoc scene_{};
     std::string scene_path_{};
+    Renderer::RenderEnv render_env_{};
     bool running_{false};
     PlayerRig rig_{};
     std::array<HandGrab, 2> hands_{};

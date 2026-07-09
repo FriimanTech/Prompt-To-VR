@@ -23,7 +23,7 @@ Quest Link (Windows PC VR).
 | Orchestrator | `apps/orchestrator` | FastAPI service that runs the pipeline |
 | Schemas | `packages/schemas` | Pydantic v2 + JSON Schemas (single source of truth) |
 | Provider clients | `packages/provider-clients` | Anthropic / Google / Tripo wrappers |
-| Engine runtime | `engine/runtime` | Reusable native Vulkan + OpenXR engine |
+| Engine runtime | `engine/runtime` | Reusable native Vulkan + OpenXR engine (MSAA forward renderer, gradient sky, scene-driven lighting; see [`rendering.md`](rendering.md)) |
 | Generated code | `engine/generated` | The **only** place LLM-produced C++ lives |
 | Starter sample | `samples/starter-room` | Hand-authored scene that runs without any LLM call |
 
@@ -61,7 +61,9 @@ The repo ships:
 - Schemas with round-trip and JSON-schema export.
 - Provider clients with mocked tests; real SDKs are installed at runtime.
 - Native engine skeleton that compiles and boots Vulkan + OpenXR + ECS +
-  Jolt + Dear ImGui overlay.
+  Jolt + Dear ImGui overlay, with an MSAA forward renderer that honors the
+  authored sky, sun, ambient, point lights, and primitive shapes
+  (see [`rendering.md`](rendering.md)).
 - Starter-room sample scene (`samples/starter-room`).
 - CTest smoke targets (`mechanics`, `scene`, `openxr`).
 - All docs, `.env.example`, Cursor rules, and `AGENTS.md`.

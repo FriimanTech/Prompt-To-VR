@@ -35,7 +35,11 @@ layout(location = 3) out float v_material;
 void main() {
     vec4 world = pc.model * vec4(in_pos, 1.0);
     v_world_pos = world.xyz;
-    v_world_normal = normalize(mat3(pc.model) * in_normal);
+    // Proper normal matrix so non-uniformly scaled primitives (stretched
+    // spheres/cylinders, thin planes) light correctly. Computed in-shader to
+    // avoid growing the push-constant block.
+    mat3 normal_matrix = transpose(inverse(mat3(pc.model)));
+    v_world_normal = normalize(normal_matrix * in_normal);
     v_color = pc.color * in_color;
     v_material = pc.params.x;
     gl_Position = pc.view_proj * world;

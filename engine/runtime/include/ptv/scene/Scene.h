@@ -68,6 +68,9 @@ struct LightSpec {
     Vec3 color{1.0f, 1.0f, 1.0f};
     float intensity{1.0f};
     Vec3 direction{0.0f, -1.0f, 0.0f};
+    // Point-light falloff radius in meters (author-controlled). <= 0 means
+    // "use the renderer's default". Ignored for directional lights.
+    float range{0.0f};
 };
 
 // Optional gradient sky authored by the world-generation stage. When
@@ -79,6 +82,13 @@ struct SkyGradient {
     Vec3 sun_direction{0.30f, -0.82f, 0.30f};
     Vec3 sun_color{1.0f, 0.97f, 0.9f};
     float sun_intensity{1.0f};
+    // Global environment/atmosphere, all author-controlled (see IWorldBuilder
+    // SkyDesc). ambient_color = lower-hemisphere (ground bounce); the upper
+    // hemisphere blends toward ``top``.
+    Vec3 ambient_color{0.20f, 0.21f, 0.24f};
+    float ambient_intensity{0.30f};
+    float fog_density{0.012f};
+    float exposure{1.0f};
 };
 
 struct PlayerSpawn {

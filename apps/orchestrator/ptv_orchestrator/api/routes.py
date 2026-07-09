@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import AsyncIterator
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Response
+from fastapi.responses import FileResponse
 from sse_starlette.sse import EventSourceResponse
 
 from ..engine_catalog import builtin_catalog, promoted_catalog
@@ -95,6 +96,20 @@ def list_artifacts(project_id: str):
     return [a.model_dump(mode="json") for a in _store().list_artifacts(project_id)]
 
 
+@router.get("/projects/{project_id}/logs")
+def list_logs(project_id: str):
+    """Names of every ``.log`` file this project has produced.
+
+    The UI uses this to render a tab per real log instead of a hard-coded
+    list, so newly added stages (e.g. ``world``) show up automatically and no
+    log is silently left out.
+    """
+    logs_dir = _store().dir_for(project_id) / "logs"
+    if not logs_dir.exists():
+        return []
+    return sorted(p.stem for p in logs_dir.glob("*.log") if p.is_file())
+
+
 @router.get("/projects/{project_id}/logs/{name}")
 def get_log(project_id: str, name: str):
     store = _store()
@@ -102,6 +117,31 @@ def get_log(project_id: str, name: str):
     if not path.exists():
         raise HTTPException(status_code=404, detail="log not found")
     return Response(content=path.read_text(encoding="utf-8"), media_type="text/plain")
+
+
+@router.get("/projects/{project_id}/file")
+def get_file(project_id: str, path: str):
+    """Serve a raw artifact file (reference image, GLB, JSON, ...) so the UI
+    can preview it.
+
+    ``path`` is the artifact's repo-relative path (as returned by the
+    ``/artifacts`` endpoint, e.g. ``projects/<id>/images/<asset>/ref.png``).
+    We resolve it and hard-fail unless it lands *inside* this project's own
+    directory -- no path traversal, no reading other projects or the repo.
+    """
+    store = _store()
+    proj_dir = store.dir_for(project_id).resolve()
+    repo_root = get_settings().projects_dir.parent
+    # Accept both repo-relative (projects/<id>/...) and project-relative paths.
+    for base in (repo_root, proj_dir):
+        candidate = (base / path).resolve()
+        try:
+            candidate.relative_to(proj_dir)
+        except ValueError:
+            continue
+        if candidate.is_file():
+            return FileResponse(candidate)
+    raise HTTPException(status_code=404, detail="file not found")
 
 
 @router.post("/projects/{project_id}/run")

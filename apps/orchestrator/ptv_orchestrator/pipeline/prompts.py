@@ -735,6 +735,24 @@ REQUIREMENTS FOR A WORKING WORLD:
   procedural geometry (any shape you compute in C++). Use ``w.seed()`` for any
   randomness so results are reproducible.
 
+LIGHTING & VISIBILITY (CRITICAL — the engine renders EXACTLY what you author,
+with NO brightness floor, so you are fully responsible for how visible the world
+is; the guide's "Rendering & lighting contract" is ground truth):
+- YOU own the entire look via ``sky(...)``: ``ambient_color`` +
+  ``ambient_intensity`` (baseline fill), ``sun_direction`` + ``sun_intensity``,
+  ``fog_density``, and ``exposure``. Set them deliberately for the intended mood
+  — bright or dark by design, but ALWAYS visible/navigable for that mood.
+- Final surface brightness is roughly ``albedo x (sun + ambient + points)``.
+  Keep visible surfaces' colors in ~0.1..0.85; near-black albedo (< ~0.05)
+  renders BLACK no matter how bright the lights are. Never fake brightness with
+  a near-black albedo + a huge light.
+- The sun only lights surfaces it faces; a near-vertical ``sun_direction`` barely
+  lights walls. Use ``ambient`` and ``point`` lights (with a sensible ``range``,
+  placed NEAR the surfaces you want lit) so the main play surfaces read. Prefer a
+  few point lights with ``intensity`` ~1..8 over one giant value.
+- If the whole scene is too dark/bright, adjust ``exposure`` rather than pushing
+  albedos to extremes.
+
 MULTI-FILE C++ RULES (same as the engine's other codegen):
 - You may emit multiple ``.cpp``/``.h`` files. Shared declarations go in a
   ``.h`` you also emit; include it with a bare ``#include "your_header.h"``.
