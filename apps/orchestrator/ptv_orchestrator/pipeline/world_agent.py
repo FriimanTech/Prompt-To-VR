@@ -5,11 +5,25 @@ iterating across turns. It runs with a persistent ``Session`` so the
 compile-and-repair loop can send follow-up messages (compiler errors) and the
 agent remembers everything it already wrote.
 
-Verified against the current SDK docs (2026):
+Verified against the current SDK docs (OpenAI Agents SDK / openai-agents 0.18,
+July 2026):
 
-* ``from agents import Agent, Runner, WebSearchTool, ModelSettings, SQLiteSession``
-* ``from openai.types.shared import Reasoning``
-* ``Agent(model="gpt-5.5", model_settings=ModelSettings(reasoning=Reasoning(effort="xhigh"),
+* ``from agents import Agent, Runner, WebSearchTool, ModelSettings,
+  SQLiteSession, OpenAIResponsesModel``
+* ``from openai import AsyncOpenAI`` and ``from openai.types.shared import Reasoning``
+* GPT-5.6 Sol (``gpt-5.6-sol``; the ``gpt-5.6`` alias also routes to Sol) is
+  the frontier model. It supports reasoning efforts
+  ``none|low|medium|high|xhigh|max`` and OpenAI recommends the **Responses API**
+  for reasoning + tools + multi-turn, so we drive the agent with an explicit
+  ``OpenAIResponsesModel`` rather than the default chat path.
+* The model runs behind a **custom ``AsyncOpenAI`` client with a long request
+  timeout**. The SDK's default client uses the openai library's 600s (10 min)
+  read timeout; a single ``xhigh`` turn that also calls ``WebSearchTool`` and
+  returns a large multi-file C++ payload can exceed that and fail with
+  "Request timed out", dropping the stage to the fallback world. We raise the
+  per-request timeout (``request_timeout_s``) to give the architect headroom.
+* ``Agent(model=OpenAIResponsesModel(model=..., openai_client=client),
+  model_settings=ModelSettings(reasoning=Reasoning(effort="xhigh"),
   verbosity="medium"), tools=[WebSearchTool()], output_type=...)``
 * ``Runner.run_sync(agent, message, session=session, max_turns=...)`` -> RunResult
 * ``RunResult.final_output_as(Cls)``
@@ -122,10 +136,11 @@ class WorldArchitect:
         self,
         *,
         instructions: str,
-        model: str = "gpt-5.5",
+        model: str = "gpt-5.6-sol",
         reasoning_effort: str = "xhigh",
         max_turns: int = 80,
         session_id: str = "ptv-world",
+        request_timeout_s: float = 1800.0,
         runner: Optional[RunnerFn] = None,
     ) -> None:
         self.instructions = instructions
@@ -133,6 +148,7 @@ class WorldArchitect:
         self.reasoning_effort = reasoning_effort
         self.max_turns = max_turns
         self.session_id = session_id
+        self.request_timeout_s = request_timeout_s
         self._runner = runner  # injected (tests) or lazily built
 
     def run(self, message: str) -> WorldAgentResult:
@@ -149,14 +165,17 @@ class WorldArchitect:
     def _build_default_runner(self) -> RunnerFn:
         """Construct the real Agents SDK agent + in-memory session once."""
         try:
+            import httpx  # type: ignore
             from agents import (  # type: ignore
                 Agent,
                 AgentOutputSchema,
                 ModelSettings,
+                OpenAIResponsesModel,
                 Runner,
                 SQLiteSession,
                 WebSearchTool,
             )
+            from openai import AsyncOpenAI  # type: ignore
             from openai.types.shared import Reasoning  # type: ignore
         except ImportError as exc:  # pragma: no cover - real runs only
             raise WorldAgentError(
@@ -175,10 +194,25 @@ class WorldArchitect:
             verbosity="medium",
         )
 
+        # Drive the agent through the Responses API (OpenAI's recommendation
+        # for GPT-5.6 reasoning + tools + multi-turn) with a dedicated client
+        # whose HTTP read/write timeout is large enough for one long xhigh
+        # turn. The SDK's default client keeps the openai library's 600s read
+        # timeout, which a single web-searching, large-C++ turn can exceed --
+        # the "Request timed out" that was dropping this stage to the fallback
+        # world. ``connect`` stays short so genuine network failures fail fast;
+        # only one retry so a real timeout doesn't silently re-run for hours.
+        http_timeout = httpx.Timeout(
+            self.request_timeout_s,
+            connect=15.0,
+        )
+        client = AsyncOpenAI(timeout=http_timeout, max_retries=1)
+        model = OpenAIResponsesModel(model=self.model, openai_client=client)
+
         agent = Agent(
             name=f"ptv-world-architect-{self.session_id}",
             instructions=self.instructions,
-            model=self.model,
+            model=model,
             model_settings=model_settings,
             tools=[WebSearchTool()],
             output_type=output_schema,

@@ -3,8 +3,9 @@ the C++ for the VR environment, iterating under a compile-and-repair loop.
 
 Flow
 ----
-1. Build the architect (OpenAI Agents SDK, gpt-5.5 @ reasoning xhigh,
-   WebSearchTool, persistent Session) and hand it the engine guide + game brief.
+1. Build the architect (OpenAI Agents SDK, gpt-5.6-sol @ reasoning xhigh via the
+   Responses API, WebSearchTool, persistent Session) and hand it the engine
+   guide + game brief.
 2. Write its bounded C++ into ``engine/generated/world/<project_id>/`` (world
    include whitelist enforced; violations are fed back to the agent).
 3. Compile the offline ``ptv_worldgen`` host (engine/worldgen, standalone).
@@ -112,6 +113,7 @@ def run_with_architect(
             model=ctx.settings.world_model,
             reasoning_effort=ctx.settings.world_reasoning_effort,
             max_turns=ctx.settings.world_agent_max_turns,
+            request_timeout_s=ctx.settings.world_request_timeout_seconds,
             session_id=f"ptv-world-{project_id}",
         )
 

@@ -81,7 +81,8 @@ orchestrator and a reusable Vulkan + OpenXR engine core.
 8. CodeTasks from MechanicPlan → Claude Opus → C++ files (`.cpp` + optional
    `.h`/`.hpp` headers) in `engine/generated/{mechanics,ai,dialogue}/`.
 8b. **World generation**: a single world-architect agent (OpenAI Agents SDK,
-   `gpt-5.5` @ reasoning `xhigh`, `WebSearchTool`) writes `IWorldBuilder` C++
+   `gpt-5.6-sol` @ reasoning `xhigh` via the Responses API, `WebSearchTool`)
+   writes `IWorldBuilder` C++
    in `engine/generated/world/<project_id>/`, compiled + run offline in
    `ptv_worldgen` under a compile-and-repair loop → `world.scene.json`
    (deterministic fallback world if the budget is exhausted).
