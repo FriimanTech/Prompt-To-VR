@@ -53,7 +53,7 @@ struct MechanicInstance {
 class MechanicHost {
 public:
     void attach_bindings(World& world);
-    void update(World& world, float dt);
+    void update(World& world, float dt, const InputSnapshot& input);
     void detach_all(World& world);
 
 private:

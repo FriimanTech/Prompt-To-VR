@@ -284,7 +284,14 @@ def compile_scene_json(
     """Pure function: produce the engine-loadable scene JSON dict."""
 
     asset_by_id = {a.id: a for a in manifest.items}
-    plan_by_id = {it.id: it for it in plan.items}
+    # Index plan items by BOTH the mechanic-plan id and the code_task id so a
+    # scene binding of either "builtin.<x>" or "generated.<code_task_id>"
+    # resolves back to its plan item (needed for config + binding merge).
+    plan_by_id: dict[str, Any] = {}
+    for it in plan.items:
+        plan_by_id[it.id] = it
+        if it.code_task is not None:
+            plan_by_id[it.code_task.id] = it
     nrep = normalization_report or {}
     referenced_asset_ids: set[str] = set()
 
@@ -312,15 +319,31 @@ def compile_scene_json(
                 "id": b.mechanic_id,
                 "params": dict(b.params),
             }
-            if item is not None and item.classification in (
-                MechanicClassification.builtin,
-                MechanicClassification.builtin_config,
-            ):
-                resolved["builtin_id"] = item.builtin_id or b.mechanic_id
+            if item is not None:
+                if item.classification in (
+                    MechanicClassification.builtin,
+                    MechanicClassification.builtin_config,
+                ):
+                    resolved["builtin_id"] = item.builtin_id or b.mechanic_id
                 # Merge item.config with per-entity params; per-entity wins.
+                # (config is typically empty for builtin / generate, non-empty
+                # for builtin+config and code_edit tuning.)
                 merged = dict(item.config)
                 merged.update(resolved["params"])
                 resolved["params"] = merged
+                # Materialize the resolved controller binding into params so
+                # the running mechanic reads its control/hand at on_attach and
+                # checks the live InputSnapshot. Per-entity params win.
+                if (
+                    item.binding is not None
+                    and item.binding.control.value != "none"
+                ):
+                    resolved["params"].setdefault(
+                        "control", item.binding.control.value
+                    )
+                    resolved["params"].setdefault(
+                        "hand", item.binding.hand.value
+                    )
             bindings.append(resolved)
         entities_out.append(
             {

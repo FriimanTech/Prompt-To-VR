@@ -43,6 +43,8 @@ PTV_API_EXACT = {
     "ptv/api/IMechanic.h",
     "ptv/api/IBehaviour.h",
     "ptv/api/IDialogueHook.h",
+    # Read-only live controller/headset input handed to on_update.
+    "ptv/api/InputSnapshot.h",
 }
 
 HEADER_EXACT = {

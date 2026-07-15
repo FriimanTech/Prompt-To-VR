@@ -1230,7 +1230,56 @@ int Application::run(const Config& cfg) {
         // ------------------------------------------------------------
         physics_.step(dt);
         physics_.sync_to_world(world_);
-        mechanics_.update(world_, dt);
+
+        // ------------------------------------------------------------
+        // Build the read-only input snapshot handed to every mechanic.
+        // All poses are already rig-composed (world space) so generated
+        // mechanics can compare them directly against entity transforms.
+        // Grab state (hands_[h].held) was resolved above, so weapon/tool
+        // mechanics can see which hand holds them THIS frame.
+        // ------------------------------------------------------------
+        InputSnapshot snapshot;
+        snapshot.dt = dt;
+        for (int h = 0; h < 2; ++h) {
+            auto& hs = snapshot.hands[h];
+            hs.trigger = input.trigger[h];
+            hs.grip = input.grip[h];
+            hs.thumbstick = Vec2(input.thumbstick[h].x, input.thumbstick[h].y);
+            hs.prev_trigger = prev_input_.trigger[h];
+            hs.prev_grip = prev_input_.grip[h];
+            if (hand_valid[h]) {
+                hs.hand_position = hand_world_pos[h];
+                hs.hand_rotation = hand_world_rot[h];
+                hs.hand_valid = true;
+            }
+            if (aim_world_valid[h]) {
+                hs.aim_position =
+                    mat_translation(rig_mat * xr_pose_to_matrix(aim_poses[h]));
+                hs.aim_rotation = aim_world_rot[h];
+                hs.aim_valid = true;
+            }
+            hs.held_entity = (hands_[h].held == entt::null)
+                                 ? InputSnapshot::kInvalidEntity
+                                 : static_cast<std::uint32_t>(hands_[h].held);
+        }
+        snapshot.button_a = input.button_a;
+        snapshot.button_b = input.button_b;
+        snapshot.button_x = input.button_x;
+        snapshot.button_y = input.button_y;
+        snapshot.prev_button_a = prev_input_.button_a;
+        snapshot.prev_button_b = prev_input_.button_b;
+        snapshot.prev_button_x = prev_input_.button_x;
+        snapshot.prev_button_y = prev_input_.button_y;
+        if (input.head_valid) {
+            snapshot.head_position = head_world_pos;
+            snapshot.head_rotation = head_world_rot;
+            snapshot.head_valid = true;
+        }
+
+        mechanics_.update(world_, dt, snapshot);
+
+        // Remember this frame's raw input for next frame's edge detection.
+        prev_input_ = input;
 
         // ------------------------------------------------------------
         // Render frame.

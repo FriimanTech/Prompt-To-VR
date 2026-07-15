@@ -72,8 +72,14 @@ orchestrator and a reusable Vulkan + OpenXR engine core.
 1. Prompt → **BuildSpec** (Claude Opus, structured output).
 2. BuildSpec → **AssetManifest** (Claude Sonnet, structured output). Only
    OBJECTS (characters, props, fx, ui) — the environment is not a GLB.
-3. AssetManifest + BuildSpec → **MechanicPlan** (Claude Opus). Each mechanic
-   must be classified `builtin`, `builtin+config`, or `generate`.
+3. AssetManifest + BuildSpec → **MechanicPlan** (OpenAI Agents SDK agent,
+   `gpt-5.5` + `WebSearchTool`). Each mechanic is classified `builtin`,
+   `builtin+config`, `builtin+config_code_edit` (copy a built-in's source and
+   edit it into a NEW generated mechanic — never replaces the built-in), or
+   `generate`. The agent also assigns a controller `binding`
+   (control + hand) to every input-driven mechanic; a deterministic
+   validator rejects conflicts. BuildSpec labels each mechanic `regular` or
+   `hub` (a shared foundation like a shooting hub).
 4. All above → **SceneSpec** (Claude Opus, structured output).
 5. Reference images for each object `AssetItem` → Gemini / Imagen.
 6. Reference images → Tripo image-to-3D (textured, PBR).

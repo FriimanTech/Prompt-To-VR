@@ -11,6 +11,7 @@ from .build_spec import (
     BuildSpec,
     SceneEntry,
     MechanicEntry,
+    MechanicType,
     AssetEntry,
     TestEntry,
 )
@@ -26,6 +27,9 @@ from .mechanic_plan import (
     MechanicPlan,
     MechanicPlanItem,
     MechanicClassification,
+    ControllerBinding,
+    ControllerControl,
+    ControllerHand,
 )
 from .scene_spec import (
     SceneSpec,
@@ -54,6 +58,7 @@ __all__ = [
     "BuildSpec",
     "SceneEntry",
     "MechanicEntry",
+    "MechanicType",
     "AssetEntry",
     "TestEntry",
     "AssetManifest",
@@ -65,6 +70,9 @@ __all__ = [
     "MechanicPlan",
     "MechanicPlanItem",
     "MechanicClassification",
+    "ControllerBinding",
+    "ControllerControl",
+    "ControllerHand",
     "SceneSpec",
     "EntitySpec",
     "Transform",

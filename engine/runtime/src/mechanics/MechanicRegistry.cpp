@@ -101,9 +101,9 @@ void MechanicHost::attach_bindings(World& world) {
     PTV_INFO("Attached {} mechanic instances", instances_.size());
 }
 
-void MechanicHost::update(World& world, float dt) {
+void MechanicHost::update(World& world, float dt, const InputSnapshot& input) {
     for (auto& [eid, inst] : instances_) {
-        if (inst.impl) inst.impl->on_update(world, eid, dt);
+        if (inst.impl) inst.impl->on_update(world, eid, dt, input);
     }
 }
 

@@ -36,6 +36,8 @@ _PTV_API_ALLOWED = frozenset(
         "ptv/api/IMechanic.h",
         "ptv/api/IBehaviour.h",
         "ptv/api/IDialogueHook.h",
+        # Read-only live controller/headset input handed to on_update.
+        "ptv/api/InputSnapshot.h",
     }
 )
 

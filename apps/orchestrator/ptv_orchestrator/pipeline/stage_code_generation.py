@@ -43,6 +43,7 @@ from ptv_schemas import (
     CodeTask,
     CodeTaskFile,
     CodeTaskKind,
+    MechanicClassification,
     ProjectStage,
     ProjectStatus,
     SceneSpec,
@@ -55,6 +56,7 @@ from .bounds import (
     validate_header_content,
     validate_includes,
 )
+from .builtin_source import format_builtin_sources_block, read_builtin_sources
 from .codegen_agent import (
     CodegenAgentError,
     CodegenAgentInput,
@@ -181,6 +183,16 @@ def run_with_runner(
         for it in codegen_items
     }
 
+    # Map code-edit task ids -> base built-in id whose source the agent
+    # should copy-and-edit. Only ``builtin+config_code_edit`` items appear
+    # here; ``generate`` items author from scratch.
+    code_edit_base_by_task_id: dict[str, str] = {
+        it.code_task.id: (it.base_builtin_id or it.builtin_id or "")  # type: ignore[union-attr]
+        for it in codegen_items
+        if it.classification == MechanicClassification.builtin_config_code_edit
+        and (it.base_builtin_id or it.builtin_id)
+    }
+
     # ------------------------------------------------------------------
     # Ensure OPENAI_API_KEY is in os.environ for the Agents SDK.
     # Pydantic BaseSettings reads .env into settings.openai_api_key but
@@ -199,6 +211,7 @@ def run_with_runner(
         ctx=ctx,
         board=board,
         tasks_by_id=tasks_by_id,
+        code_edit_base_by_task_id=code_edit_base_by_task_id,
         static=static_ctx,
         gen_root=gen_root,
         repo_root=repo_root,
@@ -355,10 +368,12 @@ class _StageRuntime:
         repo_root: Path,
         model_id: str,
         agent_runner: Optional[RunnerFn],
+        code_edit_base_by_task_id: Optional[dict[str, str]] = None,
     ) -> None:
         self.ctx = ctx
         self.board = board
         self.tasks_by_id = tasks_by_id
+        self.code_edit_base_by_task_id = code_edit_base_by_task_id or {}
         self.static = static
         self.gen_root = gen_root
         self.repo_root = repo_root
@@ -455,6 +470,24 @@ class _StageRuntime:
             f"engine/generated/{_KIND_DIR[task.kind]}/{self.ctx.project_id}"
         )
 
+        extra = [
+            f"This run is owned by agent_id={agent_id}.",
+            f"Project id is {self.ctx.project_id!r} -- all generated paths must include it.",
+        ]
+
+        # Code-edit task: inject the base built-in's source so the agent
+        # copies-and-edits it into a NEW generated mechanic.
+        base_source_block = ""
+        base_builtin_id = self.code_edit_base_by_task_id.get(task.id, "")
+        if base_builtin_id:
+            sources = read_builtin_sources(self.repo_root, base_builtin_id)
+            base_source_block = format_builtin_sources_block(sources)
+            extra.append(
+                f"CODE-EDIT TASK: copy and adapt the source of "
+                f"'{base_builtin_id}' below into a NEW mechanic registered "
+                f"under 'generated.{task.id}'. Do NOT replace the built-in."
+            )
+
         inp = CodegenAgentInput(
             project_id=self.ctx.project_id,
             task_id=task.id,
@@ -465,10 +498,8 @@ class _StageRuntime:
             scene_context_json=scene_ctx_json,
             build_spec_excerpt=bs_excerpt,
             instructions=CODE_TASK_SYSTEM,
-            extra_instructions=[
-                f"This run is owned by agent_id={agent_id}.",
-                f"Project id is {self.ctx.project_id!r} -- all generated paths must include it.",
-            ],
+            base_source_block=base_source_block,
+            extra_instructions=extra,
         )
 
         result = run_codegen_agent(

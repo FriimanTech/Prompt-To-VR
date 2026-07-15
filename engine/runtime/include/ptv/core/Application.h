@@ -149,6 +149,10 @@ private:
     bool running_{false};
     PlayerRig rig_{};
     std::array<HandGrab, 2> hands_{};
+    // Previous frame's raw OpenXR input, kept so the per-frame InputSnapshot
+    // handed to mechanics can expose edge transitions (trigger/grip/button
+    // rising + falling edges).
+    XrRuntime::InputState prev_input_{};
     LocomotionMode locomotion_{LocomotionMode::Teleport};
     Menu menu_{};
     TeleportAim teleport_{};

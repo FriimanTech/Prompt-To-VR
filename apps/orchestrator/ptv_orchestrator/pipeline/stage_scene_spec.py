@@ -646,9 +646,10 @@ def _compress_mechanics(
     for item in plan.items:
         cls = item.classification.value
         binding_id: Optional[str]
-        if cls == "generate":
+        if cls in ("generate", "builtin+config_code_edit"):
             # The SceneSpec must bind to the generated module the codegen
-            # stage will produce. Convention is generated.<code_task_id>.
+            # stage will produce (both 'generate' and 'code_edit' emit a NEW
+            # mechanic). Convention is generated.<code_task_id>.
             task_id = item.code_task.id if item.code_task else item.id
             binding_id = f"generated.{task_id}"
         else:
@@ -659,6 +660,7 @@ def _compress_mechanics(
             {
                 "id": item.id,
                 "name": bs_entry.name if bs_entry else item.id,
+                "type": bs_entry.type.value if bs_entry else "regular",
                 "classification": cls,
                 "binding_id": binding_id,
                 # Tight brief so the composer knows which entity should

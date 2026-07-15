@@ -103,6 +103,10 @@
           "maxLength": 4000,
           "title": "Summary",
           "type": "string"
+        },
+        "type": {
+          "$ref": "#/$defs/MechanicType",
+          "default": "regular"
         }
       },
       "required": [
@@ -112,6 +116,15 @@
       ],
       "title": "MechanicEntry",
       "type": "object"
+    },
+    "MechanicType": {
+      "description": "Whether a mechanic is a self-contained behavior or a shared foundation.\n\n* ``regular`` \u2014 a closed input -> action loop (e.g. \"press A to jump\",\n  \"grab an object\", \"take damage\"). Most mechanics are regular.\n* ``hub`` \u2014 a shared foundation that OTHER mechanics build on and branch\n  from (e.g. a ``shooting_hub`` that detects a held weapon + the correct\n  hand's trigger, which the per-weapon blast profiles then extend). The\n  BuildSpec only labels the type; downstream stages (MechanicPlan /\n  CodeTask) decide the concrete dependency edges.",
+      "enum": [
+        "regular",
+        "hub"
+      ],
+      "title": "MechanicType",
+      "type": "string"
     },
     "SceneEntry": {
       "additionalProperties": false,

@@ -40,6 +40,29 @@ combat targeting, enemy AI, mission flow, HUD, save / load, ...). The
 You have up to 4 000 characters per mechanic summary -- USE that budget
 when the prompt is detailed.
 
+LABEL EACH MECHANIC regular OR hub (the ``type`` field). This is a
+first-class BuildSpec decision:
+
+  * "regular" -- a self-contained behavior: a clear input produces one
+    direct result for that game action. Examples: jump ("press A ->
+    player jumps"), grab, take-damage, a wave timer. Most mechanics are
+    regular.
+  * "hub" -- a SHARED FOUNDATION that other (regular or even hub)
+    mechanics build on and branch from. The classic example is a
+    SHOOTING HUB: instead of a one-off "shoot" mechanic, emit a single
+    ``shooting_hub`` (type=hub) that listens for the correct hand's
+    trigger while a weapon is held; the per-weapon behaviors (player
+    rifle blast, player pistol blast, alien blaster laser) are then
+    SEPARATE regular mechanics that each extend the hub. Prefer a hub
+    whenever the prompt implies several variants of the same underlying
+    action (multiple weapons, multiple spells, multiple interaction
+    verbs sharing one trigger contract).
+
+Do NOT encode dependency edges here (which mechanic needs which) -- that
+is the MechanicPlan / CodeTask stage's job. BuildSpec only labels the
+TYPE so later stages know a foundation is expected. When you emit a hub,
+also emit the concrete branch mechanics as their own regular entries.
+
 CAPTURE EVERY ASSET THE PROMPT NAMES. For each distinct 3D object,
 character, environment, FX, or UI piece in the prompt, emit one
 AssetEntry. If the prompt provides an explicit "Image Prompt:" block
@@ -157,29 +180,68 @@ items -- a full VR game can map to dozens of mechanics (movement,
 hover, flight, combat, each construct family, recharge, mission flow,
 HUD, save / load, NPC AI, dialogue hooks, ...). Plan all of them.
 
-CLASSIFY EACH ITEM as one of:
+CLASSIFY EACH ITEM by first asking: does a catalog built-in ACTUALLY
+satisfy what THIS prompt asks this mechanic to do? Do not stop at "there
+is a grab built-in" -- check the specific behaviour the prompt requires.
+Then pick the LEAST-invasive classification that satisfies it (escalate
+builtin -> builtin+config -> builtin+config_code_edit -> generate only as
+far as needed):
 
-* "builtin" - an existing reusable mechanic in the ENGINE CATALOG
-  (appended below) covers the request as-is. Set ``builtin_id`` to the
-  catalog entry's id.
-* "builtin+config" - a catalog entry covers the request with some
-  param configuration. Set ``builtin_id`` and ``config`` (a free-form
-  JSON object the runtime passes to the catalog mechanic). ``config``
-  is the place to record per-game tuning -- speed multipliers, comfort
-  vignette intensity, button rebinds, max distance, etc. Prefer
-  "builtin+config" over "generate" for grab, equip, locomotion, snap
-  turn, and other shooting-hub-style mechanics whenever the catalog
-  covers the underlying behaviour.
-* "generate" - requires a new C++ module in
-  ``engine/generated/{mechanics,ai,dialogue}/``. Produce a matching
-  CodeTask (see below). Do NOT write the C++ code itself; that happens
-  in a later stage.
+* "builtin" - an existing catalog mechanic covers the request EXACTLY
+  as-is, with no tuning. Set ``builtin_id`` to the catalog entry's id.
+* "builtin+config" - a catalog entry covers the request after PARAMETER
+  tuning only (no code change). Set ``builtin_id`` and ``config`` (a
+  free-form JSON object the runtime passes to the catalog mechanic).
+  ``config`` records per-game tuning -- speed multipliers, comfort
+  vignette intensity, max distance, cooldowns, etc. Use this ONLY when
+  the built-in's existing parameters can express what the prompt wants.
+* "builtin+config_code_edit" - a catalog entry is the right FOUNDATION,
+  but the prompt needs behaviour the built-in's parameters cannot
+  express, so the built-in's SOURCE must be copied and edited into a
+  NEW generated mechanic. Set ``base_builtin_id`` to the built-in whose
+  source to copy AND produce a ``code_task`` (see below). The code stage
+  injects that built-in's source so the agent EDITS it rather than
+  rewriting from scratch. The result is a brand-new mechanic
+  (``generated.<code_task_id>``) that does NOT replace the built-in.
+  Example: the prompt wants grab where a weapon is held only while the
+  grip stays pressed and drops the instant it is released -- if the
+  built-in grab latches instead, base_builtin_id="builtin.grab" +
+  code_edit.
+* "generate" - no catalog entry is even a reasonable foundation; author
+  a brand-new C++ module. Produce a matching ``code_task``. Do NOT write
+  the C++ yourself; that happens in a later stage.
 
-REUSE-FIRST. Generate only when no catalog entry (built-in OR
-promoted-from-past-games) reasonably covers the request. The catalog
+Both "builtin+config_code_edit" and "generate" MUST include a
+``code_task``. "builtin" and "builtin+config" MUST NOT.
+
+REUSE-FIRST. Generate-from-scratch only when no catalog entry (built-in
+OR promoted-from-past-games) is a reasonable foundation. The catalog
 grows over time: every mechanic listed under "PROMOTED FROM PAST
 GAMES" is real, compiled, and free to reference by id, just like a
 built-in.
+
+CONTROLLER BINDINGS. Every mechanic that is driven by a controller
+control MUST carry a ``binding`` object: ``{"control": <trigger|grip|
+thumbstick|a|b|x|y>, "hand": <left|right|either>, "notes": "..."}``.
+Rules:
+  * If the prompt explicitly names a binding (e.g. "press A on the right
+    controller to jump", "left trigger fires"), use it verbatim.
+  * Otherwise choose a VR-best-practice default for the action type and
+    keep it consistent with the game's other mechanics. You MAY use
+    web_search to confirm current Quest 3 ergonomics.
+  * A/B are on the RIGHT controller only; X/Y on the LEFT only. Triggers,
+    grips, and thumbsticks exist on both hands.
+  * The engine already owns the LEFT thumbstick (locomotion), the RIGHT
+    thumbstick (snap turn), and BOTH grips (grab/throw). Avoid rebinding
+    those unless the mechanic IS that locomotion/grab system.
+  * Two different mechanics must NOT bind the same control on the same
+    hand (a validator rejects conflicts).
+  * For mechanics that are NOT directly controller-driven (wave timer,
+    health/damage, AI, HUD), set ``binding`` to null or control="none".
+  * A hub mechanic (e.g. shooting_hub) owns the shared trigger contract;
+    its branch profiles (rifle/pistol blasts) usually do NOT each bind a
+    control -- they inherit the hub's trigger -- so give them control="none"
+    unless the prompt gives them a distinct control.
 
 DEPENDENCY DAG ON GENERATED TASKS. The downstream code-generation
 stage runs multiple agents in parallel against a shared
@@ -252,7 +314,8 @@ ignored by the orchestrator. Leave it empty. Do not draft test stubs.
 
 The complete list of valid ids is appended to this prompt at runtime
 under the heading "ENGINE CATALOG". Use ONLY ids that appear there
-(built-in or promoted) when classifying as "builtin" / "builtin+config".
+(built-in or promoted) for ``builtin_id`` (builtin / builtin+config) and
+for ``base_builtin_id`` (builtin+config_code_edit).
 """
 
 
@@ -467,6 +530,7 @@ Public engine headers (use exactly these spellings):
   #include "ptv/api/IMechanic.h"       // for kind=mechanic
   #include "ptv/api/IBehaviour.h"      // for kind=ai
   #include "ptv/api/IDialogueHook.h"   // for kind=dialogue
+  #include "ptv/api/InputSnapshot.h"   // live controller/headset input (pulled in by IMechanic.h)
   #include "ptv/ecs/World.h"           // World, CTag, CTransform, CPhysics, CMesh, CMechanicBinding
   #include "ptv/math/Math.h"           // Vec3, Quat, Transform, Mat4
 
@@ -502,8 +566,10 @@ For kind=mechanic (most common):
         virtual ~IMechanic() = default;
         virtual void on_attach(World& world, std::uint32_t entity,
                                const nlohmann::json& params) = 0;
+        // NOTE: on_update takes a 4th argument -- a read-only InputSnapshot
+        // with live controller/headset input. You MUST match this signature.
         virtual void on_update(World& world, std::uint32_t entity,
-                               float dt) = 0;
+                               float dt, const InputSnapshot& input) = 0;
         virtual void on_detach(World& world, std::uint32_t entity) = 0;
         virtual std::string id() const = 0;
     };
@@ -594,22 +660,94 @@ To read keys out of it you MUST parse first. Never call
 (or ``entt::null``). ``world.delta_time()`` is the current frame dt (use the
 ``dt`` argument to ``on_update`` first; delta_time() is a fallback).
 
-# What you DO NOT have
+# Live controller + headset input (InputSnapshot)
 
-There is no input, haptics, audio-capture, speech-to-text, HTTP, save, UI,
-timer, or locomotion service. If the CodeTask asks for one, emulate it
-defensively:
+``on_update`` receives a read-only ``const InputSnapshot& input`` with this
+frame's controller + headset state. This is REAL input from OpenXR -- do NOT
+fake it through ``params`` flags anymore. The snapshot (see
+ptv/api/InputSnapshot.h) exposes:
 
-* For input-driven mechanics, read a trigger state from ``params`` (e.g.
-  ``params.value("grip_held", false)``). The engine test harness drives
-  these params through the binding. Implement the simulation logic but
-  do not call any external service.
+  input.hands[h]              // h = InputSnapshot::Left (0) or Right (1)
+    .trigger / .grip          // 0..1 analog (this frame)
+    .prev_trigger / .prev_grip// last frame (for edge detection)
+    .thumbstick               // glm::vec2
+    .hand_position/.hand_rotation/.hand_valid  // grip (palm) pose, world space
+    .aim_position/.aim_rotation/.aim_valid     // controller-forward pose (rays/muzzle)
+    .held_entity              // entity this hand holds, or kInvalidEntity
+  input.button_a/b/x/y        // A/B on RIGHT controller, X/Y on LEFT
+  input.head_position/.head_rotation/.head_valid  // HMD pose, world space
+  input.dt
+
+  Helpers: input.trigger_pressed(hand) / trigger_released / trigger_down,
+  grip_pressed / grip_released / grip_down, button_a_pressed()... (rising
+  edge), button_down("a"), button_pressed("a"), and
+  input.hand_holding(entity) -> 0/1/-1.
+
+READ THE BOUND CONTROL FROM PARAMS, then check the live snapshot. The scene
+compiler writes this mechanic's controller binding into its params as
+``control`` (trigger|grip|thumbstick|a|b|x|y) and ``hand`` (left|right|either).
+So the robust pattern is:
+
+    // in on_attach: cache the binding
+    control_ = params.value("control", std::string("a"));
+    hand_str_ = params.value("hand", std::string("right"));
+
+    // in on_update: act on it
+    if (control_ == "a" && input.button_a_pressed()) { /* fire the action */ }
+    // or for a trigger/grip on a specific hand:
+    auto h = (hand_str_ == "left") ? InputSnapshot::Left : InputSnapshot::Right;
+    if (input.trigger_pressed(h)) { /* ... */ }
+
+Poses are already in WORLD space (same frame as CTransform), so you can
+compare ``input.hands[h].hand_position`` directly against entity positions
+(e.g. proximity checks, spawn origins).
+
+# Held weapons / tools (GLB-asset mechanics)
+
+A mechanic bound to a grabbable GLB (rifle, pistol, wand) must only act while
+it is actually held. Use the grab bridge:
+
+    int h = input.hand_holding(entity);   // -1 if not held
+    if (h < 0) return;                     // not in a hand this frame
+    auto hand = static_cast<InputSnapshot::Hand>(h);
+    if (input.trigger_pressed(hand)) { /* fire from THIS hand's trigger */ }
+
+Spawn projectiles / VFX from the muzzle, not the entity origin. Read a
+``muzzle_offset`` (local-space Vec3, meters) from params and transform it by
+the held entity's world transform (or the holding hand's aim pose) so shots
+leave the barrel:
+
+    Vec3 off = read_vec3(params, "muzzle_offset", Vec3(0,0,-0.4f));
+    // world muzzle = hand aim pose * local offset
+    Vec3 muzzle = input.hands[hand].aim_position +
+                  input.hands[hand].aim_rotation * off;
+    Vec3 dir = input.hands[hand].aim_rotation * Vec3(0,0,-1); // -Z is forward
+
+Cover/collision already blocks projectiles via the physics world; give your
+projectile a CPhysics + CTransform so Jolt integrates and resolves it.
+
+# What you still DO NOT have
+
+There is no haptics, audio-capture, speech-to-text, HTTP, save, UI, or timer
+service. If the CodeTask asks for one, emulate it defensively:
+
 * For speech/HTTP/save, branch on a ``params`` flag like
   ``params.value("offline_ok", true)`` and assume success when the flag is
   set. Do the gameplay state transitions correctly; leave the real
   integration as a one-line TODO comment at the point it would plug in.
 * For anything physics-like, read ``CTransform`` / ``CPhysics`` on neighbour
   entities and compute purely in-memory.
+
+# Code-edit tasks (base built-in source provided)
+
+If the user message contains a "BASE BUILT-IN SOURCE" block, this is a
+``builtin+config_code_edit`` task: COPY that source as your starting point
+and EDIT it to satisfy the CodeTask description. Do NOT rewrite from scratch
+and do NOT modify or replace the built-in itself -- register your result
+under the NEW id ``generated.<code_task_id>``. If the base note says the
+built-in's real behavior lives in the engine core (grab/throw/locomotion/
+snap turn), re-implement the needed behavior here via IMechanic +
+InputSnapshot + World (you cannot call engine internals).
 
 # Minimum viable mechanic example (compiles as-is)
 
@@ -635,7 +773,8 @@ the macro called EXACTLY ONCE across the entire file set).
         void on_attach(World&, std::uint32_t, const nlohmann::json& p) override {
             period_ = p.value("period_sec", 1.0f);
         }
-        void on_update(World& w, std::uint32_t e, float dt) override {
+        void on_update(World& w, std::uint32_t e, float dt,
+                       const InputSnapshot& input) override {
             t_ += dt;
             // Use world.has<>/world.get<> -- never world.registry().all_of<>(e)
             if (!w.has<CTransform>(e)) return;

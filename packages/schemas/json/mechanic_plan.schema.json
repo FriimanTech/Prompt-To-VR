@@ -111,10 +111,57 @@
       "title": "CodeTaskKind",
       "type": "string"
     },
+    "ControllerBinding": {
+      "additionalProperties": false,
+      "description": "The controller control that activates an input-driven mechanic.\n\nSet by the MechanicPlan agent (from the prompt when it names a binding,\notherwise a VR-best-practice default), validated deterministically for\nconflicts, and materialized into the entity's ``mechanic_bindings.params``\nat scene compile so the running mechanic reads ``control`` + ``hand`` from\nits params and checks the live ``InputSnapshot``.\n\nLayout constraints (enforced by the binding validator): A/B live on the\nRIGHT controller only; X/Y live on the LEFT controller only.",
+      "properties": {
+        "control": {
+          "$ref": "#/$defs/ControllerControl",
+          "default": "none"
+        },
+        "hand": {
+          "$ref": "#/$defs/ControllerHand",
+          "default": "right"
+        },
+        "notes": {
+          "default": "",
+          "maxLength": 400,
+          "title": "Notes",
+          "type": "string"
+        }
+      },
+      "title": "ControllerBinding",
+      "type": "object"
+    },
+    "ControllerControl": {
+      "description": "Which physical control on the Meta Quest 3 Touch Plus controller\ndrives an input-driven mechanic. ``none`` means the mechanic is not\ndirectly input-driven (e.g. a wave timer, health system).",
+      "enum": [
+        "trigger",
+        "grip",
+        "thumbstick",
+        "a",
+        "b",
+        "x",
+        "y",
+        "none"
+      ],
+      "title": "ControllerControl",
+      "type": "string"
+    },
+    "ControllerHand": {
+      "enum": [
+        "left",
+        "right",
+        "either"
+      ],
+      "title": "ControllerHand",
+      "type": "string"
+    },
     "MechanicClassification": {
       "enum": [
         "builtin",
         "builtin+config",
+        "builtin+config_code_edit",
         "generate"
       ],
       "title": "MechanicClassification",
@@ -123,6 +170,31 @@
     "MechanicPlanItem": {
       "additionalProperties": false,
       "properties": {
+        "base_builtin_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "When classification is 'builtin+config_code_edit', the id of the built-in mechanic whose SOURCE should be copied and edited into the new generated mechanic (e.g. 'builtin.locomotion.teleport'). The code-generation stage injects that source into the agent's context so it edits rather than rewrites from scratch.",
+          "title": "Base Builtin Id"
+        },
+        "binding": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ControllerBinding"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Controller binding for input-driven mechanics. None (or control='none') for mechanics that are not directly driven by a controller control. Validated for conflicts before scene compile and materialized into scene.json params."
+        },
         "builtin_id": {
           "anyOf": [
             {
@@ -149,7 +221,7 @@
             }
           ],
           "default": null,
-          "description": "Present only when classification == 'generate'."
+          "description": "Present when classification == 'generate' or 'builtin+config_code_edit' (the new C++ module to author)."
         },
         "config": {
           "additionalProperties": true,

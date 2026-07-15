@@ -141,6 +141,68 @@ def test_scene_compile_resolves_builtin_and_mesh():
     assert e["physics"]["kind"] == "dynamic"
 
 
+def test_scene_compile_materializes_controller_binding_into_params():
+    """A resolved ControllerBinding on a generated mechanic must be written
+    into the entity's mechanic_bindings params (control + hand) so the
+    running mechanic reads its control at on_attach. Per-entity params win."""
+    from ptv_schemas import (
+        ControllerBinding,
+        ControllerControl,
+        ControllerHand,
+    )
+    from ptv_schemas.code_task import CodeTask, CodeTaskKind
+
+    bs = BuildSpec(
+        prompt_id="demo",
+        title="Demo",
+        pitch="jump game",
+        game_type=GameType.arcade,
+        scenes=[SceneEntry(id="room", name="Room", summary="one room.", entry_point=True)],
+        mechanics=[MechanicEntry(id="jump", name="Jump", summary="press a to jump")],
+        assets=[AssetEntry(id="cube", name="Cube", category="prop", summary="wood cube")],
+        acceptance_tests=[TestEntry(id="t1", description="jump works")],
+    )
+    plan = MechanicPlan(
+        prompt_id="demo",
+        items=[
+            MechanicPlanItem(
+                id="jump",
+                classification=MechanicClassification.generate,
+                binding=ControllerBinding(
+                    control=ControllerControl.a, hand=ControllerHand.right
+                ),
+                code_task=CodeTask(
+                    id="jump",
+                    kind=CodeTaskKind.mechanic,
+                    title="Jump",
+                    description="x" * 40,
+                    interface="IMechanic",
+                ),
+            )
+        ],
+    )
+    scene = SceneSpec(
+        prompt_id="demo",
+        scene_id="room",
+        name="Room",
+        entities=[
+            EntitySpec(
+                id="player",
+                name="Player",
+                transform=Transform(position=Vec3(x=0.0, y=0.0, z=0.0)),
+                mechanic_bindings=[
+                    MechanicBinding(mechanic_id="generated.jump", params={})
+                ],
+            )
+        ],
+    )
+    doc = compile_scene_json(bs, _manifest(), plan, scene)
+    binding = doc["entities"][0]["mechanic_bindings"][0]
+    assert binding["id"] == "generated.jump"
+    assert binding["params"]["control"] == "a"
+    assert binding["params"]["hand"] == "right"
+
+
 def test_scene_compile_auto_instantiates_unreferenced_assets():
     """Part 3 of apps/adjustments.md: every Tripo-produced asset must end
     up inside the running VR game. If the LLM-composed SceneSpec drops one,

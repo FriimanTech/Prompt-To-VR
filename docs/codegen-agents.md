@@ -384,33 +384,53 @@ The Equip / Shooting-Hub / Repulsor mechanics themselves are **not**
 implemented in this PR — only the architecture that lets a future
 real prompt add them.
 
-## Engine reality and stubs
+## Live input bridge (generated mechanics react to real controllers)
 
-The runtime engine ships built-ins that fully work today (grab via
-the tag-driven `Application.cpp` loop, locomotion modes, snap turn)
-plus stubs that the multi-agent codegen stage must not over-promise:
+`IMechanic::on_update` receives a read-only `const InputSnapshot& input`
+(see `engine/runtime/include/ptv/api/InputSnapshot.h`) with this frame's
+controller + headset state — triggers, grips, thumbsticks, A/B/X/Y
+buttons, hand/aim/head poses (in world space), and which entity each
+hand is holding. `XrRuntime::sync_input` fills the raw state, and
+`Application.cpp` composes it into the `InputSnapshot` (rig-applied
+poses + grab/held state) before calling
+`mechanics_.update(world, dt, snapshot)`. So generated mechanics can
+respond to real input in-headset — this is no longer a stub.
+
+Controller **bindings** are decided in the MechanicPlan stage and
+materialized into each mechanic's `params` at scene compile. A generated
+mechanic reads `params.value("control", ...)` (`trigger|grip|thumbstick|
+a|b|x|y`) and `params.value("hand", ...)` (`left|right|either`) at
+`on_attach`, then checks the live `InputSnapshot` in `on_update`. Do NOT
+fake input through boolean params any more.
+
+Held-weapon / GLB-asset mechanics use `input.hand_holding(entity)` to
+detect which hand holds them and read that hand's trigger; spawn
+projectiles/VFX from a `muzzle_offset` (local Vec3 in params) transformed
+by the holding hand's aim pose.
 
 | Component | Status today |
 |-----------|--------------|
-| Grab + tag `grabbable` | Works |
+| Grab + tag `grabbable` | Works (tag-driven `Application.cpp` loop) |
 | `builtin.grab` | Registers `CGrabbable`; grab logic lives in `Application.cpp` |
+| Live input into `on_update` | **Works** — `InputSnapshot` passed every frame |
+| Shooting hub + live trigger | Works — read the held hand's trigger from `InputSnapshot` |
 | **Equip on body slots** | Stub — generated code should not assume it works |
-| **Shooting hub + live trigger** | `builtin.projectile_hook` is a stub; no input bridge into `IMechanic::on_update` |
-| `MechanicHost::update` | Runs generated `on_update`, but without live OpenXR trigger state |
 
-Generated mechanics that need engine capability that isn't there yet
-should:
+## Classifications (MechanicPlan)
 
-* Read the relevant flags from `params` (e.g.
-  `params.value("primary_trigger", false)`,
-  `params.value("equipped_side", "left")`).
-* Implement the gameplay state transitions correctly assuming those
-  inputs are wired.
-* Leave a one-line `// TODO: live OpenXR input bridge` comment where
-  the real integration plugs in.
+The MechanicPlan stage (now an OpenAI Agents SDK agent, `gpt-5.5` +
+`WebSearchTool`) classifies each mechanic:
 
-The engine input-bridge / equip slots / weapon-fire pipeline are
-follow-up engine work, not part of this stage.
+* `builtin` — a catalog mechanic satisfies as-is.
+* `builtin+config` — satisfied by parameter tuning only.
+* `builtin+config_code_edit` — a catalog mechanic is the right foundation
+  but params cannot express the prompt; the code stage injects the base
+  built-in's source (`base_builtin_id`) so the agent copies-and-edits it
+  into a NEW `generated.<id>` mechanic (never replaces the built-in).
+* `generate` — a brand-new mechanic authored from scratch.
+
+Both `builtin+config_code_edit` and `generate` produce a `code_task` and
+become codegen-board rows.
 
 ## Engine growth loop
 

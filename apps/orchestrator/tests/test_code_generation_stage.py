@@ -449,6 +449,55 @@ def test_four_step_agent_context_is_wired(tmp_path: Path) -> None:
     assert rep.output_subdir == f"engine/generated/mechanics/{pid}"
 
 
+def test_code_edit_task_injects_base_builtin_source(tmp_path: Path) -> None:
+    """A ``builtin+config_code_edit`` item must cause the base built-in's
+    source to be injected into the agent's ``base_source_block`` so it can
+    copy-and-edit rather than rewrite from scratch."""
+
+    plan = MechanicPlan(
+        prompt_id="demo",
+        items=[
+            MechanicPlanItem(
+                id="custom_grab",
+                classification=MechanicClassification.builtin_config_code_edit,
+                base_builtin_id="builtin.grab",
+                code_task=_task("custom_grab"),
+            )
+        ],
+    )
+    store, pid, settings = _seed(tmp_path, plan)
+
+    # Provide a fake BuiltinMechanics.cpp so the source resolver finds it.
+    builtin_cpp = (
+        tmp_path / "engine" / "runtime" / "src" / "mechanics" / "BuiltinMechanics.cpp"
+    )
+    builtin_cpp.parent.mkdir(parents=True, exist_ok=True)
+    builtin_cpp.write_text(
+        "// GrabMechanic base source\nclass GrabMechanic {};\n", encoding="utf-8"
+    )
+
+    ctx = PipelineContext(
+        project_id=pid, settings=settings, store=store, bus=EventBus()
+    )
+
+    captured: list[CodegenAgentInput] = []
+    runner = _make_multi_file_runner(captured)
+
+    stage_code_generation.run_with_runner(ctx, agent_runner=runner)
+
+    assert len(captured) == 1
+    inp = captured[0]
+    # Base source was injected (from the fake BuiltinMechanics.cpp) plus the
+    # engine-owned-behavior NOTE for grab.
+    assert "GrabMechanic base source" in inp.base_source_block
+    assert "engine-owned behavior" in inp.base_source_block
+    # An extra instruction tells the agent to copy + adapt under a new id.
+    assert any(
+        "CODE-EDIT TASK" in line and "generated.custom_grab" in line
+        for line in inp.extra_instructions
+    )
+
+
 def test_three_parallel_workers_drain_board(tmp_path: Path) -> None:
     """With 3 workers and 6 independent tasks, the board fully drains
     and every task is claimed exactly once."""

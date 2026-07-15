@@ -279,6 +279,8 @@ bool XrRuntime::create_action_set() {
                 thumbstick_action_, true);
     make_action(XR_ACTION_TYPE_BOOLEAN_INPUT, "button_a", "Button A", button_a_action_, false);
     make_action(XR_ACTION_TYPE_BOOLEAN_INPUT, "button_b", "Button B", button_b_action_, false);
+    make_action(XR_ACTION_TYPE_BOOLEAN_INPUT, "button_x", "Button X", button_x_action_, false);
+    make_action(XR_ACTION_TYPE_BOOLEAN_INPUT, "button_y", "Button Y", button_y_action_, false);
 
     // Suggested bindings: Oculus / Meta Touch controllers (covers Quest 3 + Link).
     XrPath interaction_profile;
@@ -303,6 +305,9 @@ bool XrRuntime::create_action_set() {
         {thumbstick_action_, path("/user/hand/right/input/thumbstick")},
         {button_a_action_, path("/user/hand/right/input/a/click")},
         {button_b_action_, path("/user/hand/right/input/b/click")},
+        // X / Y live on the LEFT Touch controller only.
+        {button_x_action_, path("/user/hand/left/input/x/click")},
+        {button_y_action_, path("/user/hand/left/input/y/click")},
     };
     XrInteractionProfileSuggestedBinding ipb{
         XR_TYPE_INTERACTION_PROFILE_SUGGESTED_BINDING};
@@ -746,6 +751,20 @@ void XrRuntime::sync_input(InputState& out) {
     };
     read_vec2(thumbstick_action_, hand_paths_[0], out.thumbstick[0]);
     read_vec2(thumbstick_action_, hand_paths_[1], out.thumbstick[1]);
+
+    // Face buttons. A/B are bound on the right controller, X/Y on the left.
+    // These actions have no subaction paths, so we query with XR_NULL_PATH.
+    auto read_bool = [&](XrAction a, bool& v) {
+        XrActionStateBoolean st{XR_TYPE_ACTION_STATE_BOOLEAN};
+        XrActionStateGetInfo gi{XR_TYPE_ACTION_STATE_GET_INFO};
+        gi.action = a;
+        v = (xrGetActionStateBoolean(xr_session_, &gi, &st) == XR_SUCCESS &&
+             st.isActive && st.currentState);
+    };
+    read_bool(button_a_action_, out.button_a);
+    read_bool(button_b_action_, out.button_b);
+    read_bool(button_x_action_, out.button_x);
+    read_bool(button_y_action_, out.button_y);
 }
 
 void XrRuntime::shutdown() {

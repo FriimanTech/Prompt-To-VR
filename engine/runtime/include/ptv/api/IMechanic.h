@@ -6,6 +6,8 @@
 
 #include <nlohmann/json.hpp>
 
+#include "ptv/api/InputSnapshot.h"
+
 namespace ptv {
 
 class World;
@@ -23,8 +25,15 @@ public:
     /** Called once when the mechanic is bound to an entity. */
     virtual void on_attach(World& world, std::uint32_t entity, const nlohmann::json& params) = 0;
 
-    /** Called every frame after input and physics. */
-    virtual void on_update(World& world, std::uint32_t entity, float dt) = 0;
+    /** Called every frame after input and physics.
+     *
+     * ``input`` is a read-only snapshot of live controller + headset input
+     * for this frame (buttons, triggers, grips, thumbsticks, hand/aim/head
+     * poses in world space, and which entity each hand is holding). Poses are
+     * already rig-composed, so they are directly comparable with entity
+     * ``CTransform`` positions. See ptv/api/InputSnapshot.h. */
+    virtual void on_update(World& world, std::uint32_t entity, float dt,
+                           const InputSnapshot& input) = 0;
 
     /** Called when the mechanic is detached or the scene unloads. */
     virtual void on_detach(World& world, std::uint32_t entity) = 0;

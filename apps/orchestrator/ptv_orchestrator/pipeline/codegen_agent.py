@@ -131,6 +131,11 @@ class CodegenAgentInput:
     """The ``CODE_TASK_SYSTEM`` prompt (after the four-step / multi-file
     rewrite). Becomes the agent's ``instructions``."""
 
+    base_source_block: str = ""
+    """For ``builtin+config_code_edit`` tasks: the source of the base
+    built-in mechanic to COPY-AND-EDIT into this new generated mechanic.
+    Empty for ``generate`` tasks."""
+
     extra_instructions: list[str] = field(default_factory=list)
 
 
@@ -280,6 +285,18 @@ def build_user_message(inp: CodegenAgentInput) -> str:
         else "(none)"
     )
 
+    # For code-edit tasks, the base built-in source is injected so the agent
+    # copies-and-edits rather than rewriting from scratch.
+    base_source_section = (
+        (
+            "\n================ BASE BUILT-IN SOURCE (copy + edit; do NOT "
+            "replace the built-in) ================\n"
+            f"{inp.base_source_block}\n"
+        )
+        if inp.base_source_block
+        else ""
+    )
+
     return (
         "You are running ONE CodeTask in the Prompt-To-Native-VR "
         "multi-agent code-generation stage.\n"
@@ -321,6 +338,7 @@ def build_user_message(inp: CodegenAgentInput) -> str:
         f"{inp.scene_context_json}\n\n"
         "================ BUILD SPEC EXCERPT ================\n"
         f"{inp.build_spec_excerpt}\n"
+        f"{base_source_section}"
     )
 
 

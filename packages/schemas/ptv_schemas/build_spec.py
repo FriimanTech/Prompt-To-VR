@@ -34,6 +34,22 @@ class ComfortLevel(str, Enum):
     intense = "intense"
 
 
+class MechanicType(str, Enum):
+    """Whether a mechanic is a self-contained behavior or a shared foundation.
+
+    * ``regular`` — a closed input -> action loop (e.g. "press A to jump",
+      "grab an object", "take damage"). Most mechanics are regular.
+    * ``hub`` — a shared foundation that OTHER mechanics build on and branch
+      from (e.g. a ``shooting_hub`` that detects a held weapon + the correct
+      hand's trigger, which the per-weapon blast profiles then extend). The
+      BuildSpec only labels the type; downstream stages (MechanicPlan /
+      CodeTask) decide the concrete dependency edges.
+    """
+
+    regular = "regular"
+    hub = "hub"
+
+
 class SceneEntry(StrictModel):
     id: IdStr
     name: str = Field(..., max_length=128)
@@ -50,6 +66,9 @@ class SceneEntry(StrictModel):
 class MechanicEntry(StrictModel):
     id: IdStr
     name: str = Field(..., max_length=128)
+    # regular = closed input->action loop; hub = shared foundation other
+    # mechanics branch off of (e.g. shooting_hub). See MechanicType.
+    type: MechanicType = MechanicType.regular
     # Mechanic summaries are the primary brief the MechanicPlan / CodeTask
     # stages consume. Keep them long enough to describe Quest 3 button
     # bindings, edge cases, comfort rules, etc.

@@ -86,6 +86,17 @@ class Settings(BaseSettings):
     # update spec.
     codegen_max_parallel_agents: int = Field(default=3, ge=1, le=16)
 
+    # --- MechanicPlan stage (Stage 3, agentic) ---------------------------
+    # The mechanic planner is an OpenAI Agents SDK agent (WebSearchTool
+    # enabled) rather than a single structured LLM call. It classifies each
+    # BuildSpec mechanic (builtin / builtin+config / builtin+config_code_edit
+    # / generate), assigns controller bindings, and emits nested CodeTasks.
+    mechanic_plan_model: str = "gpt-5.5"
+    # reasoning.effort: one of none|minimal|low|medium|high|xhigh (model-dep).
+    mechanic_plan_reasoning_effort: str = "high"
+    # Turn budget for the single planning run (allows a few web_search turns).
+    mechanic_plan_agent_max_turns: int = Field(default=40, ge=4, le=200)
+
     # --- World-generation stage (agentic VR environment) -----------------
     # A single "world architect" agent (OpenAI Agents SDK) authors ALL the
     # C++ for the VR environment, bounded to the IWorldBuilder surface and

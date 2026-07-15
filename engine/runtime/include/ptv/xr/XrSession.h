@@ -223,8 +223,10 @@ private:
     XrAction trigger_action_{XR_NULL_HANDLE};
     XrAction grip_action_{XR_NULL_HANDLE};
     XrAction thumbstick_action_{XR_NULL_HANDLE};
-    XrAction button_a_action_{XR_NULL_HANDLE};
-    XrAction button_b_action_{XR_NULL_HANDLE};
+    XrAction button_a_action_{XR_NULL_HANDLE};   // right controller A
+    XrAction button_b_action_{XR_NULL_HANDLE};   // right controller B
+    XrAction button_x_action_{XR_NULL_HANDLE};   // left controller X
+    XrAction button_y_action_{XR_NULL_HANDLE};   // left controller Y
     XrPath hand_paths_[2]{XR_NULL_PATH, XR_NULL_PATH};
 
     std::vector<XrSwapchain> color_swapchains_;

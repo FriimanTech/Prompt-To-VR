@@ -29,15 +29,16 @@ public:
     void on_attach(World&, std::uint32_t, const nlohmann::json& p) override {
         static_cast<Derived*>(this)->configure(p);
     }
-    void on_update(World& world, std::uint32_t entity, float dt) override {
-        static_cast<Derived*>(this)->tick(world, entity, dt);
+    void on_update(World& world, std::uint32_t entity, float dt,
+                   const InputSnapshot& input) override {
+        static_cast<Derived*>(this)->tick(world, entity, dt, input);
     }
     void on_detach(World&, std::uint32_t) override {}
     std::string id() const override { return Derived::kId; }
     // Derived provides:
     //   static constexpr const char* kId = "...";
     //   void configure(const nlohmann::json& params);
-    //   void tick(World&, std::uint32_t, float);
+    //   void tick(World&, std::uint32_t, float, const InputSnapshot&);
 };
 
 // ---------------------------------------------------------------------------
@@ -55,7 +56,7 @@ class TeleportMechanic : public BuiltinMechanicBase<TeleportMechanic> {
 public:
     static constexpr const char* kId = "builtin.teleport";
     void configure(const nlohmann::json&) {}
-    void tick(World&, std::uint32_t, float) {}
+    void tick(World&, std::uint32_t, float, const InputSnapshot&) {}
 };
 PTV_REGISTER_MECHANIC("builtin.teleport", TeleportMechanic)
 // Planner / engine-catalog ids (locomotion is implemented in Application.cpp;
@@ -87,7 +88,7 @@ public:
     void configure(const nlohmann::json& p) {
         speed_ = p.value("speed_mps", 1.5f);
     }
-    void tick(World&, std::uint32_t, float) {}
+    void tick(World&, std::uint32_t, float, const InputSnapshot&) {}
 private:
     float speed_{1.5f};
 };
@@ -111,7 +112,7 @@ public:
     void configure(const nlohmann::json& p) {
         degrees_ = p.value("degrees", 30.0f);
     }
-    void tick(World&, std::uint32_t, float) {}
+    void tick(World&, std::uint32_t, float, const InputSnapshot&) {}
 private:
     float degrees_{30.0f};
 };
@@ -129,7 +130,7 @@ public:
         world.registry().emplace_or_replace<CGrabbable>(
             static_cast<entt::entity>(entity), CGrabbable{});
     }
-    void tick(World&, std::uint32_t, float) {}
+    void tick(World&, std::uint32_t, float, const InputSnapshot&) {}
 };
 PTV_REGISTER_MECHANIC("builtin.grab", GrabMechanic)
 
@@ -142,7 +143,7 @@ public:
     void configure(const nlohmann::json& p) {
         impulse_ = p.value("impulse", 4.0f);
     }
-    void tick(World&, std::uint32_t, float) {}
+    void tick(World&, std::uint32_t, float, const InputSnapshot&) {}
 private:
     float impulse_{4.0f};
 };
@@ -155,7 +156,7 @@ class UseInteractMechanic : public BuiltinMechanicBase<UseInteractMechanic> {
 public:
     static constexpr const char* kId = "builtin.use_interact";
     void configure(const nlohmann::json&) {}
-    void tick(World&, std::uint32_t, float) {}
+    void tick(World&, std::uint32_t, float, const InputSnapshot&) {}
 };
 PTV_REGISTER_MECHANIC("builtin.use_interact", UseInteractMechanic)
 
@@ -166,7 +167,7 @@ class PushPullMechanic : public BuiltinMechanicBase<PushPullMechanic> {
 public:
     static constexpr const char* kId = "builtin.push_pull";
     void configure(const nlohmann::json&) {}
-    void tick(World&, std::uint32_t, float) {}
+    void tick(World&, std::uint32_t, float, const InputSnapshot&) {}
 };
 PTV_REGISTER_MECHANIC("builtin.push_pull", PushPullMechanic)
 
@@ -181,7 +182,7 @@ public:
         world.registry().emplace_or_replace<CTriggerZone>(
             static_cast<entt::entity>(entity), CTriggerZone{});
     }
-    void tick(World&, std::uint32_t, float) {}
+    void tick(World&, std::uint32_t, float, const InputSnapshot&) {}
 };
 PTV_REGISTER_MECHANIC("builtin.trigger_zone", TriggerZoneMechanic)
 
@@ -194,7 +195,7 @@ public:
     void configure(const nlohmann::json& p) {
         interval_ = p.value("interval_s", 5.0f);
     }
-    void tick(World&, std::uint32_t, float) {}
+    void tick(World&, std::uint32_t, float, const InputSnapshot&) {}
 private:
     float interval_{5.0f};
 };
@@ -211,7 +212,7 @@ public:
         world.registry().emplace_or_replace<CInventorySlot>(
             static_cast<entt::entity>(entity), CInventorySlot{});
     }
-    void tick(World&, std::uint32_t, float) {}
+    void tick(World&, std::uint32_t, float, const InputSnapshot&) {}
 };
 PTV_REGISTER_MECHANIC("builtin.inventory", InventoryMechanic)
 
@@ -224,7 +225,7 @@ public:
     void configure(const nlohmann::json& p) {
         hook_id_ = p.value("hook_id", std::string{});
     }
-    void tick(World&, std::uint32_t, float) {}
+    void tick(World&, std::uint32_t, float, const InputSnapshot&) {}
 private:
     std::string hook_id_;
 };
@@ -244,7 +245,7 @@ public:
         world.registry().emplace_or_replace<CHealth>(
             static_cast<entt::entity>(entity), CHealth{max_hp_, max_hp_});
     }
-    void tick(World&, std::uint32_t, float) {}
+    void tick(World&, std::uint32_t, float, const InputSnapshot&) {}
 private:
     float max_hp_{100.0f};
 };
@@ -259,7 +260,7 @@ public:
     void configure(const nlohmann::json& p) {
         behaviour_id_ = p.value("behaviour_id", std::string{});
     }
-    void tick(World&, std::uint32_t, float) {}
+    void tick(World&, std::uint32_t, float, const InputSnapshot&) {}
 private:
     std::string behaviour_id_;
 };
@@ -275,7 +276,7 @@ public:
         speed_mps_ = p.value("speed_mps", 18.0f);
         lifetime_s_ = p.value("lifetime_s", 2.0f);
     }
-    void tick(World&, std::uint32_t, float) {}
+    void tick(World&, std::uint32_t, float, const InputSnapshot&) {}
 private:
     float speed_mps_{18.0f};
     float lifetime_s_{2.0f};
@@ -292,7 +293,7 @@ public:
         follow_head_ = p.value("follow_head", true);
         offset_m_ = p.value("offset_m", 1.2f);
     }
-    void tick(World&, std::uint32_t, float) {}
+    void tick(World&, std::uint32_t, float, const InputSnapshot&) {}
 private:
     bool follow_head_{true};
     float offset_m_{1.2f};
