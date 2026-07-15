@@ -14,6 +14,19 @@ export function StageTimeline({
     arr.push(s);
     byStage.set(s.stage, arr);
   }
+
+  const visible: string[] = STAGE_ORDER.filter(
+    (s) => s !== "created" && s !== "failed",
+  );
+
+  // While a run is in progress the pipeline always proceeds through to the end,
+  // so any stage AFTER the currently-running one will run in this pass. Show
+  // those as "queued" instead of the stale status left over from a previous run
+  // (e.g. a resume-from-world-generation shouldn't show scene_compile as
+  // "succeeded" until it has actually re-run).
+  const runActive = state.status === "running";
+  const runningIndex = runActive ? visible.indexOf(state.current_stage) : -1;
+
   return (
     <div className="grid md:grid-cols-[1fr_1fr] gap-4">
       <div className="ptv-card p-4">
@@ -21,26 +34,28 @@ export function StageTimeline({
           Pipeline stages
         </h2>
         <ol className="space-y-0">
-          {STAGE_ORDER.filter((s) => s !== "created" && s !== "failed").map(
-            (id) => {
-              const records = byStage.get(id) ?? [];
-              const latest = records[records.length - 1];
-              const status = latest?.status ?? (state.current_stage === id ? "running" : "pending");
-              return (
-                <li key={id} className="stage-row">
-                  <div>
-                    <div className="text-sm">{stageLabel(id)}</div>
-                    {latest?.message && (
-                      <div className="text-xs text-muted">{latest.message}</div>
-                    )}
-                  </div>
-                  <span className={"text-xs mono " + statusColor(status)}>
-                    {status}
-                  </span>
-                </li>
-              );
-            },
-          )}
+          {visible.map((id, idx) => {
+            const records = byStage.get(id) ?? [];
+            const latest = records[records.length - 1];
+            const queued = runActive && runningIndex >= 0 && idx > runningIndex;
+            const status = queued
+              ? "queued"
+              : latest?.status ?? (state.current_stage === id ? "running" : "pending");
+            return (
+              <li key={id} className="stage-row">
+                <div>
+                  <div className="text-sm">{stageLabel(id)}</div>
+                  {/* Hide the stale prior-run message on queued stages. */}
+                  {!queued && latest?.message && (
+                    <div className="text-xs text-muted">{latest.message}</div>
+                  )}
+                </div>
+                <span className={"text-xs mono " + statusColor(status)}>
+                  {status}
+                </span>
+              </li>
+            );
+          })}
         </ol>
       </div>
       <div className="ptv-card p-4">

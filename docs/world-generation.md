@@ -19,14 +19,9 @@ build_spec -> asset_manifest (no environment GLB) -> mechanic_plan -> scene_spec
 `world_generation` (`apps/orchestrator/ptv_orchestrator/pipeline/stage_world_generation.py`):
 
 1. Builds the **world architect** agent (`world_agent.py`) via the OpenAI Agents
-   SDK: model `world_model` (default `gpt-5.6-sol`) driven through an explicit
-   `OpenAIResponsesModel` (the Responses API is OpenAI's recommendation for
-   GPT-5.6 reasoning + tools + multi-turn), `ModelSettings(reasoning=
+   SDK: model `world_model` (default `gpt-5.6-sol`), `ModelSettings(reasoning=
    Reasoning(effort=world_reasoning_effort))` (default `xhigh`), `WebSearchTool`
-   enabled, a persistent `Session`, and `max_turns = world_agent_max_turns`. The
-   agent uses a dedicated `AsyncOpenAI` client whose HTTP timeout is raised to
-   `world_request_timeout_seconds` (default 1800s) so a long `xhigh` turn does
-   not hit the client's 600s default and fail with "Request timed out".
+   enabled, a persistent `Session`, and `max_turns = world_agent_max_turns`.
 2. Hands it `engine/world_author_guide.md` (the "understand the engine" input),
    the BuildSpec brief, and the list of available object asset ids.
 3. Writes the agent's bounded C++ into `engine/generated/world/<project_id>/`.
@@ -120,14 +115,8 @@ Source: `engine/worldgen/samples/starter_city.cpp`.
 
 `apps/orchestrator/ptv_orchestrator/settings.py`:
 
-- `world_model` (default `gpt-5.6-sol`; the `gpt-5.6` alias also routes to Sol)
-- `world_reasoning_effort` (default `xhigh`; for GPT-5.6 one of
-  none|low|medium|high|xhigh|max)
-- `world_request_timeout_seconds` (default 1800) - per-request HTTP timeout for
-  the architect's model calls. A single `xhigh` turn with `WebSearchTool` and a
-  large multi-file C++ payload can exceed the OpenAI client's 600s default and
-  fail with "Request timed out", so the stage uses a dedicated `AsyncOpenAI`
-  client with this longer timeout.
+- `world_model` (default `gpt-5.6-sol`)
+- `world_reasoning_effort` (default `xhigh`; one of none|minimal|low|medium|high|xhigh)
 - `world_max_repair_rounds` (default 6)
 - `world_agent_max_turns` (default 80)
 

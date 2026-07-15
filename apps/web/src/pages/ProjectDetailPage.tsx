@@ -1,10 +1,73 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useParams } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, eventStream } from "../api/client";
 import { StageTimeline } from "../components/StageTimeline";
 import { ArtifactBrowser } from "../components/ArtifactBrowser";
 import { LogsViewer } from "../components/LogsViewer";
+import { RESUMABLE_STAGES, stageLabel } from "../lib/stages";
+
+/** Dropdown button: pick any pipeline stage to resume from. Running it re-runs
+ *  that stage and every stage after it (stages before are skipped). */
+function ResumeFromMenu({ projectId }: { projectId: string }) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const onDown = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setOpen(false);
+    };
+    document.addEventListener("mousedown", onDown);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onDown);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [open]);
+
+  return (
+    <div className="relative" ref={ref}>
+      <button
+        className="ptv-button"
+        aria-haspopup="menu"
+        aria-expanded={open}
+        onClick={() => setOpen((o) => !o)}
+      >
+        Resume from stage
+        <span aria-hidden className="text-xs">
+          ▾
+        </span>
+      </button>
+      {open && (
+        <div
+          role="menu"
+          className="absolute right-0 z-30 mt-1 max-h-80 min-w-[18rem] overflow-auto ptv-card p-1"
+        >
+          <div className="px-3 py-1.5 text-xs text-muted">
+            Runs the selected stage and everything after it.
+          </div>
+          {RESUMABLE_STAGES.map((s) => (
+            <button
+              key={s}
+              role="menuitem"
+              className="block w-full rounded px-3 py-1.5 text-left text-sm hover:bg-white/5"
+              onClick={() => {
+                setOpen(false);
+                api.run(projectId, { resume_from: s }).catch(() => void 0);
+              }}
+            >
+              {stageLabel(s)}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
 
 type Tab = "pipeline" | "prompt" | "artifacts" | "logs";
 
@@ -67,6 +130,7 @@ export default function ProjectDetailPage() {
           <button className="ptv-button" onClick={() => api.run(id, { resume: true }).catch(() => void 0)}>
             Resume
           </button>
+          <ResumeFromMenu projectId={id} />
           <button
             className={canLaunch ? "ptv-button-primary" : "ptv-button-primary opacity-40 cursor-not-allowed"}
             disabled={!canLaunch}

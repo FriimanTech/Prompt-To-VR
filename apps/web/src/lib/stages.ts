@@ -29,10 +29,30 @@ export const STAGE_LABELS: Record<string, string> = {
   world_generation: "9. VR world generation",
   scene_compile: "10. Scene compile",
   cmake_configure: "11. CMake configure",
-  cmake_build: "12. CMake build",
+  cmake_build: "11. CMake configure + build",
+  engine_promotion: "12. Engine promotion",
   ready_to_launch: "Ready to launch",
   failed: "Failed",
 };
+
+// The stages the pipeline can actually run, in order. Mirrors the backend
+// ``_STAGES`` list in apps/orchestrator/.../pipeline/orchestrator.py: CMake
+// configure is folded into ``cmake_build``, and ``engine_promotion`` is the
+// final stage. Used to populate the "Resume from stage" menu.
+export const RESUMABLE_STAGES = [
+  "build_spec",
+  "asset_manifest",
+  "mechanic_plan",
+  "scene_spec",
+  "reference_images",
+  "tripo_models",
+  "asset_normalization",
+  "code_generation",
+  "world_generation",
+  "scene_compile",
+  "cmake_build",
+  "engine_promotion",
+] as const;
 
 export function stageLabel(id: string): string {
   return STAGE_LABELS[id] ?? id;
@@ -60,6 +80,9 @@ export function statusColor(status: string): string {
     case "compile_error":
     case "run_error":
       return "text-err";
+    case "pending":
+    case "queued":
+      return "text-muted";
     default:
       return "text-muted";
   }

@@ -141,17 +141,74 @@ def resume_pipeline(project_id: str, settings: Settings | None = None) -> None:
                 resume_from = stage
                 break
 
-        resuming = False
-        for stage, fn in _STAGES:
-            if not resuming:
-                if resume_from is None:
-                    ctx.emit(stage, "skipped", "already done")
-                    continue
-                if stage != resume_from:
-                    ctx.emit(stage, "skipped", "already done")
-                    continue
-                resuming = True
-            fn(ctx)
+        _run_stages_from(ctx, resume_from)
+    finally:
+        lock.release()
+
+
+def _run_stages_from(ctx: PipelineContext, resume_from: ProjectStage | None) -> None:
+    """Run ``resume_from`` and every stage after it; skip the ones before.
+
+    ``resume_from is None`` means everything upstream already succeeded, so all
+    stages are skipped (nothing to do). Downstream artefacts depend on upstream
+    ones, so once we start we run every remaining stage in order.
+    """
+    resuming = False
+    for stage, fn in _STAGES:
+        if not resuming:
+            if resume_from is None or stage != resume_from:
+                ctx.emit(stage, "skipped", "already done")
+                continue
+            resuming = True
+        fn(ctx)
+
+
+def resume_from_stage(
+    project_id: str, stage: ProjectStage, settings: Settings | None = None
+) -> None:
+    """Resume the pipeline from an explicit stage: run ``stage`` and every
+    stage after it (regardless of prior status); skip the ones before it.
+
+    Unlike :func:`resume_pipeline` (which auto-detects the first not-yet-
+    succeeded stage), this lets the operator force a re-run starting at a chosen
+    stage -- e.g. pick ``world_generation`` to re-author the world and rebuild
+    everything downstream.
+    """
+    lock = _project_lock(project_id)
+    if not lock.acquire(blocking=False):
+        ctx = _make_ctx(project_id, settings)
+        ctx.emit(
+            stage,
+            "skipped",
+            "another run is already in progress for this project",
+        )
+        return
+    try:
+        ctx = _make_ctx(project_id, settings)
+        if stage not in [s for s, _ in _STAGES]:
+            # Not a pipeline-runnable stage (e.g. cmake_configure is folded into
+            # cmake_build; created/ready_to_launch/failed are markers).
+            ctx.emit(
+                stage,
+                "failed",
+                f"stage '{stage.value}' cannot be run directly",
+            )
+            return
+        state = ctx.store.load_state(project_id)
+        state.status = ProjectStatus.running
+        ctx.store.save_state(state)
+        try:
+            _run_stages_from(ctx, stage)
+        except Exception as e:
+            state = ctx.store.load_state(project_id)
+            ctx.store.record_stage(
+                state,
+                state.current_stage,
+                ProjectStatus.failed,
+                message=str(e)[:1000],
+            )
+            ctx.emit(state.current_stage, "failed", str(e)[:300])
+            raise
     finally:
         lock.release()
 

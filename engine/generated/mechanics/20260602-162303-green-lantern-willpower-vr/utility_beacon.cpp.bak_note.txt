@@ -1,1 +1,0 @@
-Note: no external engine light component exists. The beacon publishes AI and VFX intent via CTag strings for other systems/tests to consume.

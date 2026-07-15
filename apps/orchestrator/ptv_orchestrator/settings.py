@@ -90,24 +90,10 @@ class Settings(BaseSettings):
     # A single "world architect" agent (OpenAI Agents SDK) authors ALL the
     # C++ for the VR environment, bounded to the IWorldBuilder surface and
     # compiled + run offline in ptv_worldgen. Defaults pin the highest-tier
-    # model + reasoning per the current SDK: GPT-5.6 Sol (the ``gpt-5.6``
-    # alias also routes here) at reasoning effort ``xhigh``. The stage runs
-    # through the Responses API (recommended by OpenAI for GPT-5.6 reasoning
-    # + tools + multi-turn).
-    world_model: str = "gpt-5.6-sol"
-    # reasoning.effort: one of none|minimal|low|medium|high|xhigh|max for
-    # GPT-5.6 (model-dependent). ``xhigh`` matches the prior 5.5 baseline;
-    # ``max`` is available for the hardest quality-first runs (slower/costlier).
+    # model + reasoning per the current SDK (gpt-5.5, reasoning effort xhigh).
+    world_model: str = "gpt-5.5"
+    # reasoning.effort: one of none|minimal|low|medium|high|xhigh (model-dep).
     world_reasoning_effort: str = "xhigh"
-    # Per-request HTTP timeout (seconds) for the world architect's model
-    # calls. A single xhigh turn with WebSearchTool + a large multi-file C++
-    # payload routinely exceeds the OpenAI client's 600s (10 min) default,
-    # which surfaces as "Request timed out" and drops the stage to the
-    # fallback world. We give it generous headroom; tune via
-    # ``WORLD_REQUEST_TIMEOUT_SECONDS`` when needed.
-    world_request_timeout_seconds: float = Field(
-        default=1800.0, ge=120.0, le=7200.0
-    )
     # How many compile-and-repair rounds the stage will attempt before
     # falling back to the deterministic world so the project still boots.
     world_max_repair_rounds: int = Field(default=6, ge=1, le=20)

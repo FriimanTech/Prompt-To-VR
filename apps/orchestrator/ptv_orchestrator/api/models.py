@@ -11,8 +11,12 @@ class CreateProjectRequest(BaseModel):
 
 
 class RunStageRequest(BaseModel):
+    # Run exactly one stage.
     stage: str | None = None
+    # Auto-resume from the first not-yet-succeeded stage.
     resume: bool = False
+    # Resume from an explicit stage: run this stage and everything after it.
+    resume_from: str | None = None
 
 
 class LaunchRequest(BaseModel):

@@ -13,7 +13,12 @@ from sse_starlette.sse import EventSourceResponse
 
 from ..engine_catalog import builtin_catalog, promoted_catalog
 from ..events import get_bus
-from ..pipeline import resume_pipeline, run_pipeline, run_stage
+from ..pipeline import (
+    resume_from_stage,
+    resume_pipeline,
+    run_pipeline,
+    run_stage,
+)
 from ..settings import get_settings
 from ..storage import ProjectStore
 from .launch import find_starter_exe, launch_exe
@@ -160,6 +165,15 @@ def run(project_id: str, req: RunStageRequest, background: BackgroundTasks):
             raise HTTPException(status_code=400, detail="unknown stage")
         background.add_task(run_stage, project_id, stage)
         return {"ok": True, "mode": "stage", "stage": stage.value}
+    if req.resume_from:
+        from ptv_schemas import ProjectStage
+
+        try:
+            stage = ProjectStage(req.resume_from)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="unknown stage")
+        background.add_task(resume_from_stage, project_id, stage)
+        return {"ok": True, "mode": "resume_from", "stage": stage.value}
     if req.resume:
         background.add_task(resume_pipeline, project_id)
         return {"ok": True, "mode": "resume"}

@@ -84,8 +84,11 @@ export const api = {
     if (!res.ok) return "";
     return res.text();
   },
-  run: (id: string, opts?: { stage?: string; resume?: boolean }) =>
-    req<{ ok: boolean; mode: string }>(`/projects/${id}/run`, {
+  run: (
+    id: string,
+    opts?: { stage?: string; resume?: boolean; resume_from?: string },
+  ) =>
+    req<{ ok: boolean; mode: string; stage?: string }>(`/projects/${id}/run`, {
       method: "POST",
       body: JSON.stringify(opts ?? {}),
     }),

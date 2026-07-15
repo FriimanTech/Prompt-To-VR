@@ -51,13 +51,19 @@ MeshDesc make_pyramid(const Vec3& center, float base, float height,
 class StarterCityWorld final : public IWorldBuilder {
 public:
     void build(WorldContext& w) override {
-        // Dusk sky.
+        // Dusk sky. Also exercises the author-controlled environment knobs
+        // (ambient fill, fog, exposure) so this sample validates the full
+        // lighting surface, not just the sky gradient.
         SkyDesc sky{};
         sky.top = Color{0.04f, 0.06f, 0.14f};
         sky.horizon = Color{0.85f, 0.45f, 0.30f};
         sky.sun_direction = Vec3{0.35f, -0.55f, 0.30f};
         sky.sun_color = Color{1.0f, 0.85f, 0.65f};
         sky.sun_intensity = 1.2f;
+        sky.ambient_color = Color{0.22f, 0.20f, 0.26f};  // cool ground bounce
+        sky.ambient_intensity = 0.35f;                   // readable baseline
+        sky.fog_density = 0.010f;                         // subtle depth haze
+        sky.exposure = 1.05f;                             // slight lift
         w.sky(sky);
 
         // Ground plaza with collision.
@@ -80,6 +86,7 @@ public:
         fill.position = Vec3{0.0f, 6.0f, 0.0f};
         fill.color = Color{0.4f, 0.55f, 1.0f};
         fill.intensity = 1.0f;
+        fill.range = 30.0f;  // author-controlled falloff radius
         w.light(fill);
 
         // A grid of buildings around a central plaza.

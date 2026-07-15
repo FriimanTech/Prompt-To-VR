@@ -2,61 +2,6 @@
   "version": 1,
   "items": [
     {
-      "id": "promoted.oath_recharge_mechanic",
-      "summary": "Implements the Oath-based recharge flow when the player presses the ring to a lantern battery socket. Captures voice, sends HTTPS to developer-provided STT, fuzzy-matches against the canonical Oath, and on success plays a green-aura recharge cinematic and refills ring energy; otherwise shows failure prompt and enforces cooldown. Integrates with builtin.inventory for the 'ring_energy' resource, builtin.use_interact or trigger volumes for socket proximity, and ui_ring_hud for prompts.",
-      "category": "mechanic",
-      "kind": "mechanics",
-      "source_path": "engine/generated/mechanics/20260423-162629-green-lantern-game/oath_recharge_mechanic.cpp",
-      "code_task_id": "oath_recharge_mechanic",
-      "project_id": "20260423-162629-green-lantern-game",
-      "promoted_at": "2026-04-24T23:14:13.876806+00:00",
-      "params": {}
-    },
-    {
-      "id": "promoted.ring_hover_flight",
-      "summary": "Adds a hover-flight mode unlocked after tutorial. Holding grip engages hover; thumbstick moves with capped speed and ascent, altitude cap above ground, and optional soft pushback near scene bounds. Applies speed-scaled comfort vignette and drains ring_energy while active. Disabled in no-fly volumes and in indoor scenes. Coexists with teleport and snap turn.",
-      "category": "mechanic",
-      "kind": "mechanics",
-      "source_path": "engine/generated/mechanics/20260423-162629-green-lantern-game/ring_hover_flight.cpp",
-      "code_task_id": "ring_hover_flight",
-      "project_id": "20260423-162629-green-lantern-game",
-      "promoted_at": "2026-04-24T23:14:13.877134+00:00",
-      "params": {}
-    },
-    {
-      "id": "promoted.construct_quick_select_mechanic",
-      "summary": "Implements a radial quick-select on the non-dominant controller to spawn one of three constructs: Shield, Hammer, Platform. While holding the assignable menu button, display a simple radial selector with three slices. On selection release, spawn the chosen construct prefab at a context-appropriate position: Shield snaps to ground in front of player, Hammer spawns grabbable in front of player hands with two-hand grab hints, Platform spawns slightly ahead at ground/hover height. Each construct has a timed despawn (e.g., 30s) or can be dismissed by the player. Ensure constructs use green emissive",
-      "category": "mechanic",
-      "kind": "mechanics",
-      "source_path": "engine/generated/mechanics/20260424-233636-green-lantern-game/construct_quick_select_mechanic.cpp",
-      "code_task_id": "construct_quick_select_mechanic",
-      "project_id": "20260424-233636-green-lantern-game",
-      "promoted_at": "2026-04-25T00:06:36.556769+00:00",
-      "params": {}
-    },
-    {
-      "id": "promoted.ring_charge_and_recharge",
-      "summary": "Provides a ring_energy resource system and a proximity-activated recharge ritual at the Recharge Station pedestal. Features: ring_energy pool with configurable max and regen=0 by default; cost + per-second drain APIs for other mechanics (constructs, flight). When the player places the ring hand into the pedestal socket volume, begin a short recharge sequence: escalating haptics, rising green beam, UI fill on ring HUD, and playback of original (non-copyright) recharge line from the ring voice pack. On completion, set ring_energy to 100%. Prevents recharge when already full and enforces a brief ",
-      "category": "mechanic",
-      "kind": "mechanics",
-      "source_path": "engine/generated/mechanics/20260429-221856-enhanced-green-lantern-game/ring_charge_and_recharge.cpp",
-      "code_task_id": "ring_charge_and_recharge",
-      "project_id": "20260429-221856-enhanced-green-lantern-game",
-      "promoted_at": "2026-04-29T22:50:06.563474+00:00",
-      "params": {}
-    },
-    {
-      "id": "promoted.ring_construct_core",
-      "summary": "Implements the Green Lantern ring construct loop with three layers: (A) Instant constructs (energy bolt, fist, sword, round shield, barrier wall); (B) Sustained constructs (dome shield, energy cage, continuous beam) draining ring_energy over time; (C) Guided freeform shaping for simple walls/platforms via right-grip shaping with translucent previews, size/orient, and finalize on right-trigger. Input: hold Y to open a radial category wheel (categories: Attack, Defense/Control, Utility); release to select; Right Trigger activates/spawns; Right Grip scales/orients during preview; Left Trigger tog",
-      "category": "mechanic",
-      "kind": "mechanics",
-      "source_path": "engine/generated/mechanics/20260429-221856-enhanced-green-lantern-game/ring_construct_core.cpp",
-      "code_task_id": "ring_construct_core",
-      "project_id": "20260429-221856-enhanced-green-lantern-game",
-      "promoted_at": "2026-04-29T22:50:06.563742+00:00",
-      "params": {}
-    },
-    {
       "id": "promoted.hover_mode_mechanic",
       "summary": "Purpose: Controlled hover for precise positioning with quick entry/exit and stabilization. Used for construct placement and mid-air combat.\n\nBehaviour:\n- Toggle entry: A (Right) double-tap toggles hover on/off. Distinguish double-tap with params.value(\"double_tap_ms\", 350). If on ground and double-tap A, enter hover at current position with vertical lock and subtle bob.\n- Movement while hovering:\n  - Left Thumbstick: strafe/forward movement in chosen locomotion orientation (read from CLocomotionSettings.mode for head or controller relative vectors). Speed limited by params.value(\"hover_max_spe",
       "category": "mechanic",
