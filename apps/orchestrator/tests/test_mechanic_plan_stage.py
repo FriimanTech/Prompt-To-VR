@@ -10,8 +10,6 @@ from __future__ import annotations
 import threading
 from pathlib import Path
 
-import pytest
-
 from ptv_orchestrator.events import EventBus, PipelineEvent
 from ptv_orchestrator.pipeline import stage_mechanic_plan
 from ptv_orchestrator.pipeline.binding_validator import validate_bindings
@@ -214,7 +212,10 @@ def test_stage_normalizes_face_button_hand(tmp_path):
     assert any("right-controller only" in m for m in warnings), warnings
 
 
-def test_stage_raises_on_binding_conflict(tmp_path):
+def test_stage_allows_shared_control_binding(tmp_path):
+    """Two mechanics binding the same control on the same hand is allowed
+    (e.g. a UI pointer clicking with the trigger while that hand also
+    grabs / fires a weapon). The stage must NOT reject the plan."""
     store, pid, settings = _seed(tmp_path)
     ctx, bus = _ctx(store, pid, settings)
 
@@ -230,22 +231,23 @@ def test_stage_raises_on_binding_conflict(tmp_path):
                 code_task=_code_task("shooting_hub"),
             ),
             MechanicPlanItem(
-                id="grenade",
+                id="ui_pointer",
                 classification=MechanicClassification.generate,
                 binding=ControllerBinding(
                     control=ControllerControl.trigger, hand=ControllerHand.right
                 ),
-                code_task=_code_task("grenade"),
+                code_task=_code_task("ui_pointer"),
             ),
         ],
     )
 
-    with pytest.raises(ValueError, match="binding"):
-        stage_mechanic_plan.run_with_planner(ctx, planner=_stub_planner(plan))
+    stage_mechanic_plan.run_with_planner(ctx, planner=_stub_planner(plan))
 
+    saved = store.load_mechanic_plan(pid)
+    assert {it.id for it in saved.items} == {"shooting_hub", "ui_pointer"}
     statuses = [e.status for e in bus.published]
-    assert "succeeded" not in statuses
-    assert "failed" in statuses
+    assert "succeeded" in statuses
+    assert "failed" not in statuses
 
 
 # ---------------------------------------------------------------------------
@@ -262,7 +264,8 @@ def _item(mid: str, control: ControllerControl, hand: ControllerHand) -> Mechani
     )
 
 
-def test_validator_detects_same_control_same_hand_conflict():
+def test_validator_allows_same_control_same_hand():
+    """Sharing a control on the same hand is allowed (not a conflict)."""
     plan = MechanicPlan(
         prompt_id="demo",
         items=[
@@ -271,11 +274,13 @@ def test_validator_detects_same_control_same_hand_conflict():
         ],
     )
     res = validate_bindings(plan)
-    assert not res.ok
-    assert any("conflict" in e for e in res.errors)
+    assert res.ok
+    assert not res.errors
 
 
-def test_validator_either_hand_conflicts_with_specific_hand():
+def test_validator_allows_either_hand_with_specific_hand():
+    """An 'either' binding alongside a specific-hand binding on the same
+    control is allowed."""
     plan = MechanicPlan(
         prompt_id="demo",
         items=[
@@ -284,7 +289,8 @@ def test_validator_either_hand_conflicts_with_specific_hand():
         ],
     )
     res = validate_bindings(plan)
-    assert not res.ok
+    assert res.ok
+    assert not res.errors
 
 
 def test_validator_allows_same_control_different_hands():

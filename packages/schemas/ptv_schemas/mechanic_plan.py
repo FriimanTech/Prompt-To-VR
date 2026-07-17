@@ -52,10 +52,11 @@ class ControllerBinding(StrictModel):
     """The controller control that activates an input-driven mechanic.
 
     Set by the MechanicPlan agent (from the prompt when it names a binding,
-    otherwise a VR-best-practice default), validated deterministically for
-    conflicts, and materialized into the entity's ``mechanic_bindings.params``
-    at scene compile so the running mechanic reads ``control`` + ``hand`` from
-    its params and checks the live ``InputSnapshot``.
+    otherwise a VR-best-practice default), normalized deterministically, and
+    materialized into the entity's ``mechanic_bindings.params`` at scene
+    compile so the running mechanic reads ``control`` + ``hand`` from its
+    params and checks the live ``InputSnapshot``. Multiple mechanics may
+    share the same control on the same hand -- that is not a conflict.
 
     Layout constraints (enforced by the binding validator): A/B live on the
     RIGHT controller only; X/Y live on the LEFT controller only.
@@ -72,20 +73,14 @@ class ControllerBinding(StrictModel):
 # engine/runtime/src/mechanics/MechanicRegistry.cpp.
 BUILTIN_MECHANIC_IDS = {
     "builtin.teleport",
+    "builtin.locomotion.teleport",
     "builtin.smooth_locomotion",
+    "builtin.locomotion.slide.head_relative",
+    "builtin.locomotion.slide.controller_relative",
     "builtin.snap_turn",
+    "builtin.locomotion.snap_turn",
     "builtin.grab",
     "builtin.throw",
-    "builtin.use_interact",
-    "builtin.push_pull",
-    "builtin.trigger_zone",
-    "builtin.spawner",
-    "builtin.inventory",
-    "builtin.dialogue_trigger",
-    "builtin.health_damage",
-    "builtin.enemy_ai_hook",
-    "builtin.projectile_hook",
-    "builtin.hud_anchor",
 }
 
 
@@ -118,8 +113,9 @@ class MechanicPlanItem(StrictModel):
         description=(
             "Controller binding for input-driven mechanics. None (or"
             " control='none') for mechanics that are not directly driven by a"
-            " controller control. Validated for conflicts before scene compile"
-            " and materialized into scene.json params."
+            " controller control. Normalized before scene compile and"
+            " materialized into scene.json params. Multiple mechanics may"
+            " share the same control on the same hand."
         ),
     )
     code_task: Optional[CodeTask] = Field(

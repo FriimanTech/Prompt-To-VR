@@ -39,8 +39,8 @@ MechanicPlan agent assigns a `ControllerBinding` (`control` +
 
 * If the prompt names a binding ("press A to jump", "left trigger
   fires"), it is used verbatim.
-* Otherwise the agent picks a VR-best-practice default (it may
-  `web_search` for current Quest 3 ergonomics).
+* Otherwise the agent picks a VR-best-practice default from the prompt
+  and binding rules (no web search).
 
 `control` is one of `trigger | grip | thumbstick | a | b | x | y | none`
 (`none` = the mechanic is not directly controller-driven, e.g. a wave
@@ -52,11 +52,14 @@ timer or health system). `hand` is `left | right | either`.
 stage and is deterministic:
 
 * Normalizes face-button hands (A/B → right, X/Y → left) with a warning.
-* **Hard error** if two different mechanics claim the same control on the
-  same hand (`either` conflicts with both specific hands).
 * **Warning** if a mechanic rebinds an engine-reserved control (left
   thumbstick = locomotion, right thumbstick = snap turn, both grips =
   grab/throw) unless it IS that locomotion/grab system.
+
+Sharing a control is **allowed**: multiple mechanics may bind the same
+control on the same hand (e.g. a UI pointer that clicks with the trigger
+while that hand also grabs / fires a weapon). The validator never rejects a
+plan on binding grounds — it only normalizes hands and emits warnings.
 
 ### Materialization
 

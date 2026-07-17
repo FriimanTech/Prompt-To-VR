@@ -119,9 +119,8 @@ Here is what the system does, step by step:
    * `flight` → first run: catalog has no flight. Plan says `generate`
      with a CodeTask describing thumbstick-driven horizontal flight
      while in the hover state.
-   * `superman_legs` → `builtin.hud_anchor` is reused as a body-anchor
-     hook for the legs mesh; if more is needed, an additional
-     `generate` task is emitted.
+   * `superman_legs` → no catalog entry fits, so a `generate` task is
+     emitted for a body-anchor hook that positions the legs mesh.
 
 4. **Code-generation stage** writes
    `engine/generated/mechanics/<pid>/superman_hover_toggle.cpp` and

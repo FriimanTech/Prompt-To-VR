@@ -22,6 +22,14 @@ Architecture (see ``docs/codegen-agents.md`` for the full design):
   ``validate_header_content`` (no registration macros in headers).
   The board records ``files_written`` and ``exports`` so downstream
   tasks can plug into them.
+* Once every task is ``done``, an optional **compile-verification +
+  repair loop** builds the ``ptv_runtime`` target (which globs in every
+  generated mechanic). Include validation only checks *includes*, not
+  that the C++ compiles -- this loop closes that gap. On a compile
+  failure the compiler errors are mapped back to the owning task and fed
+  to that task's agent as a ``repair_context`` so it regenerates the
+  file; the stage then rebuilds, up to ``codegen_max_repair_rounds``
+  times. Controlled by ``settings.codegen_verify_compile``.
 
 The CodeTask ``test_files[]`` field is intentionally unused: no disk
 writes, no CMake test targets, no planner prompts for tests.
@@ -36,7 +44,7 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from ptv_schemas import (
     BuildSpec,
@@ -49,6 +57,7 @@ from ptv_schemas import (
     SceneSpec,
 )
 
+from ..build.cmake_runner import configure_and_build
 from .bounds import (
     assert_path_allowed,
     filter_cpp_only,
@@ -78,6 +87,11 @@ _KIND_DIR: dict[CodeTaskKind, str] = {
 }
 
 
+# A compile verifier builds the generated C++ and reports ``(ok, log)``.
+# Production uses ``_default_verify_compile``; tests inject a stub.
+CompileVerifier = Callable[[], "tuple[bool, str]"]
+
+
 # ---------------------------------------------------------------------------
 # Public entry point (matches the StageFn signature in orchestrator.py)
 # ---------------------------------------------------------------------------
@@ -89,7 +103,9 @@ def run(ctx: PipelineContext) -> StageResult:
 
 
 def run_with_runner(
-    ctx: PipelineContext, agent_runner: Optional[RunnerFn] = None
+    ctx: PipelineContext,
+    agent_runner: Optional[RunnerFn] = None,
+    compile_verifier: Optional[CompileVerifier] = None,
 ) -> StageResult:
     """Run the code-generation stage with an optional injected agent
     runner. Tests use this hook to bypass the OpenAI Agents SDK.
@@ -102,6 +118,12 @@ def run_with_runner(
         Optional ``(CodegenAgentInput, model) -> CodegenAgentResult``
         callable. When ``None`` (production), the default OpenAI Agents
         SDK runner is used.
+    compile_verifier:
+        Optional ``() -> (ok, log)`` callable used by the compile-verify
+        loop. When ``None`` (production) and
+        ``settings.codegen_verify_compile`` is set, the default cmake
+        verifier builds the ``ptv_runtime`` target. Tests inject a stub
+        so no real toolchain is required.
     """
 
     ctx.emit(ProjectStage.code_generation, "running", "Generating C++ modules")
@@ -231,6 +253,54 @@ def run_with_runner(
             fut.result()
 
     # ------------------------------------------------------------------
+    # Compile-verification + repair loop
+    #
+    # Every task wrote its files and passed include validation, but that
+    # does not prove the C++ compiles. If nothing failed/blocked, build the
+    # ptv_runtime target (which globs in the generated mechanics) and feed
+    # any compiler errors back to the owning task's agent to regenerate.
+    # ------------------------------------------------------------------
+    pre_failed = [
+        tid
+        for tid in board.task_order()
+        if (board.task(tid) or {}).get("status") == "failed"
+    ]
+    pre_blocked = [
+        tid
+        for tid in board.task_order()
+        if (board.task(tid) or {}).get("status") == "blocked"
+    ]
+    verify_excerpt = ""
+    if (
+        not pre_failed
+        and not pre_blocked
+        and getattr(ctx.settings, "codegen_verify_compile", True)
+        and runtime.produced
+    ):
+        verifier = compile_verifier or (lambda: _default_verify_compile(ctx))
+        max_rounds = max(0, int(getattr(ctx.settings, "codegen_max_repair_rounds", 2)))
+        verify_ok, verify_log, failing_after = runtime.verify_and_repair(
+            verifier=verifier, max_rounds=max_rounds
+        )
+        if not verify_ok:
+            verify_excerpt = _error_excerpt(verify_log)
+            # Mark the still-failing tasks so the standard failure path
+            # reports + raises. If we could not map the errors to a
+            # specific task, mark every codegen task so the build stage
+            # never runs against C++ that does not compile.
+            targets = failing_after or list(tasks_by_id.keys())
+            for tid in targets:
+                row = board.task(tid) or {}
+                if row.get("status") == "done":
+                    try:
+                        board.mark_failed(
+                            tid,
+                            error=f"compile verification failed: {verify_excerpt}"[:2000],
+                        )
+                    except KeyError:
+                        pass
+
+    # ------------------------------------------------------------------
     # Wrap up
     # ------------------------------------------------------------------
     final_counts = board.status_counts()
@@ -265,6 +335,8 @@ def run_with_runner(
         detail += f" failed_ids={','.join(failed_ids)}"
     if blocked_ids:
         detail += f" blocked_ids={','.join(blocked_ids)}"
+    if verify_excerpt:
+        detail += f" compile_error={verify_excerpt[:200]}"
 
     ctx.store.record_stage(
         state,
@@ -448,10 +520,14 @@ class _StageRuntime:
     # One task -> agent -> file writes -> exports
     # ------------------------------------------------------------------
     def _process_one_task(
-        self, *, agent_id: str, task_id: str
+        self, *, agent_id: str, task_id: str, repair_context: str = ""
     ) -> tuple[list[str], dict[str, Any]]:
         """Run the agent for ``task_id``, validate + write its files,
-        return ``(files_written_rel_paths, exports)``."""
+        return ``(files_written_rel_paths, exports)``.
+
+        ``repair_context`` is non-empty only on a compile-repair re-run; it
+        carries the compiler errors + current file contents so the agent
+        fixes the existing files instead of authoring from scratch."""
 
         task = self.tasks_by_id.get(task_id)
         if task is None:
@@ -499,6 +575,7 @@ class _StageRuntime:
             build_spec_excerpt=bs_excerpt,
             instructions=CODE_TASK_SYSTEM,
             base_source_block=base_source_block,
+            repair_context=repair_context,
             extra_instructions=extra,
         )
 
@@ -658,6 +735,149 @@ class _StageRuntime:
         out_dir = self.repo_root / rel_dir
         return out_dir / f"{_safe_filename(task.id)}.codetask.json"
 
+    # ------------------------------------------------------------------
+    # Compile verification + repair
+    # ------------------------------------------------------------------
+    def verify_and_repair(
+        self, *, verifier: CompileVerifier, max_rounds: int
+    ) -> tuple[bool, str, list[str]]:
+        """Build the generated C++ and repair tasks whose files fail to
+        compile.
+
+        Loops: build -> on failure map compiler errors to owning tasks ->
+        re-run those tasks' agents with the errors as ``repair_context`` ->
+        rebuild. Returns ``(ok, last_build_log, still_failing_task_ids)``.
+        ``still_failing_task_ids`` is empty on success; on failure it lists
+        the tasks the errors mapped to (empty if none could be mapped).
+        """
+        last_log = ""
+        for rnd in range(0, max_rounds + 1):
+            self.ctx.emit(
+                ProjectStage.code_generation,
+                "verify",
+                f"compile check (round {rnd}/{max_rounds})",
+            )
+            ok, log = verifier()
+            last_log = log
+            if ok:
+                self.ctx.emit(
+                    ProjectStage.code_generation,
+                    "verify_ok",
+                    f"generated C++ compiled (round {rnd})",
+                )
+                return True, log, []
+
+            failing = self._failing_tasks_from_log(log)
+            excerpt = _error_excerpt(log)
+            self.ctx.emit(
+                ProjectStage.code_generation,
+                "verify_error",
+                f"round {rnd}: {excerpt[:200]}",
+            )
+
+            # Out of budget, or errors we cannot attribute to a task: stop.
+            if rnd >= max_rounds:
+                return False, log, list(failing.keys())
+            if not failing:
+                return False, log, []
+
+            for tid, errs in failing.items():
+                self._repair_one_task(tid, errs, log)
+
+        return False, last_log, []
+
+    def _failing_tasks_from_log(self, log: str) -> dict[str, list[str]]:
+        """Map compiler error lines to the codegen task that owns the file.
+
+        Builds a ``file -> task_id`` index from every task's
+        ``files_written`` (repo-relative posix + basename), then attributes
+        each error line to a task by the source path it names. Returns
+        ``{task_id: [error lines]}``."""
+        file_to_task: dict[str, str] = {}
+        for tid in self.tasks_by_id:
+            row = self.board.task(tid) or {}
+            for f in row.get("files_written", []):
+                fp = str(f).replace("\\", "/").lower()
+                file_to_task[fp] = tid
+                file_to_task[fp.rsplit("/", 1)[-1]] = tid  # basename
+
+        per_task: dict[str, list[str]] = {}
+        for line in log.splitlines():
+            low = line.lower()
+            if not (": error" in low or "error c" in low or "fatal error" in low):
+                continue
+            # MSVC: C:\path\file.cpp(42): error C2065: ...
+            # clang/gcc: /path/file.cpp:42:5: error: ...
+            m = re.search(r"([A-Za-z]:[^()<>|]+?\.(?:cpp|h|hpp))\(\d+", line)
+            if not m:
+                m = re.search(r"([^\s:<>|]+\.(?:cpp|h|hpp)):\d+", line)
+            token = m.group(1).replace("\\", "/").lower() if m else ""
+            tid: Optional[str] = None
+            if token:
+                base = token.rsplit("/", 1)[-1]
+                for fp, owner in file_to_task.items():
+                    if "/" in fp and token.endswith(fp):
+                        tid = owner
+                        break
+                if tid is None:
+                    tid = file_to_task.get(base)
+            if tid:
+                per_task.setdefault(tid, []).append(line.strip())
+        return per_task
+
+    def _repair_one_task(
+        self, task_id: str, errors: list[str], full_log: str
+    ) -> None:
+        """Re-run one task's agent with the compiler errors + current file
+        contents so it fixes the existing files, then update the board."""
+        row = self.board.task(task_id) or {}
+        current_files: list[str] = []
+        for rel in row.get("files_written", []):
+            abs_path = (self.repo_root / rel).resolve()
+            try:
+                text = abs_path.read_text(encoding="utf-8")
+            except OSError:
+                continue
+            if len(text) > 40_000:
+                text = text[:40_000] + "\n// ... [truncated] ...\n"
+            current_files.append(f"----- {rel} -----\n{text}")
+
+        repair_context = (
+            "COMPILER ERRORS for this task:\n"
+            + "\n".join(errors[:60])
+            + "\n\nFULL BUILD LOG TAIL:\n"
+            + _tail(full_log, 8_000)
+            + "\n\nCURRENT FILES ON DISK (fix these):\n"
+            + ("\n\n".join(current_files) or "(none found)")
+        )
+
+        self.ctx.emit(
+            ProjectStage.code_generation,
+            "task_repair",
+            f"{task_id}: {len(errors)} compiler error(s)",
+        )
+        try:
+            files_written, exports = self._process_one_task(
+                agent_id="repair",
+                task_id=task_id,
+                repair_context=repair_context,
+            )
+            self.board.mark_done(
+                task_id, files_written=files_written, exports=exports
+            )
+            self.ctx.emit(
+                ProjectStage.code_generation,
+                "task_repaired",
+                f"{task_id} files={len(files_written)}",
+            )
+        except Exception as exc:  # noqa: BLE001 - stamp + let verify re-check
+            self.board.mark_failed(task_id, error=f"repair failed: {exc}")
+            self.ctx.emit(
+                ProjectStage.code_generation,
+                "task_failed",
+                f"{task_id} repair ({type(exc).__name__}: {exc})"[:240],
+            )
+
 
 # ---------------------------------------------------------------------------
 # Path / text helpers
@@ -731,6 +951,61 @@ def _normalise_target_path(raw_path: str, task: CodeTask, project_id: str) -> st
 
 def _read_text(path: Path) -> str:
     return path.read_text(encoding="utf-8")
+
+
+def _tail(text: str, n: int) -> str:
+    return text[-n:] if len(text) > n else text
+
+
+def _error_excerpt(log_text: str) -> str:
+    """First recognisable compiler/linker error line, else the last line."""
+    for line in log_text.splitlines():
+        low = line.lower()
+        if ": error" in low or "error c" in low or "fatal error" in low:
+            return line.strip()
+    lines = [ln for ln in log_text.strip().splitlines() if ln.strip()]
+    return lines[-1] if lines else ""
+
+
+# ---------------------------------------------------------------------------
+# Default compile verifier: build the ptv_runtime target
+# ---------------------------------------------------------------------------
+
+
+def _default_verify_compile(ctx: PipelineContext) -> tuple[bool, str]:
+    """Configure the engine and build ONLY the ``ptv_runtime`` target,
+    which globs in every generated mechanic. Returns ``(ok, combined_log)``.
+
+    Reuses the same ``builds/cmake-current`` dir the final ``cmake_build``
+    stage uses, so vcpkg is shared and the later full build is incremental.
+    ``scene.json`` is not required to compile the library.
+    """
+    build_dir = ctx.project_dir / "builds" / "cmake-current"
+    log_path = ctx.project_dir / "logs" / "codegen_verify.log"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    logs: list[str] = []
+
+    def _sink(line: str) -> None:
+        logs.append(line)
+        ctx.emit(ProjectStage.code_generation, "log", line[:400])
+
+    result = configure_and_build(
+        source_dir=ctx.settings.engine_dir,
+        build_dir=build_dir,
+        generator=ctx.settings.cmake_generator,
+        platform=ctx.settings.cmake_generator_platform,
+        config=ctx.settings.cmake_build_config,
+        vcpkg_root=ctx.settings.vcpkg_root,
+        extra_cache=(("PTV_GENERATED_PROJECT_ID", ctx.project_id),),
+        build_target="ptv_runtime",
+        on_line=_sink,
+    )
+    text = "\n".join(logs)
+    try:
+        log_path.write_text(text, encoding="utf-8")
+    except OSError:
+        pass
+    return result.exit_code == 0, text
 
 
 # ---------------------------------------------------------------------------

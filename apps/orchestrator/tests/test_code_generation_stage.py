@@ -64,13 +64,18 @@ from ptv_schemas.scene_spec import EntitySpec, MeshRef, PhysicsProps
 # ---------------------------------------------------------------------------
 
 
-def _seed(tmp_path: Path, plan: MechanicPlan) -> tuple[ProjectStore, str, Settings]:
+def _seed(
+    tmp_path: Path, plan: MechanicPlan, *, verify_compile: bool = False
+) -> tuple[ProjectStore, str, Settings]:
     settings = Settings(
         projects_dir=tmp_path / "projects",
         engine_dir=tmp_path / "engine",
         samples_dir=tmp_path / "samples",
         repo_root=tmp_path,
         codegen_max_parallel_agents=3,
+        # Compile verification runs a real cmake build; disable it by default
+        # in tests and exercise it explicitly with an injected stub verifier.
+        codegen_verify_compile=verify_compile,
     )
     store = ProjectStore(settings.projects_dir)
     state = store.create("Demo", "prompt here")
@@ -539,6 +544,134 @@ def test_three_parallel_workers_drain_board(tmp_path: Path) -> None:
     )
     assert board["max_agents"] == 3
     assert all(row["status"] == "done" for row in board["tasks"].values())
+
+
+# ---------------------------------------------------------------------------
+# Compile-verification + repair loop
+# ---------------------------------------------------------------------------
+
+
+def test_verify_compile_repairs_then_succeeds(tmp_path: Path) -> None:
+    """A generated file that fails to compile is regenerated with the
+    compiler errors as context, then the rebuild succeeds."""
+    plan = MechanicPlan(prompt_id="demo", items=[_generate_item("solo")])
+    store, pid, settings = _seed(tmp_path, plan, verify_compile=True)
+    ctx = PipelineContext(
+        project_id=pid, settings=settings, store=store, bus=EventBus()
+    )
+
+    calls: list[CodegenAgentInput] = []
+
+    def runner(inp: CodegenAgentInput, model: str) -> CodegenAgentResult:
+        calls.append(inp)
+        return CodegenAgentResult(
+            files=[
+                GeneratedFile(
+                    path=f"engine/generated/mechanics/{inp.project_id}/solo.cpp",
+                    contents=_minimal_cpp("solo", "only"),
+                )
+            ],
+            exports={"registered_mechanic_id": "generated.solo"},
+        )
+
+    rel = f"engine/generated/mechanics/{pid}/solo.cpp"
+    rounds = {"n": 0}
+
+    def verifier() -> tuple[bool, str]:
+        rounds["n"] += 1
+        if rounds["n"] == 1:
+            return False, f"C:/repo/{rel}(12): error C2065: 'foo': undeclared identifier"
+        return True, "build ok"
+
+    stage_code_generation.run_with_runner(
+        ctx, agent_runner=runner, compile_verifier=verifier
+    )
+
+    # Verifier ran twice (fail -> ok); agent ran twice (initial + repair).
+    assert rounds["n"] == 2
+    assert len(calls) == 2
+    assert calls[0].repair_context == ""
+    assert "error C2065" in calls[1].repair_context
+    assert "CURRENT FILES ON DISK" in calls[1].repair_context
+
+    board = json.loads(
+        (store.dir_for(pid) / "codegen_board.json").read_text(encoding="utf-8")
+    )
+    assert board["tasks"]["solo"]["status"] == "done"
+
+
+def test_verify_compile_gives_up_after_budget(tmp_path: Path) -> None:
+    """When the C++ never compiles, the stage exhausts its repair budget,
+    marks the task failed, and raises so the build stage never runs."""
+    plan = MechanicPlan(prompt_id="demo", items=[_generate_item("solo")])
+    store, pid, settings = _seed(tmp_path, plan, verify_compile=True)
+    settings.codegen_max_repair_rounds = 1
+    ctx = PipelineContext(
+        project_id=pid, settings=settings, store=store, bus=EventBus()
+    )
+
+    def runner(inp: CodegenAgentInput, model: str) -> CodegenAgentResult:
+        return CodegenAgentResult(
+            files=[
+                GeneratedFile(
+                    path=f"engine/generated/mechanics/{inp.project_id}/solo.cpp",
+                    contents=_minimal_cpp("solo", "only"),
+                )
+            ],
+            exports={"registered_mechanic_id": "generated.solo"},
+        )
+
+    rel = f"engine/generated/mechanics/{pid}/solo.cpp"
+    rounds = {"n": 0}
+
+    def verifier() -> tuple[bool, str]:
+        rounds["n"] += 1
+        return False, f"C:/repo/{rel}(3): error C1004: unexpected end-of-file found"
+
+    with pytest.raises(RuntimeError, match="failed task"):
+        stage_code_generation.run_with_runner(
+            ctx, agent_runner=runner, compile_verifier=verifier
+        )
+
+    # max_repair_rounds=1 -> verifier called on round 0 (repair) and round 1 (give up).
+    assert rounds["n"] == 2
+    board = json.loads(
+        (store.dir_for(pid) / "codegen_board.json").read_text(encoding="utf-8")
+    )
+    assert board["tasks"]["solo"]["status"] == "failed"
+    assert "compile verification failed" in (board["tasks"]["solo"]["error"] or "")
+
+
+def test_verify_compile_disabled_skips_build(tmp_path: Path) -> None:
+    """With verification off (default in tests), no verifier is invoked."""
+    plan = MechanicPlan(prompt_id="demo", items=[_generate_item("solo")])
+    store, pid, settings = _seed(tmp_path, plan)  # verify_compile=False
+    ctx = PipelineContext(
+        project_id=pid, settings=settings, store=store, bus=EventBus()
+    )
+
+    def runner(inp: CodegenAgentInput, model: str) -> CodegenAgentResult:
+        return CodegenAgentResult(
+            files=[
+                GeneratedFile(
+                    path=f"engine/generated/mechanics/{inp.project_id}/solo.cpp",
+                    contents=_minimal_cpp("solo", "only"),
+                )
+            ],
+            exports={"registered_mechanic_id": "generated.solo"},
+        )
+
+    called = {"n": 0}
+
+    def verifier() -> tuple[bool, str]:
+        called["n"] += 1
+        return True, ""
+
+    stage_code_generation.run_with_runner(
+        ctx, agent_runner=runner, compile_verifier=verifier
+    )
+    # Verification disabled -> the injected verifier is never called.
+    assert called["n"] == 0
 
 
 # ---------------------------------------------------------------------------

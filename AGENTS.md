@@ -73,12 +73,13 @@ orchestrator and a reusable Vulkan + OpenXR engine core.
 2. BuildSpec → **AssetManifest** (Claude Sonnet, structured output). Only
    OBJECTS (characters, props, fx, ui) — the environment is not a GLB.
 3. AssetManifest + BuildSpec → **MechanicPlan** (OpenAI Agents SDK agent,
-   `gpt-5.5` + `WebSearchTool`). Each mechanic is classified `builtin`,
+   `gpt-5.5`, no tools). Each mechanic is classified `builtin`,
    `builtin+config`, `builtin+config_code_edit` (copy a built-in's source and
    edit it into a NEW generated mechanic — never replaces the built-in), or
    `generate`. The agent also assigns a controller `binding`
    (control + hand) to every input-driven mechanic; a deterministic
-   validator rejects conflicts. BuildSpec labels each mechanic `regular` or
+   validator normalizes face-button hands (sharing a control is allowed,
+   not a conflict). BuildSpec labels each mechanic `regular` or
    `hub` (a shared foundation like a shooting hub).
 4. All above → **SceneSpec** (Claude Opus, structured output).
 5. Reference images for each object `AssetItem` → Gemini / Imagen.
@@ -86,6 +87,11 @@ orchestrator and a reusable Vulkan + OpenXR engine core.
 7. Assets normalized (scale / materials / collision).
 8. CodeTasks from MechanicPlan → Claude Opus → C++ files (`.cpp` + optional
    `.h`/`.hpp` headers) in `engine/generated/{mechanics,ai,dialogue}/`.
+   After all tasks are written, a **compile-verify + repair loop** builds
+   the `ptv_runtime` target and feeds any compiler errors back to the
+   owning task's agent to regenerate (up to `codegen_max_repair_rounds`);
+   the stage fails loudly if the generated C++ still does not compile
+   (`codegen_verify_compile`, default on).
 8b. **World generation**: a single world-architect agent (OpenAI Agents SDK,
    `gpt-5.5` @ reasoning `xhigh`, `WebSearchTool`) writes `IWorldBuilder` C++
    in `engine/generated/world/<project_id>/`, compiled + run offline in

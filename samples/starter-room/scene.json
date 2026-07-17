@@ -490,13 +490,7 @@
         "restitution": 0.0,
         "friction": 1.0
       },
-      "mechanic_bindings": [
-        {
-          "id": "builtin.trigger_zone",
-          "builtin_id": "builtin.trigger_zone",
-          "params": { "radius_m": 0.35 }
-        }
-      ],
+      "mechanic_bindings": [],
       "tags": ["trigger"]
     }
   ]

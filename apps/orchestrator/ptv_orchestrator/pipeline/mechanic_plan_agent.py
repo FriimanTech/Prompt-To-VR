@@ -2,16 +2,17 @@
 
 A single "mechanic planner" agent classifies every BuildSpec mechanic against
 the engine catalog and emits a full :class:`MechanicPlan` (including nested
-CodeTasks for generated / code-edited mechanics and controller bindings). It
-runs with the hosted ``WebSearchTool`` so it can research VR ergonomics and
-best-practice controller layouts before deciding a binding.
+CodeTasks for generated / code-edited mechanics and controller bindings).
+No tools are attached — the agent only produces a MechanicPlan from the
+BuildSpec, AssetManifest, and engine catalog in the prompt.
 
-Mirrors the proven world-generation agent wiring (see ``world_agent.py``):
+Mirrors the proven world-generation agent wiring (see ``world_agent.py``),
+minus tools:
 
-* ``from agents import Agent, AgentOutputSchema, ModelSettings, Runner, WebSearchTool``
+* ``from agents import Agent, AgentOutputSchema, ModelSettings, Runner``
 * ``from openai.types.shared import Reasoning``
 * ``Agent(model="gpt-5.5", model_settings=ModelSettings(reasoning=Reasoning(effort=...)),
-  tools=[WebSearchTool()], output_type=AgentOutputSchema(MechanicPlan, strict_json_schema=False))``
+  output_type=AgentOutputSchema(MechanicPlan, strict_json_schema=False))``
 * ``Runner.run_sync(agent, message) -> RunResult`` ; ``RunResult.final_output_as(MechanicPlan)``
 
 The SDK import is lazy so unit tests can inject a stub ``runner`` and never
@@ -107,7 +108,6 @@ class MechanicPlanner:
                 AgentOutputSchema,
                 ModelSettings,
                 Runner,
-                WebSearchTool,
             )
             from openai.types.shared import Reasoning  # type: ignore
         except ImportError as exc:  # pragma: no cover - real runs only
@@ -133,7 +133,6 @@ class MechanicPlanner:
             instructions=self.instructions,
             model=self.model,
             model_settings=model_settings,
-            tools=[WebSearchTool()],
             output_type=output_schema,
         )
 
@@ -183,8 +182,8 @@ def build_planner_message(inp: MechanicPlanAgentInput) -> str:
         "generate.\n"
         "  2) Assign a controller binding to every input-driven mechanic "
         "(from the prompt when it names one, otherwise a VR-best-practice "
-        "default). You MAY use web_search to research Quest 3 controller "
-        "ergonomics before choosing a default.\n"
+        "default). Do not research online — decide from the prompt and "
+        "these instructions only.\n"
         "  3) Set depends_on on code_tasks so hubs are built before the "
         "profiles that branch off them.\n\n"
         f"Built-ins with editable source (for builtin+config_code_edit):\n{editable}\n\n"

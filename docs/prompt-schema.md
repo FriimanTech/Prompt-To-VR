@@ -68,20 +68,14 @@ real selection step exists.
 
 ```
 builtin.teleport
+builtin.locomotion.teleport
 builtin.smooth_locomotion
+builtin.locomotion.slide.head_relative
+builtin.locomotion.slide.controller_relative
 builtin.snap_turn
+builtin.locomotion.snap_turn
 builtin.grab
 builtin.throw
-builtin.use_interact
-builtin.push_pull
-builtin.trigger_zone
-builtin.spawner
-builtin.inventory
-builtin.dialogue_trigger
-builtin.health_damage
-builtin.enemy_ai_hook
-builtin.projectile_hook
-builtin.hud_anchor
 ```
 
 Anything outside this list must be modeled as a `CodeTask` and is classified

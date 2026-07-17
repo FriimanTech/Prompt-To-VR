@@ -49,15 +49,11 @@ def editable_builtins_note() -> str:
         "- Any catalog built-in id may be used as `base_builtin_id` for "
         "`builtin+config_code_edit`; its registration class source "
         "(BuiltinMechanics.cpp) is injected into the code agent.\n"
-        "- These built-ins implement their live behavior in the engine core "
+        "- All current built-ins (grab, throw, teleport/slide locomotion, "
+        "snap turn) implement their live behavior in the engine core "
         "(Application.cpp), so a code_edit version must RE-IMPLEMENT the "
         "behavior via IMechanic + InputSnapshot + World (it cannot call "
-        "engine internals): grab, throw, teleport/slide locomotion, snap turn.\n"
-        "- The other built-ins (trigger_zone, spawner, health_damage, "
-        "projectile_hook, hud_anchor, use_interact, push_pull, inventory, "
-        "dialogue_trigger, enemy_ai_hook) are thin catalog stubs: code_edit "
-        "means authoring the real logic on top of their component/registration "
-        "shape."
+        "engine internals)."
     )
 
 

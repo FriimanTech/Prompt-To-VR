@@ -15,8 +15,10 @@ Classification is four-way:
 * ``generate``                   -- a brand-new mechanic.
 
 The agent also assigns a controller binding to every input-driven mechanic;
-a deterministic validator (``binding_validator``) then checks for conflicts
-and normalizes face-button hands before the plan is saved.
+a deterministic validator (``binding_validator``) then normalizes
+face-button hands (A/B -> right, X/Y -> left) and emits advisory warnings
+before the plan is saved. Sharing a control across mechanics is allowed and
+is not rejected.
 
 See ``apps/orchestrator/ptv_orchestrator/engine_catalog.py`` for the catalog
 source of truth and ``builtin_source.py`` for the code-edit source resolver.
@@ -93,8 +95,9 @@ def run_with_planner(
     message = build_planner_message(inp)
     plan: MechanicPlan = planner.run(message)
 
-    # Deterministic controller-binding validation (normalizes face-button
-    # hands in place; raises on hard conflicts).
+    # Deterministic controller-binding normalization (normalizes face-button
+    # hands in place; emits advisory warnings only -- sharing a control is
+    # allowed, so this does not reject the plan).
     binding_result = validate_bindings(plan)
     for warn in binding_result.warnings:
         ctx.emit(ProjectStage.mechanic_plan, "warn", warn[:240])

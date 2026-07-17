@@ -227,15 +227,18 @@ Rules:
   * If the prompt explicitly names a binding (e.g. "press A on the right
     controller to jump", "left trigger fires"), use it verbatim.
   * Otherwise choose a VR-best-practice default for the action type and
-    keep it consistent with the game's other mechanics. You MAY use
-    web_search to confirm current Quest 3 ergonomics.
+    keep it consistent with the game's other mechanics. Decide from the
+    BuildSpec / prompt and these rules only — you have no web search.
   * A/B are on the RIGHT controller only; X/Y on the LEFT only. Triggers,
     grips, and thumbsticks exist on both hands.
   * The engine already owns the LEFT thumbstick (locomotion), the RIGHT
     thumbstick (snap turn), and BOTH grips (grab/throw). Avoid rebinding
     those unless the mechanic IS that locomotion/grab system.
-  * Two different mechanics must NOT bind the same control on the same
-    hand (a validator rejects conflicts).
+  * Multiple mechanics MAY share the same control on the same hand -- this
+    is not a conflict. For example, a UI pointer that clicks with the
+    trigger can coexist with grab/fire on that same hand; each mechanic
+    decides when it is active (e.g. only while pointing at UI, or only
+    while holding a weapon). Bind the control that best fits each mechanic.
   * For mechanics that are NOT directly controller-driven (wave timer,
     health/damage, AI, HUD), set ``binding`` to null or control="none".
   * A hub mechanic (e.g. shooting_hub) owns the shared trigger contract;

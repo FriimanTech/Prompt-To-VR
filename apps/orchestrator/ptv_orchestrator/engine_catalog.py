@@ -157,69 +157,6 @@ _BUILTINS: tuple[CatalogEntry, ...] = (
         category="interaction",
         params={"impulse": "float, default 4.0"},
     ),
-    CatalogEntry(
-        id="builtin.use_interact",
-        summary="Generic button-press event emitter for buttons / switches / NPCs.",
-        category="interaction",
-    ),
-    CatalogEntry(
-        id="builtin.push_pull",
-        summary="Hand-driven push/pull on heavy props with a configured friction model.",
-        category="interaction",
-    ),
-    # ----- World / scripting -----
-    CatalogEntry(
-        id="builtin.trigger_zone",
-        summary="Volume that fires enter/exit events when the player or any tagged entity overlaps it.",
-        category="scripting",
-    ),
-    CatalogEntry(
-        id="builtin.spawner",
-        summary="Periodically spawns a templated entity; supports max-alive cap.",
-        category="scripting",
-        params={"interval_s": "float, default 5.0"},
-    ),
-    CatalogEntry(
-        id="builtin.inventory",
-        summary="Single-slot inventory marker on an entity (for held / equipped items).",
-        category="scripting",
-    ),
-    CatalogEntry(
-        id="builtin.dialogue_trigger",
-        summary="Hands off to a dialogue hook by id when activated by the player.",
-        category="scripting",
-        params={"hook_id": "string"},
-    ),
-    CatalogEntry(
-        id="builtin.health_damage",
-        summary="HP/damage component with configurable max HP and on-death event.",
-        category="combat",
-        params={"max_hp": "float, default 100.0"},
-    ),
-    CatalogEntry(
-        id="builtin.enemy_ai_hook",
-        summary="Bridges to a generated IBehaviour by id (enemy_ai_hook -> behaviour_id).",
-        category="combat",
-        params={"behaviour_id": "string"},
-    ),
-    CatalogEntry(
-        id="builtin.projectile_hook",
-        summary="Spawns and integrates simple ballistic projectiles (bullets, arrows, energy beams).",
-        category="combat",
-        params={
-            "speed_mps": "float, default 18.0",
-            "lifetime_s": "float, default 2.0",
-        },
-    ),
-    CatalogEntry(
-        id="builtin.hud_anchor",
-        summary="Head-locked or world-anchored HUD panel; configure follow_head + offset.",
-        category="ui",
-        params={
-            "follow_head": "bool, default true",
-            "offset_m": "float, default 1.2",
-        },
-    ),
 )
 
 

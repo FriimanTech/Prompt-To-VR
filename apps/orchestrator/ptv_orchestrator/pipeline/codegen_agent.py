@@ -136,6 +136,12 @@ class CodegenAgentInput:
     built-in mechanic to COPY-AND-EDIT into this new generated mechanic.
     Empty for ``generate`` tasks."""
 
+    repair_context: str = ""
+    """Set only on a compile-repair re-run: the C++ compiler errors from
+    the previous attempt plus the current file contents. When present, the
+    agent must FIX the existing files rather than author from scratch.
+    Empty on the first attempt."""
+
     extra_instructions: list[str] = field(default_factory=list)
 
 
@@ -297,12 +303,31 @@ def build_user_message(inp: CodegenAgentInput) -> str:
         else ""
     )
 
+    # On a compile-repair re-run, surface the compiler errors + current file
+    # contents FIRST so the agent fixes the existing files instead of
+    # re-authoring from scratch.
+    repair_section = (
+        (
+            "\n================ COMPILE REPAIR (HIGHEST PRIORITY) ================\n"
+            "Your PREVIOUS attempt at this task was written to disk but FAILED "
+            "to compile. Return the COMPLETE corrected files[] (same schema, "
+            "same output_subdir, same registered id). Fix the C++ so it "
+            "compiles against the engine's public headers. Do not remove the "
+            "PTV_REGISTER_* registration. Keep the same behaviour; only change "
+            "what is needed to compile.\n"
+            f"{inp.repair_context}\n"
+        )
+        if inp.repair_context
+        else ""
+    )
+
     return (
         "You are running ONE CodeTask in the Prompt-To-Native-VR "
         "multi-agent code-generation stage.\n"
         f"project_id: {inp.project_id}\n"
         f"task_id: {inp.task_id}\n"
-        f"output_subdir: {inp.output_subdir}\n\n"
+        f"output_subdir: {inp.output_subdir}\n"
+        f"{repair_section}\n"
         "Follow this four-step process strictly:\n"
         "  1) Read the task metadata block below (id, kind, interface, "
         "depends_on, headers, planner files[] hints, asset/scene "

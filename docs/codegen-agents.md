@@ -318,6 +318,47 @@ intentionally ignored: no disk writes, no CMake test targets, no
 planner prompt language. The mechanic planner is instructed to leave
 the field empty.
 
+## Compile verification + repair loop
+
+Include validation proves a file only uses allowed headers — it does
+**not** prove the C++ compiles. To stop a mechanic that passes include
+validation but fails to compile from sinking the later `cmake_build`
+stage, the code-generation stage runs a compile-verify-and-repair loop
+once every task is `done` (mirrors the world-gen compile loop).
+
+Controlled by settings:
+
+* `codegen_verify_compile` (default `True`) — master switch. Set
+  `False` on a machine without the C++ toolchain.
+* `codegen_max_repair_rounds` (default `2`) — how many
+  build→repair→rebuild cycles to attempt (`0` = verify once, never
+  repair).
+
+Flow:
+
+1. Build the `ptv_runtime` target (`cmake --build ... --target
+   ptv_runtime`) in the same `builds/cmake-current` dir the final build
+   uses, so vcpkg is shared and the later full build is incremental.
+   `scene.json` is not needed to compile the library.
+2. On success, the stage finishes normally.
+3. On failure, compiler error lines are mapped back to the owning
+   CodeTask via each board row's `files_written` (path + basename
+   match, MSVC and clang/gcc formats).
+4. Each failing task's agent is re-run with a `repair_context` (the
+   compiler errors + the current file contents on disk) so it **fixes
+   the existing files** rather than authoring from scratch; the new
+   files overwrite the old and `board.mark_done` refreshes the row.
+5. The stage rebuilds and repeats up to `codegen_max_repair_rounds`.
+6. If the budget is exhausted (or errors cannot be attributed to any
+   task), the still-failing tasks are marked `failed` and the stage
+   raises — exactly like an agent failure — so `cmake_build` never runs
+   against C++ that does not compile.
+
+The verifier is injectable: `stage_code_generation.run_with_runner(ctx,
+agent_runner=..., compile_verifier=...)` lets tests exercise the loop
+with a stub build (no real toolchain). Production passes `None` and the
+default cmake verifier is used when `codegen_verify_compile` is set.
+
 ## `depends_on` (dependency DAG)
 
 `CodeTask.depends_on: List[IdStr]` lists other CodeTasks in the same
@@ -418,8 +459,8 @@ by the holding hand's aim pose.
 
 ## Classifications (MechanicPlan)
 
-The MechanicPlan stage (now an OpenAI Agents SDK agent, `gpt-5.5` +
-`WebSearchTool`) classifies each mechanic:
+The MechanicPlan stage (an OpenAI Agents SDK agent, `gpt-5.5`, no tools —
+plan output only) classifies each mechanic:
 
 * `builtin` — a catalog mechanic satisfies as-is.
 * `builtin+config` — satisfied by parameter tuning only.

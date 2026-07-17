@@ -86,15 +86,29 @@ class Settings(BaseSettings):
     # update spec.
     codegen_max_parallel_agents: int = Field(default=3, ge=1, le=16)
 
+    # After all CodeTasks are written, verify the generated C++ actually
+    # COMPILES by building the ``ptv_runtime`` target (which globs in every
+    # generated mechanic). On failure, the compiler errors are fed back to
+    # the owning task's agent to regenerate the file, then the stage rebuilds
+    # -- up to ``codegen_max_repair_rounds`` times. This mirrors the
+    # world-generation compile-and-repair loop and stops a mechanic that
+    # merely passes include validation but does not compile from sinking the
+    # later cmake_build stage. Set to False to skip verification (e.g. on a
+    # machine without the C++ toolchain).
+    codegen_verify_compile: bool = True
+    # How many compile+repair rounds to attempt before giving up and failing
+    # the stage (0 = verify once, never repair).
+    codegen_max_repair_rounds: int = Field(default=2, ge=0, le=10)
+
     # --- MechanicPlan stage (Stage 3, agentic) ---------------------------
-    # The mechanic planner is an OpenAI Agents SDK agent (WebSearchTool
-    # enabled) rather than a single structured LLM call. It classifies each
-    # BuildSpec mechanic (builtin / builtin+config / builtin+config_code_edit
-    # / generate), assigns controller bindings, and emits nested CodeTasks.
+    # The mechanic planner is an OpenAI Agents SDK agent with no tools
+    # (structured MechanicPlan output only). It classifies each BuildSpec
+    # mechanic (builtin / builtin+config / builtin+config_code_edit /
+    # generate), assigns controller bindings, and emits nested CodeTasks.
     mechanic_plan_model: str = "gpt-5.5"
     # reasoning.effort: one of none|minimal|low|medium|high|xhigh (model-dep).
-    mechanic_plan_reasoning_effort: str = "high"
-    # Turn budget for the single planning run (allows a few web_search turns).
+    mechanic_plan_reasoning_effort: str = "medium"
+    # Turn budget for the single planning run.
     mechanic_plan_agent_max_turns: int = Field(default=40, ge=4, le=200)
 
     # --- World-generation stage (agentic VR environment) -----------------

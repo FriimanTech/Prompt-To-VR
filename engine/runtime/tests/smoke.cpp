@@ -24,20 +24,14 @@ static int case_mechanics() {
     const auto ids = ptv::MechanicRegistry::get().mechanic_ids();
     const char* expected[] = {
         "builtin.teleport",
+        "builtin.locomotion.teleport",
         "builtin.smooth_locomotion",
+        "builtin.locomotion.slide.head_relative",
+        "builtin.locomotion.slide.controller_relative",
         "builtin.snap_turn",
+        "builtin.locomotion.snap_turn",
         "builtin.grab",
         "builtin.throw",
-        "builtin.use_interact",
-        "builtin.push_pull",
-        "builtin.trigger_zone",
-        "builtin.spawner",
-        "builtin.inventory",
-        "builtin.dialogue_trigger",
-        "builtin.health_damage",
-        "builtin.enemy_ai_hook",
-        "builtin.projectile_hook",
-        "builtin.hud_anchor",
     };
     for (const char* id : expected) {
         bool found = false;

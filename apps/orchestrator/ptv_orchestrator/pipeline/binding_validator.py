@@ -1,19 +1,23 @@
-"""Deterministic controller-binding validation for the MechanicPlan.
+"""Deterministic controller-binding normalization for the MechanicPlan.
 
 The MechanicPlan agent assigns a :class:`ControllerBinding` to every
 input-driven mechanic (from the prompt when it names one, otherwise a
-VR-best-practice default). This module checks those bindings BEFORE scene
-compile:
+VR-best-practice default). This module normalizes + sanity-checks those
+bindings BEFORE scene compile:
 
 * Face-button hand correctness -- A/B live on the RIGHT Touch controller,
   X/Y on the LEFT. A wrong hand is auto-normalized (with a warning) rather
   than failing the run.
-* Conflicts -- two DIFFERENT mechanics may not claim the same physical
-  control on the same hand. This is a hard error (the stage raises).
 * Engine-reserved controls -- the runtime already owns the left thumbstick
   (locomotion), the right thumbstick (snap turn), and both grips (grab /
   throw) in ``Application.cpp``. A plan mechanic that reuses one of those
   gets a warning unless it IS that locomotion/grab mechanic.
+
+Sharing a control is NOT a conflict: multiple mechanics may legitimately
+bind the same control on the same hand (e.g. a UI pointer that clicks with
+the trigger while that same hand also grabs / fires a weapon). The
+validator therefore never rejects a plan on binding grounds; it only
+normalizes hands and emits advisory warnings.
 
 The validator is pure/deterministic so it can run without any network or
 model call, and is unit-testable in isolation.
@@ -59,36 +63,20 @@ class BindingValidationResult:
         return not self.errors
 
 
-def _slots_for(control: ControllerControl, hand: ControllerHand) -> list[str]:
-    """Return the normalized occupancy slot key(s) for a (control, hand).
-
-    Face buttons are per-controller singletons (hand implied). ``either``
-    on an analog control occupies BOTH hands so it conflicts with a
-    same-control binding on either specific hand.
-    """
-    if control in _RIGHT_ONLY:
-        return [f"{control.value}:right"]
-    if control in _LEFT_ONLY:
-        return [f"{control.value}:left"]
-    if hand == ControllerHand.either:
-        return [f"{control.value}:left", f"{control.value}:right"]
-    return [f"{control.value}:{hand.value}"]
-
-
 def _looks_reserved_owner(item_id: str, builtin_id: str | None) -> bool:
     hay = f"{item_id} {builtin_id or ''}".lower()
     return any(h in hay for h in _RESERVED_OK_HINTS)
 
 
 def validate_bindings(plan: MechanicPlan) -> BindingValidationResult:
-    """Validate + normalize all controller bindings in ``plan`` in place.
+    """Normalize all controller bindings in ``plan`` in place.
 
-    Face-button hands are normalized to the correct controller. Returns a
-    :class:`BindingValidationResult`; the caller raises on ``errors`` and
-    logs ``warnings``.
+    Face-button hands are normalized to the correct controller. Sharing a
+    control across mechanics is allowed and is NOT reported as an error, so
+    this never populates ``errors``; it only emits advisory ``warnings``.
+    Returns a :class:`BindingValidationResult`.
     """
     res = BindingValidationResult()
-    used: dict[str, str] = {}  # slot -> owning mechanic id
 
     for item in plan.items:
         b = item.binding
@@ -108,17 +96,6 @@ def validate_bindings(plan: MechanicPlan) -> BindingValidationResult:
                 f"normalized hand '{b.hand.value}' -> 'left'"
             )
             b.hand = ControllerHand.left
-
-        # Conflict detection across plan mechanics.
-        for slot in _slots_for(b.control, b.hand):
-            prev = used.get(slot)
-            if prev is not None and prev != item.id:
-                res.errors.append(
-                    f"binding conflict: mechanics '{prev}' and '{item.id}' both "
-                    f"bind {slot.replace(':', ' on ')} controller"
-                )
-            else:
-                used[slot] = item.id
 
         # Engine-reserved control reuse (soft warning unless the mechanic IS
         # the owning locomotion/grab system).
