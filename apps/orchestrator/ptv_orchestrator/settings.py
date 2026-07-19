@@ -97,8 +97,11 @@ class Settings(BaseSettings):
     # machine without the C++ toolchain).
     codegen_verify_compile: bool = True
     # How many compile+repair rounds to attempt before giving up and failing
-    # the stage (0 = verify once, never repair).
-    codegen_max_repair_rounds: int = Field(default=2, ge=0, le=10)
+    # the stage (0 = verify once, never repair). Each round can repair several
+    # tasks in parallel; 3 gives the exe-link verify room to heal multiple
+    # independent defects (compile errors, cross-task duplicate symbols, and
+    # signature mismatches) in a single code-generation run.
+    codegen_max_repair_rounds: int = Field(default=3, ge=0, le=10)
 
     # --- MechanicPlan stage (Stage 3, agentic) ---------------------------
     # The mechanic planner is an OpenAI Agents SDK agent with no tools
@@ -126,13 +129,26 @@ class Settings(BaseSettings):
     # architect can iterate over each part; not unlimited to bound cost.
     world_agent_max_turns: int = Field(default=80, ge=4, le=1000)
 
-    # --- SceneSpec stage (Stage 4) --------------------------------------
-    # SceneSpec emits one structured-output LLM call per
-    # ``BuildSpec.scenes`` entry. A long user prompt can produce 10-15+
-    # scenes, so running them serially makes the stage appear hung.
-    # We fan out across a ``ThreadPoolExecutor`` capped by this knob
-    # (default 3 mirrors the codegen worker default).
+    # --- SceneSpec stage (Stage 4, agentic) -----------------------------
+    # SceneSpec composes one scene per ``BuildSpec.scenes`` entry via an
+    # OpenAI Agents SDK agent (gpt-5.5, NO tools) with a deterministic
+    # validate-and-repair loop, mirroring the mechanic_plan / world stages.
+    # A long user prompt can produce 10-15+ scenes, so we fan out across a
+    # ``ThreadPoolExecutor`` capped by this knob (default 3 mirrors the
+    # codegen worker default). Each worker runs its own agent, so this many
+    # gpt-5.5 SceneSpec agents may be in flight at once.
     scene_spec_max_parallel_workers: int = Field(default=3, ge=1, le=16)
+    scene_spec_model: str = "gpt-5.5"
+    # reasoning.effort: one of none|minimal|low|medium|high|xhigh (model-dep).
+    # SceneSpec is a mapping/composition task (assets+mechanics -> entities),
+    # not deep reasoning, so ``medium`` completes well under the request
+    # timeout. Lower to ``low`` for faster/cheaper runs on simple scenes.
+    scene_spec_reasoning_effort: str = "medium"
+    # Turn budget for one Agents SDK run (the agent loop).
+    scene_spec_agent_max_turns: int = Field(default=30, ge=4, le=200)
+    # How many validate-and-repair rounds per scene before giving up and
+    # failing the scene (0 = compose once, never repair).
+    scene_spec_max_repair_rounds: int = Field(default=2, ge=0, le=6)
 
     # --- Build toolchain -------------------------------------------------
     vcpkg_root: str | None = None

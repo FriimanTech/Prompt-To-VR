@@ -26,8 +26,11 @@ orchestrator and a reusable Vulkan + OpenXR engine core.
 6. Generated C++ (`.cpp`, `.h`, `.hpp`) is confined to
    `engine/generated/{mechanics,ai,dialogue,world}/`. It MUST NOT modify the
    renderer, XR session loop, platform layer, memory core, or base ECS.
-   Generated headers are allowed for same-task, same-directory use only
-   (bare-filename `#include "foo.h"` includes). Registration macros
+   Generated headers are allowed for same-task use and for including a
+   shared header owned by a declared `depends_on` task (same project
+   directory, built first — e.g. a weapon profile including
+   `shooting_hub_shared.h`); both via bare-filename `#include "foo.h"`
+   includes. Registration macros
    (`PTV_REGISTER_MECHANIC`, etc.) must only appear in `.cpp` files.
    Include violations cause the CodeTask to fail loudly (not silently
    strip).
@@ -81,7 +84,12 @@ orchestrator and a reusable Vulkan + OpenXR engine core.
    validator normalizes face-button hands (sharing a control is allowed,
    not a conflict). BuildSpec labels each mechanic `regular` or
    `hub` (a shared foundation like a shooting hub).
-4. All above → **SceneSpec** (Claude Opus, structured output).
+4. All above → **SceneSpec**, one per scene (OpenAI Agents SDK agent,
+   `gpt-5.5`, no tools) with a deterministic validate-and-repair loop
+   (asset coverage, environment presence, valid mechanic-binding ids);
+   problems are fed back into the same agent session up to
+   `scene_spec_max_repair_rounds`. Scenes fan out across
+   `scene_spec_max_parallel_workers` agents.
 5. Reference images for each object `AssetItem` → Gemini / Imagen.
 6. Reference images → Tripo image-to-3D (textured, PBR).
 7. Assets normalized (scale / materials / collision).

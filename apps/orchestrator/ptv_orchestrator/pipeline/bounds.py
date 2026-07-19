@@ -41,32 +41,103 @@ _PTV_API_ALLOWED = frozenset(
     }
 )
 
+# Allowed C++ standard-library headers. Guiding principle: permit pure,
+# deterministic, side-effect-free computation. Generated gameplay code runs
+# inside the ECS on the engine's main loop, so headers that do console/file
+# I/O, spawn threads, touch atomics, read wall-clock time, or reach the
+# filesystem / process are intentionally EXCLUDED (see _FORBIDDEN_STD_HEADERS
+# below) -- they break determinism or the single-threaded execution model.
 _HEADER_WHITELIST_EXACT = {
+    # Integer / byte / math primitives.
     "cstdint",
     "cstddef",
     "cstring",
     "cmath",
     "cfloat",
+    "climits",
+    "cstdlib",
+    "limits",
+    "bit",
+    "numeric",
+    "ratio",
+    "complex",
+    "compare",
+    # Strings / text (in-memory only; NOT iostream/fstream).
     "string",
     "string_view",
+    "cctype",
+    "cwctype",
+    "charconv",
+    "sstream",
+    "iomanip",
+    # Containers.
     "vector",
     "array",
     "span",
+    "deque",
+    "list",
+    "forward_list",
+    "stack",
+    "queue",
     "unordered_map",
     "unordered_set",
     "map",
     "set",
+    "bitset",
+    "initializer_list",
+    # Utilities / metaprogramming.
     "optional",
     "variant",
     "tuple",
     "algorithm",
     "functional",
     "memory",
+    "new",
     "utility",
+    "iterator",
     "chrono",
     "type_traits",
-    "numeric",
+    "random",
+    # Error handling.
+    "cassert",
+    "stdexcept",
+    "exception",
 }
+
+# Documented for humans (and tests): standard headers we deliberately keep
+# OUT of the allowlist because they violate determinism or the
+# single-threaded, no-side-effects execution model of generated gameplay
+# code. Not used for matching (anything not in the allowlist is rejected);
+# this is the rationale record.
+_FORBIDDEN_STD_HEADERS = frozenset(
+    {
+        # Console / file I/O.
+        "iostream",
+        "fstream",
+        "cstdio",
+        "syncstream",
+        # Filesystem.
+        "filesystem",
+        # Threading / concurrency / atomics.
+        "thread",
+        "mutex",
+        "shared_mutex",
+        "atomic",
+        "future",
+        "condition_variable",
+        "semaphore",
+        "barrier",
+        "latch",
+        "stop_token",
+        "execution",
+        # Wall-clock time (use the engine's dt, not real time).
+        "ctime",
+        # Heavy / locale-dependent.
+        "regex",
+        "locale",
+        "clocale",
+    }
+)
 
 _REGISTRATION_MACROS = re.compile(
     r"\bPTV_REGISTER_(?:MECHANIC|BEHAVIOUR|DIALOGUE_HOOK)\b"
@@ -112,14 +183,20 @@ def validate_includes(
     filename: str,
     *,
     local_headers: frozenset[str] = frozenset(),
+    dep_headers: frozenset[str] = frozenset(),
 ) -> list[str]:
     """Scan *text* for ``#include`` directives and return a list of
     human-readable violation strings.  An empty list means all includes
     are allowed.
 
     *local_headers* is the set of bare header filenames emitted by the
-    same CodeTask.  Bare-filename includes that are NOT in this set are
-    rejected (prevents cross-task or hallucinated local headers).
+    same CodeTask.  *dep_headers* is the set of bare header filenames
+    emitted by tasks this task declares in ``depends_on`` (they live in
+    the same project directory and are guaranteed built first, so a
+    dependent task MAY include them -- e.g. a weapon profile including
+    ``shooting_hub_shared.h``).  Bare-filename includes that are in
+    NEITHER set are rejected (prevents undeclared cross-task coupling or
+    hallucinated local headers).
     """
     violations: list[str] = []
     for lineno, line in enumerate(text.splitlines(), 1):
@@ -127,15 +204,18 @@ def validate_includes(
         if not m:
             continue
         header = m.group("h")
-        if _header_allowed(header, local_headers):
+        if _header_allowed(header, local_headers, dep_headers):
             continue
 
         if _is_bare_local_header(header):
             violations.append(
                 f"{filename}:{lineno}: include \"{header}\" references a "
-                f"header not produced by this task. "
+                f"header not produced by this task or any of its declared "
+                f"dependency tasks. "
                 f"This task's headers: {sorted(local_headers)}. "
-                f"Check for typos or emit the header in your files[]."
+                f"Dependency-task headers: {sorted(dep_headers)}. "
+                f"Emit the header in your files[], add the owning task to "
+                f"depends_on, or fix the typo."
             )
         else:
             violations.append(
@@ -170,19 +250,21 @@ def filter_cpp_only(
     text: str,
     *,
     local_headers: frozenset[str] = frozenset(),
+    dep_headers: frozenset[str] = frozenset(),
 ) -> str:
     """Replace disallowed ``#include`` lines with a comment.
 
     This is a secondary defence behind :func:`validate_includes` which
     should already have rejected the file.  ``local_headers`` is the set
-    of bare header filenames produced by the same CodeTask.
+    of bare header filenames produced by the same CodeTask; ``dep_headers``
+    is the set produced by its declared ``depends_on`` tasks (allowed).
     """
     out_lines: list[str] = []
     for line in text.splitlines():
         m = _ALLOWED_HEADERS.match(line)
         if m:
             header = m.group("h")
-            if not _header_allowed(header, local_headers):
+            if not _header_allowed(header, local_headers, dep_headers):
                 out_lines.append(f"// [ptv-bounds] removed disallowed include: {header}")
                 continue
         out_lines.append(line)
@@ -310,6 +392,7 @@ def repair_generated_cpp(text: str) -> tuple[str, list[str]]:
 def _header_allowed(
     header: str,
     local_headers: frozenset[str] = frozenset(),
+    dep_headers: frozenset[str] = frozenset(),
 ) -> bool:
     if header in _HEADER_WHITELIST_EXACT:
         return True
@@ -324,7 +407,9 @@ def _header_allowed(
     for p in _HEADER_WHITELIST_PREFIXES:
         if header.startswith(p):
             return True
-    if _is_bare_local_header(header) and header in local_headers:
+    if _is_bare_local_header(header) and (
+        header in local_headers or header in dep_headers
+    ):
         return True
     return False
 

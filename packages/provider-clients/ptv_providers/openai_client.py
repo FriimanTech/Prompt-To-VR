@@ -96,6 +96,15 @@ class OpenAIConfig:
     # var when running on a flaky network or behind a slow proxy.
     request_timeout_seconds: float = 300.0
 
+    # Number of times the OpenAI SDK silently re-sends a request on a
+    # timeout / transient error. The SDK default is 2, which means a
+    # single ``request_timeout_seconds`` timeout is amplified into THREE
+    # attempts (e.g. 3 x 300s = ~15 minutes of apparent hang before the
+    # error finally surfaces -- exactly the scene_spec symptom). We
+    # default to 0 so a timeout fails fast and the calling stage can
+    # decide how to recover. Override via ``OPENAI_MAX_RETRIES``.
+    max_retries: int = 0
+
     default_system: str = (
         "You are the backend model for a local-first prompt-to-native-VR"
         " pipeline. Always obey the supplied JSON Schema exactly."
@@ -114,6 +123,7 @@ class OpenAIConfig:
             request_timeout_seconds=_float_env(
                 "OPENAI_REQUEST_TIMEOUT_SECONDS", 300.0
             ),
+            max_retries=_int_env("OPENAI_MAX_RETRIES", 0),
         )
 
 
@@ -160,11 +170,18 @@ class OpenAIClient:
         model: str | None = None,
         max_tokens: int | None = None,
         temperature: float = 0.0,
+        reasoning_effort: str | None = None,
     ) -> StructuredCall:
         """Run a JSON-mode call; schema is embedded in the system prompt.
 
         Caller is expected to re-validate the returned ``data`` against a
         Pydantic model, which catches any drift in practice.
+
+        ``reasoning_effort`` (``minimal`` | ``low`` | ``medium`` | ``high``)
+        is passed through only for reasoning models that accept it. A lower
+        effort dramatically cuts wall-clock on mapping-style tasks (where the
+        model does not need deep chain-of-thought), which is the main lever
+        against timeouts on large structured outputs.
         """
 
         self._ensure_sdk()
@@ -186,6 +203,10 @@ class OpenAIClient:
         # Only pass temperature when the target model supports it.
         if not is_reasoning_model(used_model):
             kwargs["temperature"] = temperature
+        elif reasoning_effort:
+            # Only reasoning models accept ``reasoning_effort`` on Chat
+            # Completions. Non-reasoning models would 400 on it.
+            kwargs["reasoning_effort"] = reasoning_effort
 
         resp = self._call_with_length_retry(
             client,
@@ -275,21 +296,27 @@ class OpenAIClient:
 
     def _make_client(self) -> Any:
         """Construct an ``openai.OpenAI`` client with the configured
-        per-request timeout. The SDK's default is 600s (10 minutes)
-        and applies independently to connect+read; we lower it so a
-        stalled connection cannot wedge a pipeline stage. Callers can
-        override via ``OPENAI_REQUEST_TIMEOUT_SECONDS``.
+        per-request timeout AND retry budget. The SDK's defaults are
+        600s (10 minutes) timeout and 2 retries, which together let a
+        single stalled call hang for ~30 minutes with no feedback. We
+        lower the timeout and set ``max_retries`` (default 0) so a
+        stalled connection fails fast instead of silently re-sending
+        the same expensive request. Callers can override via
+        ``OPENAI_REQUEST_TIMEOUT_SECONDS`` / ``OPENAI_MAX_RETRIES``.
         """
 
         timeout = float(self.config.request_timeout_seconds)
+        max_retries = int(self.config.max_retries)
         try:
             return self._sdk.OpenAI(
-                api_key=self._require_key(), timeout=timeout
+                api_key=self._require_key(),
+                timeout=timeout,
+                max_retries=max_retries,
             )
         except TypeError:
-            # Very old SDK versions don't accept ``timeout`` here. Fall
-            # back to the default (no timeout) so the call site still
-            # works; the user gets the slow-hang behavior, which is the
+            # Very old SDK versions don't accept ``timeout`` / ``max_retries``
+            # here. Fall back to the default (no timeout) so the call site
+            # still works; the user gets the slow-hang behavior, which is the
             # pre-fix status quo rather than a crash.
             return self._sdk.OpenAI(api_key=self._require_key())
 

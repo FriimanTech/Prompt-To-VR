@@ -317,6 +317,164 @@ def test_depends_on_blocks_until_dep_done(tmp_path: Path) -> None:
     assert order.index("shooting_hub") < order.index("repulsor_blast")
 
 
+def test_dependent_task_may_include_dependency_header(tmp_path: Path) -> None:
+    """A task that declares ``depends_on: ['shooting_hub']`` may
+    ``#include "shooting_hub_shared.h"`` even though it does NOT emit that
+    header itself -- the dependency owns it and is built first. This is the
+    regression guard for the pistol_fire_profile include-violation bug."""
+    plan = MechanicPlan(
+        prompt_id="demo",
+        items=[
+            _generate_item("shooting_hub"),
+            _generate_item("pistol_fire_profile", depends_on=["shooting_hub"]),
+        ],
+    )
+    store, pid, settings = _seed(tmp_path, plan)
+    ctx = PipelineContext(
+        project_id=pid, settings=settings, store=store, bus=EventBus()
+    )
+
+    def _hub_header() -> str:
+        return (
+            "#pragma once\n"
+            "#include <nlohmann/json.hpp>\n"
+            "namespace ptv {\n"
+            "struct WeaponFireProfile { float fire_rate_rps{3.0f}; };\n"
+            "}\n"
+        )
+
+    def runner(inp: CodegenAgentInput, model: str) -> CodegenAgentResult:
+        if inp.task_id == "shooting_hub":
+            return CodegenAgentResult(
+                files=[
+                    GeneratedFile(
+                        path=f"engine/generated/mechanics/{inp.project_id}/shooting_hub_register.cpp",
+                        contents=(
+                            '#include "ptv/api/IMechanic.h"\n'
+                            '#include "ptv/ecs/World.h"\n'
+                            '#include "shooting_hub_shared.h"\n'
+                            "namespace ptv {\n"
+                            "class ShootingHub : public IMechanic {\n"
+                            " public:\n"
+                            "  void on_attach(World&, std::uint32_t, const nlohmann::json&) override {}\n"
+                            "  void on_update(World&, std::uint32_t, float, const InputSnapshot&) override {}\n"
+                            "  void on_detach(World&, std::uint32_t) override {}\n"
+                            '  std::string id() const override { return "generated.shooting_hub"; }\n'
+                            "};\n"
+                            'PTV_REGISTER_MECHANIC("generated.shooting_hub", ShootingHub)\n'
+                            "}\n"
+                        ),
+                    ),
+                    GeneratedFile(
+                        path=f"engine/generated/mechanics/{inp.project_id}/shooting_hub_shared.h",
+                        contents=_hub_header(),
+                    ),
+                ],
+                exports={"registered_mechanic_id": "generated.shooting_hub"},
+            )
+        # pistol_fire_profile: include the DEPENDENCY's header (not emitted here).
+        return CodegenAgentResult(
+            files=[
+                GeneratedFile(
+                    path=f"engine/generated/mechanics/{inp.project_id}/pistol_fire_profile_register.cpp",
+                    contents=(
+                        '#include "ptv/api/IMechanic.h"\n'
+                        '#include "ptv/ecs/World.h"\n'
+                        '#include "shooting_hub_shared.h"\n'
+                        "namespace ptv {\n"
+                        "class PistolFireProfile : public IMechanic {\n"
+                        " public:\n"
+                        "  void on_attach(World&, std::uint32_t, const nlohmann::json&) override {}\n"
+                        "  void on_update(World&, std::uint32_t, float, const InputSnapshot&) override {}\n"
+                        "  void on_detach(World&, std::uint32_t) override {}\n"
+                        '  std::string id() const override { return "generated.pistol_fire_profile"; }\n'
+                        "};\n"
+                        'PTV_REGISTER_MECHANIC("generated.pistol_fire_profile", PistolFireProfile)\n'
+                        "}\n"
+                    ),
+                ),
+            ],
+            exports={"registered_mechanic_id": "generated.pistol_fire_profile"},
+        )
+
+    stage_code_generation.run_with_runner(ctx, agent_runner=runner)
+
+    board = json.loads(
+        (store.dir_for(pid) / "codegen_board.json").read_text(encoding="utf-8")
+    )
+    # Both tasks succeeded (the profile was NOT rejected for including the
+    # dependency's header).
+    assert board["tasks"]["shooting_hub"]["status"] == "done"
+    assert board["tasks"]["pistol_fire_profile"]["status"] == "done"
+
+    # The profile file is on disk and kept its dependency include.
+    profile = (
+        tmp_path
+        / "engine" / "generated" / "mechanics" / pid
+        / "pistol_fire_profile_register.cpp"
+    )
+    assert profile.exists()
+    assert '#include "shooting_hub_shared.h"' in profile.read_text(encoding="utf-8")
+
+
+def test_undeclared_cross_task_header_still_rejected(tmp_path: Path) -> None:
+    """Including another task's header WITHOUT declaring depends_on is still
+    a violation (preserves the DAG-ordering guarantee)."""
+    plan = MechanicPlan(
+        prompt_id="demo",
+        items=[
+            _generate_item("shooting_hub"),
+            _generate_item("pistol_fire_profile"),  # NO depends_on
+        ],
+    )
+    store, pid, settings = _seed(tmp_path, plan)
+    ctx = PipelineContext(
+        project_id=pid, settings=settings, store=store, bus=EventBus()
+    )
+
+    def runner(inp: CodegenAgentInput, model: str) -> CodegenAgentResult:
+        if inp.task_id == "shooting_hub":
+            return CodegenAgentResult(
+                files=[
+                    GeneratedFile(
+                        path=f"engine/generated/mechanics/{inp.project_id}/shooting_hub_shared.h",
+                        contents="#pragma once\nnamespace ptv { struct X {}; }\n",
+                    ),
+                    GeneratedFile(
+                        path=f"engine/generated/mechanics/{inp.project_id}/shooting_hub.cpp",
+                        contents=_minimal_cpp("shooting_hub", "all"),
+                    ),
+                ],
+                exports={"registered_mechanic_id": "generated.shooting_hub"},
+            )
+        return CodegenAgentResult(
+            files=[
+                GeneratedFile(
+                    path=f"engine/generated/mechanics/{inp.project_id}/pistol_fire_profile.cpp",
+                    contents=(
+                        '#include "ptv/api/IMechanic.h"\n'
+                        '#include "shooting_hub_shared.h"\n'
+                        "namespace ptv {}\n"
+                    ),
+                ),
+            ],
+            exports={},
+        )
+
+    # No compile verification here; we only care about include validation.
+    settings.codegen_verify_compile = False
+    with pytest.raises(RuntimeError, match="failed task"):
+        stage_code_generation.run_with_runner(ctx, agent_runner=runner)
+
+    board = json.loads(
+        (store.dir_for(pid) / "codegen_board.json").read_text(encoding="utf-8")
+    )
+    assert board["tasks"]["pistol_fire_profile"]["status"] == "failed"
+    assert "shooting_hub_shared.h" in (
+        board["tasks"]["pistol_fire_profile"]["error"] or ""
+    )
+
+
 def test_single_file_fallback(tmp_path: Path) -> None:
     plan = MechanicPlan(
         prompt_id="demo", items=[_generate_item("solo")]

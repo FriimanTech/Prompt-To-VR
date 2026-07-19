@@ -47,12 +47,27 @@ PTV_API_EXACT = {
     "ptv/api/InputSnapshot.h",
 }
 
+# Keep in sync with ``_HEADER_WHITELIST_EXACT`` in
+# apps/orchestrator/ptv_orchestrator/pipeline/bounds.py. Guiding principle:
+# only pure, deterministic, side-effect-free standard headers -- no console/
+# file I/O, threading/atomics, wall-clock time, filesystem, or process control
+# (those break the ECS single-threaded, deterministic execution model).
 HEADER_EXACT = {
-    "cstdint", "cstddef", "cstring", "cmath", "cfloat",
-    "string", "string_view", "vector", "array", "span",
-    "unordered_map", "unordered_set", "map", "set",
-    "optional", "variant", "tuple", "algorithm", "functional",
-    "memory", "utility", "chrono", "type_traits", "numeric",
+    # Integer / byte / math primitives.
+    "cstdint", "cstddef", "cstring", "cmath", "cfloat", "climits", "cstdlib",
+    "limits", "bit", "numeric", "ratio", "complex", "compare",
+    # Strings / text (in-memory only; NOT iostream/fstream).
+    "string", "string_view", "cctype", "cwctype", "charconv", "sstream",
+    "iomanip",
+    # Containers.
+    "vector", "array", "span", "deque", "list", "forward_list", "stack",
+    "queue", "unordered_map", "unordered_set", "map", "set", "bitset",
+    "initializer_list",
+    # Utilities / metaprogramming.
+    "optional", "variant", "tuple", "algorithm", "functional", "memory", "new",
+    "utility", "iterator", "chrono", "type_traits", "random",
+    # Error handling.
+    "cassert", "stdexcept", "exception",
 }
 
 INCLUDE_RE = re.compile(r"""^\s*#\s*include\s*[<"](?P<h>[^">]+)[">]""")

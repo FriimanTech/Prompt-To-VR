@@ -63,16 +63,22 @@ What this module does
    ``assets/<asset_id>.glb`` path is computed once so the LLM cannot
    invent a wrong path that would later fail GLB normalization.
 
-Each scene call still uses the shared :func:`make_llm` facade, which
-inherits the generous ``OpenAIConfig.max_tokens`` budget (96K with
-auto-retry up to 128K) introduced earlier -- so a single
-SceneSpec response cannot silently truncate the way MechanicPlan
-used to.
+Each scene is composed by an OpenAI Agents SDK agent (``gpt-5.5``, NO
+tools) via :class:`SceneSpecComposer`, mirroring the mechanic_plan and
+world stages. After each compose the stage runs a deterministic
+:func:`_validate_scene_semantics` check (asset coverage, environment
+presence, valid mechanic-binding ids, scene_id match); any problems are
+fed back into the SAME agent session as a repair message so the agent
+fixes its output in context, up to ``scene_spec_max_repair_rounds``.
+This replaces the old single ``make_llm`` JSON call, whose gpt-5
+fallback could exceed the request timeout and then be silently retried
+by the OpenAI SDK, producing a ~15-minute apparent hang.
 """
 
 from __future__ import annotations
 
 import json
+import os
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -89,9 +95,14 @@ from ptv_schemas import (
     SceneSpec,
 )
 
+from ..settings import Settings
 from .context import PipelineContext, StageResult
-from .llm import make_llm
 from .prompts import SCENE_SPEC_SYSTEM
+from .scene_spec_agent import (
+    SceneSpecAgentError,
+    SceneSpecComposer,
+    build_repair_message,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -99,26 +110,42 @@ from .prompts import SCENE_SPEC_SYSTEM
 # ---------------------------------------------------------------------------
 
 
-# A ``ClientFactory`` is anything that takes the orchestrator ``Settings``
-# and returns an object exposing ``.generate_json(prompt=..., schema=...,
-# system=...)``. ``make_llm`` is the production wiring; tests inject a
-# fake. We accept a *factory* (not a pre-built client) because some
-# tests want to count constructions and to be sure no client is built
-# at import-time.
-ClientFactory = Callable[[Any], Any]
+# A ``ComposerFactory`` takes the orchestrator ``Settings`` plus a unique
+# per-scene ``session_id`` and returns an object exposing
+# ``.compose(message) -> SceneSpec`` (a :class:`SceneSpecComposer`).
+# ``_default_composer_factory`` is the production wiring; tests inject a
+# fake. We accept a *factory* (not a pre-built composer) because each
+# scene needs its OWN agent session, and some tests want to count
+# constructions and be sure no agent is built at import-time.
+ComposerFactory = Callable[[Settings, str], Any]
+
+
+def _default_composer_factory(
+    settings: Settings, session_id: str
+) -> SceneSpecComposer:
+    """Build a real Agents-SDK scene composer from settings."""
+    return SceneSpecComposer(
+        instructions=SCENE_SPEC_SYSTEM,
+        model=settings.scene_spec_model,
+        reasoning_effort=settings.scene_spec_reasoning_effort,
+        max_turns=settings.scene_spec_agent_max_turns,
+        session_id=session_id,
+    )
 
 
 def run(ctx: PipelineContext) -> StageResult:
-    return run_with_client_factory(ctx, make_llm)
+    return run_with_composer_factory(ctx, _default_composer_factory)
 
 
-def run_with_client_factory(
-    ctx: PipelineContext, client_factory: ClientFactory
+def run_with_composer_factory(
+    ctx: PipelineContext, composer_factory: ComposerFactory
 ) -> StageResult:
     """Compose one SceneSpec per BuildSpec scene, in parallel.
 
-    ``client_factory`` lets tests inject a fake LLM client without
-    monkey-patching :mod:`make_llm`.
+    Each scene is composed by its own OpenAI Agents SDK agent
+    (``gpt-5.5``, no tools) with a validate-and-repair loop.
+    ``composer_factory`` lets tests inject a fake composer without
+    touching the SDK or the network.
 
     On Resume / partial completion, scenes whose ``scene_spec.<id>.json``
     already exists and validates against the :class:`SceneSpec` schema
@@ -171,9 +198,14 @@ def run_with_client_factory(
         ctx.mechanic_plan or ctx.store.load_mechanic_plan(ctx.project_id)
     )
 
+    # Bridge OPENAI_API_KEY into os.environ for the Agents SDK (BaseSettings
+    # does not export it automatically), mirroring the mechanic_plan / world
+    # stages.
+    if ctx.settings.openai_api_key and not os.environ.get("OPENAI_API_KEY"):
+        os.environ["OPENAI_API_KEY"] = ctx.settings.openai_api_key
+
     static = _StaticContext.build(build_spec, manifest, plan)
-    schema = SceneSpec.model_json_schema(by_alias=True)
-    client = client_factory(ctx.settings)
+    max_repair_rounds = int(ctx.settings.scene_spec_max_repair_rounds)
 
     max_workers = max(
         1, min(int(ctx.settings.scene_spec_max_parallel_workers), total)
@@ -220,11 +252,17 @@ def run_with_client_factory(
         )
         heartbeat.start(scene_id, index)
         try:
+            composer = composer_factory(
+                ctx.settings, f"ptv-scene-{ctx.project_id}-{scene_id}"
+            )
             scene_spec = _compose_one_scene(
-                client=client,
-                schema=schema,
+                ctx=ctx,
+                composer=composer,
                 scene_entry=scene_entry,
                 static=static,
+                max_repair_rounds=max_repair_rounds,
+                index=index,
+                total=total,
             )
         except Exception as e:
             heartbeat.stop(scene_id)
@@ -497,18 +535,133 @@ class _Heartbeat:
 
 def _compose_one_scene(
     *,
-    client: Any,
-    schema: Mapping[str, Any],
+    ctx: PipelineContext,
+    composer: Any,
     scene_entry: Any,
     static: "_StaticContext",
+    max_repair_rounds: int,
+    index: int,
+    total: int,
 ) -> SceneSpec:
-    user_message = _build_user_message(scene_entry, static)
-    resp = client.generate_json(
-        prompt=user_message,
-        schema=schema,
-        system=SCENE_SPEC_SYSTEM,
+    """Compose one scene via the agent, then run deterministic semantic
+    validation and feed any problems back to the SAME agent session as a
+    repair message, up to ``max_repair_rounds`` times.
+
+    Raises :class:`SceneSpecAgentError` if the scene still fails schema or
+    semantic validation after the repair budget is exhausted (the worker
+    stamps the failure and the stage propagates it).
+    """
+
+    message = _build_user_message(scene_entry, static)
+    issues: list[str] = []
+
+    for attempt in range(max_repair_rounds + 1):
+        if attempt > 0:
+            ctx.emit(
+                ProjectStage.scene_spec,
+                "info",
+                f"[{index + 1}/{total}] repairing scene '{scene_entry.id}' "
+                f"(round {attempt}/{max_repair_rounds}): {len(issues)} issue(s)",
+            )
+        msg = message if attempt == 0 else build_repair_message(issues)
+
+        try:
+            scene = composer.compose(msg)
+        except SceneSpecAgentError as e:
+            # Schema / SDK failure. Treat as a repairable issue while we
+            # still have budget; otherwise surface it.
+            issues = [f"agent returned invalid/non-conforming output: {e}"]
+            if attempt >= max_repair_rounds:
+                raise
+            continue
+
+        issues = _validate_scene_semantics(scene, scene_entry, static)
+        if not issues:
+            return scene
+        if attempt >= max_repair_rounds:
+            raise SceneSpecAgentError(
+                f"scene '{scene_entry.id}' failed semantic validation after "
+                f"{max_repair_rounds} repair round(s): " + "; ".join(issues)
+            )
+
+    # Unreachable (the loop either returns or raises), but keeps the type
+    # checker satisfied.
+    raise SceneSpecAgentError(f"scene '{scene_entry.id}' could not be composed")
+
+
+def _validate_scene_semantics(
+    scene: SceneSpec, scene_entry: Any, static: "_StaticContext"
+) -> list[str]:
+    """Deterministic post-checks the schema alone cannot enforce.
+
+    Returns a list of human-readable problems (empty == valid) that are
+    fed back to the agent as a repair message.
+    """
+
+    issues: list[str] = []
+
+    if scene.scene_id != scene_entry.id:
+        issues.append(
+            f"scene_id mismatch: got '{scene.scene_id}', "
+            f"expected '{scene_entry.id}'"
+        )
+
+    if not scene.entities:
+        issues.append(
+            "entities[] is empty; a real scene needs at least the "
+            "environment and the player rig"
+        )
+
+    # Asset coverage: every AssetItem must appear at least once as a mesh.
+    mesh_asset_ids = {
+        e.mesh.asset_id for e in scene.entities if e.mesh is not None
+    }
+    missing = [
+        a["id"] for a in static.assets_compact if a["id"] not in mesh_asset_ids
+    ]
+    if missing:
+        shown = ", ".join(missing[:20]) + (" ..." if len(missing) > 20 else "")
+        issues.append(
+            "these AssetItem ids never appear in entities[] with a mesh "
+            f"(each must appear at least once): {shown}"
+        )
+
+    # Environment presence: if the manifest has an environment asset, the
+    # scene must contain an entity tagged 'environment' the player spawns in.
+    has_env_asset = any(
+        a.get("category") == "environment" for a in static.assets_compact
     )
-    return SceneSpec.model_validate(resp.data)
+    if has_env_asset and not any(
+        "environment" in e.tags for e in scene.entities
+    ):
+        issues.append(
+            "no entity is tagged 'environment' even though the manifest has "
+            "an environment asset; the player must spawn inside it"
+        )
+
+    # Mechanic-binding validity: every mechanic_id must be a known binding
+    # id from the plan (builtin.* or generated.<task_id>).
+    known_binding_ids = {
+        m["binding_id"]
+        for m in static.mechanics_compact
+        if m.get("binding_id")
+    }
+    unknown: list[str] = []
+    for e in scene.entities:
+        for b in e.mechanic_bindings:
+            mid = b.mechanic_id
+            if mid in known_binding_ids or mid.startswith("builtin."):
+                continue
+            unknown.append(f"{e.id}:{mid}")
+    if unknown:
+        shown = ", ".join(unknown[:20]) + (" ..." if len(unknown) > 20 else "")
+        issues.append(
+            "mechanic_bindings reference unknown mechanic ids (use a "
+            "binding_id from the MECHANICS block or a 'builtin.*' id): "
+            f"{shown}"
+        )
+
+    return issues
 
 
 def _build_user_message(scene_entry: Any, static: "_StaticContext") -> str:

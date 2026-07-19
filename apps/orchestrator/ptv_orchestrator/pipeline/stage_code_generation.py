@@ -23,13 +23,16 @@ Architecture (see ``docs/codegen-agents.md`` for the full design):
   The board records ``files_written`` and ``exports`` so downstream
   tasks can plug into them.
 * Once every task is ``done``, an optional **compile-verification +
-  repair loop** builds the ``ptv_runtime`` target (which globs in every
-  generated mechanic). Include validation only checks *includes*, not
-  that the C++ compiles -- this loop closes that gap. On a compile
-  failure the compiler errors are mapped back to the owning task and fed
-  to that task's agent as a ``repair_context`` so it regenerates the
-  file; the stage then rebuilds, up to ``codegen_max_repair_rounds``
-  times. Controlled by ``settings.codegen_verify_compile``.
+  repair loop** builds the ``ptv_starter_room`` executable (which links
+  ``ptv_runtime`` with every generated mechanic force-linked). Include
+  validation only checks *includes*; this loop additionally catches
+  compile AND link errors (e.g. a task calling a dependency's function
+  with a mismatched signature -- an ``unresolved external symbol`` that a
+  static-lib-only build would miss). On failure the errors are mapped
+  back to the owning task and fed to that task's agent as a
+  ``repair_context`` so it regenerates the file; the stage then rebuilds,
+  up to ``codegen_max_repair_rounds`` times. Controlled by
+  ``settings.codegen_verify_compile``.
 
 The CodeTask ``test_files[]`` field is intentionally unused: no disk
 writes, no CMake test targets, no planner prompts for tests.
@@ -583,7 +586,16 @@ class _StageRuntime:
             inp, model=self.model_id, runner=self.agent_runner
         )
 
-        files_written_abs, files_written_rel = self._write_files(task, result)
+        # Headers produced by this task's declared dependency tasks. They live
+        # in the same project directory and the board guarantees they are
+        # ``done`` (written to disk) before this task runs, so a dependent
+        # task MAY include them (e.g. a weapon profile including
+        # ``shooting_hub_shared.h``).
+        dep_headers = _dep_header_names(snapshot, list(task.depends_on))
+
+        files_written_abs, files_written_rel = self._write_files(
+            task, result, dep_headers=dep_headers
+        )
 
         # Update the .codetask.json sidecar with the final files[]
         # content so downstream tools (promotion stage) see exactly
@@ -613,7 +625,11 @@ class _StageRuntime:
     # Per-file write pipeline
     # ------------------------------------------------------------------
     def _write_files(
-        self, task: CodeTask, result: CodegenAgentResult
+        self,
+        task: CodeTask,
+        result: CodegenAgentResult,
+        *,
+        dep_headers: frozenset[str] = frozenset(),
     ) -> tuple[list[Path], list[str]]:
         """Validate + write every file in ``result.files``. Returns
         ``(absolute_paths_written, repo-relative posix paths)``.
@@ -624,7 +640,10 @@ class _StageRuntime:
         Generated ``.h``/``.hpp`` files are first-class outputs subject
         to the same path and include rules as ``.cpp`` files.  Same-task
         headers are whitelisted so that ``#include "foo_shared.h"`` is
-        preserved when the task also emits ``foo_shared.h``.
+        preserved when the task also emits ``foo_shared.h``. ``dep_headers``
+        additionally whitelists headers produced by this task's declared
+        ``depends_on`` tasks (same directory, built first), so a dependent
+        task may include them.
         """
 
         if not result.files:
@@ -676,7 +695,9 @@ class _StageRuntime:
 
             # Validate includes (fail-loudly: collect all violations).
             inc_violations = validate_includes(
-                code, basename, local_headers=local_headers,
+                code, basename,
+                local_headers=local_headers,
+                dep_headers=dep_headers,
             )
             all_violations.extend(
                 f"CodeTask {task.id!r}: {v}" for v in inc_violations
@@ -691,7 +712,9 @@ class _StageRuntime:
                 )
 
             # Secondary safety-net filter + auto-repair.
-            code = filter_cpp_only(code, local_headers=local_headers)
+            code = filter_cpp_only(
+                code, local_headers=local_headers, dep_headers=dep_headers
+            )
             code, repair_notes = repair_generated_cpp(code)
             for note in repair_notes:
                 self.ctx.emit(
@@ -787,33 +810,48 @@ class _StageRuntime:
         return False, last_log, []
 
     def _failing_tasks_from_log(self, log: str) -> dict[str, list[str]]:
-        """Map compiler error lines to the codegen task that owns the file.
+        """Map compiler AND linker error lines to the codegen task that owns
+        the file.
 
-        Builds a ``file -> task_id`` index from every task's
-        ``files_written`` (repo-relative posix + basename), then attributes
-        each error line to a task by the source path it names. Returns
-        ``{task_id: [error lines]}``."""
+        Builds ``file -> task_id`` (source paths + basenames) and
+        ``stem -> task_id`` (basename without extension) indexes from every
+        task's ``files_written``, then attributes each error line to a task
+        by the source path it names (compiler errors, ``foo.cpp(42):``) or
+        by the object file it names (MSVC linker errors, ``foo.obj : error
+        LNK2019: ...``). Returns ``{task_id: [error lines]}``."""
         file_to_task: dict[str, str] = {}
+        stem_to_task: dict[str, str] = {}
         for tid in self.tasks_by_id:
             row = self.board.task(tid) or {}
             for f in row.get("files_written", []):
                 fp = str(f).replace("\\", "/").lower()
+                base = fp.rsplit("/", 1)[-1]
                 file_to_task[fp] = tid
-                file_to_task[fp.rsplit("/", 1)[-1]] = tid  # basename
+                file_to_task[base] = tid
+                stem_to_task[base.rsplit(".", 1)[0]] = tid
 
         per_task: dict[str, list[str]] = {}
         for line in log.splitlines():
             low = line.lower()
-            if not (": error" in low or "error c" in low or "fatal error" in low):
+            is_compile_err = (
+                ": error" in low or "error c" in low or "fatal error" in low
+            )
+            # MSVC linker errors (LNK2019/LNK2001 unresolved external, etc.)
+            # name an .obj, not a source file: "foo.obj : error LNK2019: ...".
+            is_link_err = "lnk" in low or "unresolved external" in low
+            if not (is_compile_err or is_link_err):
                 continue
+
+            tid: Optional[str] = None
+
+            # 1) Source-file attribution (compiler errors).
             # MSVC: C:\path\file.cpp(42): error C2065: ...
             # clang/gcc: /path/file.cpp:42:5: error: ...
             m = re.search(r"([A-Za-z]:[^()<>|]+?\.(?:cpp|h|hpp))\(\d+", line)
             if not m:
                 m = re.search(r"([^\s:<>|]+\.(?:cpp|h|hpp)):\d+", line)
-            token = m.group(1).replace("\\", "/").lower() if m else ""
-            tid: Optional[str] = None
-            if token:
+            if m:
+                token = m.group(1).replace("\\", "/").lower()
                 base = token.rsplit("/", 1)[-1]
                 for fp, owner in file_to_task.items():
                     if "/" in fp and token.endswith(fp):
@@ -821,6 +859,15 @@ class _StageRuntime:
                         break
                 if tid is None:
                     tid = file_to_task.get(base)
+
+            # 2) Object-file attribution (linker errors).
+            if tid is None:
+                for om in re.finditer(r"([\w\-]+)\.obj\b", line, re.IGNORECASE):
+                    cand = stem_to_task.get(om.group(1).lower())
+                    if cand is not None:
+                        tid = cand
+                        break
+
             if tid:
                 per_task.setdefault(tid, []).append(line.strip())
         return per_task
@@ -953,6 +1000,27 @@ def _read_text(path: Path) -> str:
     return path.read_text(encoding="utf-8")
 
 
+def _dep_header_names(
+    board_snapshot: dict[str, Any], depends_on: list[str]
+) -> frozenset[str]:
+    """Bare header filenames (``*.h`` / ``*.hpp``) written by each task in
+    ``depends_on``, read from a board snapshot's ``files_written``. These
+    headers live in the same project directory and are guaranteed built
+    before the dependent task, so the dependent task may ``#include`` them.
+    """
+    tasks = board_snapshot.get("tasks", {})
+    out: set[str] = set()
+    for dep in depends_on:
+        row = tasks.get(dep)
+        if not row:
+            continue
+        for f in row.get("files_written", []):
+            name = Path(str(f).replace("\\", "/")).name
+            if name.lower().endswith((".h", ".hpp")):
+                out.add(name)
+    return frozenset(out)
+
+
 def _tail(text: str, n: int) -> str:
     return text[-n:] if len(text) > n else text
 
@@ -973,12 +1041,22 @@ def _error_excerpt(log_text: str) -> str:
 
 
 def _default_verify_compile(ctx: PipelineContext) -> tuple[bool, str]:
-    """Configure the engine and build ONLY the ``ptv_runtime`` target,
-    which globs in every generated mechanic. Returns ``(ok, combined_log)``.
+    """Configure the engine and build the ``ptv_starter_room`` executable,
+    which links ``ptv_runtime`` (with every generated mechanic force-linked
+    via /WHOLEARCHIVE). Returns ``(ok, combined_log)``.
+
+    Building the EXE (not just the ``ptv_runtime`` static lib) is deliberate:
+    a static-library build never links, so it would miss cross-task
+    ``unresolved external symbol`` errors -- e.g. a weapon profile or hub
+    that calls a dependency's function with a mismatched signature. Those
+    only surface when an executable links the archive, which is exactly what
+    breaks the final playable build. Catching them here lets the repair loop
+    fix them.
 
     Reuses the same ``builds/cmake-current`` dir the final ``cmake_build``
     stage uses, so vcpkg is shared and the later full build is incremental.
-    ``scene.json`` is not required to compile the library.
+    The project's ``scene.json`` is not required to build the exe (the
+    starter-room ships its own default scene).
     """
     build_dir = ctx.project_dir / "builds" / "cmake-current"
     log_path = ctx.project_dir / "logs" / "codegen_verify.log"
@@ -997,7 +1075,7 @@ def _default_verify_compile(ctx: PipelineContext) -> tuple[bool, str]:
         config=ctx.settings.cmake_build_config,
         vcpkg_root=ctx.settings.vcpkg_root,
         extra_cache=(("PTV_GENERATED_PROJECT_ID", ctx.project_id),),
-        build_target="ptv_runtime",
+        build_target="ptv_starter_room",
         on_line=_sink,
     )
     text = "\n".join(logs)

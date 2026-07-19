@@ -30,9 +30,13 @@ alwaysApply: true
 - Generated header files (`.h`/`.hpp`) are allowed under the same directories
   as `.cpp` files, subject to the same include whitelist. They are for
   task-local helpers, structs, and shared declarations only.
-- Generated headers may only be included via bare filename
-  (`#include "foo.h"`) by files in the same project directory. Cross-project
-  header includes are forbidden.
+- Generated headers may be included via bare filename (`#include "foo.h"`)
+ by files in the SAME task, or by a task that declares the owning task in
+ its `depends_on` (both live in the same project directory and the
+ dependency is built first — e.g. a weapon profile that
+ `depends_on: ["shooting_hub"]` may `#include "shooting_hub_shared.h"`).
+ Including a header from a task that is neither the same task nor a
+ declared dependency, or from another project, is forbidden.
 - Registration macros (`PTV_REGISTER_MECHANIC`, `PTV_REGISTER_BEHAVIOUR`,
   `PTV_REGISTER_DIALOGUE_HOOK`, `PTV_REGISTER_WORLD_BUILDER`) must only appear
   in `.cpp` files, never in headers.

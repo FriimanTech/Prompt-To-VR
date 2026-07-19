@@ -4,6 +4,7 @@
 #include <entt/entt.hpp>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <vector>
 
@@ -115,6 +116,26 @@ struct CMechanicBinding {
 struct CTag {
     std::vector<std::string> tags;
 };
+
+// ---- Canonical tag helper --------------------------------------------------
+//
+// Generated mechanics frequently need "does this entity have tag X?".
+// Providing it ONCE here (inline, in the public engine API) gives generated
+// code a canonical helper so tasks stop defining their own ``entity_has_tag``
+// free function with external linkage -- which collides at link time
+// (LNK2005 "already defined") when two parallel-generated tasks pick the same
+// name. Generated code should call ``has_tag`` instead of rolling its own.
+// (``add``/``remove`` are intentionally NOT provided as free functions to
+// avoid clashing with helpers some generated tasks already define; mutate
+// ``world.get<CTag>(e).tags`` directly, or use a task-unique helper name.)
+
+inline bool has_tag(const World& world, std::uint32_t e, std::string_view tag) {
+    if (!world.has<CTag>(e)) return false;
+    for (const auto& t : world.get<CTag>(e).tags) {
+        if (t == tag) return true;
+    }
+    return false;
+}
 
 // Procedural primitive geometry authored by the world-generation stage.
 // Rendered as a colored box/plane/cylinder/sphere/ramp sized by ``size``.

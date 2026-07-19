@@ -102,8 +102,8 @@ Pills are red with ✗ if a key is missing.
 |---|---|---|---|
 | BuildSpec | Anthropic `claude-opus-4-7` | OpenAI `gpt-5` | JSON schema |
 | AssetManifest | Anthropic `claude-sonnet-4-6` | OpenAI `gpt-5-mini` | JSON schema |
-| MechanicPlan | Anthropic `claude-opus-4-7` | OpenAI `gpt-5` | JSON schema |
-| SceneSpec (per scene) | Anthropic `claude-opus-4-7` | OpenAI `gpt-5` | JSON schema |
+| MechanicPlan | OpenAI Agents SDK `gpt-5.5` (no tools) | — (OpenAI-only) | JSON schema |
+| SceneSpec (per scene) | OpenAI Agents SDK `gpt-5.5` (no tools) + validate-and-repair | — (OpenAI-only) | JSON schema |
 | Reference image | Google `gemini-3.1-flash-image` | — | — |
 | Image-to-3D | Tripo (default latest, configurable) | — | textured + PBR |
 | C++ module | Anthropic `claude-opus-4-7` | OpenAI `gpt-5` | free-form, guarded by boundaries |

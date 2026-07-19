@@ -1,17 +1,20 @@
 """Tests for the parallel SceneSpec stage.
 
-These tests exercise ``stage_scene_spec.run_with_client_factory`` with
-an injected fake LLM client so no network calls happen. They verify:
+These tests exercise ``stage_scene_spec.run_with_composer_factory`` with
+an injected fake SceneSpec composer so no network / Agents SDK calls
+happen. They verify:
 
-* one LLM call per BuildSpec scene
+* one agent call per BuildSpec scene
 * per-scene user messages are COMPRESSED (no full BuildSpec / Manifest /
   MechanicPlan dumps) and include pre-computed glb_path values
-* the stage runs scene calls in PARALLEL but returns ``ctx.scene_specs``
+* the stage runs scene composes in PARALLEL but returns ``ctx.scene_specs``
   in BuildSpec order
 * per-scene progress events are emitted
 * per-scene + canonical scene_spec.json files are saved
 * a single failing scene propagates the error (the stage cannot quietly
   proceed with a missing SceneSpec)
+* the validate-and-repair loop fixes a semantically invalid first output
+  and fails the stage when the repair budget is exhausted
 """
 
 from __future__ import annotations
@@ -188,31 +191,57 @@ def _ctx(
 @dataclass
 class _Call:
     prompt: str
-    schema: dict
-    system: str
+    scene_id: str
 
 
-@dataclass
-class _Resp:
-    data: dict
+class _Registry:
+    """Shared call log across all per-scene fake composers (each scene
+    gets its own composer instance, so we aggregate here)."""
 
-
-class _FakeClient:
-    """Records every ``generate_json`` call and returns a valid SceneSpec
-    payload derived from the prompt's ``scene_id``."""
-
-    def __init__(self, *, delay_seconds: float = 0.0):
-        self._delay = delay_seconds
+    def __init__(self) -> None:
         self.calls: list[_Call] = []
         self._lock = threading.Lock()
 
-    def generate_json(self, *, prompt: str, schema: Any, system: str) -> _Resp:
+    def record(self, scene_id: str, prompt: str) -> None:
+        with self._lock:
+            self.calls.append(_Call(prompt=prompt, scene_id=scene_id))
+
+
+# ``payload_fn(scene_id, attempt) -> SceneSpec | Exception-raiser``. ``attempt``
+# is 0 for the initial compose, 1+ for repair turns on the SAME scene.
+PayloadFn = Any
+
+
+class _FakeComposer:
+    """Fake :class:`SceneSpecComposer`. Records every ``compose`` call and
+    returns a SceneSpec for its scene. The scene_id is captured from the
+    FIRST (initial) message; repair turns reuse it since they carry no id.
+    """
+
+    def __init__(
+        self,
+        *,
+        registry: _Registry,
+        delay_seconds: float = 0.0,
+        payload_fn: PayloadFn = None,
+    ) -> None:
+        self._registry = registry
+        self._delay = delay_seconds
+        self._payload_fn = payload_fn
+        self._scene_id: str | None = None
+        self._attempt = 0
+
+    def compose(self, message: str) -> SceneSpec:
         if self._delay > 0:
             time.sleep(self._delay)
-        with self._lock:
-            self.calls.append(_Call(prompt=prompt, schema=dict(schema), system=system))
-        scene_id = _scene_id_from_prompt(prompt)
-        return _Resp(data=_make_scene_payload(scene_id))
+        if self._scene_id is None:
+            self._scene_id = _scene_id_from_prompt(message)
+        self._registry.record(self._scene_id, message)
+        attempt = self._attempt
+        self._attempt += 1
+        if self._payload_fn is not None:
+            return self._payload_fn(self._scene_id, attempt)
+        return _make_valid_scene(self._scene_id)
 
 
 def _scene_id_from_prompt(prompt: str) -> str:
@@ -223,8 +252,38 @@ def _scene_id_from_prompt(prompt: str) -> str:
     return raw.strip("'\"")
 
 
-def _make_scene_payload(scene_id: str) -> dict:
-    spec = SceneSpec(
+def _make_valid_scene(scene_id: str) -> SceneSpec:
+    """A semantically valid SceneSpec for the seed manifest (city env +
+    gauntlet prop): every asset appears, an environment entity exists."""
+    return SceneSpec(
+        prompt_id="demo",
+        scene_id=scene_id,
+        name=f"Composed {scene_id}",
+        entities=[
+            EntitySpec(
+                id="city",
+                name="City",
+                transform=Transform(position=Vec3(x=0.0, y=0.0, z=0.0)),
+                mesh=MeshRef(asset_id="city", glb_path="assets/city.glb"),
+                physics=PhysicsProps(kind="static", collision_shape="mesh"),
+                tags=["environment"],
+            ),
+            EntitySpec(
+                id="gauntlet",
+                name="Gauntlet",
+                transform=Transform(position=Vec3(x=0.5, y=1.0, z=-0.5)),
+                mesh=MeshRef(asset_id="gauntlet", glb_path="assets/gauntlet.glb"),
+                physics=PhysicsProps(kind="dynamic"),
+                tags=["interactable", "grabbable"],
+            ),
+        ],
+    )
+
+
+def _make_scene_missing_asset(scene_id: str) -> SceneSpec:
+    """An INVALID SceneSpec: the gauntlet asset never appears, so
+    ``_validate_scene_semantics`` reports it as missing."""
+    return SceneSpec(
         prompt_id="demo",
         scene_id=scene_id,
         name=f"Composed {scene_id}",
@@ -239,12 +298,22 @@ def _make_scene_payload(scene_id: str) -> dict:
             ),
         ],
     )
-    return spec.model_dump(mode="json")
 
 
-def _factory_returning(client: _FakeClient):
-    def factory(_settings: Settings):
-        return client
+def _composer_factory(
+    registry: _Registry,
+    *,
+    delay_seconds: float = 0.0,
+    payload_fn: PayloadFn = None,
+):
+    """Return a ComposerFactory ``(settings, session_id) -> _FakeComposer``."""
+
+    def factory(_settings: Settings, _session_id: str) -> _FakeComposer:
+        return _FakeComposer(
+            registry=registry,
+            delay_seconds=delay_seconds,
+            payload_fn=payload_fn,
+        )
 
     return factory
 
@@ -399,13 +468,13 @@ def test_user_message_focuses_on_this_scene(tmp_path):
 def test_one_llm_call_per_scene_and_order_preserved(tmp_path):
     store, pid, settings = _seed(tmp_path, n_scenes=5)
     ctx, _ = _ctx_with_bus(store, pid, settings)
-    client = _FakeClient()
+    reg = _Registry()
 
-    result = stage_scene_spec.run_with_client_factory(
-        ctx, _factory_returning(client)
+    result = stage_scene_spec.run_with_composer_factory(
+        ctx, _composer_factory(reg)
     )
 
-    assert len(client.calls) == 5, f"expected 5 LLM calls, got {len(client.calls)}"
+    assert len(reg.calls) == 5, f"expected 5 agent calls, got {len(reg.calls)}"
     # ctx.scene_specs preserves BuildSpec order regardless of which
     # worker finished first.
     assert [s.scene_id for s in ctx.scene_specs] == [
@@ -438,11 +507,11 @@ def test_scenes_run_in_parallel_when_workers_gt_one(tmp_path):
     store, pid, settings = _seed(tmp_path, n_scenes=6, workers=3)
     ctx, _ = _ctx_with_bus(store, pid, settings)
     # 200ms per call. Serial = 1.2s. With 3 workers should be ~0.4s.
-    client = _FakeClient(delay_seconds=0.2)
+    reg = _Registry()
 
     t0 = time.monotonic()
-    stage_scene_spec.run_with_client_factory(
-        ctx, _factory_returning(client)
+    stage_scene_spec.run_with_composer_factory(
+        ctx, _composer_factory(reg, delay_seconds=0.2)
     )
     elapsed = time.monotonic() - t0
 
@@ -458,10 +527,10 @@ def test_scenes_run_in_parallel_when_workers_gt_one(tmp_path):
 def test_emits_per_scene_progress_events(tmp_path):
     store, pid, settings = _seed(tmp_path, n_scenes=3)
     ctx, bus = _ctx_with_bus(store, pid, settings)
-    client = _FakeClient()
+    reg = _Registry()
 
-    stage_scene_spec.run_with_client_factory(
-        ctx, _factory_returning(client)
+    stage_scene_spec.run_with_composer_factory(
+        ctx, _composer_factory(reg)
     )
 
     # Drain everything published during the run.
@@ -484,17 +553,15 @@ def test_failing_scene_propagates_and_does_not_succeed_stage(tmp_path):
     store, pid, settings = _seed(tmp_path, n_scenes=3)
     ctx, bus = _ctx_with_bus(store, pid, settings)
 
-    class _BoomClient(_FakeClient):
-        def generate_json(self, *, prompt, schema, system):  # type: ignore[override]
-            scene_id = _scene_id_from_prompt(prompt)
-            if scene_id == "scene_01":
-                raise RuntimeError("simulated LLM blow-up on scene_01")
-            return super().generate_json(prompt=prompt, schema=schema, system=system)
+    def payload(scene_id: str, attempt: int) -> SceneSpec:
+        if scene_id == "scene_01":
+            raise RuntimeError("simulated LLM blow-up on scene_01")
+        return _make_valid_scene(scene_id)
 
-    client = _BoomClient()
+    reg = _Registry()
     with pytest.raises(RuntimeError, match="scene_01"):
-        stage_scene_spec.run_with_client_factory(
-            ctx, _factory_returning(client)
+        stage_scene_spec.run_with_composer_factory(
+            ctx, _composer_factory(reg, payload_fn=payload)
         )
 
     # Stage was not stamped 'succeeded'.
@@ -504,21 +571,80 @@ def test_failing_scene_propagates_and_does_not_succeed_stage(tmp_path):
     assert any("FAILED scene 'scene_01'" in e.message for e in bus.published)
 
 
-def test_run_default_factory_constructs_make_llm(tmp_path, monkeypatch):
-    """Smoke-test that the public ``run`` wires through ``make_llm`` and
-    accepts a stub client built by patching it."""
+def test_run_default_factory_uses_composer(tmp_path, monkeypatch):
+    """Smoke-test that the public ``run`` wires through the default
+    composer factory, accepting a stub composer built by patching it."""
     store, pid, settings = _seed(tmp_path, n_scenes=2)
     ctx, _ = _ctx_with_bus(store, pid, settings)
 
-    client = _FakeClient()
-
-    def fake_make_llm(_settings):
-        return client
-
-    monkeypatch.setattr(stage_scene_spec, "make_llm", fake_make_llm)
+    reg = _Registry()
+    monkeypatch.setattr(
+        stage_scene_spec, "_default_composer_factory", _composer_factory(reg)
+    )
 
     stage_scene_spec.run(ctx)
-    assert len(client.calls) == 2
+    assert len(reg.calls) == 2
+
+
+# ---------------------------------------------------------------------------
+# Tests: validate-and-repair loop
+# ---------------------------------------------------------------------------
+
+
+def test_semantic_repair_then_succeeds(tmp_path):
+    """A first compose that omits an asset (semantic failure) is repaired
+    on the next turn; the scene succeeds and a repair event is emitted."""
+    store, pid, settings = _seed(tmp_path, n_scenes=1)
+    ctx, bus = _ctx_with_bus(store, pid, settings)
+
+    def payload(scene_id: str, attempt: int) -> SceneSpec:
+        # First attempt is missing the gauntlet asset -> semantic failure.
+        if attempt == 0:
+            return _make_scene_missing_asset(scene_id)
+        return _make_valid_scene(scene_id)
+
+    reg = _Registry()
+    result = stage_scene_spec.run_with_composer_factory(
+        ctx, _composer_factory(reg, payload_fn=payload)
+    )
+
+    # Composed twice for the one scene: initial (bad) + one repair (good).
+    assert len(reg.calls) == 2
+    assert [c.scene_id for c in reg.calls] == ["scene_00", "scene_00"]
+    assert [s.scene_id for s in result.data] == ["scene_00"]
+
+    statuses = [(e.status, e.message) for e in bus.published]
+    assert any(s == "succeeded" for s, _ in statuses)
+    info_msgs = [m for s, m in statuses if s == "info"]
+    assert any("repairing scene 'scene_00'" in m for m in info_msgs), info_msgs
+
+    # The persisted scene is the repaired (valid) one with both assets.
+    saved = store.load_scene_spec(pid, filename="scene_spec.scene_00.json")
+    asset_ids = {e.mesh.asset_id for e in saved.entities if e.mesh}
+    assert {"city", "gauntlet"} <= asset_ids
+
+
+def test_repair_budget_exhausted_fails_stage(tmp_path):
+    """If the scene never validates, the stage exhausts its repair budget,
+    raises, and is not stamped succeeded."""
+    store, pid, settings = _seed(tmp_path, n_scenes=1)
+    settings.scene_spec_max_repair_rounds = 1
+    ctx, bus = _ctx_with_bus(store, pid, settings)
+
+    def payload(scene_id: str, attempt: int) -> SceneSpec:
+        # Always invalid (gauntlet asset never present).
+        return _make_scene_missing_asset(scene_id)
+
+    reg = _Registry()
+    with pytest.raises(Exception, match="semantic validation"):
+        stage_scene_spec.run_with_composer_factory(
+            ctx, _composer_factory(reg, payload_fn=payload)
+        )
+
+    # max_repair_rounds=1 -> initial compose + 1 repair = 2 attempts.
+    assert len(reg.calls) == 2
+    statuses = [e.status for e in bus.published]
+    assert "succeeded" not in statuses
 
 
 # ---------------------------------------------------------------------------
@@ -533,25 +659,25 @@ def test_resume_skips_scenes_already_on_disk(tmp_path):
     mark the stage succeeded in well under a second."""
     store, pid, settings = _seed(tmp_path, n_scenes=4)
     ctx, bus = _ctx_with_bus(store, pid, settings)
-    client = _FakeClient()
+    reg = _Registry()
 
-    # First run: composes all 4 scenes via LLM and writes them to disk.
-    stage_scene_spec.run_with_client_factory(ctx, _factory_returning(client))
-    assert len(client.calls) == 4
+    # First run: composes all 4 scenes via the agent and writes them to disk.
+    stage_scene_spec.run_with_composer_factory(ctx, _composer_factory(reg))
+    assert len(reg.calls) == 4
     proj_dir = store.dir_for(pid)
     for i in range(4):
         assert (proj_dir / f"scene_spec.scene_{i:02d}.json").exists()
 
     # Second run on a fresh context: every scene should be reused from
-    # disk; the fake client must NOT be called again.
+    # disk; the fake composer must NOT be called again.
     ctx2, bus2 = _ctx_with_bus(store, pid, settings)
-    client2 = _FakeClient()
-    result = stage_scene_spec.run_with_client_factory(
-        ctx2, _factory_returning(client2)
+    reg2 = _Registry()
+    result = stage_scene_spec.run_with_composer_factory(
+        ctx2, _composer_factory(reg2)
     )
-    assert len(client2.calls) == 0, (
-        "second run made LLM calls; idempotent resume is broken. "
-        f"calls={[c.prompt[:80] for c in client2.calls]}"
+    assert len(reg2.calls) == 0, (
+        "second run made agent calls; idempotent resume is broken. "
+        f"calls={[c.scene_id for c in reg2.calls]}"
     )
     # Outputs still preserve BuildSpec order.
     assert [s.scene_id for s in result.data] == [
@@ -573,20 +699,20 @@ def test_resume_recomposes_only_missing_scenes(tmp_path):
     the LLM. Tests the partial-resume code path."""
     store, pid, settings = _seed(tmp_path, n_scenes=5)
     ctx, _ = _ctx_with_bus(store, pid, settings)
-    client = _FakeClient()
+    reg = _Registry()
 
     # Compose everything once, then nuke 2 of the per-scene files.
-    stage_scene_spec.run_with_client_factory(ctx, _factory_returning(client))
+    stage_scene_spec.run_with_composer_factory(ctx, _composer_factory(reg))
     proj_dir = store.dir_for(pid)
     (proj_dir / "scene_spec.scene_01.json").unlink()
     (proj_dir / "scene_spec.scene_03.json").unlink()
 
-    # Fresh client + ctx: only scenes 01 and 03 should fire an LLM call.
+    # Fresh registry + ctx: only scenes 01 and 03 should fire an agent call.
     ctx2, _ = _ctx_with_bus(store, pid, settings)
-    client2 = _FakeClient()
-    stage_scene_spec.run_with_client_factory(ctx2, _factory_returning(client2))
-    assert len(client2.calls) == 2
-    scene_ids_called = {_scene_id_from_prompt(c.prompt) for c in client2.calls}
+    reg2 = _Registry()
+    stage_scene_spec.run_with_composer_factory(ctx2, _composer_factory(reg2))
+    assert len(reg2.calls) == 2
+    scene_ids_called = {c.scene_id for c in reg2.calls}
     assert scene_ids_called == {"scene_01", "scene_03"}
     # All five files are present once we're done.
     for i in range(5):
@@ -599,9 +725,9 @@ def test_resume_regenerates_corrupt_scene_file(tmp_path):
     validation as "missing" and re-compose just that scene."""
     store, pid, settings = _seed(tmp_path, n_scenes=3)
     ctx, _ = _ctx_with_bus(store, pid, settings)
-    client = _FakeClient()
-    stage_scene_spec.run_with_client_factory(ctx, _factory_returning(client))
-    assert len(client.calls) == 3
+    reg = _Registry()
+    stage_scene_spec.run_with_composer_factory(ctx, _composer_factory(reg))
+    assert len(reg.calls) == 3
 
     proj_dir = store.dir_for(pid)
     # Corrupt scene_01's file. Invalid JSON triggers the "missing" path.
@@ -610,11 +736,11 @@ def test_resume_regenerates_corrupt_scene_file(tmp_path):
     )
 
     ctx2, _ = _ctx_with_bus(store, pid, settings)
-    client2 = _FakeClient()
-    stage_scene_spec.run_with_client_factory(ctx2, _factory_returning(client2))
+    reg2 = _Registry()
+    stage_scene_spec.run_with_composer_factory(ctx2, _composer_factory(reg2))
     # Exactly one re-composed scene (the corrupted one).
-    assert len(client2.calls) == 1
-    assert _scene_id_from_prompt(client2.calls[0].prompt) == "scene_01"
+    assert len(reg2.calls) == 1
+    assert reg2.calls[0].scene_id == "scene_01"
     # And the file is now valid JSON again.
     spec = store.load_scene_spec(pid, filename="scene_spec.scene_01.json")
     assert spec.scene_id == "scene_01"
@@ -625,8 +751,8 @@ def test_resume_regenerates_file_with_mismatched_scene_id(tmp_path):
     stale after a rename) is considered invalid and re-generated."""
     store, pid, settings = _seed(tmp_path, n_scenes=2)
     ctx, _ = _ctx_with_bus(store, pid, settings)
-    client = _FakeClient()
-    stage_scene_spec.run_with_client_factory(ctx, _factory_returning(client))
+    reg = _Registry()
+    stage_scene_spec.run_with_composer_factory(ctx, _composer_factory(reg))
 
     proj_dir = store.dir_for(pid)
     # Replace scene_00's file with content whose scene_id says something else.
@@ -641,11 +767,11 @@ def test_resume_regenerates_file_with_mismatched_scene_id(tmp_path):
     )
 
     ctx2, _ = _ctx_with_bus(store, pid, settings)
-    client2 = _FakeClient()
-    stage_scene_spec.run_with_client_factory(ctx2, _factory_returning(client2))
+    reg2 = _Registry()
+    stage_scene_spec.run_with_composer_factory(ctx2, _composer_factory(reg2))
     # Exactly the mismatched scene is re-composed.
-    assert len(client2.calls) == 1
-    assert _scene_id_from_prompt(client2.calls[0].prompt) == "scene_00"
+    assert len(reg2.calls) == 1
+    assert reg2.calls[0].scene_id == "scene_00"
 
 
 def test_fast_finish_records_succeeded_without_llm_call(tmp_path):
@@ -656,13 +782,13 @@ def test_fast_finish_records_succeeded_without_llm_call(tmp_path):
 
     store, pid, settings = _seed(tmp_path, n_scenes=3)
     ctx, _ = _ctx_with_bus(store, pid, settings)
-    client = _FakeClient()
-    stage_scene_spec.run_with_client_factory(ctx, _factory_returning(client))
+    reg = _Registry()
+    stage_scene_spec.run_with_composer_factory(ctx, _composer_factory(reg))
 
     ctx2, _ = _ctx_with_bus(store, pid, settings)
-    client2 = _FakeClient()
-    stage_scene_spec.run_with_client_factory(ctx2, _factory_returning(client2))
-    assert len(client2.calls) == 0
+    reg2 = _Registry()
+    stage_scene_spec.run_with_composer_factory(ctx2, _composer_factory(reg2))
+    assert len(reg2.calls) == 0
 
     state = store.load_state(pid)
     scene_stages = [
@@ -680,7 +806,7 @@ def test_heartbeat_emits_for_slow_scenes(tmp_path):
     store, pid, settings = _seed(tmp_path, n_scenes=1)
     ctx, bus = _ctx_with_bus(store, pid, settings)
     # 2s scene, 1s heartbeat -> at least one heartbeat fires.
-    client = _FakeClient(delay_seconds=2.2)
+    reg = _Registry()
 
     # Reach into the module to lower the heartbeat interval for the test.
     real_heartbeat_cls = stage_scene_spec._Heartbeat
@@ -692,8 +818,8 @@ def test_heartbeat_emits_for_slow_scenes(tmp_path):
     import unittest.mock as _mock
 
     with _mock.patch.object(stage_scene_spec, "_Heartbeat", _FastHeartbeat):
-        stage_scene_spec.run_with_client_factory(
-            ctx, _factory_returning(client)
+        stage_scene_spec.run_with_composer_factory(
+            ctx, _composer_factory(reg, delay_seconds=2.2)
         )
 
     info_msgs = [e.message for e in bus.published if e.status == "info"]
@@ -708,9 +834,9 @@ def test_no_heartbeat_for_fast_scenes(tmp_path):
     well within the interval should produce zero heartbeat events."""
     store, pid, settings = _seed(tmp_path, n_scenes=3)
     ctx, bus = _ctx_with_bus(store, pid, settings)
-    client = _FakeClient()  # no delay
+    reg = _Registry()  # no delay
 
-    stage_scene_spec.run_with_client_factory(ctx, _factory_returning(client))
+    stage_scene_spec.run_with_composer_factory(ctx, _composer_factory(reg))
 
     info_msgs = [e.message for e in bus.published if e.status == "info"]
     assert not any("still composing" in m for m in info_msgs), info_msgs

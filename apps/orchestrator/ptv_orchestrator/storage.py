@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import threading
 from datetime import datetime, timezone
@@ -282,10 +283,41 @@ class ProjectStore:
             f.write(line.rstrip("\n") + "\n")
 
 
+# Build-intermediate directories that must never be treated as project
+# artifacts. They contain thousands of transient files (compiler ``.obj``
+# outputs, vcpkg installs, CMake bookkeeping) -- some of them locked by an
+# in-flight MSBuild, which made ``list_artifacts`` spam
+# ``PermissionError: [Errno 13]`` while hashing e.g.
+# ``builds/cmake-current/runtime/ptv_runtime.dir/Release/*.obj``. Pruning
+# these directories keeps the final binaries (``.exe``/``.dll``/``.pdb`` that
+# live directly under a ``<config>/`` output dir, not under a ``*.dir``) while
+# skipping the intermediates entirely -- faster and no spurious errors.
+_PRUNED_ARTIFACT_DIR_NAMES = frozenset(
+    {
+        "CMakeFiles",
+        "vcpkg_installed",
+        "__pycache__",
+        ".cmake",
+        "Testing",
+    }
+)
+
+
+def _is_pruned_artifact_dir(name: str) -> bool:
+    # Per-target intermediate dirs are named ``<target>.dir`` (this is where
+    # the locked ``*.obj`` files live).
+    return name in _PRUNED_ARTIFACT_DIR_NAMES or name.endswith(".dir")
+
+
 def _walk(root: Path):
-    for p in root.rglob("*"):
-        if p.is_file():
-            yield p
+    for dirpath, dirnames, filenames in os.walk(root):
+        # Prune in place so os.walk never descends into build intermediates.
+        dirnames[:] = [d for d in dirnames if not _is_pruned_artifact_dir(d)]
+        base = Path(dirpath)
+        for fname in filenames:
+            p = base / fname
+            if p.is_file():
+                yield p
 
 
 def _kind_for(p: Path) -> ArtifactKind:

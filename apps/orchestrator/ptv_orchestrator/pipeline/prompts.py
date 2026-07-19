@@ -470,10 +470,34 @@ from each ``.cpp`` that needs them. Each ``.cpp`` file is compiled
 independently -- a function defined in ``foo_register.cpp`` is NOT
 visible from ``foo_runtime.cpp`` unless declared in a shared header.
 
+MULTI-FILE CORRECTNESS (these are the most common compile breaks -- obey
+them exactly):
+
+  * NEVER split a single class across ``.cpp`` files. If a class (e.g.
+    ``EnemyAICombat``) is referenced from more than one ``.cpp``, its FULL
+    definition -- every data member (``state_``, ``params_``, ...) and every
+    method declaration -- MUST live in a shared ``.h`` you emit. A ``.cpp``
+    cannot use ``state_`` / ``params_`` or write ``EnemyAICombat::foo`` unless
+    that class is fully defined in a header it includes. Define the class in
+    the header; put method BODIES in one ``.cpp``.
+  * Free (non-member) helper functions used from more than one ``.cpp`` MUST
+    be DECLARED in the shared header with the EXACT signature (parameter
+    count AND types) used at every call site, and DEFINED in exactly one
+    ``.cpp``. Do not call ``pick_cover_near(world, pos)`` if the header
+    declares ``pick_cover_near(const World&)`` -- the signatures must match.
+  * A ``.cpp``-local helper that is NOT in a header must be marked
+    ``static`` (or in an anonymous namespace) and used only within that same
+    ``.cpp``.
+  * ``enum class`` values are NOT implicitly convertible to ``int``. Use
+    ``static_cast<int>(x)`` when you need the integer, and ``switch`` on the
+    enum-typed value with enum-qualified ``case`` labels
+    (``case State::Chase:``) -- never a bare integer ``case`` on an
+    ``enum class`` value.
+
 You may create ``.h`` and ``.hpp`` header files as part of your
 ``files[]`` output.  These headers are for sharing structs, enums,
 constants, and helper declarations across the ``.cpp`` files of THIS
-task only.  Rules:
+task.  Rules:
 
   * Headers MUST be in the same directory as your ``.cpp`` files
     (i.e. under ``engine/generated/<kind>/<project_id>/``).
@@ -487,9 +511,25 @@ task only.  Rules:
     header -- registration must live in a ``.cpp`` file.
   * Do NOT define new ``ptv::`` engine API types in headers.  Your
     headers are for task-local helpers only.
-  * Do NOT include headers from other tasks or other projects.
-    Cross-task reuse goes through the ``depends_on`` / ``exports``
-    ledger, not shared headers.
+
+DEPENDENCY-TASK HEADERS. You MAY ``#include`` a shared header produced
+by a task you list in ``depends_on`` (it lives in this same project
+directory and is guaranteed built before you). This is the intended way
+a mechanic that BUILDS ON another reuses its shared contract -- e.g. a
+weapon profile that ``depends_on: ["shooting_hub"]`` may
+``#include "shooting_hub_shared.h"`` to reuse the hub's shared structs /
+declarations. Rules for this:
+
+  * Only include a dependency-task header when that task is in your
+    ``depends_on`` list. Including a header from a task you do NOT
+    depend on (or from another project) is rejected -- add the owning
+    task to ``depends_on`` first so the build order is guaranteed.
+  * Use the bare filename in quotes (``#include "shooting_hub_shared.h"``);
+    do NOT emit that header yourself (the dependency task owns it).
+  * Prefer the dependency's ``exports`` (registered ids, macros, symbol
+    names) from the ledger to know WHAT to use; the header gives you the
+    C++ declarations to use it. A pure data hand-off via
+    ``CMechanicBinding.params_json`` is also fine and needs no header.
 
 # Output format
 
@@ -535,6 +575,7 @@ Public engine headers (use exactly these spellings):
   #include "ptv/api/IDialogueHook.h"   // for kind=dialogue
   #include "ptv/api/InputSnapshot.h"   // live controller/headset input (pulled in by IMechanic.h)
   #include "ptv/ecs/World.h"           // World, CTag, CTransform, CPhysics, CMesh, CMechanicBinding
+                                       //   + tag read helper: has_tag(world, e, "x")
   #include "ptv/math/Math.h"           // Vec3, Quat, Transform, Mat4
 
 Third-party headers already available (no setup needed):
@@ -542,14 +583,22 @@ Third-party headers already available (no setup needed):
   #include <nlohmann/json.hpp>         // params parsing
   #include <glm/glm.hpp>               // optional, if math needed
 
-C++ standard library (common ones, use as needed):
-  <cstdint> <cstddef> <cstring> <cmath> <cfloat>
-  <string> <string_view> <vector> <array> <span> <optional> <variant> <tuple>
-  <unordered_map> <unordered_set> <map> <set>
-  <algorithm> <functional> <memory> <utility> <chrono> <type_traits> <numeric>
+C++ standard library (deterministic, no-I/O headers -- use as needed):
+  <cstdint> <cstddef> <cstring> <cmath> <cfloat> <climits> <cstdlib>
+  <limits> <bit> <numeric> <ratio> <complex> <compare> <random>
+  <string> <string_view> <cctype> <cwctype> <charconv> <sstream> <iomanip>
+  <vector> <array> <span> <deque> <list> <forward_list> <stack> <queue>
+  <unordered_map> <unordered_set> <map> <set> <bitset> <initializer_list>
+  <optional> <variant> <tuple> <algorithm> <functional> <memory> <new>
+  <utility> <iterator> <chrono> <type_traits> <cassert> <stdexcept> <exception>
 
 Same-task generated headers (your own .h/.hpp files emitted in files[]):
   #include "your_shared_header.h"   // bare filename, quotes, same directory
+
+Dependency-task generated headers (a header owned by a task in your
+``depends_on`` list -- same directory, built first; do NOT emit it):
+  #include "shooting_hub_shared.h"  // e.g. a weapon profile that
+                                    //   depends_on: ["shooting_hub"]
 
 DO NOT include any header that is not in the lists above. In particular
 there is NO ptv/api/input.h, no ptv/api/locomotion.h, no ptv/api/haptics.h,
@@ -557,6 +606,16 @@ no ptv/api/ui.h, no ptv/api/time.h, no ptv/api/audio_capture.h, no
 ptv/api/http.h, no ptv/api/save_state.h, no ptv/scene/node.h, no
 ptv/scene/volume.h. These do not exist. The boundary checker will REJECT
 your task (not silently strip) and you will see a clear error message.
+
+Standard headers are limited to the deterministic, side-effect-free set
+listed above. Headers that do console/file I/O (<iostream>, <fstream>,
+<cstdio>), touch the filesystem (<filesystem>), spawn threads / use atomics
+(<thread>, <mutex>, <atomic>, <future>, <condition_variable>), read the
+wall clock (<ctime> -- use the ``dt`` argument instead), or are heavy /
+locale-dependent (<regex>, <locale>) are FORBIDDEN. Generated gameplay code
+runs single-threaded inside the ECS main loop and must stay deterministic.
+For randomness use <random> with a seeded engine; for text formatting use
+<sstream> / <charconv>, never <iostream>.
 
 # Exact interface signatures (copy these verbatim)
 
@@ -800,8 +859,9 @@ the macro called EXACTLY ONCE across the entire file set).
 
 1. Do NOT ``#include`` anything outside the allowed lists above (engine
    allowlist + standard library + third-party + your own same-task
-   headers emitted in ``files[]``). The boundary checker will REJECT
-   your task with a clear error -- it does NOT silently strip includes.
+   headers emitted in ``files[]`` + a shared header owned by a task in
+   your ``depends_on`` list). The boundary checker will REJECT your task
+   with a clear error -- it does NOT silently strip includes.
 2. Do NOT redefine ``IMechanic`` / ``IBehaviour`` / ``IDialogueHook``; just
    ``#include`` the header and subclass the real type.
 3. Use ``PTV_REGISTER_MECHANIC`` (or ``PTV_REGISTER_BEHAVIOUR`` /
@@ -822,7 +882,11 @@ the macro called EXACTLY ONCE across the entire file set).
    Stub genuinely-missing engine capability with a ``params``-driven
    fallback and a one-line TODO comment.
 7. Re-use exports from ``depends_on`` tasks rather than re-implementing
-   them. The ledger gives you those exports; plug into them.
+   them. The ledger gives you those exports; plug into them. You MAY
+   ``#include`` a ``depends_on`` task's shared header (same directory,
+   built first) to reuse its declared structs / helpers -- e.g. a weapon
+   profile including ``shooting_hub_shared.h``. Do NOT re-emit that
+   header; the dependency owns it.
 8. Do NOT define a class in one ``.cpp`` file and then define its
    methods in a DIFFERENT ``.cpp`` file. Each ``.cpp`` is compiled
    independently. If a class method is split across files, the class
@@ -834,6 +898,42 @@ the macro called EXACTLY ONCE across the entire file set).
    function in your shared ``.h`` header.
 10. ``nlohmann::json`` has no ``set_object()`` method. To create an
     empty JSON object, use ``nlohmann::json::object()``.
+11. CROSS-TASK SYMBOL CONTRACTS. When you call a function, or use a
+    struct/enum, that is DEFINED by a task in your ``depends_on`` list,
+    ``#include`` that task's shared header (``<dep_task_id>_shared.h``)
+    and use the REAL declaration from it. NEVER re-declare a dependency's
+    function with your own ``extern`` prototype and NEVER redefine its
+    structs -- if your hand-written prototype's signature differs from the
+    dependency's actual definition (parameter types, return type, a
+    ``const char*`` vs ``const std::string&``, a bespoke params struct),
+    the code compiles but FAILS TO LINK with "unresolved external symbol".
+    The dependency's ``exports`` in the ledger tell you which header +
+    symbols exist; the header gives you the exact signatures. Example: a
+    ``shooting_hub`` that ``depends_on: ["projectile_system_visible"]``
+    MUST ``#include "projectile_system_visible_shared.h"`` and call its
+    real ``spawn_projectile(World&, const CProjectileSpawnParams&)`` --
+    it must NOT invent ``extern void spawn_projectile(World&, Vec3, ...)``.
+12. NO DUPLICATE GLOBAL SYMBOLS ACROSS TASKS. Many tasks are generated in
+    parallel and ALL link into the same executable. If two tasks each
+    define a free function OR a struct/enum with the SAME name in
+    ``namespace ptv`` with external linkage, the link fails with LNK2005
+    "already defined". Therefore:
+      * Prefer engine-provided helpers. For tag membership use
+        ``has_tag(world, e, "x")`` from ``ptv/ecs/World.h`` -- do NOT define
+        your own ``entity_has_tag``. To add/remove a tag, mutate
+        ``world.get<CTag>(e).tags`` directly (guard with ``world.has<CTag>``)
+        or use a task-unique helper name.
+      * For any OTHER shared helper or type you must define yourself, make
+        it UNIQUE to your task: either put it in a task-specific nested
+        namespace (``namespace ptv { namespace <task_id>_detail { ... } }``)
+        or prefix its name with your task id (``<task_id>_lerp(...)``).
+      * Small helpers declared in your shared ``.h`` should be ``inline``
+        (inline definitions COMDAT-fold and do not cause LNK2005). A
+        non-inline free function defined in a ``.cpp`` has external linkage
+        and WILL collide if another task uses the same name.
+      * Only the ONE task that owns a cross-task export (a symbol other
+        tasks call) defines it non-inline; dependents include its header
+        and call it -- they never redefine it.
 """
 
 

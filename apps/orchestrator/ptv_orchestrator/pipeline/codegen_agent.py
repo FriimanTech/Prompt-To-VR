@@ -167,7 +167,7 @@ class CodegenAgentError(RuntimeError):
 def run_codegen_agent(
     inp: CodegenAgentInput,
     *,
-    model: str = "gpt-5",
+    model: str = "gpt-5.5",
     runner: Optional[RunnerFn] = None,
 ) -> CodegenAgentResult:
     """Run one OpenAI Agents SDK session for one claimed CodeTask.

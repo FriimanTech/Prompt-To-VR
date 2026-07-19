@@ -8,10 +8,13 @@ from pathlib import Path
 import pytest
 
 from ptv_orchestrator.pipeline.bounds import (
+    _FORBIDDEN_STD_HEADERS,
+    _HEADER_WHITELIST_EXACT,
     GeneratedBoundsError,
     assert_path_allowed,
     filter_cpp_only,
     repair_generated_cpp,
+    validate_includes,
 )
 from ptv_orchestrator.pipeline.stage_scene_compile import compile_scene_json
 from ptv_orchestrator.storage import ProjectStore
@@ -125,6 +128,47 @@ def test_write_and_list_artifacts(tmp_path: Path):
 # ---------------------------------------------------------------------------
 # Scene compile
 # ---------------------------------------------------------------------------
+
+
+def test_list_artifacts_prunes_build_intermediates(tmp_path: Path):
+    """Regression for the alien-shooter ``list_artifacts`` PermissionError
+    spam: compiler intermediates under ``builds/.../<target>.dir/`` (locked
+    ``*.obj`` files) and vcpkg/CMake bookkeeping must NOT be walked or listed
+    as project artifacts. Final binaries that live directly under a config
+    output dir stay listed."""
+    store = ProjectStore(tmp_path)
+    state = store.create("X", "prompt here")
+    store.save_build_spec(state.project_id, _build_spec())
+    root = store.dir_for(state.project_id)
+
+    # Build-intermediate files that previously tripped PermissionError / noise.
+    obj_dir = (
+        root / "builds" / "cmake-current" / "runtime"
+        / "ptv_runtime.dir" / "Release"
+    )
+    obj_dir.mkdir(parents=True)
+    (obj_dir / "game_over_and_restart_runtime.obj").write_bytes(b"\x00obj")
+    (root / "builds" / "cmake-current" / "CMakeFiles").mkdir(parents=True)
+    (root / "builds" / "cmake-current" / "CMakeFiles" / "x.stamp").write_text("s")
+    (root / "builds" / "cmake-current" / "vcpkg_installed").mkdir(parents=True)
+    (root / "builds" / "cmake-current" / "vcpkg_installed" / "y.h").write_text("h")
+
+    # A real final binary that SHOULD still be surfaced.
+    bin_dir = root / "builds" / "cmake-current" / "samples" / "starter-room" / "Release"
+    bin_dir.mkdir(parents=True)
+    (bin_dir / "ptv_starter_room.exe").write_bytes(b"MZ")
+
+    arts = store.list_artifacts(state.project_id)
+    names = {a.path.rsplit("/", 1)[-1] for a in arts}
+
+    assert "build_spec.json" in names
+    assert "ptv_starter_room.exe" in names
+    # Pruned intermediates must be absent.
+    assert "game_over_and_restart_runtime.obj" not in names
+    assert "x.stamp" not in names
+    assert "y.h" not in names
+    # And no path should reference a *.dir intermediate directory.
+    assert not any(".dir/" in a.path for a in arts)
 
 
 def test_scene_compile_resolves_builtin_and_mesh():
@@ -432,6 +476,51 @@ def test_filter_cpp_only_removes_disallowed_includes():
     assert '#include <windows.h>' not in out
     assert "[ptv-bounds] removed disallowed include" in out
     assert "void foo" in out
+
+
+def test_validate_includes_accepts_random_and_cctype():
+    """Regression for the alien-shooter codegen run: <random> (enemy fire
+    spread/jitter) and <cctype> (HUD label formatting) are legitimate,
+    deterministic, side-effect-free standard headers and must NOT be
+    flagged as violations."""
+    src = (
+        '#include "ptv/api/IMechanic.h"\n'
+        "#include <random>\n"
+        "#include <cctype>\n"
+        "#include <sstream>\n"
+        "#include <charconv>\n"
+        "void foo() {}\n"
+    )
+    assert validate_includes(src, "enemy_projectile_firing_shared.h") == []
+
+
+@pytest.mark.parametrize(
+    "header",
+    ["random", "cctype", "cwctype", "sstream", "iomanip", "charconv",
+     "cstdlib", "climits", "limits", "bit", "bitset", "cassert",
+     "stdexcept", "deque", "list"],
+)
+def test_validate_includes_accepts_expanded_stdlib(header):
+    src = f"#include <{header}>\nvoid foo() {{}}\n"
+    assert validate_includes(src, "x.cpp") == [], header
+
+
+@pytest.mark.parametrize(
+    "header",
+    ["iostream", "fstream", "thread", "mutex", "atomic", "filesystem",
+     "cstdio", "regex", "ctime"],
+)
+def test_validate_includes_rejects_forbidden_stdlib(header):
+    """Non-deterministic / I/O / threading headers stay rejected (fail-loud)."""
+    src = f"#include <{header}>\nvoid foo() {{}}\n"
+    violations = validate_includes(src, "x.cpp")
+    assert len(violations) == 1
+    assert "disallowed include" in violations[0]
+
+
+def test_forbidden_and_allowed_stdlib_sets_are_disjoint():
+    """A header can never be both allowed and documented-forbidden."""
+    assert _HEADER_WHITELIST_EXACT.isdisjoint(_FORBIDDEN_STD_HEADERS)
 
 
 # ---------------------------------------------------------------------------

@@ -6,6 +6,28 @@ add_executable(ptv_starter_room main.cpp)
 target_link_libraries(ptv_starter_room PRIVATE ptv_runtime)
 target_compile_features(ptv_starter_room PRIVATE cxx_std_20)
 
+# Force-link the whole ptv_runtime archive into the executable.
+#
+# Generated gameplay mechanics (engine/generated/**) are compiled INTO
+# ptv_runtime and register themselves via PTV_REGISTER_MECHANIC static
+# initializers. With a normal static-library link, MSVC (and ld) only pull
+# object files that define a referenced symbol -- and a self-registering
+# mechanic is referenced by NOTHING at compile time (the scene loader looks
+# it up by string at runtime). So the linker would DROP those .obj files and
+# the registrations would never run, leaving every generated mechanic
+# "not registered" at play time. /WHOLEARCHIVE (MSVC) / --whole-archive
+# (GNU/Clang) forces every object -- including the generated ones -- into the
+# exe so their registrations execute. The engine registry map is a
+# function-local static, so registration during static-init is safe.
+# See https://learn.microsoft.com/cpp/build/reference/wholearchive.
+if(MSVC)
+  target_link_options(ptv_starter_room PRIVATE
+    "/WHOLEARCHIVE:$<TARGET_FILE:ptv_runtime>")
+else()
+  target_link_options(ptv_starter_room PRIVATE
+    "LINKER:--whole-archive,$<TARGET_FILE:ptv_runtime>,--no-whole-archive")
+endif()
+
 # Per-project executable name. The orchestrator passes -DPTV_APP_NAME="<title>"
 # so each generated game builds as ``<Project Title>.exe`` instead of the
 # generic ``ptv_starter_room.exe``. We only override the OUTPUT_NAME (the file

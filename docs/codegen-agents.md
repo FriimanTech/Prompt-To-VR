@@ -302,14 +302,54 @@ declarations across the `.cpp` files of a single CodeTask.
   (`engine/generated/<kind>/<project_id>/`).
 * Include with `#include "filename.h"` (quotes, bare filename, no
   path separators).
-* Only headers produced by the same task are whitelisted. An
-  `#include "other_task_header.h"` is rejected if `other_task_header.h`
-  is not in the same task's `files[]`.
+* A task's own headers (in its `files[]`) are whitelisted, plus a shared
+  header owned by a task in its `depends_on` list (same directory, built
+  first — e.g. a weapon profile including `shooting_hub_shared.h`). An
+  `#include "other_task_header.h"` is rejected when the owning task is
+  neither this task nor a declared dependency.
 * Registration macros (`PTV_REGISTER_MECHANIC`, etc.) must NOT appear
   in header files — they belong in `.cpp` only.
 * Headers must not define new `ptv::` engine API types.
 * Cross-project header includes are blocked (no `../other_project/`
   paths).
+
+### Standard-library include allowlist
+
+`validate_includes` only permits a curated set of C++ standard headers,
+kept in sync across `pipeline/bounds.py` (`_HEADER_WHITELIST_EXACT`),
+`engine/tools/check_generated_bounds.py` (`HEADER_EXACT`), and the
+`CODE_TASK_SYSTEM` prompt. The guiding principle is **pure, deterministic,
+side-effect-free computation** — generated gameplay code runs
+single-threaded inside the ECS main loop.
+
+* **Allowed** (examples): `<random>` (seeded RNG for fire spread/jitter),
+  `<cctype>`/`<cwctype>`/`<charconv>`/`<sstream>`/`<iomanip>` (in-memory
+  text formatting for HUD labels), the container and utility headers
+  (`<vector>`, `<array>`, `<deque>`, `<optional>`, `<algorithm>`, …),
+  math (`<cmath>`, `<numeric>`, `<bit>`, `<limits>`), and error handling
+  (`<cassert>`, `<stdexcept>`, `<exception>`).
+* **Forbidden** (documented in `_FORBIDDEN_STD_HEADERS`): console/file I/O
+  (`<iostream>`, `<fstream>`, `<cstdio>`), filesystem (`<filesystem>`),
+  threading/atomics (`<thread>`, `<mutex>`, `<atomic>`, `<future>`, …),
+  wall-clock time (`<ctime>` — use the `dt` argument), and heavy /
+  locale-dependent headers (`<regex>`, `<locale>`). These break
+  determinism or the single-threaded execution model and are rejected
+  fail-loudly.
+
+### Multi-file correctness rules
+
+`CODE_TASK_SYSTEM` enforces the C++ rules whose violation most often
+broke the `cmake_build` stage:
+
+* A class used from more than one `.cpp` must be **fully defined in a
+  shared `.h`** (all data members + method declarations); its members are
+  otherwise undeclared in the other translation unit. Never split one
+  class across `.cpp` files.
+* Free helper functions shared across `.cpp` are declared in the shared
+  header with the **exact signature** used at every call site and defined
+  in exactly one `.cpp`; `.cpp`-local helpers are `static`.
+* `enum class` values must be `static_cast<int>` before integer use, and
+  `switch`/`case` labels must be enum-qualified (`case State::Chase:`).
 
 ### `test_files[]` is unused
 
@@ -321,10 +361,11 @@ the field empty.
 ## Compile verification + repair loop
 
 Include validation proves a file only uses allowed headers — it does
-**not** prove the C++ compiles. To stop a mechanic that passes include
-validation but fails to compile from sinking the later `cmake_build`
-stage, the code-generation stage runs a compile-verify-and-repair loop
-once every task is `done` (mirrors the world-gen compile loop).
+**not** prove the C++ compiles or links. To stop a mechanic that passes
+include validation but fails to compile/link from sinking the later
+`cmake_build` stage, the code-generation stage runs a
+compile-verify-and-repair loop once every task is `done` (mirrors the
+world-gen compile loop).
 
 Controlled by settings:
 
@@ -336,14 +377,21 @@ Controlled by settings:
 
 Flow:
 
-1. Build the `ptv_runtime` target (`cmake --build ... --target
-   ptv_runtime`) in the same `builds/cmake-current` dir the final build
-   uses, so vcpkg is shared and the later full build is incremental.
-   `scene.json` is not needed to compile the library.
+1. Build the `ptv_starter_room` **executable** (`cmake --build ...
+   --target ptv_starter_room`) in the same `builds/cmake-current` dir the
+   final build uses, so vcpkg is shared and the later full build is
+   incremental. Building the exe (not just the `ptv_runtime` static lib)
+   is deliberate: a static-lib-only build never links, so it would miss
+   cross-task `unresolved external symbol` errors (e.g. a task calling a
+   dependency's function with a mismatched signature). Those only surface
+   at exe link — exactly what breaks the playable build. The project's
+   `scene.json` is not needed (the starter-room ships its own scene).
 2. On success, the stage finishes normally.
-3. On failure, compiler error lines are mapped back to the owning
+3. On failure, compiler/linker error lines are mapped back to the owning
    CodeTask via each board row's `files_written` (path + basename
-   match, MSVC and clang/gcc formats).
+   match, MSVC and clang/gcc formats). Linker errors that name no source
+   file cannot be attributed to a single task; the stage fails loudly so
+   they are surfaced rather than silently ignored.
 4. Each failing task's agent is re-run with a `repair_context` (the
    compiler errors + the current file contents on disk) so it **fixes
    the existing files** rather than authoring from scratch; the new
