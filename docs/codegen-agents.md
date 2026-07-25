@@ -371,21 +371,26 @@ Controlled by settings:
 
 * `codegen_verify_compile` (default `True`) — master switch. Set
   `False` on a machine without the C++ toolchain.
-* `codegen_max_repair_rounds` (default `2`) — how many
+* `codegen_max_repair_rounds` (default `3`) — how many
   build→repair→rebuild cycles to attempt (`0` = verify once, never
   repair).
 
 Flow:
 
 1. Build the `ptv_starter_room` **executable** (`cmake --build ...
-   --target ptv_starter_room`) in the same `builds/cmake-current` dir the
-   final build uses, so vcpkg is shared and the later full build is
-   incremental. Building the exe (not just the `ptv_runtime` static lib)
-   is deliberate: a static-lib-only build never links, so it would miss
-   cross-task `unresolved external symbol` errors (e.g. a task calling a
-   dependency's function with a mismatched signature). Those only surface
-   at exe link — exactly what breaks the playable build. The project's
-   `scene.json` is not needed (the starter-room ships its own scene).
+   --target ptv_starter_room --clean-first`) in the same
+   `builds/cmake-current` dir the final build uses, so vcpkg is shared and
+   the later full build is incremental. Building the exe (not just the
+   `ptv_runtime` static lib) is deliberate: a static-lib-only build never
+   links, so it would miss cross-task `unresolved external symbol` errors
+   (e.g. a task calling a dependency's function with a mismatched
+   signature). Those only surface at exe link — exactly what breaks the
+   playable build. The project's `scene.json` is not needed (the
+   starter-room ships its own scene). **`--clean-first` (`clean_first=True`)
+   is mandatory**: it forces every generated source to recompile so a stale
+   `.obj` from a previous run (e.g. one left before a repair rewrote a
+   generated file) can never mask a compile error and produce a FALSE
+   GREEN. The verify must reflect the CURRENT files on disk.
 2. On success, the stage finishes normally.
 3. On failure, compiler/linker error lines are mapped back to the owning
    CodeTask via each board row's `files_written` (path + basename
@@ -393,14 +398,26 @@ Flow:
    file cannot be attributed to a single task; the stage fails loudly so
    they are surfaced rather than silently ignored.
 4. Each failing task's agent is re-run with a `repair_context` (the
-   compiler errors + the current file contents on disk) so it **fixes
-   the existing files** rather than authoring from scratch; the new
-   files overwrite the old and `board.mark_done` refreshes the row.
-5. The stage rebuilds and repeats up to `codegen_max_repair_rounds`.
+   compiler errors, the current file contents on disk, AND the shared
+   headers + ledger exports of its `depends_on` tasks — the "dependency
+   contract") so it **fixes the existing files** against the REAL
+   cross-task symbol names rather than authoring from scratch. On a repair
+   the agent must re-emit ALL of the task's files as one consistent set
+   (`CODE_TASK_SYSTEM` rules 13-14), so a partial repair can never leave a
+   task self-contradictory (header renamed but a `.cpp` not updated). The
+   new files overwrite the old and `board.mark_done` refreshes the row.
+5. The stage rebuilds (again clean) and repeats up to
+   `codegen_max_repair_rounds`.
 6. If the budget is exhausted (or errors cannot be attributed to any
    task), the still-failing tasks are marked `failed` and the stage
    raises — exactly like an agent failure — so `cmake_build` never runs
    against C++ that does not compile.
+
+The verify also runs on an **idempotent resume**: if every task is already
+`done` on disk from a previous run (so this run produced no new files), the
+stage still performs one compile-verify pass before reporting success, so a
+resume after an interrupted/partial repair cannot ship un-verified C++ to
+`cmake_build`.
 
 The verifier is injectable: `stage_code_generation.run_with_runner(ctx,
 agent_runner=..., compile_verifier=...)` lets tests exercise the loop

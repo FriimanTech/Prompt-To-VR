@@ -901,3 +901,82 @@ def test_build_user_message_uses_resolved_subdir() -> None:
     assert "four-step process" in msg
     assert "web_search" in msg
     assert "1..16 entries" in msg
+
+
+def test_configure_and_build_clean_first_appends_flag(monkeypatch) -> None:
+    """The codegen compile-verify must force a full recompile so a stale
+    ``.obj`` cannot mask a compile error (the shooting_hub false-green
+    regression). ``clean_first=True`` must append ``--clean-first`` to the
+    ``cmake --build`` invocation."""
+    from ptv_orchestrator.build import cmake_runner
+
+    captured: list[list[str]] = []
+
+    monkeypatch.setattr(cmake_runner, "find_cmake", lambda: "cmake")
+
+    def fake_run(cmd, *, cwd, on_line):
+        captured.append(list(cmd))
+        return 0
+
+    monkeypatch.setattr(cmake_runner, "_run", fake_run)
+
+    cmake_runner.configure_and_build(
+        source_dir=Path("."),
+        build_dir=Path("."),
+        generator="Ninja",
+        platform="",
+        config="Release",
+        vcpkg_root=None,
+        build_target="ptv_starter_room",
+        clean_first=True,
+    )
+
+    build_cmds = [c for c in captured if "--build" in c]
+    assert build_cmds, "expected a cmake --build invocation"
+    assert "--clean-first" in build_cmds[-1]
+    assert "--target" in build_cmds[-1]
+
+
+def test_configure_and_build_without_clean_first_omits_flag(monkeypatch) -> None:
+    from ptv_orchestrator.build import cmake_runner
+
+    captured: list[list[str]] = []
+    monkeypatch.setattr(cmake_runner, "find_cmake", lambda: "cmake")
+    monkeypatch.setattr(
+        cmake_runner, "_run", lambda cmd, *, cwd, on_line: captured.append(list(cmd)) or 0
+    )
+
+    cmake_runner.configure_and_build(
+        source_dir=Path("."),
+        build_dir=Path("."),
+        generator="Ninja",
+        platform="",
+        config="Release",
+        vcpkg_root=None,
+    )
+
+    build_cmds = [c for c in captured if "--build" in c]
+    assert build_cmds
+    assert "--clean-first" not in build_cmds[-1]
+
+
+def test_code_task_system_enforces_consistency_and_full_repair() -> None:
+    """Regression for the shooting_hub partial-repair break: the prompt must
+    require same-task naming consistency and whole-file-set repairs."""
+    for needle in (
+        "SAME-TASK INTERNAL CONSISTENCY",
+        "REPAIR = REGENERATE THE WHOLE FILE SET",
+    ):
+        assert needle in CODE_TASK_SYSTEM, (
+            f"CODE_TASK_SYSTEM missing required rule: {needle!r}"
+        )
+
+
+def test_world_builder_system_documents_meshdesc_flat_floats() -> None:
+    """The world prompt must teach the flat std::vector<float> MeshDesc layout
+    so the architect does not use std::vector<Vec3> (attempt-1 failure)."""
+    from ptv_orchestrator.pipeline.prompts import WORLD_BUILDER_SYSTEM
+
+    assert "MeshDesc" in WORLD_BUILDER_SYSTEM
+    assert "std::vector<float>" in WORLD_BUILDER_SYSTEM
+    assert "NOT ``std::vector<Vec3>``" in WORLD_BUILDER_SYSTEM

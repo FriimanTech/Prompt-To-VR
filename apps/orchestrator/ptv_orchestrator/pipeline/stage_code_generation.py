@@ -273,12 +273,22 @@ def run_with_runner(
         for tid in board.task_order()
         if (board.task(tid) or {}).get("status") == "blocked"
     ]
+    # Generated files may exist on disk from a previous run even when THIS
+    # run produced nothing (an idempotent resume where every task is already
+    # ``done``). We must still compile-verify in that case -- otherwise a
+    # resume after a partial/interrupted repair can ship un-verified C++ to
+    # the cmake_build stage (the shooting_hub false-green regression).
+    done_with_files = any(
+        (board.task(tid) or {}).get("status") == "done"
+        and (board.task(tid) or {}).get("files_written")
+        for tid in board.task_order()
+    )
     verify_excerpt = ""
     if (
         not pre_failed
         and not pre_blocked
         and getattr(ctx.settings, "codegen_verify_compile", True)
-        and runtime.produced
+        and (runtime.produced or done_with_files)
     ):
         verifier = compile_verifier or (lambda: _default_verify_compile(ctx))
         max_rounds = max(0, int(getattr(ctx.settings, "codegen_max_repair_rounds", 2)))
@@ -872,6 +882,38 @@ class _StageRuntime:
                 per_task.setdefault(tid, []).append(line.strip())
         return per_task
 
+    def _dependency_contract_block(self, task_id: str) -> str:
+        """Build a repair-context block with the shared headers + ledger
+        exports of this task's declared dependencies, so the agent fixes
+        cross-task symbol mismatches against the REAL declarations."""
+        task = self.tasks_by_id.get(task_id)
+        if task is None or not task.depends_on:
+            return ""
+        snapshot = self.board.snapshot()
+        tasks = snapshot.get("tasks", {})
+        blocks: list[str] = []
+        for dep in task.depends_on:
+            row = tasks.get(dep) or {}
+            for rel in row.get("files_written", []):
+                low = str(rel).lower()
+                if not (low.endswith(".h") or low.endswith(".hpp")):
+                    continue
+                abs_path = (self.repo_root / rel).resolve()
+                try:
+                    text = abs_path.read_text(encoding="utf-8")
+                except OSError:
+                    continue
+                if len(text) > 16_000:
+                    text = text[:16_000] + "\n// ... [truncated] ...\n"
+                blocks.append(f"----- {rel} (dependency '{dep}') -----\n{text}")
+        if not blocks:
+            return ""
+        return (
+            "\n\nDEPENDENCY CONTRACT -- use these EXACT type names and function "
+            "signatures from your depends_on tasks (do NOT invent different "
+            "names):\n" + "\n\n".join(blocks)
+        )
+
     def _repair_one_task(
         self, task_id: str, errors: list[str], full_log: str
     ) -> None:
@@ -889,12 +931,23 @@ class _StageRuntime:
                 text = text[:40_000] + "\n// ... [truncated] ...\n"
             current_files.append(f"----- {rel} -----\n{text}")
 
+        # Dependency contract: the shared headers + ledger exports of every
+        # task this one depends on. Many compile failures are cross-task
+        # symbol mismatches (calling a dependency's function/struct by an
+        # invented name, e.g. ``ProjectileSpawnParams`` vs the real
+        # ``ProjectileSpawnRequest``). Showing the dependency's ACTUAL header
+        # lets the agent use the exact declared names/signatures.
+        dep_contract = self._dependency_contract_block(task_id)
+
         repair_context = (
             "COMPILER ERRORS for this task:\n"
             + "\n".join(errors[:60])
             + "\n\nFULL BUILD LOG TAIL:\n"
             + _tail(full_log, 8_000)
-            + "\n\nCURRENT FILES ON DISK (fix these):\n"
+            + dep_contract
+            + "\n\nCURRENT FILES ON DISK (fix these -- re-emit ALL of them as "
+            "a consistent set; if you change a name/signature in the shared "
+            "header, update every .cpp that uses it):\n"
             + ("\n\n".join(current_files) or "(none found)")
         )
 
@@ -1077,6 +1130,12 @@ def _default_verify_compile(ctx: PipelineContext) -> tuple[bool, str]:
         extra_cache=(("PTV_GENERATED_PROJECT_ID", ctx.project_id),),
         build_target="ptv_starter_room",
         on_line=_sink,
+        # Force a full recompile of the generated sources. Without this, an
+        # incremental build can reuse a stale ``.obj`` from before a repair
+        # rewrote a generated file, reporting a FALSE GREEN while the current
+        # on-disk C++ actually fails to compile (exactly the shooting_hub
+        # partial-repair regression). The verify MUST reflect current files.
+        clean_first=True,
     )
     text = "\n".join(logs)
     try:

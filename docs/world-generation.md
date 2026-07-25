@@ -20,7 +20,7 @@ build_spec -> asset_manifest (no environment GLB) -> mechanic_plan -> scene_spec
 
 1. Builds the **world architect** agent (`world_agent.py`) via the OpenAI Agents
    SDK: model `world_model` (default `gpt-5.6-sol`), `ModelSettings(reasoning=
-   Reasoning(effort=world_reasoning_effort))` (default `xhigh`), `WebSearchTool`
+   Reasoning(effort=world_reasoning_effort))` (default `high`), `WebSearchTool`
    enabled, a persistent `Session`, and `max_turns = world_agent_max_turns`.
 2. Hands it `engine/world_author_guide.md` (the "understand the engine" input),
    the BuildSpec brief, and the list of available object asset ids.
@@ -59,6 +59,12 @@ inside `namespace ptv::world` in a `.cpp`.
 procedural triangles), `place_object` (anchor a prop GLB), `seed()`. Header-only
 convenience builders live in `ptv::world::helpers` (`building_grid`, `wall_shell`,
 `path`, `platform_set`).
+
+`MeshDesc` (for `add_mesh`) uses FLAT float buffers: `positions` and `normals`
+are `std::vector<float>` xyz triples (`{x0,y0,z0, x1,y1,z1, ...}`), NOT
+`std::vector<Vec3>`; `indices` is a `std::vector<std::uint32_t>` triangle list.
+`WORLD_BUILDER_SYSTEM` teaches this layout so the architect gets it right on the
+first attempt.
 
 The environment look is **fully author-controlled** — the engine renders exactly
 what the builder specifies and imposes no brightness floor. `SkyDesc` carries the
@@ -116,7 +122,8 @@ Source: `engine/worldgen/samples/starter_city.cpp`.
 `apps/orchestrator/ptv_orchestrator/settings.py`:
 
 - `world_model` (default `gpt-5.6-sol`)
-- `world_reasoning_effort` (default `xhigh`; one of none|minimal|low|medium|high|xhigh)
+- `world_reasoning_effort` (default `high`; one of none|minimal|low|medium|high|xhigh;
+  keep at `high`/`xhigh` — `medium` risks first-try compile failures in the generated C++)
 - `world_max_repair_rounds` (default 6)
 - `world_agent_max_turns` (default 80)
 

@@ -117,11 +117,15 @@ class Settings(BaseSettings):
     # --- World-generation stage (agentic VR environment) -----------------
     # A single "world architect" agent (OpenAI Agents SDK) authors ALL the
     # C++ for the VR environment, bounded to the IWorldBuilder surface and
-    # compiled + run offline in ptv_worldgen. Defaults pin the highest-tier
-    # model + reasoning per the current SDK (gpt-5.5, reasoning effort xhigh).
+    # compiled + run offline in ptv_worldgen. World gen runs once per project
+    # and the C++ must compile against the IWorldBuilder API first try, so we
+    # default to a high reasoning tier (raise to ``xhigh`` for max quality).
     world_model: str = "gpt-5.5"
     # reasoning.effort: one of none|minimal|low|medium|high|xhigh (model-dep).
-    world_reasoning_effort: str = "xhigh"
+    # NOTE: a ``WORLD_REASONING_EFFORT`` entry in .env overrides this default;
+    # keep it at ``high`` or ``xhigh`` -- ``medium`` risks first-try compile
+    # failures in the generated IWorldBuilder C++.
+    world_reasoning_effort: str = "high"
     # How many compile-and-repair rounds the stage will attempt before
     # falling back to the deterministic world so the project still boots.
     world_max_repair_rounds: int = Field(default=6, ge=1, le=20)

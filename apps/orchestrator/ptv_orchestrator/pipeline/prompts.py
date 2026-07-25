@@ -934,6 +934,21 @@ the macro called EXACTLY ONCE across the entire file set).
       * Only the ONE task that owns a cross-task export (a symbol other
         tasks call) defines it non-inline; dependents include its header
         and call it -- they never redefine it.
+13. SAME-TASK INTERNAL CONSISTENCY. Your header + every one of your ``.cpp``
+    files form ONE consistent unit. Use exactly ONE name and ONE definition
+    for each struct/enum/function across all your files. A struct declared as
+    ``WeaponProfile`` in your ``.h`` must be spelled ``WeaponProfile`` (not
+    ``WeaponFireProfile``) in every ``.cpp``, with the SAME fields; a function
+    declared in the header must be defined with the identical signature. Do
+    not introduce a second, differently-named type for the same concept.
+14. REPAIR = REGENERATE THE WHOLE FILE SET. When you are fixing compile
+    errors (a repair run), you MUST re-emit ALL of this task's files as a
+    single consistent set -- never change a type/function name (or its
+    fields/signature) in the shared header without updating EVERY ``.cpp``
+    that uses it in the same output. Emitting only some files leaves the task
+    self-contradictory (header says ``WeaponProfile``, an un-emitted ``.cpp``
+    still says ``WeaponFireProfile``) and the build breaks. If you touch the
+    shared header, re-emit every ``.cpp`` that includes it.
 """
 
 
@@ -976,6 +991,17 @@ REQUIREMENTS FOR A WORKING WORLD:
 - Use ``spawn_primitive`` for blocky structure and ``add_mesh`` for arbitrary
   procedural geometry (any shape you compute in C++). Use ``w.seed()`` for any
   randomness so results are reproducible.
+- ``MeshDesc`` GEOMETRY LAYOUT (exact API -- getting this wrong fails the
+  build): ``positions`` and ``normals`` are FLAT ``std::vector<float>`` of xyz
+  triples (``{x0,y0,z0, x1,y1,z1, ...}``), NOT ``std::vector<Vec3>``.
+  ``indices`` is a ``std::vector<std::uint32_t>`` triangle list. ``normals``
+  may be left empty (the host computes flat normals). Example:
+    ``ptv::world::MeshDesc m;``
+    ``m.positions = { 0.f,0.f,0.f,  1.f,0.f,0.f,  0.f,1.f,0.f };``
+    ``m.indices   = { 0, 1, 2 };``
+    ``w.add_mesh(m);``
+  To build from ``Vec3`` corners, push each component:
+  ``m.positions.push_back(p.x); m.positions.push_back(p.y); m.positions.push_back(p.z);``
 
 LIGHTING & VISIBILITY (CRITICAL — the engine renders EXACTLY what you author,
 with NO brightness floor, so you are fully responsible for how visible the world
