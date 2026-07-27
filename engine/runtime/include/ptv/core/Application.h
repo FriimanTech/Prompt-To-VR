@@ -10,7 +10,13 @@
 #include "ptv/math/Math.h"
 #include "ptv/mechanics/MechanicRegistry.h"
 #include "ptv/physics/PhysicsWorld.h"
+#if !defined(__ANDROID__)
+// GLFW mirror window is desktop-only. On Quest (NativeActivity) there is no
+// desktop surface, and Window's implementation (platform/desktop/Window.cpp)
+// is excluded from the Android build -- so even holding a unique_ptr<Window>
+// member would odr-use the missing Window::~Window() at link time.
 #include "ptv/platform/Window.h"
+#endif
 #include "ptv/render/Renderer.h"
 #include "ptv/render/VulkanContext.h"
 #include "ptv/scene/Scene.h"
@@ -135,7 +141,9 @@ private:
         std::vector<Vec3> arc_points;   // debug render segments (in world)
     };
 
-    std::unique_ptr<Window> window_;
+#if !defined(__ANDROID__)
+    std::unique_ptr<Window> window_;  // desktop mirror window only
+#endif
     VulkanContext vk_{};
     XrRuntime xr_{};
     Renderer renderer_{};

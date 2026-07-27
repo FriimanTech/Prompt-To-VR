@@ -10,6 +10,9 @@ plugins {
 android {
     namespace '@PTV_PACKAGE@'
     compileSdk @PTV_COMPILE_SDK@
+    // Pin the NDK so the externalNativeBuild is deterministic (substituted from
+    // Settings.android_ndk_version). Must be installed under $ANDROID_HOME/ndk.
+    ndkVersion '@PTV_NDK_VERSION@'
 
     defaultConfig {
         applicationId '@PTV_PACKAGE@'

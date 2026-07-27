@@ -190,8 +190,16 @@ static void resolve_project_mesh_paths(World& w, const std::string& scene_path) 
 // Locate the repository's ``3D_Objects/`` directory by walking up from
 // the running executable. Returns an empty string if we can't find one
 // within ten parents (in which case the locomotion menu falls back to
-// procedural icons). Windows-only (matches the rest of the runtime).
+// procedural icons).
+//
+// Desktop-only: it depends on the Win32 ``GetModuleFileNameW`` to find the
+// exe, and the ``3D_Objects/`` tree only exists in the desktop repo layout.
+// On Quest the menu icons are packaged differently (and fall back to
+// procedural icons), so this returns ``{}`` on Android.
 static std::string find_3d_objects_dir() {
+#if defined(__ANDROID__)
+    return {};
+#else
     namespace fs = std::filesystem;
     wchar_t buf[MAX_PATH] = {};
     DWORD n = GetModuleFileNameW(nullptr, buf, MAX_PATH);
@@ -208,6 +216,7 @@ static std::string find_3d_objects_dir() {
         dir = parent;
     }
     return {};
+#endif
 }
 
 // ---------------------------------------------------------------------------
@@ -559,14 +568,21 @@ int Application::run(const Config& cfg) {
         window_->poll_events();
         if (window_->should_close()) running_ = false;
 #else
-        // Pump the NativeActivity event queue (non-blocking). APP_CMD_DESTROY
-        // etc. are handled by the onAppCmd callback in AndroidMain.cpp; when
-        // the activity is torn down android_app::destroyRequested is set.
+        // Pump the NativeActivity event queue (non-blocking). APP_CMD_*
+        // lifecycle events are handled by the onAppCmd callback in
+        // AndroidMain.cpp; when the activity is torn down
+        // android_app::destroyRequested is set.
+        //
+        // ALooper_pollAll is removed as of NDK r27 (racy vs ALooper_wake), so
+        // we call ALooper_pollOnce in a loop and treat every return value as a
+        // reason to process/continue. A zero timeout keeps the frame loop
+        // running; the OpenXR session state machine (XrRuntime::poll_events)
+        // gates actual rendering until the runtime is READY/focused.
         if (android_app* app = current_android_app()) {
             int events = 0;
             android_poll_source* source = nullptr;
-            while (ALooper_pollAll(0, nullptr, &events,
-                                   reinterpret_cast<void**>(&source)) >= 0) {
+            while (ALooper_pollOnce(0, nullptr, &events,
+                                    reinterpret_cast<void**>(&source)) >= 0) {
                 if (source) source->process(app, source);
                 if (app->destroyRequested) { running_ = false; break; }
             }
@@ -1738,7 +1754,9 @@ void Application::shutdown() {
     xr_.shutdown();
     physics_.shutdown();
     vk_.shutdown();
+#if !defined(__ANDROID__)
     window_.reset();
+#endif
 }
 
 }  // namespace ptv

@@ -63,7 +63,14 @@ default to min 32 / target 34 / compile 34; the OpenXR loader is
 Everything is drivable from Cursor: the `quest_build` stage shells out to
 `gradlew assembleDebug`; launch shells out to `adb install -r` + `am start`.
 Android Studio the IDE is only needed for one-time SDK/NDK install and deep
-native debugging (logcat / GPU profiling).
+native debugging (logcat / GPU profiling); it does NOT need to be running for a
+build.
+
+A Gradle 8.9 wrapper is vendored in `engine/android/` (`gradlew`, `gradlew.bat`,
+`gradle/wrapper/*`) and copied into `builds/quest/` per project, so no system
+Gradle install is required -- `gradlew` self-bootstraps the Gradle distribution
+using `JAVA_HOME` (Android Studio's bundled JBR works). Gradle 8.9 is the
+minimum required by the template's AGP 8.7.
 
 ## Validation ladder (on-device)
 
@@ -72,12 +79,40 @@ native debugging (logcat / GPU profiling).
 2. Run a generated project end-to-end to an APK on device.
 3. Optimize: multiview single-pass stereo, `XR_FB_foveation`, ASTC textures.
 
-## Known first-build iteration points
+## Verified build (arm64-android)
 
-- The arm64-android dependency build (`app/src/main/cpp/CMakeLists.txt` uses
-  FetchContent for glm/EnTT/nlohmann/VMA/volk/tinygltf/spdlog/Jolt); Jolt and
-  spdlog versions are the most likely to need pinning.
+The NDK build of `libptv_quest.so` has been validated end-to-end (configure +
+compile + link + APK package + `adb install` + launch on a Quest 3, booting
+through scene load, OpenXR + Vulkan + Jolt init, and into the render loop).
+Notes captured while getting there:
+
+- `spdlog` is pinned to `v1.15.3` (bundles fmt 11.2.0). Older spdlog (1.14.x ->
+  fmt 10.x) fails to compile with the NDK's modern clang: bundled fmt's
+  `FMT_STRING` triggers "call to consteval function ... is not a constant
+  expression" (fixed in fmt 11.2.0).
+- JoltPhysics via FetchContent exposes the plain `Jolt` target (NOT the
+  `Jolt::Jolt` alias, which only exists in the vcpkg package used on desktop).
+- `ANativeActivity_onCreate` (the NativeActivity entry point, provided by
+  `native_app_glue` and looked up by the framework via `dlsym`) MUST be
+  exported by `libptv_quest.so`. `native_app_glue` is linked with
+  `--whole-archive` and `-u ANativeActivity_onCreate` is passed via a `SHELL:`
+  link option (a plain quoted `"-u ANativeActivity_onCreate"` is delivered as
+  one malformed argument and silently does nothing -> `UnsatisfiedLinkError:
+  undefined symbol: ANativeActivity_onCreate` at launch).
+- The NDK is pinned via `Settings.android_ndk_version` -> `@PTV_NDK_VERSION@`
+  in `app/build.gradle`.
+- Engine logs go to logcat on Android (spdlog android sink, tag `ptv`): watch
+  with `adb logcat -s ptv`. Native crashes are in the crash buffer:
+  `adb logcat -b crash -d`.
+- Debug APKs build Jolt with assertions enabled, so an entity carrying a
+  non-normalized/zero quaternion or non-finite position aborts with SIGTRAP in
+  `JPH::Body::SetPositionAndRotationInternal`. `PhysicsWorld::rebuild_from_world`
+  sanitizes transforms (normalize rotation, guard position) before creating
+  bodies (on desktop Release the same bad data is silent UB).
+
+## Known on-device iteration points
+
 - Native XR bring-up: NativeActivity surface/focus timing and controller
-  re-acquire on resume.
-- A Gradle wrapper (`gradlew`) is not vendored in the template; generate one
-  once (`gradle wrapper --gradle-version 8.9`) or rely on a system `gradle`.
+  re-acquire on resume. The VR frame loop only advances once the OpenXR session
+  reaches READY/FOCUSED, i.e. when the headset is actually worn (a doffed
+  headset pauses/stops the app).

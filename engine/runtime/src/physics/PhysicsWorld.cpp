@@ -219,10 +219,34 @@ void PhysicsWorld::rebuild_from_world(World& world) {
                 shape_ref = new JPH::BoxShape(half);
             }
         }
+        // Sanitize the transform before handing it to Jolt. Generated/authored
+        // entities occasionally carry a non-normalized or zero quaternion, or a
+        // non-finite position. Jolt asserts IsNormalized()/IsFinite() inside
+        // Body::SetPositionAndRotationInternal, which aborts with SIGTRAP in
+        // assert-enabled (debug) builds -- e.g. the Quest debug APK -- and is
+        // undefined behavior in release. Fall back to a safe value.
+        JPH::RVec3 body_pos{t.position.x, t.position.y, t.position.z};
+        if (!std::isfinite(t.position.x) || !std::isfinite(t.position.y) ||
+            !std::isfinite(t.position.z)) {
+            PTV_WARN("Physics: entity {} has non-finite position; using origin",
+                     static_cast<std::uint32_t>(entity));
+            body_pos = JPH::RVec3::sZero();
+        }
+        JPH::Quat body_rot{t.rotation.x, t.rotation.y, t.rotation.z,
+                           t.rotation.w};
+        const float rot_len = body_rot.Length();
+        if (!std::isfinite(rot_len) || rot_len < 1.0e-6f) {
+            PTV_WARN("Physics: entity {} has degenerate rotation; using identity",
+                     static_cast<std::uint32_t>(entity));
+            body_rot = JPH::Quat::sIdentity();
+        } else if (!body_rot.IsNormalized()) {
+            body_rot = body_rot.Normalized();
+        }
+
         JPH::BodyCreationSettings bcs(
             shape_ref,
-            JPH::RVec3{t.position.x, t.position.y, t.position.z},
-            JPH::Quat{t.rotation.x, t.rotation.y, t.rotation.z, t.rotation.w},
+            body_pos,
+            body_rot,
             motion, layer);
         bcs.mRestitution = p.restitution;
         bcs.mFriction = p.friction;

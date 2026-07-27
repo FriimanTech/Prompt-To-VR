@@ -178,6 +178,10 @@ class Settings(BaseSettings):
     android_compile_sdk: int = 34
     # Khronos OpenXR Android loader (Meta requires >= 1.0.34).
     android_openxr_loader_version: str = "1.0.34"
+    # Pin the NDK so externalNativeBuild is deterministic. Defaults to the NDK
+    # installed with the documented Android Studio setup; override if a
+    # different NDK is on the machine (must be installed under $ANDROID_HOME/ndk).
+    android_ndk_version: str = "30.0.15729638"
 
 
 _cached: Settings | None = None

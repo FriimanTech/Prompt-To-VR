@@ -32,12 +32,29 @@ Android Studio SDK/NDK, `ANDROID_HOME`, `ANDROID_NDK_HOME`, `JAVA_HOME`,
 
 ## Gradle wrapper
 
-The `gradlew` / `gradle/wrapper` files are NOT vendored here; generate them once
-with a locally installed Gradle (`gradle wrapper --gradle-version 8.9`) or let
-the orchestrator invoke a system `gradle`. See `stage_quest_build.py`.
+The Gradle 8.9 wrapper IS vendored here (`gradlew`, `gradlew.bat`,
+`gradle/wrapper/gradle-wrapper.jar`, `gradle/wrapper/gradle-wrapper.properties`)
+and is copied into each project's `builds/quest/` by `stage_quest_build.py`. No
+system Gradle install is required: `gradlew` self-bootstraps by downloading the
+Gradle 8.9 distribution using `JAVA_HOME` (the Android Studio JBR is fine). The
+version is pinned to Gradle 8.9 because the template's AGP 8.7 requires a minimum
+of Gradle 8.9. `gradle_runner.find_gradle()` prefers this wrapper and only falls
+back to a `gradle` on PATH if the wrapper is missing.
 
-## First-build iteration
+## Build status (arm64-android)
 
-The arm64-android dependency build (Jolt/spdlog versions) and native XR
-bring-up (surface/focus timing, controller re-acquire on resume) are expected
-to need on-device iteration. Validate with the starter-room scene first.
+The NDK build of `libptv_quest.so` is validated (configure + compile + link +
+APK install + launch on Quest 3). Key pins:
+
+- `spdlog` `v1.15.3` (bundles fmt 11.2.0) -- older spdlog/fmt fails to compile
+  with the NDK's modern clang (`FMT_STRING` consteval error).
+- JoltPhysics FetchContent target is plain `Jolt` (not `Jolt::Jolt`).
+- NDK pinned via `Settings.android_ndk_version` (`@PTV_NDK_VERSION@`).
+- Vulkan is linked explicitly (`find_library(vulkan)`) alongside volk.
+- Generated mechanics compile into a `ptv_generated` static lib force-linked
+  with `--whole-archive` so `PTV_REGISTER_*` initializers survive.
+
+Engine logs go to logcat (spdlog android sink, tag `ptv`): `adb logcat -s ptv`.
+
+Native XR bring-up (NativeActivity surface/focus timing, controller re-acquire
+on resume) still needs the headset worn to reach a FOCUSED session.

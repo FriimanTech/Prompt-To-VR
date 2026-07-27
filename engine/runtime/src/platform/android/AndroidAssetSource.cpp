@@ -9,18 +9,31 @@
 namespace ptv {
 
 std::string AndroidAssetSource::to_asset_key(const std::string& path) const {
-    // Normalise separators and strip any leading "./" or absolute prefix so
-    // the engine's logical paths resolve against the APK assets/ root.
+    // Map an engine "logical" path onto the key layout inside the APK's assets/
+    // root (the directory AAssetManager treats as its root).
+    //
+    // The quest_build stage (stage_quest_build._package_assets) packages a
+    // project's files like this, relative to the assets root:
+    //   scene.json                         <- app/src/main/assets/scene.json
+    //   assets/<asset_id>/<uuid>_pbr.glb   <- from projects/<id>/assets/<...>
+    //   shaders/<name>.spv                 <- compiled engine shaders
+    //
+    // The compiled scene.json refers to meshes as
+    //   projects/<project_id>/assets/<asset_id>/<uuid>_pbr.glb
+    // so we strip the leading "projects/<project_id>/" segment, leaving
+    // "assets/<asset_id>/<uuid>_pbr.glb" -- which matches the packaged layout.
+    // "scene.json" and "shaders/*.spv" carry no such prefix and pass through.
     std::string p = path;
     std::replace(p.begin(), p.end(), '\\', '/');
-    // If the path contains an "assets/" segment, keep everything after it.
-    const std::string marker = "assets/";
-    const auto pos = p.rfind(marker);
-    if (pos != std::string::npos) {
-        p = p.substr(pos + marker.size());
-    }
     while (p.rfind("./", 0) == 0) p = p.substr(2);
     while (!p.empty() && p.front() == '/') p = p.substr(1);
+    const std::string projects = "projects/";
+    if (p.rfind(projects, 0) == 0) {
+        const auto slash = p.find('/', projects.size());
+        if (slash != std::string::npos) {
+            p = p.substr(slash + 1);
+        }
+    }
     return p;
 }
 

@@ -155,6 +155,7 @@ def run(ctx: PipelineContext) -> StageResult:
         "@PTV_TARGET_SDK@": str(s.android_target_sdk),
         "@PTV_COMPILE_SDK@": str(s.android_compile_sdk),
         "@PTV_LOADER_VERSION@": s.android_openxr_loader_version,
+        "@PTV_NDK_VERSION@": s.android_ndk_version,
     }
     _substitute_tokens(build_dir, tokens)
 

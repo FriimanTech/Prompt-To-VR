@@ -26,12 +26,34 @@
 #include "ptv/platform/AssetSource.h"
 
 namespace {
-bool g_destroy_requested = false;
-
+// NativeActivity lifecycle callback. On Quest the actual VR frame loop and its
+// gating on visibility/focus are driven by the OpenXR session state machine
+// (XrRuntime::poll_events); native_app_glue also updates android_app fields
+// (window, destroyRequested) that the Application loop reads. We log the key
+// transitions here since on-device bring-up (surface/focus timing, controller
+// re-acquire on resume) is the main thing that needs iteration on hardware.
 void handle_app_cmd(android_app* app, int32_t cmd) {
     switch (cmd) {
+        case APP_CMD_INIT_WINDOW:
+            PTV_INFO("android: APP_CMD_INIT_WINDOW (native window ready)");
+            break;
+        case APP_CMD_TERM_WINDOW:
+            PTV_INFO("android: APP_CMD_TERM_WINDOW (native window destroyed)");
+            break;
+        case APP_CMD_GAINED_FOCUS:
+            PTV_INFO("android: APP_CMD_GAINED_FOCUS");
+            break;
+        case APP_CMD_LOST_FOCUS:
+            PTV_INFO("android: APP_CMD_LOST_FOCUS");
+            break;
+        case APP_CMD_RESUME:
+            PTV_INFO("android: APP_CMD_RESUME");
+            break;
+        case APP_CMD_PAUSE:
+            PTV_INFO("android: APP_CMD_PAUSE");
+            break;
         case APP_CMD_DESTROY:
-            g_destroy_requested = true;
+            PTV_INFO("android: APP_CMD_DESTROY (activity tearing down)");
             break;
         default:
             break;
@@ -59,7 +81,6 @@ extern "C" void android_main(android_app* app) {
     ptv::Application appn;
     const int rc = appn.run(cfg);
     PTV_INFO("android_main: runtime exited rc={}", rc);
-    (void)g_destroy_requested;
 }
 
 #endif  // __ANDROID__

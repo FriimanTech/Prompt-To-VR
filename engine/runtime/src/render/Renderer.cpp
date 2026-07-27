@@ -1089,9 +1089,11 @@ int Renderer::load_glb(const std::string& resolved_path,
 int Renderer::ensure_gltf_mesh(const std::string& resolved_path,
                                float target_scale_meters) {
     if (!vk_ || resolved_path.empty()) return -1;
-    namespace fs = std::filesystem;
-    if (!fs::exists(fs::path(resolved_path))) {
-        PTV_WARN("GLB not found on disk: {}", resolved_path);
+    // Resolve through the process-global asset source (filesystem on desktop,
+    // AAssetManager inside the APK on Quest) -- a raw std::filesystem check is
+    // always false for assets packaged in an APK.
+    if (!asset_source().exists(resolved_path)) {
+        PTV_WARN("GLB not found via asset source: {}", resolved_path);
         return -1;
     }
     auto it = gltf_path_to_slot_.find(resolved_path);
