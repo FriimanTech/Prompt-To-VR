@@ -72,13 +72,24 @@
 //               left controller for controller-relative slide.
 // ---------------------------------------------------------------------------
 
-#include <GLFW/glfw3.h>
 #include <glm/gtc/quaternion.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 
 #include "ptv/core/Logger.h"
-#include "ptv/debug/DebugUI.h"
 #include "ptv/scene/SceneLoader.h"
+
+// Desktop-only host pieces: the GLFW mirror window and the ImGui debug overlay.
+// On Quest (standalone Android) there is no desktop window; the loop is driven
+// by the NativeActivity event queue and DebugUI is not shipped.
+#if !defined(__ANDROID__)
+#include <GLFW/glfw3.h>
+
+#include "ptv/debug/DebugUI.h"
+#else
+#include <android_native_app_glue.h>
+
+#include "../platform/android/AndroidPlatform.h"
+#endif
 
 namespace ptv {
 
@@ -544,8 +555,23 @@ int Application::run(const Config& cfg) {
         last = now;
         world_.set_delta_time(dt);
 
+#if !defined(__ANDROID__)
         window_->poll_events();
         if (window_->should_close()) running_ = false;
+#else
+        // Pump the NativeActivity event queue (non-blocking). APP_CMD_DESTROY
+        // etc. are handled by the onAppCmd callback in AndroidMain.cpp; when
+        // the activity is torn down android_app::destroyRequested is set.
+        if (android_app* app = current_android_app()) {
+            int events = 0;
+            android_poll_source* source = nullptr;
+            while (ALooper_pollAll(0, nullptr, &events,
+                                   reinterpret_cast<void**>(&source)) >= 0) {
+                if (source) source->process(app, source);
+                if (app->destroyRequested) { running_ = false; break; }
+            }
+        }
+#endif
 
         if (!xr_.poll_events()) running_ = false;
 
@@ -1429,10 +1455,12 @@ int Application::run(const Config& cfg) {
             xr_.submit_pending_empty_frame();
         }
 
+#if !defined(__ANDROID__)
         DebugUI::new_frame();
         XrFrameInfo fi{dt * 1000.0f, window_->width(), window_->height()};
         DebugUI::draw(world_, fi);
         DebugUI::render_to_mirror_window();
+#endif
 
         tick(dt);
     }
@@ -1457,6 +1485,7 @@ bool Application::initialize(const Config& cfg) {
     const std::string display_name =
         (scene_loaded && !scene_.title.empty()) ? scene_.title : cfg.app_name;
 
+#if !defined(__ANDROID__)
     try {
         window_ = std::make_unique<Window>(cfg.mirror_width, cfg.mirror_height,
                                             display_name + " [mirror]");
@@ -1464,6 +1493,7 @@ bool Application::initialize(const Config& cfg) {
         PTV_ERROR("Window init: {}", e.what());
         return false;
     }
+#endif  // desktop mirror window; Quest has no desktop surface
 
     PTV_INFO("App: beginning OpenXR initialization (phase 1: instance/system)...");
     bool xr_ready = xr_.init_instance_and_system(display_name);
@@ -1700,7 +1730,9 @@ void Application::tick(float /*dt*/) {}
 
 void Application::shutdown() {
     mechanics_.detach_all(world_);
+#if !defined(__ANDROID__)
     DebugUI::shutdown();
+#endif
     renderer_.shutdown();
     renderer_ready_ = false;
     xr_.shutdown();

@@ -9,6 +9,8 @@ from __future__ import annotations
 
 from .build_spec import (
     BuildSpec,
+    GameType,
+    TargetDevice,
     SceneEntry,
     MechanicEntry,
     MechanicType,
@@ -56,6 +58,8 @@ from .acceptance import AcceptanceTestPlan, AcceptanceCheck
 
 __all__ = [
     "BuildSpec",
+    "GameType",
+    "TargetDevice",
     "SceneEntry",
     "MechanicEntry",
     "MechanicType",

@@ -5,12 +5,18 @@
 #include <vk_mem_alloc.h>
 
 // OpenXR headers pulled in only here to keep VulkanContext.h light. We need
-// the platform macros in the same order XrSession.h establishes them.
+// the platform macros in the same order XrSession.h establishes them. The
+// platform macro comes from the per-target CMakeLists; only fall back by
+// compiler so an Android build is never forced onto the Win32 path.
 #ifndef XR_USE_GRAPHICS_API_VULKAN
 #define XR_USE_GRAPHICS_API_VULKAN
 #endif
-#ifndef XR_USE_PLATFORM_WIN32
-#define XR_USE_PLATFORM_WIN32
+#if !defined(XR_USE_PLATFORM_WIN32) && !defined(XR_USE_PLATFORM_ANDROID)
+#  if defined(_WIN32)
+#    define XR_USE_PLATFORM_WIN32
+#  elif defined(__ANDROID__)
+#    define XR_USE_PLATFORM_ANDROID
+#  endif
 #endif
 #ifdef XR_USE_PLATFORM_WIN32
 #  ifndef WIN32_LEAN_AND_MEAN
@@ -21,6 +27,9 @@
 #  endif
 #  include <windows.h>
 #  include <unknwn.h>
+#endif
+#ifdef XR_USE_PLATFORM_ANDROID
+#  include <jni.h>
 #endif
 #include <openxr/openxr.h>
 #include <openxr/openxr_platform.h>

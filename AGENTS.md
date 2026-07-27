@@ -16,8 +16,11 @@ orchestrator and a reusable Vulkan + OpenXR engine core.
 2. Rendering is Vulkan. XR is OpenXR. Build system is CMake. Dependencies are
    managed with vcpkg manifest mode.
 3. Local-first only. **No Supabase, S3, Temporal, cloud auth/storage,
-   multiplayer, speech-to-text, marketplace publishing, Steam / Quest standalone
-   packaging** in this version.
+   multiplayer, speech-to-text, marketplace publishing, Steam packaging** in
+   this version. Quest standalone packaging IS supported: the `quest`
+   target_device builds a local debug APK (Gradle + NDK) that is sideloaded to
+   the headset over `adb` for local testing only. Meta Horizon **Store**
+   submission / release signing remains out of scope.
 4. Schema-first development. Once a schema exists in `packages/schemas`,
    downstream stages MUST consume the structured artifact, not the raw prompt.
 5. Reuse built-in VR mechanics. The engine ships reusable, data-driven modules
@@ -56,6 +59,11 @@ orchestrator and a reusable Vulkan + OpenXR engine core.
 - `apps/web` – React + Vite + TypeScript control panel.
 - `apps/orchestrator` – FastAPI backend that runs the pipeline.
 - `engine/runtime` – **hand-authored** reusable C++ VR engine. Stable.
+  Platform-split under `src/platform/{desktop,android}`; a `ptv::IAssetSource`
+  seam feeds assets from the filesystem (PC VR) or the APK (Quest).
+- `engine/android` – Gradle + NDK template the `quest_build` stage
+  instantiates per project to package a standalone Quest APK. See
+  `docs/quest-build.md`.
 - `engine/generated/{mechanics,ai,dialogue,world}` – the **only** directories
   where LLM-produced C++ lives (`world/` = VR environment builders).
 - `engine/worldgen` – offline `ptv_worldgen` host + `WorldContext` that runs
@@ -107,8 +115,13 @@ orchestrator and a reusable Vulkan + OpenXR engine core.
    (deterministic fallback world if the budget is exhausted).
 9. Deterministic scene compiler merges `world.scene.json` (environment) with
    gameplay entities and emits `scene.json` + build metadata.
-10. CMake configure + build (Visual Studio 18 2026 generator, toolset v145).
-11. Orchestrator launches the produced `.exe` through OpenXR.
+10. Build (branches on `BuildSpec.target_device`):
+    - `pcvr`: CMake configure + build (Visual Studio 18 2026, toolset v145) → `.exe`.
+    - `quest`: `quest_build` instantiates `engine/android`, packages
+      `scene.json` + GLBs + `.spv` into the APK assets, and runs
+      `gradlew assembleDebug` (NDK) → standalone APK. See `docs/quest-build.md`.
+11. Launch (branches on target_device): `pcvr` runs the `.exe` through OpenXR
+    (Quest Link); `quest` does `adb install -r` + `am start` the NativeActivity.
 
 ## Verified model / SDK choices (April 2026)
 

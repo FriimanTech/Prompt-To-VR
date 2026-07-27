@@ -1,0 +1,22 @@
+// Root settings for the Prompt-To-VR Quest (Android/NativeActivity) app.
+//
+// This directory is a TEMPLATE. The orchestrator's quest_build stage copies it
+// into a project's build dir and replaces the @PTV_*@ tokens (see
+// stage_quest_build.py) before invoking `gradlew assembleDebug`.
+pluginManagement {
+    repositories {
+        google()
+        mavenCentral()
+        gradlePluginPortal()
+    }
+}
+dependencyResolutionManagement {
+    repositoriesMode = RepositoriesMode.FAIL_ON_PROJECT_REPOS
+    repositories {
+        google()
+        mavenCentral()
+    }
+}
+
+rootProject.name = "ptv-quest"
+include ':app'

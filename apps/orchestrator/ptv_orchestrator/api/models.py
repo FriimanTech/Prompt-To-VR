@@ -8,6 +8,9 @@ from pydantic import BaseModel, Field
 class CreateProjectRequest(BaseModel):
     title: str = Field(..., min_length=1, max_length=128)
     prompt: str = Field(..., min_length=10, max_length=16_000)
+    # Which VR target to build for: "pcvr" (Windows .exe over Quest Link) or
+    # "quest" (standalone Android APK). Defaults to pcvr for back-compat.
+    target_device: str = Field(default="pcvr")
 
 
 class RunStageRequest(BaseModel):

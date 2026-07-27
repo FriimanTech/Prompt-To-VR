@@ -4,6 +4,7 @@
 #include <sstream>
 
 #include "ptv/core/Logger.h"
+#include "ptv/platform/AssetSource.h"
 
 namespace ptv {
 
@@ -32,16 +33,16 @@ Transform read_transform(const Json& v) {
 }  // namespace
 
 SceneDoc LoadSceneJson(const std::string& path) {
-    std::ifstream in(path);
-    if (!in) {
+    // Read through the process-global asset source so scene.json loads from
+    // the filesystem on desktop and from the APK (AAssetManager) on Quest.
+    auto text = asset_source().read_text(path);
+    if (!text) {
         PTV_ERROR("Cannot open scene file: {}", path);
         return {};
     }
-    std::stringstream ss;
-    ss << in.rdbuf();
     Json j;
     try {
-        j = Json::parse(ss.str());
+        j = Json::parse(*text);
     } catch (const std::exception& e) {
         PTV_ERROR("Scene JSON parse error: {}", e.what());
         return {};

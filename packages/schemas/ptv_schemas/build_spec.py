@@ -21,6 +21,22 @@ class GameType(str, Enum):
     experience = "experience"
 
 
+class TargetDevice(str, Enum):
+    """Which VR target the generated game is built and launched for.
+
+    * ``pcvr`` — Windows native ``.exe`` (Vulkan + Win32 OpenXR), run on the
+      PC and viewed on the headset over Quest Link. The historical default.
+    * ``quest`` — a standalone Android APK (Vulkan + Android OpenXR loader,
+      NativeActivity) installed and run locally on the Quest headset.
+
+    Stages 1-9 (BuildSpec .. scene compile, incl. codegen + worldgen) are
+    identical for both; only the build + launch stages branch on this value.
+    """
+
+    pcvr = "pcvr"
+    quest = "quest"
+
+
 class LocomotionStyle(str, Enum):
     teleport = "teleport"
     smooth = "smooth"
@@ -116,6 +132,10 @@ class BuildSpec(StrictModel):
     title: str = Field(..., max_length=128)
     pitch: str = Field(..., max_length=2000)
     game_type: GameType
+    # Which VR device the game is built for. Set from the create-time routing
+    # choice (ProjectState.target_device); downstream stages read it to pick
+    # the desktop .exe build vs the Quest APK build.
+    target_device: TargetDevice = TargetDevice.pcvr
     locomotion: LocomotionStyle = LocomotionStyle.teleport
     comfort: ComfortLevel = ComfortLevel.comfort
     player_height_meters: float = Field(default=1.7, gt=0.0, lt=3.0)

@@ -9,6 +9,7 @@
 
 #include "ptv/core/Logger.h"
 #include "ptv/ecs/World.h"
+#include "ptv/platform/AssetSource.h"
 #include "ptv/render/GltfMeshLoad.h"
 #include "ptv/render/VulkanContext.h"
 
@@ -20,16 +21,16 @@ namespace {
 #define PTV_SHADER_DIR "shaders"
 #endif
 
+// Shaders are read through the process-global asset source so the same code
+// works on desktop (filesystem) and on Quest (APK assets via AAssetManager).
+// The default FilesystemAssetSource reproduces the historical ifstream read.
 std::vector<uint8_t> read_file_bytes(const std::string& path) {
-    std::ifstream in(path, std::ios::binary);
-    if (!in) {
+    auto bytes = asset_source().read_bytes(path);
+    if (!bytes) {
         PTV_ERROR("Could not open shader SPIR-V: {}", path);
         return {};
     }
-    std::ostringstream oss;
-    oss << in.rdbuf();
-    const std::string s = oss.str();
-    return {s.begin(), s.end()};
+    return std::move(*bytes);
 }
 
 VkShaderModule make_shader(VkDevice dev, const std::string& path) {

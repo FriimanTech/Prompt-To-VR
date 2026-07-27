@@ -41,6 +41,7 @@ from ptv_schemas import (
     ProjectStatus,
     SceneSpec,
     StageRecord,
+    TargetDevice,
 )
 
 _lock = threading.Lock()
@@ -132,7 +133,12 @@ class ProjectStore:
     # ------------------------------------------------------------------
     # Create
     # ------------------------------------------------------------------
-    def create(self, title: str, prompt: str) -> ProjectState:
+    def create(
+        self,
+        title: str,
+        prompt: str,
+        target_device: TargetDevice = TargetDevice.pcvr,
+    ) -> ProjectState:
         pid = self.new_id(title)
         proj_dir = self.dir_for(pid)
         for sub in ("images", "assets", "generated_code", "logs", "builds"):
@@ -142,6 +148,7 @@ class ProjectStore:
             project_id=pid,
             title=title[:128] or "Untitled",
             prompt=prompt,
+            target_device=target_device,
         )
         self.save_state(state)
         return state

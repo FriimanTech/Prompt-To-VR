@@ -9,6 +9,7 @@ from typing import Dict, List, Optional
 from pydantic import Field
 
 from .common import IdStr, StrictModel
+from .build_spec import TargetDevice
 
 
 class ProjectStage(str, Enum):
@@ -25,6 +26,10 @@ class ProjectStage(str, Enum):
     scene_compile = "scene_compile"
     cmake_configure = "cmake_configure"
     cmake_build = "cmake_build"
+    # Quest (standalone Android APK) build path. Used instead of
+    # cmake_configure/cmake_build when target_device == quest.
+    quest_build = "quest_build"
+    quest_install = "quest_install"
     engine_promotion = "engine_promotion"
     ready_to_launch = "ready_to_launch"
     failed = "failed"
@@ -61,9 +66,16 @@ class ProjectState(StrictModel):
     current_stage: ProjectStage = ProjectStage.created
     status: ProjectStatus = ProjectStatus.idle
 
+    # Which VR target this project builds for. Chosen at create time (PC VR /
+    # Quest toggle) and used to route the build + launch stages. Defaults to
+    # pcvr so existing projects load unchanged.
+    target_device: TargetDevice = TargetDevice.pcvr
+
     stages: List[StageRecord] = Field(default_factory=list)
     env_snapshot: Dict[str, str] = Field(default_factory=dict)
 
     latest_build_exe: Optional[str] = None
     latest_build_dir: Optional[str] = None
     latest_scene_json: Optional[str] = None
+    # Quest builds: path to the produced debug APK.
+    latest_build_apk: Optional[str] = None

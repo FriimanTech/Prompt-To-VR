@@ -33,6 +33,8 @@ export type StageRecord = {
   artifacts: string[];
 };
 
+export type TargetDevice = "pcvr" | "quest";
+
 export type ProjectState = {
   project_id: string;
   title: string;
@@ -41,10 +43,12 @@ export type ProjectState = {
   updated_at: string;
   current_stage: string;
   status: string;
+  target_device: TargetDevice;
   stages: StageRecord[];
   latest_build_exe: string | null;
   latest_build_dir: string | null;
   latest_scene_json: string | null;
+  latest_build_apk: string | null;
 };
 
 export type Artifact = {
@@ -72,10 +76,14 @@ export const api = {
   health: () => req<Health>("/health"),
   listProjects: () => req<ProjectSummary[]>("/projects"),
   getProject: (id: string) => req<ProjectState>(`/projects/${id}`),
-  createProject: (title: string, prompt: string) =>
-    req<{ project_id: string }>("/projects", {
+  createProject: (
+    title: string,
+    prompt: string,
+    target_device: TargetDevice = "pcvr",
+  ) =>
+    req<{ project_id: string; target_device: TargetDevice }>("/projects", {
       method: "POST",
-      body: JSON.stringify({ title, prompt }),
+      body: JSON.stringify({ title, prompt, target_device }),
     }),
   listArtifacts: (id: string) => req<Artifact[]>(`/projects/${id}/artifacts`),
   listLogs: (id: string) => req<string[]>(`/projects/${id}/logs`),
@@ -93,10 +101,13 @@ export const api = {
       body: JSON.stringify(opts ?? {}),
     }),
   launch: (id: string, scene_json?: string) =>
-    req<{ ok: boolean; exe: string }>(`/projects/${id}/launch`, {
-      method: "POST",
-      body: JSON.stringify({ scene_json: scene_json ?? null }),
-    }),
+    req<{ ok: boolean; exe?: string; apk?: string; package?: string }>(
+      `/projects/${id}/launch`,
+      {
+        method: "POST",
+        body: JSON.stringify({ scene_json: scene_json ?? null }),
+      },
+    ),
   launchSample: () =>
     req<{ ok: boolean; exe: string }>("/sample/launch", { method: "POST" }),
 };

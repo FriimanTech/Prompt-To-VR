@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { api } from "../api/client";
+import { api, type TargetDevice } from "../api/client";
 
 const SAMPLE = `A small Iron Man-style training arcade (local PC VR, Quest 3 via Quest Link).
 
@@ -26,6 +26,7 @@ export default function NewProjectPage() {
   const nav = useNavigate();
   const [title, setTitle] = useState("Iron Man training arcade");
   const [prompt, setPrompt] = useState(SAMPLE);
+  const [device, setDevice] = useState<TargetDevice>("pcvr");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
@@ -33,7 +34,7 @@ export default function NewProjectPage() {
     setBusy(true);
     setErr(null);
     try {
-      const { project_id } = await api.createProject(title, prompt);
+      const { project_id } = await api.createProject(title, prompt, device);
       if (runNow) {
         await api.run(project_id).catch((e) => {
           // Surface the error but still navigate so the user can see state.
@@ -66,6 +67,30 @@ export default function NewProjectPage() {
             onChange={(e) => setTitle(e.target.value)}
             maxLength={128}
           />
+        </label>
+        <label className="block">
+          <div className="text-sm text-muted mb-1">Target device</div>
+          <div className="flex gap-2">
+            <button
+              type="button"
+              className={device === "pcvr" ? "ptv-button-primary" : "ptv-button"}
+              onClick={() => setDevice("pcvr")}
+            >
+              PC VR (Quest Link)
+            </button>
+            <button
+              type="button"
+              className={device === "quest" ? "ptv-button-primary" : "ptv-button"}
+              onClick={() => setDevice("quest")}
+            >
+              Quest (standalone APK)
+            </button>
+          </div>
+          <div className="text-xs text-muted mt-1">
+            {device === "pcvr"
+              ? "Builds a Windows .exe you run on the PC and view over Quest Link."
+              : "Builds a standalone Android APK installed and run locally on the Quest 3."}
+          </div>
         </label>
         <label className="block">
           <div className="text-sm text-muted mb-1">Prompt</div>

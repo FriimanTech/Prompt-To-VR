@@ -13,8 +13,10 @@ alwaysApply: true
 - Rendering uses **Vulkan**. XR uses **OpenXR**. Build is **CMake** with
   **vcpkg manifest mode**.
 - Do not add cloud services: no Supabase, S3, Temporal, cloud auth, multiplayer,
-  speech-to-text, marketplace publishing, Steam packaging, Quest standalone
-  packaging in this version.
+  speech-to-text, marketplace publishing, Steam packaging in this version.
+- Two build targets are supported via `BuildSpec.target_device`: `pcvr` (Windows
+  .exe over Quest Link) and `quest` (standalone Android APK, Gradle + NDK,
+  sideloaded via adb for LOCAL testing). Meta Store submission is out of scope.
 - Prefer determinism over agent improvisation. Prefer reusable built-in VR
   mechanics over regenerating them.
 - Whenever you change the set of artifacts, stages, providers, or engine

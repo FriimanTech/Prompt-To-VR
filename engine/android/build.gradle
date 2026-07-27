@@ -1,0 +1,5 @@
+// Top-level build file. Plugin versions are pinned; the Android Gradle Plugin
+// must be compatible with the Gradle wrapper version in gradle/wrapper.
+plugins {
+    id 'com.android.application' version '8.7.0' apply false
+}

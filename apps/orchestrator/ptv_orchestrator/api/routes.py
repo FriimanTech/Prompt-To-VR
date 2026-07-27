@@ -83,8 +83,14 @@ def list_projects():
 
 @router.post("/projects", status_code=201)
 def create_project(req: CreateProjectRequest):
-    state = _store().create(req.title, req.prompt)
-    return {"project_id": state.project_id}
+    from ptv_schemas import TargetDevice
+
+    try:
+        device = TargetDevice(req.target_device)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="unknown target_device")
+    state = _store().create(req.title, req.prompt, target_device=device)
+    return {"project_id": state.project_id, "target_device": device.value}
 
 
 @router.get("/projects/{project_id}")
@@ -183,11 +189,36 @@ def run(project_id: str, req: RunStageRequest, background: BackgroundTasks):
 
 @router.post("/projects/{project_id}/launch")
 def launch(project_id: str, req: LaunchRequest):
+    from ptv_schemas import TargetDevice
+
+    from ..quest_ids import quest_package_name
+    from .launch import install_and_launch_apk
+
     store = _store()
     try:
         state = store.load_state(project_id)
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail="project not found")
+
+    device = getattr(state, "target_device", TargetDevice.pcvr)
+
+    # Quest: install + launch the APK on the connected headset via adb.
+    if device == TargetDevice.quest:
+        apk = Path(state.latest_build_apk) if state.latest_build_apk else None
+        if apk is None or not apk.exists():
+            raise HTTPException(
+                status_code=400,
+                detail="no APK; run the Quest build first",
+            )
+        s = get_settings()
+        package = quest_package_name(s.android_package_prefix, project_id)
+        try:
+            install_and_launch_apk(apk, package=package, adb_path=s.adb_path)
+        except Exception as e:  # adb not connected / device not authorized / etc.
+            raise HTTPException(status_code=400, detail=str(e))
+        return {"ok": True, "apk": str(apk), "package": package}
+
+    # PC VR: launch the Windows exe (viewed over Quest Link).
     exe = Path(state.latest_build_exe) if state.latest_build_exe else None
     if exe is None or not exe.exists():
         raise HTTPException(status_code=400, detail="no build exe; run CMake build first")

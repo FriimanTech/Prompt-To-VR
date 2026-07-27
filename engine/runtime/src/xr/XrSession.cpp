@@ -7,6 +7,12 @@
 
 #include "ptv/core/Logger.h"
 
+#if defined(XR_USE_PLATFORM_ANDROID)
+#include <android_native_app_glue.h>
+
+#include "../platform/android/AndroidPlatform.h"
+#endif
+
 namespace ptv {
 
 namespace {
@@ -138,6 +144,34 @@ bool XrRuntime::init_session_and_swapchains(VulkanContext& vk) {
 }
 
 bool XrRuntime::create_instance(const std::string& app_name) {
+#if defined(XR_USE_PLATFORM_ANDROID)
+    // On Android the Khronos OpenXR loader MUST be initialised with the
+    // JavaVM + activity context BEFORE any other OpenXR call (Meta requires
+    // loader >= 1.0.34). See mobile-openxr docs / XR_KHR_loader_init_android.
+    {
+        PFN_xrInitializeLoaderKHR xrInitializeLoaderKHR = nullptr;
+        if (XR_SUCCEEDED(xrGetInstanceProcAddr(
+                XR_NULL_HANDLE, "xrInitializeLoaderKHR",
+                reinterpret_cast<PFN_xrVoidFunction*>(&xrInitializeLoaderKHR))) &&
+            xrInitializeLoaderKHR != nullptr) {
+            android_app* app = current_android_app();
+            if (app && app->activity) {
+                XrLoaderInitInfoAndroidKHR init{
+                    XR_TYPE_LOADER_INIT_INFO_ANDROID_KHR};
+                init.applicationVM = app->activity->vm;
+                init.applicationContext = app->activity->clazz;
+                xrInitializeLoaderKHR(
+                    reinterpret_cast<const XrLoaderInitInfoBaseHeaderKHR*>(&init));
+            } else {
+                PTV_ERROR("XR(Android): no android_app/activity for loader init");
+                return false;
+            }
+        } else {
+            PTV_ERROR("XR(Android): xrInitializeLoaderKHR not resolvable");
+            return false;
+        }
+    }
+#endif
     // Enumerate the extensions the runtime offers so we can log any that we
     // ask for and don't get, and so we can diagnose missing runtime installs.
     uint32_t ext_count = 0;
@@ -163,7 +197,20 @@ bool XrRuntime::create_instance(const std::string& app_name) {
     std::vector<const char*> exts{
         XR_KHR_VULKAN_ENABLE2_EXTENSION_NAME,
     };
+#if defined(XR_USE_PLATFORM_ANDROID)
+    // Required so xrCreateInstance receives the Android VM + activity context.
+    exts.push_back(XR_KHR_ANDROID_CREATE_INSTANCE_EXTENSION_NAME);
+#endif
     XrInstanceCreateInfo ici{XR_TYPE_INSTANCE_CREATE_INFO};
+#if defined(XR_USE_PLATFORM_ANDROID)
+    XrInstanceCreateInfoAndroidKHR android_ci{
+        XR_TYPE_INSTANCE_CREATE_INFO_ANDROID_KHR};
+    if (android_app* app = current_android_app(); app && app->activity) {
+        android_ci.applicationVM = app->activity->vm;
+        android_ci.applicationActivity = app->activity->clazz;
+        ici.next = &android_ci;
+    }
+#endif
     ici.enabledExtensionCount = static_cast<uint32_t>(exts.size());
     ici.enabledExtensionNames = exts.data();
     std::strncpy(ici.applicationInfo.applicationName,

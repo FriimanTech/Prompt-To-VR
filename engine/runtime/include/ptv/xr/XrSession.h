@@ -2,14 +2,20 @@
 
 #include <volk.h>
 
-// These match the target_compile_definitions in engine/runtime/CMakeLists.txt.
-// Use #ifndef guards so we get no redefinition warnings when they are already
-// set on the compile command line.
+// The graphics API is Vulkan on BOTH desktop and Quest. The platform macro
+// (XR_USE_PLATFORM_WIN32 vs XR_USE_PLATFORM_ANDROID) is supplied by the
+// per-target CMakeLists (engine/runtime for desktop, engine/android for
+// Quest). Only fall back to Win32 here when neither was set AND we're on a
+// Windows compiler, so the header never forces Win32 into an Android build.
 #ifndef XR_USE_GRAPHICS_API_VULKAN
 #define XR_USE_GRAPHICS_API_VULKAN
 #endif
-#ifndef XR_USE_PLATFORM_WIN32
-#define XR_USE_PLATFORM_WIN32
+#if !defined(XR_USE_PLATFORM_WIN32) && !defined(XR_USE_PLATFORM_ANDROID)
+#  if defined(_WIN32)
+#    define XR_USE_PLATFORM_WIN32
+#  elif defined(__ANDROID__)
+#    define XR_USE_PLATFORM_ANDROID
+#  endif
 #endif
 
 // openxr_platform.h on Windows references LARGE_INTEGER (windows.h) and
@@ -24,6 +30,11 @@
 #  endif
 #  include <windows.h>
 #  include <unknwn.h>
+#endif
+
+// openxr_platform.h on Android references the JNI JavaVM type.
+#ifdef XR_USE_PLATFORM_ANDROID
+#  include <jni.h>
 #endif
 
 #include <openxr/openxr.h>

@@ -30,10 +30,12 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <filesystem>
 #include <string>
 #include <vector>
 
 #include "ptv/core/Logger.h"
+#include "ptv/platform/AssetSource.h"
 #include "ptv/render/GltfMeshLoad.h"
 
 namespace ptv::gltf_mesh_load {
@@ -333,7 +335,18 @@ bool load_glb_merged(const std::string& path,
     // still parsed, we just skip pixel decoding.
     loader.SetImageLoader(noop_image_loader, nullptr);
     std::string warn;
-    if (!loader.LoadBinaryFromFile(&model, &err, &warn, path)) {
+    // Read the GLB bytes through the process-global asset source (filesystem
+    // on desktop, APK/AAssetManager on Quest) and parse from memory, so the
+    // loader is not tied to a filesystem path that does not exist on-device.
+    auto bytes = asset_source().read_bytes(path);
+    if (!bytes) {
+        err = "asset source could not read GLB: " + path;
+        return false;
+    }
+    const std::string base_dir = std::filesystem::path(path).parent_path().string();
+    if (!loader.LoadBinaryFromMemory(&model, &err, &warn, bytes->data(),
+                                     static_cast<unsigned int>(bytes->size()),
+                                     base_dir)) {
         if (warn.size()) PTV_WARN("tinygltf warn: {}", warn);
         return false;
     }

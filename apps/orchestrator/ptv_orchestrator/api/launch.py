@@ -50,3 +50,52 @@ def find_starter_exe(repo_root: Path, config: str = "Release") -> Path | None:
         for p in root.rglob("ptv_starter_room.exe"):
             return p
     return None
+
+
+def _adb(adb_path: str | None) -> str:
+    """Resolve the adb executable (settings override -> PATH)."""
+    if adb_path:
+        return adb_path
+    return shutil.which("adb") or "adb"
+
+
+def install_and_launch_apk(
+    apk: Path,
+    *,
+    package: str,
+    adb_path: str | None = None,
+) -> int:
+    """Install (``adb install -r``) then launch (``am start`` the
+    NativeActivity) a Quest APK on the connected headset.
+
+    The headset must be in Developer Mode, connected over USB, and authorized
+    (``adb devices`` shows it). Returns 0 on success; raises on adb failure.
+    """
+    if not apk.exists():
+        raise FileNotFoundError(f"APK not found: {apk}")
+    adb = _adb(adb_path)
+
+    install = subprocess.run(
+        [adb, "install", "-r", str(apk)],
+        capture_output=True,
+        text=True,
+    )
+    if install.returncode != 0:
+        raise RuntimeError(
+            f"adb install failed (exit={install.returncode}): "
+            f"{(install.stderr or install.stdout)[:500]}"
+        )
+
+    # NativeActivity is the launch component (matches AndroidManifest.xml).
+    component = f"{package}/android.app.NativeActivity"
+    start = subprocess.run(
+        [adb, "shell", "am", "start", "-n", component],
+        capture_output=True,
+        text=True,
+    )
+    if start.returncode != 0:
+        raise RuntimeError(
+            f"adb am start failed (exit={start.returncode}): "
+            f"{(start.stderr or start.stdout)[:500]}"
+        )
+    return 0

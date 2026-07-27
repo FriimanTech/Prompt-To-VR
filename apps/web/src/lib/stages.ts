@@ -30,16 +30,18 @@ export const STAGE_LABELS: Record<string, string> = {
   scene_compile: "10. Scene compile",
   cmake_configure: "11. CMake configure",
   cmake_build: "11. CMake configure + build",
+  quest_build: "11. Quest APK build",
+  quest_install: "12. Install on Quest",
   engine_promotion: "12. Engine promotion",
   ready_to_launch: "Ready to launch",
   failed: "Failed",
 };
 
 // The stages the pipeline can actually run, in order. Mirrors the backend
-// ``_STAGES`` list in apps/orchestrator/.../pipeline/orchestrator.py: CMake
-// configure is folded into ``cmake_build``, and ``engine_promotion`` is the
-// final stage. Used to populate the "Resume from stage" menu.
-export const RESUMABLE_STAGES = [
+// ``_stages_for(target_device)`` in apps/orchestrator/.../pipeline/orchestrator.py.
+// Stages 1-9 are shared; the build tail differs by device (cmake_build for
+// PC VR, quest_build for Quest). ``engine_promotion`` is the final stage.
+const SHARED_STAGES = [
   "build_spec",
   "asset_manifest",
   "mechanic_plan",
@@ -50,9 +52,18 @@ export const RESUMABLE_STAGES = [
   "code_generation",
   "world_generation",
   "scene_compile",
-  "cmake_build",
-  "engine_promotion",
 ] as const;
+
+export function resumableStages(targetDevice: string = "pcvr"): string[] {
+  const tail =
+    targetDevice === "quest"
+      ? ["quest_build", "engine_promotion"]
+      : ["cmake_build", "engine_promotion"];
+  return [...SHARED_STAGES, ...tail];
+}
+
+// Back-compat default (PC VR) for callers that don't know the device yet.
+export const RESUMABLE_STAGES = resumableStages("pcvr");
 
 export function stageLabel(id: string): string {
   return STAGE_LABELS[id] ?? id;

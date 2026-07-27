@@ -1,0 +1,72 @@
+// Per-game Quest APK module (template).
+//
+// @PTV_*@ tokens are substituted by the orchestrator's quest_build stage
+// (stage_quest_build.py) when it instantiates this template into a project's
+// build dir. Do not hand-edit the instantiated copy.
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace '@PTV_PACKAGE@'
+    compileSdk @PTV_COMPILE_SDK@
+
+    defaultConfig {
+        applicationId '@PTV_PACKAGE@'
+        minSdk @PTV_MIN_SDK@
+        targetSdk @PTV_TARGET_SDK@
+        versionCode 1
+        versionName '1.0'
+
+        ndk {
+            // Quest 3 is arm64 only. Shipping one ABI keeps the APK small and
+            // the build fast.
+            abiFilters 'arm64-v8a'
+        }
+        externalNativeBuild {
+            cmake {
+                arguments '-DANDROID_STL=c++_shared',
+                          '-DPTV_ENGINE_DIR=@PTV_ENGINE_DIR@',
+                          '-DPTV_PROJECT_ID=@PTV_PROJECT_ID@',
+                          '-DPTV_APP_LIB_NAME=ptv_quest'
+                cppFlags '-std=c++20'
+            }
+        }
+    }
+
+    // The Khronos OpenXR Android loader is delivered as an AAR containing a
+    // native Prefab package; CMake picks it up via find_package(OpenXR).
+    buildFeatures {
+        prefab true
+    }
+
+    externalNativeBuild {
+        cmake {
+            path 'src/main/cpp/CMakeLists.txt'
+            version '3.22.1+'
+        }
+    }
+
+    // Debug builds are auto-signed with the SDK debug key -> installable via
+    // adb with no manual signing. Release signing/store submission is out of
+    // scope for local testing.
+    buildTypes {
+        debug {
+            debuggable true
+            jniDebuggable true
+        }
+        release {
+            minifyEnabled false
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+}
+
+dependencies {
+    // Meta requires the Khronos OpenXR Android loader >= 1.0.34.
+    implementation 'org.khronos.openxr:openxr_loader_for_android:@PTV_LOADER_VERSION@'
+}

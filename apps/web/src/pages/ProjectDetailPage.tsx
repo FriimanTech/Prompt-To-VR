@@ -5,11 +5,17 @@ import { api, eventStream } from "../api/client";
 import { StageTimeline } from "../components/StageTimeline";
 import { ArtifactBrowser } from "../components/ArtifactBrowser";
 import { LogsViewer } from "../components/LogsViewer";
-import { RESUMABLE_STAGES, stageLabel } from "../lib/stages";
+import { resumableStages, stageLabel } from "../lib/stages";
 
 /** Dropdown button: pick any pipeline stage to resume from. Running it re-runs
  *  that stage and every stage after it (stages before are skipped). */
-function ResumeFromMenu({ projectId }: { projectId: string }) {
+function ResumeFromMenu({
+  projectId,
+  targetDevice,
+}: {
+  projectId: string;
+  targetDevice: string;
+}) {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
 
@@ -50,7 +56,7 @@ function ResumeFromMenu({ projectId }: { projectId: string }) {
           <div className="px-3 py-1.5 text-xs text-muted">
             Runs the selected stage and everything after it.
           </div>
-          {RESUMABLE_STAGES.map((s) => (
+          {resumableStages(targetDevice).map((s) => (
             <button
               key={s}
               role="menuitem"
@@ -114,7 +120,11 @@ export default function ProjectDetailPage() {
   if (!project.data) return null;
   const p = project.data;
 
-  const canLaunch = Boolean(p.latest_build_exe);
+  const isQuest = p.target_device === "quest";
+  const canLaunch = isQuest
+    ? Boolean(p.latest_build_apk)
+    : Boolean(p.latest_build_exe);
+  const launchLabel = isQuest ? "Install & launch on Quest" : "Launch latest build";
 
   return (
     <div className="space-y-4">
@@ -122,6 +132,9 @@ export default function ProjectDetailPage() {
         <div>
           <h1 className="text-xl font-semibold">{p.title}</h1>
           <div className="text-xs text-muted mono">{p.project_id}</div>
+          <div className="mt-1 inline-block rounded px-2 py-0.5 text-xs bg-white/5 text-muted">
+            {isQuest ? "Quest (standalone APK)" : "PC VR (Quest Link)"}
+          </div>
         </div>
         <div className="flex flex-wrap gap-2">
           <button className="ptv-button" onClick={() => api.run(id).catch(() => void 0)}>
@@ -130,13 +143,13 @@ export default function ProjectDetailPage() {
           <button className="ptv-button" onClick={() => api.run(id, { resume: true }).catch(() => void 0)}>
             Resume
           </button>
-          <ResumeFromMenu projectId={id} />
+          <ResumeFromMenu projectId={id} targetDevice={p.target_device} />
           <button
             className={canLaunch ? "ptv-button-primary" : "ptv-button-primary opacity-40 cursor-not-allowed"}
             disabled={!canLaunch}
             onClick={() => api.launch(id).catch(() => void 0)}
           >
-            Launch latest build
+            {launchLabel}
           </button>
         </div>
       </div>

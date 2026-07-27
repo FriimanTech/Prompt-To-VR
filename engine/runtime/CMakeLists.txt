@@ -10,6 +10,13 @@ file(GLOB_RECURSE PTV_RUNTIME_SOURCES CONFIGURE_DEPENDS
   "${CMAKE_CURRENT_SOURCE_DIR}/include/*.h"
 )
 
+# Platform selection. This CMakeLists is the DESKTOP / PC VR build (Windows +
+# GLFW + Win32 OpenXR). The Quest/Android build uses its own native CMakeLists
+# under engine/android/src/main/cpp/ and defines XR_USE_PLATFORM_ANDROID. Drop
+# the Android-only platform sources so they never reach the desktop compiler
+# (they include <android/...> / <jni.h>).
+list(FILTER PTV_RUNTIME_SOURCES EXCLUDE REGEX "/src/platform/android/")
+
 add_library(ptv_runtime STATIC ${PTV_RUNTIME_SOURCES})
 
 target_include_directories(ptv_runtime PUBLIC
@@ -43,9 +50,15 @@ target_compile_definitions(ptv_runtime PUBLIC
   GLM_ENABLE_EXPERIMENTAL
   VK_NO_PROTOTYPES
   XR_USE_GRAPHICS_API_VULKAN
-  XR_USE_PLATFORM_WIN32
   NOMINMAX
 )
+
+# OpenXR platform macro is platform-specific. Desktop/PC VR is Windows-only
+# here; the Quest/Android native build defines XR_USE_PLATFORM_ANDROID in its
+# own CMakeLists instead.
+if(WIN32)
+  target_compile_definitions(ptv_runtime PUBLIC XR_USE_PLATFORM_WIN32)
+endif()
 
 # Shader compilation (glslc from Vulkan SDK).
 find_program(PTV_GLSLC glslc HINTS "$ENV{VULKAN_SDK}/Bin")

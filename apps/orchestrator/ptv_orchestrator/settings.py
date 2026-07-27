@@ -164,6 +164,21 @@ class Settings(BaseSettings):
     optional_vulkan_sdk_path: str | None = None
     optional_openxr_runtime_hint: str | None = None
 
+    # --- Quest / Android build toolchain --------------------------------
+    # The Quest target reuses the user's Android Studio toolchain via the
+    # standard env vars (ANDROID_HOME, ANDROID_NDK_HOME, JAVA_HOME) and PATH
+    # (adb, cmdline-tools). These knobs let those be overridden if needed.
+    android_sdk_root: str | None = None  # defaults to $ANDROID_HOME
+    android_ndk_home: str | None = None  # defaults to $ANDROID_NDK_HOME
+    adb_path: str | None = None  # defaults to `adb` on PATH
+    # APK identity + SDK levels. Package name is "<prefix>.<sanitized_id>".
+    android_package_prefix: str = "com.prompttovr"
+    android_min_sdk: int = 32
+    android_target_sdk: int = 34
+    android_compile_sdk: int = 34
+    # Khronos OpenXR Android loader (Meta requires >= 1.0.34).
+    android_openxr_loader_version: str = "1.0.34"
+
 
 _cached: Settings | None = None
 

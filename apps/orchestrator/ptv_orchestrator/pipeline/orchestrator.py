@@ -5,7 +5,7 @@ from __future__ import annotations
 import threading
 from typing import Callable
 
-from ptv_schemas import ProjectStage, ProjectStatus
+from ptv_schemas import ProjectStage, ProjectStatus, TargetDevice
 
 from ..events import get_bus
 from ..settings import Settings, get_settings
@@ -18,6 +18,7 @@ from . import (
     stage_code_generation,
     stage_engine_promotion,
     stage_mechanic_plan,
+    stage_quest_build,
     stage_reference_images,
     stage_scene_compile,
     stage_scene_spec,
@@ -48,8 +49,9 @@ def _project_lock(project_id: str) -> threading.Lock:
 StageFn = Callable[[PipelineContext], StageResult]
 
 
-# Stage sequence in the order defined by Instructions.md.
-_STAGES: list[tuple[ProjectStage, StageFn]] = [
+# Stages 1-9 are identical for both targets: prompt -> scene.json + generated
+# C++ + GLBs. Only the build stage differs by target_device.
+_SHARED_STAGES: list[tuple[ProjectStage, StageFn]] = [
     (ProjectStage.build_spec, stage_build_spec.run),
     (ProjectStage.asset_manifest, stage_asset_manifest.run),
     (ProjectStage.mechanic_plan, stage_mechanic_plan.run),
@@ -60,9 +62,33 @@ _STAGES: list[tuple[ProjectStage, StageFn]] = [
     (ProjectStage.code_generation, stage_code_generation.run),
     (ProjectStage.world_generation, stage_world_generation.run),
     (ProjectStage.scene_compile, stage_scene_compile.run),
+]
+
+# PC VR: build a Windows .exe with CMake/MSVC.
+_PCVR_TAIL: list[tuple[ProjectStage, StageFn]] = [
     (ProjectStage.cmake_build, stage_cmake.run),
     (ProjectStage.engine_promotion, stage_engine_promotion.run),
 ]
+
+# Quest: build a standalone Android APK with Gradle + the NDK.
+_QUEST_TAIL: list[tuple[ProjectStage, StageFn]] = [
+    (ProjectStage.quest_build, stage_quest_build.run),
+    (ProjectStage.engine_promotion, stage_engine_promotion.run),
+]
+
+
+def _stages_for(target_device: TargetDevice) -> list[tuple[ProjectStage, StageFn]]:
+    """The ordered stage list for a target device. Shared stages 1-9 then the
+    device-specific build tail."""
+    tail = _QUEST_TAIL if target_device == TargetDevice.quest else _PCVR_TAIL
+    return _SHARED_STAGES + tail
+
+
+def _stages_for_project(ctx: PipelineContext) -> list[tuple[ProjectStage, StageFn]]:
+    device = getattr(
+        ctx.store.load_state(ctx.project_id), "target_device", TargetDevice.pcvr
+    )
+    return _stages_for(device)
 
 
 def _make_ctx(project_id: str, settings: Settings | None = None) -> PipelineContext:
@@ -94,7 +120,7 @@ def run_pipeline(project_id: str, settings: Settings | None = None) -> None:
         state.status = ProjectStatus.running
         ctx.store.save_state(state)
         try:
-            for stage, fn in _STAGES:
+            for stage, fn in _stages_for(state.target_device):
                 fn(ctx)
         except Exception as e:
             state = ctx.store.load_state(project_id)
@@ -136,7 +162,7 @@ def resume_pipeline(project_id: str, settings: Settings | None = None) -> None:
             latest_status[s.stage] = s.status  # records are appended in order
 
         resume_from: ProjectStage | None = None
-        for stage, _fn in _STAGES:
+        for stage, _fn in _stages_for(state.target_device):
             if latest_status.get(stage) != ProjectStatus.succeeded:
                 resume_from = stage
                 break
@@ -154,7 +180,7 @@ def _run_stages_from(ctx: PipelineContext, resume_from: ProjectStage | None) -> 
     ones, so once we start we run every remaining stage in order.
     """
     resuming = False
-    for stage, fn in _STAGES:
+    for stage, fn in _stages_for_project(ctx):
         if not resuming:
             if resume_from is None or stage != resume_from:
                 ctx.emit(stage, "skipped", "already done")
@@ -185,7 +211,7 @@ def resume_from_stage(
         return
     try:
         ctx = _make_ctx(project_id, settings)
-        if stage not in [s for s, _ in _STAGES]:
+        if stage not in [s for s, _ in _stages_for_project(ctx)]:
             # Not a pipeline-runnable stage (e.g. cmake_configure is folded into
             # cmake_build; created/ready_to_launch/failed are markers).
             ctx.emit(
@@ -221,7 +247,7 @@ def run_stage(project_id: str, stage: ProjectStage, settings: Settings | None = 
         return
     try:
         ctx = _make_ctx(project_id, settings)
-        for s, fn in _STAGES:
+        for s, fn in _stages_for_project(ctx):
             if s == stage:
                 fn(ctx)
                 return
