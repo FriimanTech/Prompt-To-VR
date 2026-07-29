@@ -13,6 +13,7 @@ build_spec -> asset_manifest (no environment GLB) -> mechanic_plan -> scene_spec
   -> reference_images -> tripo_models -> asset_normalization
   -> code_generation (mechanics DAG)
   -> world_generation (this stage)
+  -> asset_optimization (decimation + LOD chain)
   -> scene_compile (merge world + gameplay) -> cmake_build -> engine_promotion
 ```
 

@@ -1,6 +1,10 @@
 #include "ptv/render/Renderer.h"
 
+#include <algorithm>
 #include <array>
+#include <cfloat>
+#include <chrono>
+#include <cmath>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -304,6 +308,7 @@ bool Renderer::initialize(VulkanContext& vk,
     if (!create_depth_image()) return false;
     if (!create_msaa_color_image()) return false;
     if (!create_command_resources()) return false;
+    start_stream_worker();
     PTV_INFO("Renderer ready: {}x{} per eye, color fmt {}, MSAA {}x",
              eye_width_, eye_height_, static_cast<int>(color_format_),
              static_cast<int>(samples_));
@@ -314,12 +319,23 @@ VkSampleCountFlagBits Renderer::pick_sample_count() {
     VkPhysicalDeviceProperties props{};
     vkGetPhysicalDeviceProperties(vk_->physical_device(), &props);
     // Only levels supported for BOTH color and depth framebuffers are usable
-    // for our resolve pass. Cap at 4x per the plan's quality budget.
+    // for our resolve pass.
     const VkSampleCountFlags counts =
         props.limits.framebufferColorSampleCounts &
         props.limits.framebufferDepthSampleCounts;
-    if (counts & VK_SAMPLE_COUNT_4_BIT) return VK_SAMPLE_COUNT_4_BIT;
-    if (counts & VK_SAMPLE_COUNT_2_BIT) return VK_SAMPLE_COUNT_2_BIT;
+
+    // The scene's performance tier decides how much MSAA we can afford: 4x is
+    // a heavy bandwidth cost on a mobile tiler, so large/massive scenes ask
+    // for 2x (or 1x) instead of always taking the maximum the GPU advertises.
+    // Clamped to what the device actually supports, and never above 4x.
+    int requested = perf_.msaa_samples > 0 ? perf_.msaa_samples : 4;
+    requested = std::min(requested, 4);
+    if (requested >= 4 && (counts & VK_SAMPLE_COUNT_4_BIT)) {
+        return VK_SAMPLE_COUNT_4_BIT;
+    }
+    if (requested >= 2 && (counts & VK_SAMPLE_COUNT_2_BIT)) {
+        return VK_SAMPLE_COUNT_2_BIT;
+    }
     return VK_SAMPLE_COUNT_1_BIT;
 }
 
@@ -702,9 +718,231 @@ int Renderer::create_mesh_slot(const std::vector<gltf_mesh_load::LitVertex>& ver
     upload_buffer(*vk_, gm.ib, gm.ib_alloc, indices.data(),
                   static_cast<size_t>(ib_size));
     gm.index_count = static_cast<uint32_t>(indices.size());
+    gm.triangle_count = gm.index_count / 3;
+
+    // Bounding sphere in mesh space, used for frustum + distance culling.
+    // Centre-of-AABB + max radius is tighter than an AABB-corner radius and is
+    // cheap enough to compute once at upload.
+    float mn[3] = {FLT_MAX, FLT_MAX, FLT_MAX};
+    float mx[3] = {-FLT_MAX, -FLT_MAX, -FLT_MAX};
+    for (const auto& v : verts) {
+        for (int c = 0; c < 3; ++c) {
+            if (v.pos[c] < mn[c]) mn[c] = v.pos[c];
+            if (v.pos[c] > mx[c]) mx[c] = v.pos[c];
+        }
+    }
+    const float cx = 0.5f * (mn[0] + mx[0]);
+    const float cy = 0.5f * (mn[1] + mx[1]);
+    const float cz = 0.5f * (mn[2] + mx[2]);
+    float r2 = 0.0f;
+    for (const auto& v : verts) {
+        const float dx = v.pos[0] - cx, dy = v.pos[1] - cy, dz = v.pos[2] - cz;
+        const float d2 = dx * dx + dy * dy + dz * dz;
+        if (d2 > r2) r2 = d2;
+    }
+    gm.local_radius = std::sqrt(r2);
+
+    resident_triangles_ += gm.triangle_count;
+
+    // Reuse a slot freed by eviction before growing the table, so mesh_slot
+    // indices stay stable and the vector does not grow without bound.
+    if (!free_mesh_slots_.empty()) {
+        const int slot = free_mesh_slots_.back();
+        free_mesh_slots_.pop_back();
+        gltf_meshes_[static_cast<size_t>(slot)] = gm;
+        return slot;
+    }
     const int slot = static_cast<int>(gltf_meshes_.size());
     gltf_meshes_.push_back(gm);
     return slot;
+}
+
+// ---------------------------------------------------------------------------
+// Asynchronous mesh streaming
+// ---------------------------------------------------------------------------
+
+void Renderer::start_stream_worker() {
+    if (stream_thread_.joinable()) return;
+    stream_stop_ = false;
+    stream_thread_ = std::thread([this] { stream_worker_main(); });
+}
+
+void Renderer::stop_stream_worker() {
+    if (!stream_thread_.joinable()) return;
+    {
+        std::lock_guard<std::mutex> lock(stream_mutex_);
+        stream_stop_ = true;
+    }
+    stream_cv_.notify_all();
+    stream_thread_.join();
+    stream_queue_.clear();
+    stream_done_.clear();
+    stream_inflight_.clear();
+}
+
+void Renderer::stream_worker_main() {
+    for (;;) {
+        StreamRequest req;
+        {
+            std::unique_lock<std::mutex> lock(stream_mutex_);
+            stream_cv_.wait(lock, [this] {
+                return stream_stop_.load() || !stream_queue_.empty();
+            });
+            if (stream_stop_.load()) return;
+
+            // Pop the highest-priority (nearest) request. The queue is small
+            // (bounded by scene asset count), so a linear scan beats keeping a
+            // heap in sync as priorities change every frame.
+            size_t best = 0;
+            for (size_t i = 1; i < stream_queue_.size(); ++i) {
+                if (stream_queue_[i].priority < stream_queue_[best].priority) {
+                    best = i;
+                }
+            }
+            req = stream_queue_[best];
+            stream_queue_.erase(stream_queue_.begin() +
+                                static_cast<std::ptrdiff_t>(best));
+        }
+
+        StreamResult result;
+        result.path = req.path;
+        std::string err;
+        result.ok = gltf_mesh_load::load_glb_merged(
+            req.path, req.target_scale_meters, result.verts, result.indices,
+            err);
+        if (!result.ok) {
+            PTV_WARN("stream: GLB load failed ({}): {}", req.path, err);
+        }
+        {
+            std::lock_guard<std::mutex> lock(stream_mutex_);
+            stream_done_.push_back(std::move(result));
+        }
+    }
+}
+
+int Renderer::resident_slot(const std::string& path) {
+    auto it = gltf_path_to_slot_.find(path);
+    if (it == gltf_path_to_slot_.end()) return -1;
+    gltf_meshes_[static_cast<size_t>(it->second)].last_used_frame = frame_index_;
+    return it->second;
+}
+
+void Renderer::request_stream(const std::string& path,
+                              float target_scale_meters, float priority) {
+    if (path.empty()) return;
+    if (gltf_path_to_slot_.count(path)) return;
+    if (stream_failed_.count(path)) return;  // don't retry a broken asset forever
+
+    std::lock_guard<std::mutex> lock(stream_mutex_);
+    if (stream_inflight_.count(path)) {
+        // Already queued: keep the most urgent priority seen this frame so the
+        // nearest object still wins if the player turns around.
+        for (auto& q : stream_queue_) {
+            if (q.path == path) {
+                q.priority = std::min(q.priority, priority);
+                break;
+            }
+        }
+        return;
+    }
+    stream_inflight_.insert(path);
+    stream_queue_.push_back(StreamRequest{path, target_scale_meters, priority});
+    stream_cv_.notify_one();
+}
+
+void Renderer::pump_streaming() {
+    ++frame_index_;
+    if (!vk_) return;
+
+    // Upload at most a couple of meshes per frame. Meta's own open-world
+    // streaming sample throttles to ~4 async operations per frame for exactly
+    // this reason: a burst of uploads is what turns into a visible hitch (and,
+    // on Android, a blocked event pump -> ANR).
+    constexpr int kMaxUploadsPerFrame = 2;
+    constexpr double kMaxUploadMillis = 4.0;
+
+    const auto start = std::chrono::steady_clock::now();
+    int uploaded = 0;
+    while (uploaded < kMaxUploadsPerFrame) {
+        StreamResult result;
+        {
+            std::lock_guard<std::mutex> lock(stream_mutex_);
+            if (stream_done_.empty()) break;
+            result = std::move(stream_done_.back());
+            stream_done_.pop_back();
+            stream_inflight_.erase(result.path);
+        }
+
+        if (result.ok) {
+            const int slot = create_mesh_slot(result.verts, result.indices);
+            if (slot >= 0) {
+                auto& gm = gltf_meshes_[static_cast<size_t>(slot)];
+                gm.path = result.path;
+                gm.evictable = true;
+                gm.last_used_frame = frame_index_;
+                gltf_path_to_slot_[result.path] = slot;
+            } else {
+                stream_failed_.insert(result.path);
+            }
+        } else {
+            stream_failed_.insert(result.path);
+        }
+        ++uploaded;
+
+        const double elapsed_ms =
+            std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - start)
+                .count();
+        if (elapsed_ms >= kMaxUploadMillis) break;
+    }
+
+    evict_to_budget();
+
+    std::lock_guard<std::mutex> lock(stream_mutex_);
+    stats_.streaming_pending =
+        static_cast<std::uint32_t>(stream_inflight_.size());
+}
+
+void Renderer::destroy_mesh_slot(GltfGpuMesh& gm) {
+    if (!vk_) return;
+    if (gm.vb) vmaDestroyBuffer(vk_->allocator(), gm.vb, gm.vb_alloc);
+    if (gm.ib) vmaDestroyBuffer(vk_->allocator(), gm.ib, gm.ib_alloc);
+    gm = GltfGpuMesh{};
+}
+
+void Renderer::evict_to_budget() {
+    if (!perf_.evict_when_over_budget) return;
+    if (resident_triangles_ <= perf_.resident_triangle_budget) return;
+
+    // Safe to free here: draw_frame waits on its fence before returning, so no
+    // command buffer is still referencing these buffers. Evict at most one per
+    // frame to spread the cost (same rationale as the upload throttle).
+    int victim = -1;
+    std::uint64_t oldest = UINT64_MAX;
+    for (size_t i = 0; i < gltf_meshes_.size(); ++i) {
+        const auto& gm = gltf_meshes_[i];
+        if (!gm.evictable || gm.vb == VK_NULL_HANDLE) continue;
+        if (gm.last_used_frame >= frame_index_) continue;  // in use this frame
+        if (gm.last_used_frame < oldest) {
+            oldest = gm.last_used_frame;
+            victim = static_cast<int>(i);
+        }
+    }
+    if (victim < 0) return;
+
+    auto& gm = gltf_meshes_[static_cast<size_t>(victim)];
+    resident_triangles_ -= std::min(resident_triangles_, gm.triangle_count);
+    gltf_path_to_slot_.erase(gm.path);
+    PTV_INFO("stream: evicted {} ({} tris, resident now {})", gm.path,
+             gm.triangle_count, resident_triangles_);
+    destroy_mesh_slot(gm);
+    free_mesh_slots_.push_back(victim);
+}
+
+void Renderer::set_performance(const ScenePerformance& perf) {
+    perf_ = perf;
+    cull_distance_m_ = perf.cull_distance_m;
+    lod_bias_ = 0.0f;
 }
 
 bool Renderer::create_primitive_meshes() {
@@ -1075,6 +1313,9 @@ void Renderer::destroy_gltf_meshes() {
     gltf_meshes_.clear();
     gltf_path_to_slot_.clear();
     inline_mesh_slots_.clear();
+    free_mesh_slots_.clear();
+    entity_lod_.clear();
+    resident_triangles_ = 0;
     // Built-in primitive meshes lived in gltf_meshes_; their slots are now
     // invalid.
     prim_slot_sphere_ = prim_slot_cylinder_ = prim_slot_plane_ =
@@ -1111,6 +1352,12 @@ int Renderer::ensure_gltf_mesh(const std::string& resolved_path,
 
     const int slot = create_mesh_slot(verts, indices);
     if (slot < 0) return -1;
+    // Synchronous path (menu icons / explicit load_glb). Pinned: these are not
+    // driven by entity visibility, so the LRU has no signal to keep them.
+    auto& gm = gltf_meshes_[static_cast<size_t>(slot)];
+    gm.path = resolved_path;
+    gm.evictable = false;
+    gm.last_used_frame = frame_index_;
     gltf_path_to_slot_[resolved_path] = slot;
     return slot;
 }
@@ -1176,11 +1423,72 @@ int Renderer::ensure_inline_mesh(std::uint32_t key,
     return slot;
 }
 
-void Renderer::build_items_from_world(World& world, std::vector<DrawItem>& out) {
+namespace {
+
+/** Six frustum planes (x,y,z = normal, w = distance) from a view-projection.
+ *  Gribb/Hartmann plane extraction; normals point INTO the frustum. */
+struct Frustum {
+    Vec4 planes[6];
+    bool valid{false};
+
+    void build(const Mat4& m) {
+        // glm is column-major, so row K is (m[0][K], m[1][K], m[2][K], m[3][K]).
+        auto row = [&m](int k) {
+            return Vec4(m[0][k], m[1][k], m[2][k], m[3][k]);
+        };
+        const Vec4 r0 = row(0), r1 = row(1), r2 = row(2), r3 = row(3);
+        planes[0] = r3 + r0;  // left
+        planes[1] = r3 - r0;  // right
+        planes[2] = r3 + r1;  // bottom
+        planes[3] = r3 - r1;  // top
+        // The engine builds projections with GLM_FORCE_DEPTH_ZERO_TO_ONE, so
+        // clip-space z is in [0, w] rather than [-w, w]: the near plane is
+        // plain row2, NOT row3 + row2 (the OpenGL-convention formula).
+        planes[4] = r2;       // near
+        planes[5] = r3 - r2;  // far
+        for (auto& pl : planes) {
+            const float len =
+                std::sqrt(pl.x * pl.x + pl.y * pl.y + pl.z * pl.z);
+            if (len > 1e-6f) pl /= len;
+        }
+        valid = true;
+    }
+
+    /** Conservative sphere test: false only when definitely outside. */
+    bool intersects_sphere(const Vec3& c, float r) const {
+        if (!valid) return true;
+        for (const auto& pl : planes) {
+            if (pl.x * c.x + pl.y * c.y + pl.z * c.z + pl.w < -r) return false;
+        }
+        return true;
+    }
+};
+
+/** Largest absolute scale factor baked into a model matrix. Used to convert a
+ *  mesh-space bounding radius into world space. */
+float max_axis_scale(const Mat4& m) {
+    const float sx = glm::length(Vec3(m[0]));
+    const float sy = glm::length(Vec3(m[1]));
+    const float sz = glm::length(Vec3(m[2]));
+    return std::max(sx, std::max(sy, sz));
+}
+
+}  // namespace
+
+void Renderer::build_items_from_world(World& world, std::vector<DrawItem>& out,
+                                      const ViewInfo& view_info) {
     out.clear();
+    stats_ = FrameStats{};
+    stats_.resident_triangles = resident_triangles_;
+
+    Frustum frustum;
+    if (view_info.valid) frustum.build(view_info.view_proj);
+    const Vec3 cam = view_info.camera_pos;
+
     auto view = world.registry().view<const CTransform>();
     for (auto entity : view) {
         const auto& ct = view.get<const CTransform>(entity).t;
+        ++stats_.entities_considered;
 
         // --- Skip invisible / logic-only entities --------------------------------
         // Generated scenes often include dozens of ``mesh: null`` trigger /
@@ -1213,11 +1521,93 @@ void Renderer::build_items_from_world(World& world, std::vector<DrawItem>& out) 
         if (world.registry().all_of<CMesh>(entity)) {
             const auto& cm = world.registry().get<CMesh>(entity);
             if (!cm.glb_path.empty()) {
-                int slot =
-                    ensure_gltf_mesh(cm.glb_path, cm.target_scale_meters);
+                const Mat4 model = ct.matrix();
+                const Vec3 center{model[3][0], model[3][1], model[3][2]};
+                const float distance = view_info.valid
+                                           ? glm::length(center - cam)
+                                           : 0.0f;
+
+                // Radius: prefer the pipeline-computed value (already scaled
+                // to metres); otherwise fall back to a generous estimate so a
+                // mesh is never culled just because we lack bounds.
+                float radius = cm.bounds_radius_m;
+                if (radius <= 0.0f) {
+                    radius = std::max(1.0f, cm.target_scale_meters) *
+                             max_axis_scale(model);
+                }
+
+                // Distance cull. cull_distance_m_ is effectively infinite for
+                // compact/standard scenes, so small games still show
+                // everything; the governor may tighten it under load.
+                if (view_info.valid && distance - radius > cull_distance_m_) {
+                    ++stats_.culled_distance;
+                    continue;
+                }
+                // Frustum cull once for both eyes.
+                if (view_info.valid &&
+                    !frustum.intersects_sphere(center, radius)) {
+                    ++stats_.culled_frustum;
+                    continue;
+                }
+
+                // --- Pick a level of detail -------------------------------
+                // Choose by distance against the scene's switch distances,
+                // shrunk by the governor's lod_bias when frames are slow.
+                const auto& chain = cm.lod_paths;
+                int desired = 0;
+                if (chain.size() > 1 && view_info.valid) {
+                    const float bias = 1.0f / (1.0f + std::max(0.0f, lod_bias_));
+                    const auto& sw = perf_.lod_switch_distances_m;
+                    for (size_t i = 0; i < sw.size() &&
+                                       i < chain.size() - 1;
+                         ++i) {
+                        if (distance > sw[i] * bias) {
+                            desired = static_cast<int>(i) + 1;
+                        }
+                    }
+                    // Hysteresis: only move one level per frame and require a
+                    // clear margin, so an object hovering on a switch boundary
+                    // does not visibly pop back and forth.
+                    const auto prev_it =
+                        entity_lod_.find(static_cast<std::uint32_t>(entity));
+                    if (prev_it != entity_lod_.end()) {
+                        const int prev = prev_it->second;
+                        if (desired > prev) {
+                            desired = prev + 1;
+                        } else if (desired < prev) {
+                            const size_t idx = static_cast<size_t>(desired);
+                            const bool clearly_closer =
+                                idx < sw.size() &&
+                                distance < sw[idx] * bias * 0.85f;
+                            desired = clearly_closer ? prev - 1 : prev;
+                        }
+                    }
+                    desired = std::max(
+                        0, std::min(desired,
+                                    static_cast<int>(chain.size()) - 1));
+                }
+
+                // --- Resolve to a resident mesh ---------------------------
+                // Never block on I/O here. Request the LOD we want and, until
+                // it arrives, draw any coarser level that is already resident.
+                const std::string& wanted =
+                    chain.empty() ? cm.glb_path
+                                  : chain[static_cast<size_t>(desired)];
+                int slot = resident_slot(wanted);
+                if (slot < 0) {
+                    request_stream(wanted, cm.target_scale_meters, distance);
+                    for (size_t i = static_cast<size_t>(desired) + 1;
+                         slot < 0 && i < chain.size(); ++i) {
+                        slot = resident_slot(chain[i]);
+                    }
+                    if (slot < 0 && !chain.empty()) {
+                        slot = resident_slot(chain[0]);
+                    }
+                }
                 if (slot >= 0) {
+                    entity_lod_[static_cast<std::uint32_t>(entity)] = desired;
                     DrawItem it{};
-                    it.model = ct.matrix();
+                    it.model = model;
                     it.mesh_slot = slot;
                     it.material_id = 0.0f;
                     // GLB primitives carry their own per-vertex baseColor
@@ -1249,8 +1639,15 @@ void Renderer::build_items_from_world(World& world, std::vector<DrawItem>& out) 
                         }
                     }
                     out.push_back(it);
+                    ++stats_.drawn;
+                    stats_.visible_triangles +=
+                        gltf_meshes_[static_cast<size_t>(slot)].triangle_count;
                     continue;
                 }
+                // Nothing resident yet: skip this entity for now. It pops in
+                // within a frame or two as the streaming worker catches up --
+                // vastly preferable to a multi-second stall on frame one.
+                continue;
             }
         }
 
@@ -1287,7 +1684,18 @@ void Renderer::build_items_from_world(World& world, std::vector<DrawItem>& out) 
             } else {
                 it.mesh_slot = -1;  // box / unknown -> unit cube
             }
+            // World-gen primitives are cheap and always resident, but they
+            // still count toward the frame's visible triangle total that the
+            // governor watches.
+            if (it.mesh_slot >= 0) {
+                stats_.visible_triangles +=
+                    gltf_meshes_[static_cast<size_t>(it.mesh_slot)]
+                        .triangle_count;
+            } else {
+                stats_.visible_triangles += cube_index_count_ / 3;
+            }
             out.push_back(it);
+            ++stats_.drawn;
             continue;
         }
 
@@ -1304,6 +1712,9 @@ void Renderer::build_items_from_world(World& world, std::vector<DrawItem>& out) 
                 it.color = Vec4{1.0f, 1.0f, 1.0f, 1.0f};  // vertex colors drive look
                 it.material_id = 0.0f;
                 out.push_back(it);
+                ++stats_.drawn;
+                stats_.visible_triangles +=
+                    gltf_meshes_[static_cast<size_t>(slot)].triangle_count;
                 continue;
             }
         }
@@ -1344,10 +1755,19 @@ void Renderer::build_items_from_world(World& world, std::vector<DrawItem>& out) 
         it.color = color;
         it.material_id = material_id;
         out.push_back(it);
+        ++stats_.drawn;
+        stats_.visible_triangles += cube_index_count_ / 3;
     }
+
+    stats_.resident_meshes =
+        static_cast<std::uint32_t>(gltf_path_to_slot_.size());
+    stats_.resident_triangles = resident_triangles_;
 }
 
 void Renderer::shutdown() {
+    // Join the streaming worker BEFORE touching Vulkan objects: it must not be
+    // mid-parse when the device goes away. Safe to call when never started.
+    stop_stream_worker();
     if (!vk_) return;
     if (vk_->device() != VK_NULL_HANDLE) {
         vkDeviceWaitIdle(vk_->device());

@@ -98,10 +98,29 @@ def _compile_shaders(engine_dir: Path, assets_dir: Path) -> list[str]:
     return notes
 
 
+def _is_superseded_by_lods(glb: Path) -> bool:
+    """True for a raw source GLB whose directory already holds an LOD chain.
+
+    ``asset_optimization`` writes ``<asset_id>_lod0.glb`` .. ``_lodN.glb`` next
+    to the Tripo source and repoints ``scene.json`` at LOD0, so the original is
+    dead weight in the APK.
+    """
+    if "_lod" in glb.stem:
+        return False  # this IS an LOD file
+    return any(glb.parent.glob("*_lod0.glb"))
+
+
 def _package_assets(ctx: PipelineContext, build_dir: Path) -> list[str]:
     """Copy scene.json + GLBs + shaders into the APK assets dir."""
     notes: list[str] = []
     assets_dir = build_dir / "app" / "src" / "main" / "assets"
+    # Wipe the staged assets first so the APK is always a faithful mirror of
+    # the project's CURRENT files. Without this, anything packaged by an
+    # earlier run lingers forever -- e.g. the raw Tripo GLBs from before
+    # asset_optimization existed would keep shipping alongside their much
+    # smaller LOD replacements (141 MB of dead weight in a 123 MB APK).
+    if assets_dir.exists():
+        shutil.rmtree(assets_dir, ignore_errors=True)
     assets_dir.mkdir(parents=True, exist_ok=True)
 
     scene = ctx.project_dir / "scene.json"
@@ -110,17 +129,29 @@ def _package_assets(ctx: PipelineContext, build_dir: Path) -> list[str]:
     else:
         notes.append("scene.json missing -- run scene_compile first")
 
-    # GLBs live under the project assets dir (normalized Tripo output).
+    # GLBs live under the project assets dir. Once the asset_optimization
+    # stage has produced an LOD chain for an asset we ship ONLY the LODs --
+    # shipping the raw Tripo source too would multiply the APK size (a single
+    # untouched Tripo GLB is ~14 MB vs ~250 KB for its LOD0) while the runtime
+    # would never load it.
     glb_count = 0
+    skipped_sources = 0
     proj_assets = ctx.project_dir / "assets"
     if proj_assets.exists():
         for glb in proj_assets.rglob("*.glb"):
+            if _is_superseded_by_lods(glb):
+                skipped_sources += 1
+                continue
             rel = glb.relative_to(proj_assets)
             dest = assets_dir / "assets" / rel
             dest.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(glb, dest)
             glb_count += 1
     notes.append(f"packaged {glb_count} GLB(s)")
+    if skipped_sources:
+        notes.append(
+            f"skipped {skipped_sources} un-decimated source GLB(s) superseded by LODs"
+        )
 
     notes.extend(_compile_shaders(ctx.settings.engine_dir, assets_dir))
     return notes

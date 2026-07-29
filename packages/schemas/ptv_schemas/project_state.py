@@ -21,6 +21,9 @@ class ProjectStage(str, Enum):
     reference_images = "reference_images"
     tripo_models = "tripo_models"
     asset_normalization = "asset_normalization"
+    # Decimates GLBs + generates LOD chains against the device triangle
+    # budget. Runs after world_generation, before scene_compile.
+    asset_optimization = "asset_optimization"
     code_generation = "code_generation"
     world_generation = "world_generation"
     scene_compile = "scene_compile"

@@ -56,9 +56,10 @@ flowchart TD
   SceneSpec --> Refs[images/*/ref_NN.png]
   Refs --> Tripo[assets/*/model.glb]
   Tripo --> Normalize[asset_normalization.json]
+  Normalize --> Optimize["asset_optimization: decimate + LOD chain"]
   MechanicPlan --> CppGen["engine/generated/<kind>/<project_id>/*.cpp"]
   SceneSpec --> SceneCompile[scene.json]
-  Normalize --> SceneCompile
+  Optimize --> SceneCompile
   SceneCompile --> CMake[builds/cmake-*/*.exe]
   CppGen --> CMake
   CMake --> Launch[exe launch via OpenXR]

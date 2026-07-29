@@ -200,6 +200,17 @@ public:
 
     bool is_running() const { return is_running_; }
 
+    /** Apply a fixed-foveated-rendering level (0 = off .. 4 = strongest).
+     *
+     *  Renders the periphery at lower resolution -- one of the cheapest large
+     *  GPU savings on Quest, and generally imperceptible. No-op when the
+     *  runtime does not expose the XR_FB_foveation extensions (e.g. PC VR).
+     *  Cheap to call every frame: it early-outs unless the level changed, so
+     *  the adaptive governor can drive it directly. */
+    void set_foveation_level(int level);
+    bool foveation_supported() const { return foveation_supported_; }
+    int foveation_level() const { return foveation_level_applied_; }
+
     XrInstance instance() const { return xr_instance_; }
     XrSystemId system() const { return xr_system_; }
     ::XrSession xr_session() const { return xr_session_; }
@@ -248,6 +259,10 @@ private:
     XrViewConfigurationType view_config_{XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO};
     std::array<XrViewConfigurationView, 2> view_config_views_{};
     bool is_running_{false};
+    // Fixed foveated rendering (XR_FB_foveation family). Decided at instance
+    // creation from the runtime's advertised extensions.
+    bool foveation_supported_{false};
+    int foveation_level_applied_{-1};  // -1 = never applied
     uint32_t runtime_min_vk_api_{0};
     uint32_t runtime_max_vk_api_{0};
     // Updated inside ``begin_frame`` / ``begin_xr_frame`` / ``render_frame``;

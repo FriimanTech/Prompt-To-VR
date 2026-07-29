@@ -181,14 +181,14 @@ bool XrRuntime::create_instance(const std::string& app_name) {
     xrEnumerateInstanceExtensionProperties(nullptr, ext_count, &ext_count,
                                            avail.data());
     PTV_INFO("XR: runtime exposes {} instance extensions", ext_count);
-    bool has_vulkan_enable2 = false;
-    for (const auto& e : avail) {
-        if (std::strcmp(e.extensionName, XR_KHR_VULKAN_ENABLE2_EXTENSION_NAME) == 0) {
-            has_vulkan_enable2 = true;
-            break;
+    auto has_extension = [&avail](const char* name) {
+        for (const auto& e : avail) {
+            if (std::strcmp(e.extensionName, name) == 0) return true;
         }
-    }
-    if (!has_vulkan_enable2) {
+        return false;
+    };
+
+    if (!has_extension(XR_KHR_VULKAN_ENABLE2_EXTENSION_NAME)) {
         PTV_ERROR("XR: runtime does not expose {} (required).",
                   XR_KHR_VULKAN_ENABLE2_EXTENSION_NAME);
         return false;
@@ -201,6 +201,22 @@ bool XrRuntime::create_instance(const std::string& app_name) {
     // Required so xrCreateInstance receives the Android VM + activity context.
     exts.push_back(XR_KHR_ANDROID_CREATE_INSTANCE_EXTENSION_NAME);
 #endif
+
+    // Fixed foveated rendering: render the periphery at lower resolution.
+    // This is one of the cheapest large GPU wins on a Quest (the player does
+    // not perceive the edge blur), so we opt in whenever the runtime offers
+    // the full trio. All three are OPTIONAL -- PC VR runtimes generally do not
+    // expose them and the engine simply runs without foveation.
+    foveation_supported_ =
+        has_extension(XR_FB_SWAPCHAIN_UPDATE_STATE_EXTENSION_NAME) &&
+        has_extension(XR_FB_FOVEATION_EXTENSION_NAME) &&
+        has_extension(XR_FB_FOVEATION_CONFIGURATION_EXTENSION_NAME);
+    if (foveation_supported_) {
+        exts.push_back(XR_FB_SWAPCHAIN_UPDATE_STATE_EXTENSION_NAME);
+        exts.push_back(XR_FB_FOVEATION_EXTENSION_NAME);
+        exts.push_back(XR_FB_FOVEATION_CONFIGURATION_EXTENSION_NAME);
+        PTV_INFO("XR: fixed foveated rendering extensions available");
+    }
     XrInstanceCreateInfo ici{XR_TYPE_INSTANCE_CREATE_INFO};
 #if defined(XR_USE_PLATFORM_ANDROID)
     XrInstanceCreateInfoAndroidKHR android_ci{
@@ -423,6 +439,14 @@ bool XrRuntime::create_swapchains() {
         sci.faceCount = 1;
         sci.arraySize = 1;
         sci.mipCount = 1;
+        // Opt this swapchain in to foveation. Must be chained at CREATE time;
+        // the level itself is set later (and can change per frame) through
+        // xrUpdateSwapchainFB.
+        XrSwapchainCreateInfoFoveationFB foveation_ci{
+            XR_TYPE_SWAPCHAIN_CREATE_INFO_FOVEATION_FB};
+        if (foveation_supported_) {
+            sci.next = &foveation_ci;
+        }
         if (!xr_ok(xrCreateSwapchain(xr_session_, &sci, &color_swapchains_[eye]),
                    "xrCreateSwapchain")) return false;
 
@@ -436,6 +460,74 @@ bool XrRuntime::create_swapchains() {
               "xrEnumerateSwapchainImages#2");
     }
     return true;
+}
+
+void XrRuntime::set_foveation_level(int level) {
+    if (!foveation_supported_ || xr_session_ == XR_NULL_HANDLE) return;
+    level = std::max(0, std::min(level, 4));
+    if (level == foveation_level_applied_) return;
+
+    // Resolve the entry points once. These are extension functions, so they
+    // are not in the loader's static export table.
+    static PFN_xrCreateFoveationProfileFB create_profile = nullptr;
+    static PFN_xrDestroyFoveationProfileFB destroy_profile = nullptr;
+    static PFN_xrUpdateSwapchainFB update_swapchain = nullptr;
+    if (create_profile == nullptr) {
+        xrGetInstanceProcAddr(xr_instance_, "xrCreateFoveationProfileFB",
+                              reinterpret_cast<PFN_xrVoidFunction*>(&create_profile));
+        xrGetInstanceProcAddr(xr_instance_, "xrDestroyFoveationProfileFB",
+                              reinterpret_cast<PFN_xrVoidFunction*>(&destroy_profile));
+        xrGetInstanceProcAddr(xr_instance_, "xrUpdateSwapchainFB",
+                              reinterpret_cast<PFN_xrVoidFunction*>(&update_swapchain));
+    }
+    if (!create_profile || !update_swapchain) {
+        foveation_supported_ = false;
+        return;
+    }
+
+    // Map our 0..4 scale onto the runtime's four levels. Meta's guidance is to
+    // raise this for pixel-heavy scenes and drop it for menus/simple content,
+    // which is exactly what the adaptive governor does with it.
+    XrFoveationLevelFB xr_level = XR_FOVEATION_LEVEL_NONE_FB;
+    switch (level) {
+        case 1: xr_level = XR_FOVEATION_LEVEL_LOW_FB; break;
+        case 2: xr_level = XR_FOVEATION_LEVEL_MEDIUM_FB; break;
+        case 3:
+        case 4: xr_level = XR_FOVEATION_LEVEL_HIGH_FB; break;
+        default: xr_level = XR_FOVEATION_LEVEL_NONE_FB; break;
+    }
+
+    XrFoveationLevelProfileCreateInfoFB level_profile{
+        XR_TYPE_FOVEATION_LEVEL_PROFILE_CREATE_INFO_FB};
+    level_profile.level = xr_level;
+    level_profile.verticalOffset = 0.0f;
+    // Dynamic lets the runtime ease the level with GPU load; at level 4 we ask
+    // for the strongest static setting instead.
+    level_profile.dynamic = (level >= 4) ? XR_FOVEATION_DYNAMIC_DISABLED_FB
+                                         : XR_FOVEATION_DYNAMIC_LEVEL_ENABLED_FB;
+
+    XrFoveationProfileCreateInfoFB profile_ci{
+        XR_TYPE_FOVEATION_PROFILE_CREATE_INFO_FB};
+    profile_ci.next = &level_profile;
+
+    XrFoveationProfileFB profile = XR_NULL_HANDLE;
+    if (create_profile(xr_session_, &profile_ci, &profile) != XR_SUCCESS) {
+        PTV_WARN("XR: xrCreateFoveationProfileFB failed; disabling foveation");
+        foveation_supported_ = false;
+        return;
+    }
+
+    XrSwapchainStateFoveationFB state{XR_TYPE_SWAPCHAIN_STATE_FOVEATION_FB};
+    state.profile = profile;
+    for (auto sc : color_swapchains_) {
+        if (sc == XR_NULL_HANDLE) continue;
+        update_swapchain(
+            sc, reinterpret_cast<XrSwapchainStateBaseHeaderFB*>(&state));
+    }
+    if (destroy_profile) destroy_profile(profile);
+
+    foveation_level_applied_ = level;
+    PTV_INFO("XR: foveation level -> {}", level);
 }
 
 bool XrRuntime::poll_events() {

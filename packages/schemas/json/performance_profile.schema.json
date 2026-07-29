@@ -1,0 +1,177 @@
+{
+  "$defs": {
+    "GovernorBounds": {
+      "additionalProperties": false,
+      "description": "Limits the runtime adaptive quality governor may move within.\n\nThe governor escalates in this order when frame time exceeds budget:\nraise ``lod_bias`` -> shrink cull distance -> raise foveation level. It\nrelaxes them again (in reverse) once there is headroom. These bounds keep\nit from destroying image quality on a scene that simply cannot hit target.",
+      "properties": {
+        "enabled": {
+          "default": true,
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "escalate_after_bad_frames": {
+          "default": 30,
+          "maximum": 600,
+          "minimum": 1,
+          "title": "Escalate After Bad Frames",
+          "type": "integer"
+        },
+        "max_foveation_level": {
+          "default": 3,
+          "description": "0=off, 1=low, 2=medium, 3=high, 4=top (Meta FFR levels).",
+          "maximum": 4,
+          "minimum": 0,
+          "title": "Max Foveation Level",
+          "type": "integer"
+        },
+        "max_lod_bias": {
+          "default": 2.0,
+          "description": "Upper bound on the global LOD bias the governor may add.",
+          "maximum": 8.0,
+          "minimum": 0.0,
+          "title": "Max Lod Bias",
+          "type": "number"
+        },
+        "min_cull_distance_m": {
+          "default": 25.0,
+          "description": "Governor will never pull the cull distance below this.",
+          "exclusiveMinimum": 0.0,
+          "title": "Min Cull Distance M",
+          "type": "number"
+        },
+        "relax_after_good_frames": {
+          "default": 180,
+          "maximum": 3000,
+          "minimum": 1,
+          "title": "Relax After Good Frames",
+          "type": "integer"
+        }
+      },
+      "title": "GovernorBounds",
+      "type": "object"
+    },
+    "PerformanceTier": {
+      "description": "How heavy the generated content is, relative to the device.\n\nDerived deterministically from the target device plus the amount of GLB\ncontent in the project (see :func:`derive_profile`). The tier only changes\nDEFAULTS -- it never forbids content.",
+      "enum": [
+        "compact",
+        "standard",
+        "large",
+        "massive"
+      ],
+      "title": "PerformanceTier",
+      "type": "string"
+    },
+    "TargetDevice": {
+      "description": "Which VR target the generated game is built and launched for.\n\n* ``pcvr`` \u2014 Windows native ``.exe`` (Vulkan + Win32 OpenXR), run on the\n  PC and viewed on the headset over Quest Link. The historical default.\n* ``quest`` \u2014 a standalone Android APK (Vulkan + Android OpenXR loader,\n  NativeActivity) installed and run locally on the Quest headset.\n\nStages 1-9 (BuildSpec .. scene compile, incl. codegen + worldgen) are\nidentical for both; only the build + launch stages branch on this value.",
+      "enum": [
+        "pcvr",
+        "quest"
+      ],
+      "title": "TargetDevice",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "description": "Resolved per-project rendering budget, emitted into ``scene.json``.\n\nConsumed by the C++ runtime (``ScenePerformance`` in ``ptv/scene/Scene.h``)\nto configure MSAA, foveation, culling, LOD switching and the governor.",
+  "properties": {
+    "cull_distance_m": {
+      "description": "Entities beyond this distance are skipped. Deliberately set effectively infinite for small scenes so a compact game still renders its whole environment.",
+      "exclusiveMinimum": 0.0,
+      "title": "Cull Distance M",
+      "type": "number"
+    },
+    "draw_call_budget": {
+      "exclusiveMinimum": 0,
+      "title": "Draw Call Budget",
+      "type": "integer"
+    },
+    "evict_when_over_budget": {
+      "default": false,
+      "description": "Enable LRU mesh eviction once resident budget is hit.",
+      "title": "Evict When Over Budget",
+      "type": "boolean"
+    },
+    "foveation_level": {
+      "default": 0,
+      "description": "Initial fixed-foveated-rendering level (0=off .. 4=top).",
+      "maximum": 4,
+      "minimum": 0,
+      "title": "Foveation Level",
+      "type": "integer"
+    },
+    "frame_triangle_budget": {
+      "description": "Triangles allowed to be VISIBLE in one frame.",
+      "exclusiveMinimum": 0,
+      "title": "Frame Triangle Budget",
+      "type": "integer"
+    },
+    "governor": {
+      "$ref": "#/$defs/GovernorBounds"
+    },
+    "lod_ratios": {
+      "description": "Triangle ratio of each LOD relative to the LOD0 budget.",
+      "items": {
+        "type": "number"
+      },
+      "title": "Lod Ratios",
+      "type": "array"
+    },
+    "lod_switch_distances_m": {
+      "description": "Distance (metres) at which LOD1, LOD2, LOD3 take over. Length is one less than the LOD chain length.",
+      "items": {
+        "type": "number"
+      },
+      "title": "Lod Switch Distances M",
+      "type": "array"
+    },
+    "max_triangles_per_asset": {
+      "default": 60000,
+      "exclusiveMinimum": 0,
+      "title": "Max Triangles Per Asset",
+      "type": "integer"
+    },
+    "min_triangles_per_asset": {
+      "default": 1500,
+      "exclusiveMinimum": 0,
+      "title": "Min Triangles Per Asset",
+      "type": "integer"
+    },
+    "msaa_samples": {
+      "default": 4,
+      "maximum": 8,
+      "minimum": 1,
+      "title": "Msaa Samples",
+      "type": "integer"
+    },
+    "resident_triangle_budget": {
+      "description": "Triangles allowed to be LOADED (GPU-resident) at once.",
+      "exclusiveMinimum": 0,
+      "title": "Resident Triangle Budget",
+      "type": "integer"
+    },
+    "target_device": {
+      "$ref": "#/$defs/TargetDevice"
+    },
+    "target_fps": {
+      "default": 72,
+      "maximum": 120,
+      "minimum": 60,
+      "title": "Target Fps",
+      "type": "integer"
+    },
+    "tier": {
+      "$ref": "#/$defs/PerformanceTier"
+    }
+  },
+  "required": [
+    "tier",
+    "target_device",
+    "frame_triangle_budget",
+    "resident_triangle_budget",
+    "draw_call_budget",
+    "cull_distance_m",
+    "lod_switch_distances_m"
+  ],
+  "title": "PerformanceProfile",
+  "type": "object"
+}

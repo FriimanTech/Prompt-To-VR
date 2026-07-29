@@ -32,6 +32,9 @@ find_package(spdlog CONFIG REQUIRED)
 find_package(nlohmann_json CONFIG REQUIRED)
 find_package(imgui CONFIG REQUIRED)
 find_package(TinyGLTF CONFIG QUIET)
+# Offline mesh simplification for the asset_optimization pipeline stage
+# (engine/tools/glb_optimize.cpp). Host-only: not linked into the runtime.
+find_package(meshoptimizer CONFIG REQUIRED)
 
 # Some vcpkg portfile versions expose tinygltf as an INTERFACE target or via
 # a different package name; handle both cases gracefully.

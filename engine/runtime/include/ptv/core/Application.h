@@ -6,6 +6,7 @@
 #include <string>
 #include <vector>
 
+#include "ptv/core/QualityGovernor.h"
 #include "ptv/ecs/World.h"
 #include "ptv/math/Math.h"
 #include "ptv/mechanics/MechanicRegistry.h"
@@ -209,6 +210,18 @@ private:
     float teleport_floor_y_{0.0f};
     float snap_turn_degrees_{45.0f};
     float snap_turn_cooldown_s_{0.30f};
+
+    // Adaptive quality: trades LOD / cull distance / foveation for frame rate
+    // when the measured frame time misses the headset's target.
+    QualityGovernor governor_{};
+    // Telemetry accumulators; flushed to the log about once a second so
+    // ``adb logcat -s ptv`` shows real on-device performance.
+    float telemetry_accum_s_{0.0f};
+    // Sum of per-frame WORK time (excludes the xrWaitFrame block, which the
+    // runtime controls) -- this is what the governor reacts to.
+    float telemetry_work_accum_s_{0.0f};
+    int telemetry_frames_{0};
+    float telemetry_worst_frame_ms_{0.0f};
 };
 
 }  // namespace ptv

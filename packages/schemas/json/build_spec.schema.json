@@ -166,6 +166,15 @@
       "title": "SceneEntry",
       "type": "object"
     },
+    "TargetDevice": {
+      "description": "Which VR target the generated game is built and launched for.\n\n* ``pcvr`` \u2014 Windows native ``.exe`` (Vulkan + Win32 OpenXR), run on the\n  PC and viewed on the headset over Quest Link. The historical default.\n* ``quest`` \u2014 a standalone Android APK (Vulkan + Android OpenXR loader,\n  NativeActivity) installed and run locally on the Quest headset.\n\nStages 1-9 (BuildSpec .. scene compile, incl. codegen + worldgen) are\nidentical for both; only the build + launch stages branch on this value.",
+      "enum": [
+        "pcvr",
+        "quest"
+      ],
+      "title": "TargetDevice",
+      "type": "string"
+    },
     "TestEntry": {
       "additionalProperties": false,
       "properties": {
@@ -293,6 +302,10 @@
       "minItems": 1,
       "title": "Scenes",
       "type": "array"
+    },
+    "target_device": {
+      "$ref": "#/$defs/TargetDevice",
+      "default": "pcvr"
     },
     "title": {
       "maxLength": 128,

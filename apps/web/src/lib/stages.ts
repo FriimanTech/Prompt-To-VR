@@ -9,6 +9,7 @@ export const STAGE_ORDER = [
   "asset_normalization",
   "code_generation",
   "world_generation",
+  "asset_optimization",
   "scene_compile",
   "cmake_configure",
   "cmake_build",
@@ -27,19 +28,20 @@ export const STAGE_LABELS: Record<string, string> = {
   asset_normalization: "7. Asset normalization",
   code_generation: "8. C++ gameplay codegen",
   world_generation: "9. VR world generation",
-  scene_compile: "10. Scene compile",
-  cmake_configure: "11. CMake configure",
-  cmake_build: "11. CMake configure + build",
-  quest_build: "11. Quest APK build",
-  quest_install: "12. Install on Quest",
-  engine_promotion: "12. Engine promotion",
+  asset_optimization: "10. Asset decimation + LODs",
+  scene_compile: "11. Scene compile",
+  cmake_configure: "12. CMake configure",
+  cmake_build: "12. CMake configure + build",
+  quest_build: "12. Quest APK build",
+  quest_install: "13. Install on Quest",
+  engine_promotion: "13. Engine promotion",
   ready_to_launch: "Ready to launch",
   failed: "Failed",
 };
 
 // The stages the pipeline can actually run, in order. Mirrors the backend
 // ``_stages_for(target_device)`` in apps/orchestrator/.../pipeline/orchestrator.py.
-// Stages 1-9 are shared; the build tail differs by device (cmake_build for
+// Stages 1-11 are shared; the build tail differs by device (cmake_build for
 // PC VR, quest_build for Quest). ``engine_promotion`` is the final stage.
 const SHARED_STAGES = [
   "build_spec",
@@ -51,6 +53,7 @@ const SHARED_STAGES = [
   "asset_normalization",
   "code_generation",
   "world_generation",
+  "asset_optimization",
   "scene_compile",
 ] as const;
 

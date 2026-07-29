@@ -32,6 +32,7 @@ A concrete example prompt lives in the `NewProjectPage` sample text.
 | `MechanicPlan` | `mechanic_plan.json` | Claude Opus |
 | `SceneSpec` | `scene_spec.<scene_id>.json`, `scene_spec.json` | Claude Opus (per scene) |
 | `CodeTask` (embedded in MechanicPlan) | emitted as `*.codetask.json` next to generated `*.cpp` | Claude Opus |
+| `PerformanceProfile` | `performance` block in `scene.json` (+ `__performance__` in `asset_normalization.json`) | Orchestrator (`asset_optimization`, deterministic) |
 | `ProjectState` | `project_state.json` | Orchestrator (bookkeeping) |
 | `ArtifactMetadata` | returned from `/api/projects/<id>/artifacts` | Orchestrator |
 | `AcceptanceTestPlan` | `acceptance_test_plan.json` | (optional) Claude Sonnet |
@@ -63,6 +64,23 @@ current limits per artifact are:
 ranks / chooses between multiple candidate reference images, so
 generating more than one just burns API credits. Lift the cap when a
 real selection step exists.
+
+## Performance hints on `AssetItem` (optional)
+
+The `asset_optimization` stage derives a triangle budget for every asset, so
+neither field below is required. Set them only to override the automatic
+choice:
+
+- `importance` -- `hero` / `standard` / `background`. Controls the share of the
+  triangle budget an asset receives. Derived when omitted: characters and
+  anything grabbable / mechanic-bound become `hero`; `fx`/`ui` and very large
+  scenery become `background`.
+- `max_triangles` -- hard per-asset cap after decimation. Wins over the
+  computed budget AND over the quality floor.
+
+Note that asset COUNT is never the limiting factor: a bigger project simply
+gets a smaller per-asset budget plus more aggressive runtime culling and LOD.
+See `docs/rendering.md` for the tier table.
 
 ## Built-in mechanic ids (reuse these)
 

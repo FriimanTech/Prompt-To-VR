@@ -95,6 +95,7 @@ def _default_entity_for_asset(
     asset: AssetItem,
     glb_path: str,
     spread_index: int,
+    norm: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build a category-appropriate default entity for an unreferenced asset."""
 
@@ -103,6 +104,7 @@ def _default_entity_for_asset(
         "glb_path": glb_path,
         "target_scale_meters": asset.target_scale_meters,
         "collision_shape": asset.collision_shape,
+        **_mesh_render_fields(norm or {}, asset.target_scale_meters),
     }
     transform_identity = {
         "position": [0.0, 0.0, 0.0],
@@ -256,6 +258,34 @@ def _default_entity_for_asset(
     }
 
 
+def _mesh_render_fields(
+    norm: dict[str, Any],
+    target_scale_meters: float,
+) -> dict[str, Any]:
+    """Per-mesh rendering metadata produced by ``asset_optimization``.
+
+    ``lod_paths`` is the decimated LOD chain (coarser as the index grows) and
+    ``bounds_radius_m`` is the world-space bounding-sphere radius the renderer
+    uses for frustum + distance culling. Both are omitted when the asset has
+    not been optimized, in which case the runtime falls back to drawing
+    ``glb_path`` at full detail with a conservative radius.
+    """
+
+    out: dict[str, Any] = {}
+    lod_paths = norm.get("lod_paths")
+    if lod_paths:
+        out["lod_paths"] = list(lod_paths)
+    if norm.get("triangle_counts"):
+        out["lod_triangle_counts"] = list(norm["triangle_counts"])
+    unit_radius = norm.get("bounds_radius_m")
+    if unit_radius:
+        # The optimizer reports the radius of a mesh normalised to a 1 m
+        # longest axis; the runtime rescales by target_scale_meters, so the
+        # world-space radius scales identically.
+        out["bounds_radius_m"] = float(unit_radius) * float(target_scale_meters)
+    return out
+
+
 def _resolve_glb_path(
     asset_id: str,
     manifest_path_hint: str | None,
@@ -301,15 +331,15 @@ def compile_scene_json(
         if e.mesh is not None:
             asset = asset_by_id.get(e.mesh.asset_id)
             norm = nrep.get(e.mesh.asset_id, {})
+            scale_m = asset.target_scale_meters if asset is not None else 1.0
             mesh = {
                 "asset_id": e.mesh.asset_id,
                 "glb_path": norm.get("glb_path") or e.mesh.glb_path,
-                "target_scale_meters": (
-                    asset.target_scale_meters if asset is not None else 1.0
-                ),
+                "target_scale_meters": scale_m,
                 "collision_shape": (
                     asset.collision_shape if asset is not None else "aabb"
                 ),
+                **_mesh_render_fields(norm, scale_m),
             }
             referenced_asset_ids.add(e.mesh.asset_id)
         bindings: list[dict[str, Any]] = []
@@ -388,7 +418,9 @@ def compile_scene_json(
             # engine's GLB loader would reject.
             continue
         entities_out.append(
-            _default_entity_for_asset(asset, glb_path, auto_index)
+            _default_entity_for_asset(
+                asset, glb_path, auto_index, nrep.get(asset.id, {})
+            )
         )
         auto_index += 1
 
@@ -442,14 +474,57 @@ def compile_scene_json(
             for l in scene.lights
         ],
         "entities": entities_out,
+        # Device budget + runtime quality policy resolved by the
+        # asset_optimization stage. The engine reads this to configure MSAA,
+        # foveation, culling, LOD switching and the adaptive governor. Absent
+        # for projects compiled before that stage existed, in which case the
+        # runtime falls back to safe built-in defaults.
+        **({"performance": nrep["__performance__"]} if "__performance__" in nrep else {}),
     }
 
 
-def _merge_world_into_scene(doc: dict, world_doc: dict) -> dict:
+def _repoint_world_meshes_to_lods(
+    entities: list[dict], nrep: dict[str, dict[str, Any]]
+) -> list[dict]:
+    """Point world-generated mesh entities at the optimized LOD chain.
+
+    ``world_generation`` runs BEFORE ``asset_optimization``, so any prop the
+    world builder placed still references the raw Tripo GLB. Those entities are
+    merged into the scene verbatim, bypassing ``compile_scene_json``'s mesh
+    mapping -- without this remap a single world-placed prop would drag a
+    500k-triangle mesh onto the headset.
+    """
+
+    out: list[dict] = []
+    for entity in entities:
+        mesh = entity.get("mesh")
+        if not isinstance(mesh, dict) or not mesh.get("asset_id"):
+            out.append(entity)
+            continue
+        norm = nrep.get(mesh["asset_id"]) or {}
+        if not norm.get("lod_paths"):
+            out.append(entity)
+            continue
+        scale_m = float(mesh.get("target_scale_meters") or 1.0)
+        merged = dict(entity)
+        merged["mesh"] = {
+            **mesh,
+            "glb_path": norm["glb_path"],
+            **_mesh_render_fields(norm, scale_m),
+        }
+        out.append(merged)
+    return out
+
+
+def _merge_world_into_scene(
+    doc: dict, world_doc: dict, nrep: dict[str, dict[str, Any]] | None = None
+) -> dict:
     """Merge the C++-generated environment (world.scene.json) into a compiled
     gameplay scene doc: environment entities + sky + lights + spawn come from
     the world; gameplay entities render on top of it."""
-    world_entities = world_doc.get("entities") or []
+    world_entities = _repoint_world_meshes_to_lods(
+        list(world_doc.get("entities") or []), nrep or {}
+    )
     doc["entities"] = list(world_entities) + list(doc.get("entities") or [])
     if "sky" in world_doc:
         doc["sky"] = world_doc["sky"]
@@ -516,7 +591,7 @@ def run(ctx: PipelineContext) -> StageResult:
         )
         doc = compile_scene_json(build_spec, manifest, plan, scene_spec, normalization)
         if world_doc is not None and scene_entry.id == entry_id:
-            doc = _merge_world_into_scene(doc, world_doc)
+            doc = _merge_world_into_scene(doc, world_doc, normalization)
         out = builds_dir / f"{scene_entry.id}.scene.json"
         out.write_text(json.dumps(doc, indent=2, sort_keys=True), encoding="utf-8")
         artifacts.append(str(out.relative_to(ctx.settings.repo_root)).replace("\\", "/"))

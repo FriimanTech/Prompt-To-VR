@@ -37,10 +37,12 @@ prompt
   → SceneSpec (Claude Opus, per scene)
   → reference images (Imagen / Gemini)
   → Tripo image-to-3D (textured + PBR)   # objects/props/characters
-  → asset normalization (deterministic, local)
+  → asset normalization (deterministic GLB validation, local)
   → generated C++ gameplay modules (Claude)
   → world generation (single ChatGPT world-architect agent → C++ VR
     environment, compiled + run offline → world.scene.json)
+  → asset optimization (deterministic: decimate GLBs + build LOD chains
+    against the device triangle budget — see docs/rendering.md)
   → scene compile (merge world + gameplay → deterministic JSON)
   → CMake configure + build (Visual Studio 18 2026)
   → launch native .exe via OpenXR

@@ -608,6 +608,12 @@ int Application::run(const Config& cfg) {
         // values will simply be stale identity until the runtime is
         // ready.
         const bool xr_should_render = xr_.begin_xr_frame();
+        // Start the work clock AFTER xrWaitFrame has unblocked. The adaptive
+        // governor must react to how long OUR frame takes, not to the interval
+        // between frames: the runtime owns the pacing and legitimately slows
+        // it down (headset idle/doffed, power saving), which would otherwise
+        // look identical to us missing the frame budget.
+        const auto frame_work_start = clock::now();
 
         XrRuntime::InputState input;
         xr_.sync_input(input);
@@ -1337,7 +1343,31 @@ int Application::run(const Config& cfg) {
         // end-frame to balance the wait/begin pair.
         // ------------------------------------------------------------
         if (xr_should_render && renderer_ready_ && xr_.is_running()) {
-            renderer_.build_items_from_world(world_, items);
+            // Upload a bounded slice of finished background mesh loads before
+            // building the draw list. Everything expensive (asset read + glTF
+            // parse) already happened off-thread; this only does a couple of
+            // GPU uploads so the Android event pump keeps running.
+            renderer_.pump_streaming();
+
+            // One conservative frustum covering BOTH eyes, built from the HMD
+            // centre pose with a deliberately padded FOV (Quest 3 is ~110 deg
+            // horizontal; 140 deg here comfortably contains both eye frusta
+            // plus the IPD offset). Culling once is cheaper than twice and,
+            // being conservative, can only ever draw a few extra objects at
+            // the very edge -- never wrongly remove one the player can see.
+            Renderer::ViewInfo view_info{};
+            if (input.head_valid) {
+                constexpr float kCullFovRadians = 2.443f;  // 140 degrees
+                const Mat4 world_from_head =
+                    glm::translate(Mat4(1.0f), head_world_pos) *
+                    glm::mat4_cast(head_world_rot);
+                const Mat4 cull_proj = glm::perspective(
+                    kCullFovRadians, 1.0f, 0.05f, 2000.0f);
+                view_info.camera_pos = head_world_pos;
+                view_info.view_proj = cull_proj * glm::inverse(world_from_head);
+                view_info.valid = true;
+            }
+            renderer_.build_items_from_world(world_, items, view_info);
 
             // Hand visuals: procedural palm + wrist + thumb in blue (left)
             // and red (right). The grab highlights light up brighter when
@@ -1477,6 +1507,58 @@ int Application::run(const Config& cfg) {
         DebugUI::draw(world_, fi);
         DebugUI::render_to_mirror_window();
 #endif
+
+        // ------------------------------------------------------------
+        // Adaptive quality + telemetry.
+        //
+        // Gated on xr_should_render, NOT merely on the session running: when
+        // the headset is off the user's head the runtime tells us to skip
+        // rendering, and the loop free-runs at ~30 ms. Feeding that to the
+        // governor would look like a catastrophic frame-rate miss and drive
+        // quality to the floor, so the player would don the headset to a
+        // maximally degraded scene that then takes ~45 s to recover.
+        // ------------------------------------------------------------
+        if (xr_should_render && renderer_ready_ && xr_.is_running()) {
+            // Our CPU+GPU cost for this frame (draw_frame waits on its fence,
+            // so GPU time is included). This is the governor's input.
+            const float work_s =
+                std::chrono::duration<float>(clock::now() - frame_work_start)
+                    .count();
+
+            if (governor_.update(work_s)) {
+                const auto& q = governor_.state();
+                renderer_.set_lod_bias(q.lod_bias);
+                renderer_.set_cull_distance(q.cull_distance_m);
+                xr_.set_foveation_level(q.foveation_level);
+            }
+
+            telemetry_accum_s_ += dt;
+            telemetry_work_accum_s_ += work_s;
+            ++telemetry_frames_;
+            telemetry_worst_frame_ms_ =
+                std::max(telemetry_worst_frame_ms_, work_s * 1000.0f);
+            if (telemetry_accum_s_ >= 1.0f && telemetry_frames_ > 0) {
+                const auto& st = renderer_.frame_stats();
+                const float frames = static_cast<float>(telemetry_frames_);
+                PTV_INFO(
+                    "perf: {:.1f} fps | work {:.1f} ms avg, {:.1f} ms worst | "
+                    "draw {} of {} (cull frustum {} dist {}) | tris {} | "
+                    "meshes {} resident ({} tris), {} streaming | "
+                    "lod_bias {:.1f} cull {:.0f}m ffr {}",
+                    frames / telemetry_accum_s_,
+                    (telemetry_work_accum_s_ * 1000.0f) / frames,
+                    telemetry_worst_frame_ms_, st.drawn,
+                    st.entities_considered, st.culled_frustum,
+                    st.culled_distance, st.visible_triangles,
+                    st.resident_meshes, st.resident_triangles,
+                    st.streaming_pending, renderer_.lod_bias(),
+                    renderer_.cull_distance(), xr_.foveation_level());
+                telemetry_accum_s_ = 0.0f;
+                telemetry_work_accum_s_ = 0.0f;
+                telemetry_frames_ = 0;
+                telemetry_worst_frame_ms_ = 0.0f;
+            }
+        }
 
         tick(dt);
     }
@@ -1623,9 +1705,17 @@ bool Application::initialize(const Config& cfg) {
     // without a renderer backend that sets RendererHasTextures.
 
     if (xr_.is_running() || xr_.xr_session() != XR_NULL_HANDLE) {
+        // Install the scene's device budget BEFORE initialize so the renderer
+        // can pick MSAA from it instead of always taking the maximum the GPU
+        // advertises (4x MSAA is a large, and often unnecessary, mobile cost).
+        renderer_.set_performance(scene_.performance);
+        governor_.configure(scene_.performance);
         renderer_ready_ = renderer_.initialize(vk_, xr_.color_format(),
                                                xr_.eye_width(),
                                                xr_.eye_height());
+        // Baseline foveation for this scene's tier. No-op on runtimes without
+        // the XR_FB_foveation extensions (e.g. PC VR over Quest Link).
+        xr_.set_foveation_level(scene_.performance.foveation_level);
         if (!renderer_ready_) {
             PTV_WARN("Renderer init failed; headset will not display content.");
         }

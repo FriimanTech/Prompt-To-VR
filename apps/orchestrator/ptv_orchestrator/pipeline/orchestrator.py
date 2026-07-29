@@ -13,6 +13,7 @@ from ..storage import ProjectStore
 from . import (
     stage_asset_manifest,
     stage_asset_normalize,
+    stage_asset_optimize,
     stage_build_spec,
     stage_cmake,
     stage_code_generation,
@@ -61,6 +62,10 @@ _SHARED_STAGES: list[tuple[ProjectStage, StageFn]] = [
     (ProjectStage.asset_normalization, stage_asset_normalize.run),
     (ProjectStage.code_generation, stage_code_generation.run),
     (ProjectStage.world_generation, stage_world_generation.run),
+    # Runs here (not next to asset_normalization) so the engine build tree
+    # already exists from the codegen compile-verify step -- ptv_glb_optimize
+    # is then a cheap incremental target rather than a cold engine build.
+    (ProjectStage.asset_optimization, stage_asset_optimize.run),
     (ProjectStage.scene_compile, stage_scene_compile.run),
 ]
 

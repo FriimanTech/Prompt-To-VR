@@ -101,6 +101,55 @@ SceneDoc LoadSceneJson(const std::string& path) {
         d.sky_color = d.sky.horizon;
     }
 
+    // Device budget + quality policy (emitted by asset_optimization). Every
+    // field falls back to the ScenePerformance defaults, so a scene compiled
+    // before this stage existed still loads and simply runs with the
+    // conservative built-in budget.
+    if (j.contains("performance") && j["performance"].is_object()) {
+        const auto& pf = j["performance"];
+        auto& sp = d.performance;
+        sp.tier = pf.value("tier", sp.tier);
+        sp.target_fps = pf.value("target_fps", sp.target_fps);
+        sp.frame_triangle_budget =
+            pf.value("frame_triangle_budget", sp.frame_triangle_budget);
+        sp.resident_triangle_budget =
+            pf.value("resident_triangle_budget", sp.resident_triangle_budget);
+        sp.draw_call_budget = pf.value("draw_call_budget", sp.draw_call_budget);
+        sp.msaa_samples = pf.value("msaa_samples", sp.msaa_samples);
+        sp.foveation_level = pf.value("foveation_level", sp.foveation_level);
+        sp.cull_distance_m = pf.value("cull_distance_m", sp.cull_distance_m);
+        sp.evict_when_over_budget =
+            pf.value("evict_when_over_budget", sp.evict_when_over_budget);
+        if (pf.contains("lod_switch_distances_m") &&
+            pf["lod_switch_distances_m"].is_array()) {
+            std::vector<float> dists;
+            for (const auto& v : pf["lod_switch_distances_m"]) {
+                if (v.is_number()) dists.push_back(v.get<float>());
+            }
+            if (!dists.empty()) sp.lod_switch_distances_m = std::move(dists);
+        }
+        if (pf.contains("governor") && pf["governor"].is_object()) {
+            const auto& g = pf["governor"];
+            sp.governor_enabled = g.value("enabled", sp.governor_enabled);
+            sp.governor_max_lod_bias =
+                g.value("max_lod_bias", sp.governor_max_lod_bias);
+            sp.governor_min_cull_distance_m =
+                g.value("min_cull_distance_m", sp.governor_min_cull_distance_m);
+            sp.governor_max_foveation_level =
+                g.value("max_foveation_level", sp.governor_max_foveation_level);
+            sp.governor_escalate_after_bad_frames = g.value(
+                "escalate_after_bad_frames", sp.governor_escalate_after_bad_frames);
+            sp.governor_relax_after_good_frames = g.value(
+                "relax_after_good_frames", sp.governor_relax_after_good_frames);
+        }
+        PTV_INFO(
+            "Scene performance: tier={} budget={} tris/frame msaa={}x ffr={} "
+            "cull={:.0f}m governor={}",
+            sp.tier, sp.frame_triangle_budget, sp.msaa_samples,
+            sp.foveation_level, sp.cull_distance_m,
+            sp.governor_enabled ? "on" : "off");
+    }
+
     for (const auto& l : j.value("lights", Json::array())) {
         LightSpec ls{};
         ls.id = l.value("id", "");
@@ -125,6 +174,20 @@ SceneDoc LoadSceneJson(const std::string& path) {
             m.glb_path = e["mesh"].value("glb_path", "");
             m.target_scale_meters = e["mesh"].value("target_scale_meters", 1.0f);
             m.collision_shape = e["mesh"].value("collision_shape", "aabb");
+            // Decimated LOD chain + culling radius from asset_optimization.
+            // Absent on scenes compiled before that stage: the renderer then
+            // just draws glb_path with a conservative radius.
+            for (const auto& lp : e["mesh"].value("lod_paths", Json::array())) {
+                if (lp.is_string()) m.lod_paths.push_back(lp.get<std::string>());
+            }
+            for (const auto& tc :
+                 e["mesh"].value("lod_triangle_counts", Json::array())) {
+                if (tc.is_number()) {
+                    m.lod_triangle_counts.push_back(
+                        tc.get<std::uint32_t>());
+                }
+            }
+            m.bounds_radius_m = e["mesh"].value("bounds_radius_m", 0.0f);
             es.mesh = std::move(m);
         }
         if (e.contains("primitive") && e["primitive"].is_object()) {
@@ -183,7 +246,8 @@ void ApplySceneToWorld(const SceneDoc& doc, World& world) {
         if (es.mesh.has_value()) {
             world.registry().emplace<CMesh>(
                 e, CMesh{es.mesh->asset_id, es.mesh->glb_path,
-                         es.mesh->target_scale_meters});
+                         es.mesh->target_scale_meters, es.mesh->lod_paths,
+                         es.mesh->bounds_radius_m});
         }
         if (es.primitive.has_value()) {
             world.registry().emplace<CPrimitive>(

@@ -109,7 +109,112 @@ what you see is what you can stand on.
 
 ## Performance budget
 
-Targeted at a **smooth 72–90 Hz over Quest Link on a normal/mid-range gaming
-PC**. The costs are MSAA 4x, one extra fullscreen sky pass, and a slightly
-heavier fragment shader; there is no shadow pass, no bloom, and no fullscreen
-post. If a device reports no 4x support the renderer steps down automatically.
+Targeted at a **smooth 72–90 Hz**, on Quest 3 standalone as well as over Quest
+Link. There is no shadow pass, no bloom, and no fullscreen post; the costs are
+MSAA, one extra fullscreen sky pass, and a slightly heavier fragment shader.
+
+Meta's published guidance for Quest 3 is **1.3M–1.8M triangles per frame** and
+**200–300 draw calls** for a busy simulation. Since the renderer is still
+two-pass stereo, draw calls are `2 x visible entities`, so the visible entity
+count is the practical ceiling.
+
+### Budget tiers (no content caps)
+
+The pipeline never limits how many assets a prompt may ask for. Instead the
+`asset_optimization` stage derives a tier from the target device and the amount
+of GLB content, and everything downstream is sized from it. A compact game
+keeps full detail and unlimited view distance; a massive one decimates harder
+and culls sooner. Policy lives in one place:
+`packages/schemas/ptv_schemas/performance.py`.
+
+- `compact` (<= 12 assets, <= 40 mesh entities): 60k tri/asset ceiling,
+  distance culling effectively OFF, MSAA 4x, foveation off.
+- `standard` (<= 24 assets, <= 100 entities): 35k ceiling, culling off,
+  MSAA 4x, foveation low.
+- `large` (<= 48 assets, <= 250 entities): 18k ceiling, culling on at 120 m,
+  MSAA 2x, foveation medium.
+- `massive` (> 250 mesh entities): 10k ceiling, culling at 80 m, foveation
+  high, LRU mesh eviction on.
+- `pcvr` multiplies the geometry budgets ~5x and disables the mobile
+  compromises.
+
+Per-asset budgets are weighted by importance (`hero` / `standard` /
+`background`, derived from category, scale and interactivity) with a hard
+floor so small props never become blobs, and are never raised above the source
+mesh — decimation only.
+
+## Level of detail
+
+Each optimized asset ships an LOD chain (`_lod0` .. `_lod3`, roughly 100% /
+40% / 15% / 5% of the LOD0 budget). The renderer selects a level from camera
+distance against the scene's `lod_switch_distances_m`, with:
+
+- **hysteresis** — at most one level change per frame and a 15% margin before
+  moving back up, so an object sitting on a switch boundary cannot flicker;
+- a global **`lod_bias`** the adaptive governor raises under load.
+
+## Culling
+
+Built each frame in `Renderer::build_items_from_world`:
+
+- **Frustum culling** against a single conservative frustum that covers both
+  eyes (HMD centre pose, FOV padded to 140°). Culling once is cheaper than per
+  eye and, being conservative, can only ever draw a few extra edge objects —
+  never wrongly remove a visible one.
+- **Distance culling** beyond `cull_distance_m`. Deliberately set effectively
+  infinite for `compact`/`standard`, so a small game still renders its whole
+  world. This is a budget, not a global rule.
+
+Both use a bounding sphere: the pipeline-computed `bounds_radius_m` when
+available, otherwise a conservative estimate.
+
+## Asset streaming
+
+GLBs are **never** loaded inside the draw loop. A worker thread does the
+expensive part (asset read + glTF parse + CPU vertex build) and the main thread
+performs at most a couple of GPU uploads per frame (~4 ms cap), mirroring
+Meta's own open-world sample which throttles to ~4 async operations per frame.
+
+This is what fixed the `isn't responding` ANR: previously the first frame
+loaded all 13 assets synchronously (~5.5 s), which starved the
+`native_app_glue` event pump and blocked the Android UI thread past its ~5 s
+watchdog. Meshes now pop in over a frame or two, and an entity draws a coarser
+already-resident LOD while its preferred one streams in.
+
+When a scene exceeds the resident triangle budget (only enabled in `massive`),
+least-recently-used meshes are evicted one per frame. This is safe because
+`draw_frame` waits on its fence before returning, so no command buffer is still
+referencing the freed buffers.
+
+## Fixed foveated rendering
+
+When the runtime exposes `XR_FB_foveation` + `XR_FB_foveation_configuration` +
+`XR_FB_swapchain_update_state` (Quest does; PC VR generally does not), the
+swapchains are created foveation-capable and the level is applied through
+`xrUpdateSwapchainFB`. The periphery renders at lower resolution — one of the
+cheapest large GPU savings on mobile. The level starts from the scene tier and
+can change per frame.
+
+## Adaptive quality governor
+
+Build-time budgets are only an estimate; `QualityGovernor` closes the loop on
+the real device. It watches measured frame time and, with hysteresis to avoid
+oscillation, walks an escalation ladder (cheapest perceptual cost first):
+
+1. raise `lod_bias`, 2. shrink the cull distance, 3. raise the foveation level
+
+...then relaxes back in reverse once there is headroom. Bounds come from the
+scene's tier, so the governor can never destroy image quality outright. This is
+what lets an arbitrarily large prompted game self-tune instead of the pipeline
+refusing content.
+
+## On-device telemetry
+
+About once a second the runtime logs FPS, average/worst frame ms, drawn vs
+considered entities, frustum/distance culled counts, visible triangles,
+resident meshes and triangles, pending streams, and the current
+`lod_bias`/cull distance/foveation level. Watch it with:
+
+```
+adb logcat -s ptv
+```

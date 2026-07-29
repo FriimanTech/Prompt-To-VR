@@ -193,6 +193,48 @@ April 2026 the Tripo stage hard-fails (status `failed`) if *any* reference
 images were produced upstream but *zero* GLBs came back, so this should no
 longer let an empty asset set slip through to normalization.
 
+## `asset_optimization` fails: "could not build ptv_glb_optimize"
+
+The stage shells out to the `ptv_glb_optimize` tool (meshoptimizer-based
+decimation) and builds it on demand if it is not already in `engine/build/`.
+A cold build needs vcpkg to install `meshoptimizer`. Build it once by hand:
+
+```powershell
+cmake --preset vs2026-x64
+cmake --build build/vs2026-x64 --config Release --target ptv_glb_optimize
+```
+
+## The game runs but distant objects look blocky / pop in
+
+Expected, and tunable. Assets are decimated into LOD chains against the device
+triangle budget, and the adaptive governor coarsens LODs further when frame
+time slips. Check `adb logcat -s ptv` for a `governor:` line — if it is
+escalating, the scene is over budget for the headset. Levers, in order:
+
+- lower the asset count or mark key assets `importance: hero` in the manifest,
+- raise `Settings`-level budgets in
+  `packages/schemas/ptv_schemas/performance.py` (the single policy location),
+- set an explicit `max_triangles` on a specific `AssetItem`.
+
+Objects popping in during the first second or two after load is the streaming
+loader working as designed — it is what keeps the app from tripping Android's
+ANR watchdog.
+
+## APK is much larger than expected
+
+`quest_build` ships only `*_lod*.glb` files once `asset_optimization` has run,
+and wipes its staging directory each run. If the APK still looks bloated,
+confirm the LOD chain exists (`projects/<id>/assets/<asset_id>/*_lod0.glb`) and
+inspect what actually got packaged:
+
+```powershell
+Get-ChildItem projects/<id>/builds/quest/app/src/main/assets/assets -Recurse -Filter *.glb
+```
+
+Note that overwriting an APK in place can leave dead bytes, so the file can
+read larger than its contents; delete `app/build/outputs` and rebuild for a
+true size.
+
 ## Frontend: "Orchestrator unreachable"
 
 The dev server proxies `/api/*` to `http://127.0.0.1:8787` by default. If

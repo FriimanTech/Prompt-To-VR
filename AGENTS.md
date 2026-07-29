@@ -100,7 +100,8 @@ orchestrator and a reusable Vulkan + OpenXR engine core.
    `scene_spec_max_parallel_workers` agents.
 5. Reference images for each object `AssetItem` → Gemini / Imagen.
 6. Reference images → Tripo image-to-3D (textured, PBR).
-7. Assets normalized (scale / materials / collision).
+7. Assets **validated** (`asset_normalization`): GLB header/JSON check plus
+   scale / collision metadata. This stage does NOT modify geometry.
 8. CodeTasks from MechanicPlan → Claude Opus → C++ files (`.cpp` + optional
    `.h`/`.hpp` headers) in `engine/generated/{mechanics,ai,dialogue}/`.
    After all tasks are written, a **compile-verify + repair loop** builds
@@ -113,8 +114,19 @@ orchestrator and a reusable Vulkan + OpenXR engine core.
    in `engine/generated/world/<project_id>/`, compiled + run offline in
    `ptv_worldgen` under a compile-and-repair loop → `world.scene.json`
    (deterministic fallback world if the budget is exhausted).
+8c. **Asset optimization** (`asset_optimization`): derives a device
+   `PerformanceProfile` (tier + triangle/draw-call budgets) from
+   `target_device` and how much GLB content the project has, allocates a
+   per-asset triangle budget weighted by importance, and runs
+   `ptv_glb_optimize` (meshoptimizer) to emit an LOD chain
+   `<asset_id>_lod0..3.glb`. Raw Tripo output is ~500k triangles per asset;
+   Meta's whole-frame budget for Quest 3 is 1.3M-1.8M, so this stage is what
+   makes any non-trivial project runnable. There is **no cap on asset count** —
+   more content just means a smaller per-asset budget (never below a quality
+   floor) plus more aggressive runtime culling/LOD. See `docs/rendering.md`.
 9. Deterministic scene compiler merges `world.scene.json` (environment) with
-   gameplay entities and emits `scene.json` + build metadata.
+   gameplay entities and emits `scene.json` + build metadata, including each
+   mesh's `lod_paths`/`bounds_radius_m` and the scene-level `performance` block.
 10. Build (branches on `BuildSpec.target_device`):
     - `pcvr`: CMake configure + build (Visual Studio 18 2026, toolset v145) → `.exe`.
     - `quest`: `quest_build` instantiates `engine/android`, packages

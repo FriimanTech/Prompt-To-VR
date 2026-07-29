@@ -8,6 +8,7 @@ from typing import List, Optional
 from pydantic import Field
 
 from .common import IdStr, StrictModel
+from .performance import AssetImportance
 
 
 class AssetCategory(str, Enum):
@@ -89,6 +90,24 @@ class AssetItem(StrictModel):
         ),
     )
     rigged: bool = False
+    # --- Optional performance hints -------------------------------------
+    # Both are optional: the asset_optimization stage derives sensible values
+    # from category/scale/interactivity when the planner leaves them unset.
+    importance: Optional[AssetImportance] = Field(
+        default=None,
+        description=(
+            "How much of the triangle budget this asset deserves. 'hero' for"
+            " things inspected up close (characters, held props),"
+            " 'background' for distant set dressing. Derived when omitted."
+        ),
+    )
+    max_triangles: Optional[int] = Field(
+        default=None, ge=100, le=200_000,
+        description=(
+            "Hard per-asset triangle cap after decimation. Overrides the"
+            " budget allocator for this asset when set."
+        ),
+    )
 
 
 class AssetManifest(StrictModel):

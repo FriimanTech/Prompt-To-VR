@@ -94,6 +94,14 @@ struct CMesh {
     std::string asset_id;
     std::string glb_path;
     float target_scale_meters{1.0f};
+    /** Decimated LOD chain (coarsest last) from the asset_optimization
+     * pipeline stage; ``lod_paths[0]`` == ``glb_path``. Empty when the asset
+     * was never optimized, in which case the renderer always draws
+     * ``glb_path``. */
+    std::vector<std::string> lod_paths;
+    /** World-space bounding-sphere radius (metres) used for frustum and
+     * distance culling. 0 = unknown -> renderer uses a safe fallback. */
+    float bounds_radius_m{0.0f};
 };
 
 struct CPhysics {

@@ -21,6 +21,7 @@ from . import (
     BuildSpec,
     CodeTask,
     MechanicPlan,
+    PerformanceProfile,
     ProjectState,
     SceneSpec,
 )
@@ -35,6 +36,7 @@ _EXPORTS: dict[str, Type[BaseModel]] = {
     "project_state": ProjectState,
     "artifact_metadata": ArtifactMetadata,
     "acceptance_test_plan": AcceptanceTestPlan,
+    "performance_profile": PerformanceProfile,
 }
 
 

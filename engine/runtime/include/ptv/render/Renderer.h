@@ -4,13 +4,19 @@
 #include <vk_mem_alloc.h>
 
 #include <array>
+#include <atomic>
+#include <condition_variable>
 #include <cstdint>
+#include <mutex>
 #include <string>
+#include <thread>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "ptv/math/Math.h"
 #include "ptv/render/GltfMeshLoad.h"
+#include "ptv/scene/Scene.h"
 
 namespace ptv {
 
@@ -117,9 +123,60 @@ public:
                     const std::vector<DrawItem>& items,
                     const RenderEnv& env);
 
-    /** Build a list of DrawItems from the ECS. Entities with ``CMesh`` load
-     *  GLB geometry on first use; others use the procedural unit cube. */
-    void build_items_from_world(World& world, std::vector<DrawItem>& out);
+    /** Where the player is looking this frame, used for culling + LOD.
+     *
+     *  ``view_proj`` is a single frustum that covers BOTH eyes (built from the
+     *  HMD centre view with a widened FOV), so visibility is decided once per
+     *  frame rather than per eye. */
+    struct ViewInfo {
+        Vec3 camera_pos{0.0f, 0.0f, 0.0f};
+        Mat4 view_proj{1.0f};
+        bool valid{false};
+    };
+
+    /** Per-frame rendering statistics, for telemetry + the adaptive governor. */
+    struct FrameStats {
+        std::uint32_t entities_considered{0};
+        std::uint32_t drawn{0};
+        std::uint32_t culled_frustum{0};
+        std::uint32_t culled_distance{0};
+        std::uint32_t visible_triangles{0};
+        std::uint32_t resident_meshes{0};
+        std::uint32_t resident_triangles{0};
+        std::uint32_t streaming_pending{0};
+    };
+
+    /** Install the scene's device budget (LOD distances, cull distance,
+     *  resident budget, eviction policy). Safe to call before initialize. */
+    void set_performance(const ScenePerformance& perf);
+
+    /** Global LOD bias applied on top of the scene's switch distances. The
+     *  adaptive governor raises this when frame time slips (higher = coarser
+     *  meshes sooner). */
+    void set_lod_bias(float bias) { lod_bias_ = bias; }
+    float lod_bias() const { return lod_bias_; }
+
+    /** Runtime override of the scene cull distance (governor-controlled). */
+    void set_cull_distance(float meters) { cull_distance_m_ = meters; }
+    float cull_distance() const { return cull_distance_m_; }
+
+    const FrameStats& frame_stats() const { return stats_; }
+
+    /** Build a list of DrawItems from the ECS.
+     *
+     *  Entities are frustum- and distance-culled, and each GLB entity picks
+     *  the LOD appropriate for its on-screen size. Meshes that are not yet
+     *  resident are requested from the streaming loader and skipped for this
+     *  frame (or drawn at a coarser LOD that already is resident) -- the draw
+     *  loop NEVER blocks on disk I/O. */
+    void build_items_from_world(World& world, std::vector<DrawItem>& out,
+                                const ViewInfo& view);
+
+    /** Upload a bounded number of finished streaming loads and evict meshes
+     *  when over the resident budget. Called once per frame; the time budget
+     *  keeps the Android event pump alive (a stalled pump is what produces
+     *  "app isn't responding"). */
+    void pump_streaming();
 
     /** Pre-load (or fetch from cache) a GLB mesh for use as a UI icon /
      *  manually-placed DrawItem. Returns the cache slot to set on
@@ -153,7 +210,42 @@ private:
         VkBuffer ib{VK_NULL_HANDLE};
         VmaAllocation ib_alloc{nullptr};
         uint32_t index_count{0};
+        // Bookkeeping for culling, telemetry and LRU eviction.
+        uint32_t triangle_count{0};
+        float local_radius{0.0f};   // bounding-sphere radius in mesh space
+        uint64_t last_used_frame{0};
+        bool evictable{false};      // false for built-in primitives / icons
+        std::string path;           // cache key, empty for procedural meshes
     };
+
+    // --- Asynchronous mesh streaming ---------------------------------------
+    // A worker thread does the expensive part (asset read + glTF parse + CPU
+    // vertex build); the main thread only performs the Vulkan upload, capped
+    // per frame. This is what keeps a 13-asset scene from stalling the very
+    // first frame for ~5 s and tripping Android's ANR watchdog.
+    struct StreamRequest {
+        std::string path;
+        float target_scale_meters{1.0f};
+        float priority{0.0f};  // distance in metres; smaller = sooner
+    };
+    struct StreamResult {
+        std::string path;
+        std::vector<gltf_mesh_load::LitVertex> verts;
+        std::vector<std::uint32_t> indices;
+        bool ok{false};
+    };
+
+    void start_stream_worker();
+    void stop_stream_worker();
+    void stream_worker_main();
+    /** Slot for an already-resident mesh, or -1. Marks it used this frame. */
+    int resident_slot(const std::string& path);
+    /** Queue ``path`` for background loading (no-op if resident/in flight). */
+    void request_stream(const std::string& path, float target_scale_meters,
+                        float priority);
+    /** Free least-recently-used meshes until back under the resident budget. */
+    void evict_to_budget();
+    void destroy_mesh_slot(GltfGpuMesh& gm);
     /** Upload a finished lit-vertex mesh into the shared mesh cache and return
      *  its slot (or -1). Used by the GLB path, the inline-mesh path, and the
      *  built-in unit primitive meshes so buffer creation lives in one place. */
@@ -239,6 +331,29 @@ private:
     std::unordered_map<std::string, int> gltf_path_to_slot_;
     // Inline procedural meshes (world-gen add_mesh) cached by entity id.
     std::unordered_map<std::uint32_t, int> inline_mesh_slots_;
+    // Slots freed by eviction, reused before growing ``gltf_meshes_``.
+    std::vector<int> free_mesh_slots_;
+
+    // --- Device budget + adaptive quality ----------------------------------
+    ScenePerformance perf_{};
+    float lod_bias_{0.0f};
+    float cull_distance_m_{100000.0f};
+    std::uint64_t frame_index_{0};
+    std::uint32_t resident_triangles_{0};
+    FrameStats stats_{};
+    // Per-entity LOD hysteresis: remembers the level chosen last frame so a
+    // mesh sitting exactly on a switch distance does not flicker between LODs.
+    std::unordered_map<std::uint32_t, int> entity_lod_;
+
+    // --- Streaming worker ---------------------------------------------------
+    std::thread stream_thread_;
+    std::mutex stream_mutex_;
+    std::condition_variable stream_cv_;
+    std::vector<StreamRequest> stream_queue_;
+    std::vector<StreamResult> stream_done_;
+    std::unordered_set<std::string> stream_inflight_;
+    std::unordered_set<std::string> stream_failed_;
+    std::atomic<bool> stream_stop_{false};
 };
 
 }  // namespace ptv

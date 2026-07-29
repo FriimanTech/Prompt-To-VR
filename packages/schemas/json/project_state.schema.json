@@ -10,11 +10,14 @@
         "reference_images",
         "tripo_models",
         "asset_normalization",
+        "asset_optimization",
         "code_generation",
         "world_generation",
         "scene_compile",
         "cmake_configure",
         "cmake_build",
+        "quest_build",
+        "quest_install",
         "engine_promotion",
         "ready_to_launch",
         "failed"
@@ -87,6 +90,15 @@
       ],
       "title": "StageRecord",
       "type": "object"
+    },
+    "TargetDevice": {
+      "description": "Which VR target the generated game is built and launched for.\n\n* ``pcvr`` \u2014 Windows native ``.exe`` (Vulkan + Win32 OpenXR), run on the\n  PC and viewed on the headset over Quest Link. The historical default.\n* ``quest`` \u2014 a standalone Android APK (Vulkan + Android OpenXR loader,\n  NativeActivity) installed and run locally on the Quest headset.\n\nStages 1-9 (BuildSpec .. scene compile, incl. codegen + worldgen) are\nidentical for both; only the build + launch stages branch on this value.",
+      "enum": [
+        "pcvr",
+        "quest"
+      ],
+      "title": "TargetDevice",
+      "type": "string"
     }
   },
   "additionalProperties": false,
@@ -106,6 +118,18 @@
       },
       "title": "Env Snapshot",
       "type": "object"
+    },
+    "latest_build_apk": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Latest Build Apk"
     },
     "latest_build_dir": {
       "anyOf": [
@@ -164,6 +188,10 @@
     "status": {
       "$ref": "#/$defs/ProjectStatus",
       "default": "idle"
+    },
+    "target_device": {
+      "$ref": "#/$defs/TargetDevice",
+      "default": "pcvr"
     },
     "title": {
       "maxLength": 128,

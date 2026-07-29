@@ -11,6 +11,16 @@
       "title": "AssetCategory",
       "type": "string"
     },
+    "AssetImportance": {
+      "description": "How much of the triangle budget an asset deserves.\n\n``hero`` assets are the ones the player looks at up close (characters,\nheld/interactive objects). ``background`` assets are set dressing seen at\na distance. Derived from category/scale/interactivity when not authored.",
+      "enum": [
+        "hero",
+        "standard",
+        "background"
+      ],
+      "title": "AssetImportance",
+      "type": "string"
+    },
     "AssetItem": {
       "additionalProperties": false,
       "properties": {
@@ -29,6 +39,33 @@
           "pattern": "^[a-z0-9][a-z0-9_.\\-]{0,63}$",
           "title": "Id",
           "type": "string"
+        },
+        "importance": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AssetImportance"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "How much of the triangle budget this asset deserves. 'hero' for things inspected up close (characters, held props), 'background' for distant set dressing. Derived when omitted."
+        },
+        "max_triangles": {
+          "anyOf": [
+            {
+              "maximum": 200000,
+              "minimum": 100,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Hard per-asset triangle cap after decimation. Overrides the budget allocator for this asset when set.",
+          "title": "Max Triangles"
         },
         "name": {
           "maxLength": 128,

@@ -77,7 +77,9 @@ Prompt-To-VR/
 │       ├── asset_normalization.json
 │       ├── scene.json
 │       ├── images/<asset_id>/*.png
-│       ├── assets/<asset_id>/*.glb
+│       ├── assets/<asset_id>/*.glb          # raw Tripo source (kept, not shipped)
+│       ├── assets/<asset_id>/<id>_lod0..3.glb  # decimated LOD chain (shipped)
+│       ├── assets/<asset_id>/<id>_lod.json  # decimation stamp (idempotency)
 │       ├── logs/*.log
 │       └── builds/cmake-<timestamp>/
 │

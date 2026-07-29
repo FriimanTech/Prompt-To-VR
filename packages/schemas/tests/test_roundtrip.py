@@ -126,6 +126,7 @@ def test_export_all_writes_files(tmp_path: Path):
         "project_state",
         "artifact_metadata",
         "acceptance_test_plan",
+        "performance_profile",
     }
     schema = json.loads(written["build_spec"].read_text(encoding="utf-8"))
     assert schema["$defs"] or schema.get("properties")

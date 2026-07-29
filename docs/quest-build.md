@@ -110,6 +110,18 @@ Notes captured while getting there:
   sanitizes transforms (normalize rotation, guard position) before creating
   bodies (on desktop Release the same bad data is silent UB).
 
+## Asset size + performance
+
+Raw Tripo GLBs are ~500k triangles / ~14 MB each, which is far past Meta's
+whole-frame Quest 3 budget (1.3M-1.8M triangles) and produced multi-second
+first-frame stalls (an ANR). The `asset_optimization` stage decimates every
+asset into an LOD chain before packaging, and `quest_build` ships ONLY the
+LODs (the raw source stays on disk for future use).
+
+Measured on the iron-man reference project: 4.86M -> 239k triangles (20x) and
+a 111 MB -> 20 MB APK. `_package_assets` wipes its staging directory each run,
+so assets deleted or superseded upstream cannot linger in the APK.
+
 ## Known on-device iteration points
 
 - Native XR bring-up: NativeActivity surface/focus timing and controller

@@ -18,6 +18,17 @@ struct MeshRef {
     std::string glb_path;
     float target_scale_meters{1.0f};
     std::string collision_shape{"aabb"};
+    /** Decimated level-of-detail chain produced by the ``asset_optimization``
+     * pipeline stage, coarsest last. ``lod_paths[0]`` is the same mesh as
+     * ``glb_path``. Empty for assets that were never optimized, in which case
+     * the renderer just always draws ``glb_path``. */
+    std::vector<std::string> lod_paths;
+    /** Triangle count of each entry in ``lod_paths`` (telemetry + budgeting). */
+    std::vector<std::uint32_t> lod_triangle_counts;
+    /** World-space bounding-sphere radius (metres) of the scaled mesh. Used
+     * for frustum + distance culling. 0 means "unknown": the renderer then
+     * falls back to a conservative radius so nothing is wrongly culled. */
+    float bounds_radius_m{0.0f};
 };
 
 // Procedural primitive authored by the world-generation stage.
@@ -96,6 +107,44 @@ struct PlayerSpawn {
     Quat rotation{1.0f, 0.0f, 0.0f, 0.0f};
 };
 
+/** Device rendering budget + quality policy for this scene.
+ *
+ * Emitted by the ``asset_optimization`` pipeline stage (see
+ * ``ptv_schemas.performance``), which sizes it from the target device and how
+ * much GLB content the project has. Defaults below are the conservative
+ * "small scene on Quest" values used when a scene predates the stage.
+ *
+ * The philosophy: nothing here is a hard content limit. A compact game gets an
+ * effectively infinite cull distance and full detail; a massive one gets
+ * tighter LOD distances and foveation. The runtime governor then trims further
+ * only if the measured frame time actually demands it.
+ */
+struct ScenePerformance {
+    std::string tier{"standard"};
+    int target_fps{72};
+    std::uint32_t frame_triangle_budget{1'100'000};
+    std::uint32_t resident_triangle_budget{2'400'000};
+    std::uint32_t draw_call_budget{300};
+    int msaa_samples{4};
+    /** Fixed-foveated-rendering level: 0 = off .. 4 = top. */
+    int foveation_level{0};
+    /** Entities beyond this are not drawn. Huge (1e5) means "no distance
+     * culling", which is what small scenes get so the player still sees the
+     * whole world. */
+    float cull_distance_m{100000.0f};
+    /** Distance at which LOD1, LOD2, LOD3 take over. */
+    std::vector<float> lod_switch_distances_m{12.0f, 30.0f, 65.0f};
+    bool evict_when_over_budget{false};
+
+    // --- Adaptive governor bounds ---
+    bool governor_enabled{true};
+    float governor_max_lod_bias{2.0f};
+    float governor_min_cull_distance_m{25.0f};
+    int governor_max_foveation_level{3};
+    int governor_escalate_after_bad_frames{30};
+    int governor_relax_after_good_frames{180};
+};
+
 struct SceneDoc {
     int version{0};
     std::string prompt_id;
@@ -126,6 +175,7 @@ struct SceneDoc {
     Vec3 sky_color{0.05f, 0.07f, 0.11f};
     float ambient_intensity{0.25f};
     SkyGradient sky{};
+    ScenePerformance performance{};
     std::vector<LightSpec> lights;
     std::vector<EntitySpec> entities;
 };
