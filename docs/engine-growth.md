@@ -165,9 +165,12 @@ first game paid for.
 ## Practical guidance for prompts
 
 * If your prompt names a movement style explicitly ("teleport-only",
-  "smooth locomotion"), the planner uses just that one. If your prompt
-  is silent, you'll get all three locomotion modes plus the in-game
-  picker — same as the starter room.
+  "smooth/sliding locomotion"), the planner plans just that one. If your
+  prompt is silent, you'll get all three locomotion modes plus the in-game
+  picker — same as the starter room. Either way the engine attaches all
+  four locomotion mechanics at scene load, since the runtime picker can
+  switch to any of them; the plan decides which one is *selected* by
+  default, not which ones exist.
 
 * Promotion is conservative: it only registers mechanics whose
   `cmake_build` succeeded. Broken builds never pollute the catalog.

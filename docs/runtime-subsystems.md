@@ -10,7 +10,9 @@ code is restricted to these prefixes (enforced by
 and the orchestrator's
 [`bounds.py`](../apps/orchestrator/ptv_orchestrator/pipeline/bounds.py)):
 
-- `ptv/api/` — `IMechanic`, `IBehaviour`, `IDialogueHook` and the register macros.
+- `ptv/api/` — `IMechanic`, `IBehaviour`, `IDialogueHook` and the register
+  macros, plus `InputSnapshot` (live controller/headset input) and
+  `MechanicContext` (locomotion / physics / debug-draw / hand services).
 - `ptv/ecs/` — `World`, core ECS components (`CTransform`, `CMesh`, `CPhysics`, …).
 - `ptv/scene/` — `SceneDoc`, `LoadSceneJson`, `ApplySceneToWorld`.
 - `ptv/math/` — `Vec3`, `Quat`, `Transform` (glm wrappers).
@@ -60,13 +62,20 @@ writes transforms back.
 ### Mechanics (`ptv::MechanicRegistry`, `ptv::MechanicHost`)
 
 A static registry of `IMechanic` / `IBehaviour` / `IDialogueHook`
-factories. Built-in mechanics in `src/mechanics/BuiltinMechanics.cpp`
-register themselves at static-init time. Generated modules do the same from
+factories. Each built-in mechanic lives in its own module under
+`src/mechanics/builtin/<mechanic>/` and registers itself at static-init
+time; generated modules do the same from
 `engine/generated/{mechanics,ai,dialogue}/`.
+`src/mechanics/BuiltinMechanics.cpp` holds no mechanics any more — it is
+purely the link anchor that stops MSVC discarding the module objects (they
+are referenced by nothing but their static constructors).
 
-`MechanicHost::attach_bindings(world)` walks every `CMechanicBinding` and
-instantiates the matching mechanic. `update(world, dt)` ticks all
-instances.
+`MechanicHost::attach_bindings(world, ctx)` walks every `CMechanicBinding`
+and instantiates the matching mechanic, collapsing `MechanicScope::Player`
+mechanics to a single shared instance.
+`update(world, dt, input, ctx, phase)` ticks the instances in one phase; the
+frame calls it twice, `Input` before the snapshot freezes and the physics
+step, `Simulate` after. See [`docs/input-and-bindings.md`](input-and-bindings.md).
 
 ### Debug UI (`ptv::DebugUI`)
 

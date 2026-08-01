@@ -492,15 +492,26 @@ real prompt add them.
 
 ## Live input bridge (generated mechanics react to real controllers)
 
-`IMechanic::on_update` receives a read-only `const InputSnapshot& input`
-(see `engine/runtime/include/ptv/api/InputSnapshot.h`) with this frame's
+`IMechanic::on_update(world, entity, dt, input, ctx)` receives a read-only
+`const InputSnapshot& input` (see
+`engine/runtime/include/ptv/api/InputSnapshot.h`) with this frame's
 controller + headset state — triggers, grips, thumbsticks, A/B/X/Y
-buttons, hand/aim/head poses (in world space), and which entity each
-hand is holding. `XrRuntime::sync_input` fills the raw state, and
-`Application.cpp` composes it into the `InputSnapshot` (rig-applied
-poses + grab/held state) before calling
-`mechanics_.update(world, dt, snapshot)`. So generated mechanics can
-respond to real input in-headset — this is no longer a stub.
+buttons, hand/aim/head poses (in world space), smoothed hand velocity, and
+which entity each hand is holding. `XrRuntime::sync_input` fills the raw
+state and `Application.cpp` composes it into the `InputSnapshot`. So
+generated mechanics can respond to real input in-headset — this is no
+longer a stub.
+
+It also receives `MechanicContext& ctx`
+(`engine/runtime/include/ptv/api/MechanicContext.h`) exposing
+`ctx.locomotion` (move the player rig), `ctx.physics` (raycast, impulse,
+kinematic), `ctx.draw` (one-frame debug geometry) and `ctx.hands` (what each
+hand holds). Every mutating call is validated and clamped engine-side, so
+generated code can use them freely. Mechanics may also declare a
+`MechanicPhase` (`Input` runs before the snapshot freezes and before
+physics; `Simulate` is the default) and a `MechanicScope` (`Entity` is the
+default; `Player` gives one shared instance for player-global systems).
+See [`docs/input-and-bindings.md`](input-and-bindings.md).
 
 Controller **bindings** are decided in the MechanicPlan stage and
 materialized into each mechanic's `params` at scene compile. A generated
@@ -516,9 +527,11 @@ by the holding hand's aim pose.
 
 | Component | Status today |
 |-----------|--------------|
-| Grab + tag `grabbable` | Works (tag-driven `Application.cpp` loop) |
-| `builtin.grab` | Registers `CGrabbable`; grab logic lives in `Application.cpp` |
+| Grab + tag `grabbable` | Works. Binding `builtin.grab` to an entity ADDS the tag, so scenes no longer author both |
+| `builtin.grab` | A real mechanic in `engine/runtime/src/mechanics/builtin/grab/` — copy-and-editable |
+| `builtin.throw` | A real per-entity mechanic in `builtin/throw/`; grab without throw simply drops |
 | Live input into `on_update` | **Works** — `InputSnapshot` passed every frame |
+| Locomotion / physics from generated code | **Works** — via `MechanicContext` (clamped) |
 | Shooting hub + live trigger | Works — read the held hand's trigger from `InputSnapshot` |
 | **Equip on body slots** | Stub — generated code should not assume it works |
 

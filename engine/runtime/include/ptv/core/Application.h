@@ -47,12 +47,26 @@ public:
         bool enable_validation{true};
     };
 
-    Application() = default;
-    ~Application() = default;
+    Application();
+    // Defined out-of-line: the mechanic-service members below are held by
+    // unique_ptr to incomplete types.
+    ~Application();
 
     int run(const Config& cfg);
 
 private:
+    // Engine-side implementations of the services handed to mechanics
+    // (ptv/api/MechanicContext.h). Defined in Application.cpp; nested so they
+    // can reach the rig / physics / draw state without exposing any of it.
+    class LocomotionService;
+    class PhysicsAccessService;
+    class DebugDrawService;
+    class HandsService;
+    friend class LocomotionService;
+    friend class PhysicsAccessService;
+    friend class DebugDrawService;
+    friend class HandsService;
+
     bool initialize(const Config& cfg);
     void shutdown();
     void tick(float dt);
@@ -61,6 +75,10 @@ private:
     // are chosen so scenes without an authored sky/lights (e.g. the starter
     // room) still look good.
     void build_render_env();
+
+    // Guarantee that every locomotion style the runtime menu can select has
+    // a mechanic attached, adding only the ones the scene left out.
+    void ensure_player_locomotion_bindings();
 
     // ------------------------------------------------------------------
     // Player rig: the virtual transform of the stage origin in world
@@ -71,21 +89,26 @@ private:
         float pos_x{0.0f};
         float pos_y{0.0f};
         float pos_z{0.0f};
-        float yaw_rad{0.0f};          // rotation around world Y
-        float snap_cooldown_s{0.0f};  // prevents rapid repeated snap turns
+        float yaw_rad{0.0f};  // rotation around world Y
+        // NOTE: the snap-turn cooldown used to live here. It now belongs to
+        // the builtin.locomotion.snap_turn mechanic, which owns that state.
     };
 
     // Per-hand grab state tracked across frames so we can detect edge
     // transitions (press-to-grab / release-to-throw) and compute a
     // velocity estimate for the throw impulse.
+    // Per-hand state owned by the INPUT layer.
+    //
+    // ``held`` is published here by the builtin.grab mechanic (through
+    // ILocomotion's sibling IHands service) so the frame's InputSnapshot can
+    // report it; the hold offsets and grip edge detection belong to that
+    // mechanic. The velocity is a derived input reading, smoothed here and
+    // handed to mechanics on the snapshot.
     struct HandGrab {
         entt::entity held{entt::null};
-        float prev_grip{0.0f};       // previous frame's grip (squeeze) value
         Vec3 prev_world_pos{0.0f};   // previous frame hand world position
         Vec3 world_velocity{0.0f};   // smoothed m/s
         bool had_prev_pos{false};
-        Vec3 hold_local_offset{0.0f};        // entity pos in hand-local frame
-        Quat hold_local_rot{1, 0, 0, 0};     // entity rot in hand-local frame
     };
 
     // ------------------------------------------------------------------
@@ -133,14 +156,8 @@ private:
         bool anchor_set{false};
     };
 
-    // Teleport aim + commit state. The arc is drawn from the left
-    // controller with gravity, landing on the first y=0 intersection.
-    struct TeleportAim {
-        bool aiming{false};
-        bool have_target{false};
-        Vec3 target{0.0f};
-        std::vector<Vec3> arc_points;   // debug render segments (in world)
-    };
+    // NOTE: teleport aim/commit state used to live here. It now belongs to
+    // the builtin.locomotion.teleport mechanic, which owns its own arc.
 
 #if !defined(__ANDROID__)
     std::unique_ptr<Window> window_;  // desktop mirror window only
@@ -164,7 +181,6 @@ private:
     XrRuntime::InputState prev_input_{};
     LocomotionMode locomotion_{LocomotionMode::Teleport};
     Menu menu_{};
-    TeleportAim teleport_{};
     // Horizontal head-facing direction in **stage / world XZ** (Y=0 plane).
     //
     // CRITICAL: this MUST default to the zero vector so that until we have
@@ -193,11 +209,9 @@ private:
     int menu_icon_head_relative_slot_{-1};
     int menu_icon_controller_relative_slot_{-1};
 
-    // Comfort acceleration ramp for sliding locomotion. Meta's design
-    // guide recommends easing into and out of motion to reduce vection
-    // sickness; we lerp `current_slide_speed_mps_` toward the requested
-    // target each frame instead of snapping.
-    float current_slide_speed_mps_{0.0f};
+    // NOTE: the slide comfort ramp used to live here. It now belongs to the
+    // slide mechanics (see mechanics/builtin/slide/SlideComfort.h), one ramp
+    // per mechanic instance.
 
     // Locomotion tunables (loaded from scene.json ``player`` block; see
     // docs/locomotion.md). Defaults match Meta's comfort recommendations.
@@ -210,6 +224,17 @@ private:
     float teleport_floor_y_{0.0f};
     float snap_turn_degrees_{45.0f};
     float snap_turn_cooldown_s_{0.30f};
+
+    // Services handed to mechanics each frame, plus the context that bundles
+    // them. Created in initialize(), valid for the lifetime of the scene.
+    std::unique_ptr<LocomotionService> locomotion_svc_;
+    std::unique_ptr<PhysicsAccessService> physics_svc_;
+    std::unique_ptr<DebugDrawService> draw_svc_;
+    std::unique_ptr<HandsService> hands_svc_;
+    MechanicContext mech_ctx_{};
+    // One-frame draw list produced by mechanics through IDebugDraw; appended
+    // to the render item list and cleared every frame.
+    std::vector<Renderer::DrawItem> mech_draw_items_;
 
     // Adaptive quality: trades LOD / cull distance / foveation for frame rate
     // when the measured frame time misses the headset's target.

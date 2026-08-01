@@ -34,18 +34,15 @@ $env:PATH = "$env:VULKAN_SDK\Bin;" + $env:PATH
 
 ## Sliding locomotion still moves in a fixed world direction in an existing project
 
-Locomotion logic lives in `engine/runtime/src/core/Application.cpp`
-(search for `LocomotionMode::SlideHeadRelative` /
-`SlideControllerRelative`). The catalog mechanics
-`builtin.locomotion.slide.head_relative` and
-`builtin.locomotion.slide.controller_relative` in
-`engine/runtime/src/mechanics/BuiltinMechanics.cpp` are intentional
-**no-op stubs** (their `tick` methods are empty) -- they exist only so
-each scene's `systems_global` entity can list them without
-`MechanicHost` complaining "no mechanic registered".
+Slide logic lives in
+`engine/runtime/src/mechanics/builtin/slide/SlideMechanic.cpp` -- the
+mechanics `builtin.locomotion.slide.head_relative` and
+`builtin.locomotion.slide.controller_relative` are real implementations, not
+stubs. The shared comfort ramp is in `builtin/slide/SlideComfort.h` and the
+thumbstick dead zone in `builtin/StickFilter.h`.
 
-That means the engine has **one** locomotion implementation, shared by
-every game. Whenever it changes:
+The engine still has **one** slide implementation, shared by every game.
+Whenever it changes:
 
 1. The fix lands in `engine/runtime/src/...` -- the engine source.
 2. **Each existing project's `builds/cmake-current/...exe` was built
@@ -58,13 +55,13 @@ every game. Whenever it changes:
 
 ### Root causes that have shipped at least once
 
-* **`last_head_forward_xz_` defaulted to `(0, 0, -1)`.** The slide path
+* **The cached head-forward defaulted to `(0, 0, -1)`.** The slide path
   used this cache as a "we don't have a head pose yet" fallback, so
   early frames before the runtime delivered a valid VIEW pose slid the
-  player along world `-Z`. **Fix:** the cache now defaults to the zero
+  player along world `-Z`. **Fix:** the cache defaults to the zero
   vector, and the slide path explicitly skips motion when its length
-  is zero (no fixed-direction fallback anywhere). See
-  `engine/runtime/include/ptv/core/Application.h`.
+  is zero (no fixed-direction fallback anywhere). It now lives on the
+  head-relative mechanic in `builtin/slide/SlideMechanic.cpp`.
 * **`xrWaitFrame` was inside `render_frame`, after `sync_input`.** The
   predicted display time used to locate `view_space_` against the
   stage was therefore the *previous* frame's time. On frame 0 it was
@@ -82,17 +79,19 @@ every game. Whenever it changes:
   ("Standard input identifiers") defines thumbstick `+1` on the Y
   axis as "all the way up", i.e. *forward push*. The runtime had the
   sign negated, so pushing the stick forward produced backward
-  motion in **both** sliding modes. **Fix:** `forward_axis = +ly` in
-  `Application::run` (the controller-relative path inherits the same
-  variable).
+  motion in **both** sliding modes. **Fix:** `forward_axis = +y` in
+  `SlideMechanicBase::on_update` (both slide modes share it).
 * **Cross-axis stick bleed leaked into perpendicular motion.**
   Touch Plus thumbsticks accumulate ~0.10 of off-axis reading after
   a few months of use. With only a *radial* dead zone, "push pure
   right" reads as `(+1.0, +0.10)` and the player drifts diagonally.
-  **Fix:** after the radial dead zone (now 0.18) the runtime
-  applies a *cardinal snap* -- when one axis dominates (`>0.5`) and
-  the other is small (`<0.18`), the small axis is forced to zero.
-  Intentional diagonals (both axes large) are preserved unchanged.
+  **Fix:** after the radial dead zone (now 0.18) a *cardinal snap*
+  applies -- when one axis dominates (`>0.5`) and the other is small
+  (`<0.18`), the small axis is forced to zero. Intentional diagonals
+  (both axes large) are preserved unchanged. Both live in
+  `engine/runtime/src/mechanics/builtin/StickFilter.h`, shared by every
+  stick-driven built-in so teleport's aim threshold and slide's speed
+  ramp are expressed against the same filtered magnitude.
 * **Controller-relative slide used `/grip/pose`'s `-Z`.** Quest
   Touch grips are angled ~30° below the controller body, so
   `/grip`'s `-Z` is along the user's *hand*, not the controller
@@ -100,12 +99,13 @@ every game. Whenever it changes:
   upward component, which combined with the inverted `forward_axis`
   produced the "controller looks tilted up + forward = backward"
   symptom. **Fix:** `XrSession::create_action_set` now binds a
-  separate `aim_pose_action_` to `/aim/pose`, exposed via
-  `InputState::aim_left/right`. `Application::run` reads
-  `aim_world_rot[0] * (0,0,-1)` for controller-relative slide,
-  teleport arc origin direction, and the locomotion menu pointer.
-  `/grip/pose` is still used for hand visualization and grab
-  detection (where palm-centric is what you want).
+  separate `aim_pose_action_` to `/aim/pose`, surfaced on each hand of
+  the `InputSnapshot` as `aim_position` / `aim_rotation`. The
+  controller-relative slide, the teleport arc direction and the
+  locomotion menu pointer all read `aim_rotation * (0,0,-1)`.
+  `/grip/pose` (`hand_position` / `hand_rotation`) is still used for
+  hand visualization and grab detection, where palm-centric is what
+  you want.
 * **Procedural hand mesh's `+Z` was placed at the thumb side.** The
   OpenXR `/grip/pose` spec says `-Z` is the forward (sword-blade)
   direction and `+Z` is the wrist/forearm direction. The mesh had
@@ -124,7 +124,7 @@ the exe directly): the slide path now logs once per second whenever
 the player is actually sliding, e.g.
 
 ```
-[info] Slide[head_rel] fwd=(+0.00,-1.00) stick=(+0.00,-0.92) speed=1.38m/s rig=(+0.00,-1.20) head_fresh=yes
+[info] Slide[head_rel] fwd=(+0.00,-1.00) stick=(+0.00,+0.92) speed=1.38m/s rig=(+0.00,-1.20)
 ```
 
 Physically turning your head 180 deg flips `fwd` within ~1 s. If `fwd`
@@ -136,7 +136,7 @@ this 1 Hz warning instead -- it tells you exactly which tracked pose
 is missing:
 
 ```
-[warn] Slide[head_rel] no basis (head_fresh=no, left_hand_valid=yes, head_valid=no). Player won't move until tracking is restored.
+[warn] Slide[head_rel] no basis (head_valid=no, left_aim_valid=yes). Player won't move until tracking is restored.
 ```
 
 `head_valid=no` means OpenXR didn't return a valid VIEW pose against

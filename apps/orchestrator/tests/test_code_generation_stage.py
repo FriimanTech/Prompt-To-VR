@@ -630,13 +630,17 @@ def test_code_edit_task_injects_base_builtin_source(tmp_path: Path) -> None:
     )
     store, pid, settings = _seed(tmp_path, plan)
 
-    # Provide a fake BuiltinMechanics.cpp so the source resolver finds it.
-    builtin_cpp = (
-        tmp_path / "engine" / "runtime" / "src" / "mechanics" / "BuiltinMechanics.cpp"
+    # Each built-in lives in its own module directory; the resolver injects
+    # that module's files plus the shared headers they include.
+    builtin_root = (
+        tmp_path / "engine" / "runtime" / "src" / "mechanics" / "builtin"
     )
-    builtin_cpp.parent.mkdir(parents=True, exist_ok=True)
-    builtin_cpp.write_text(
+    (builtin_root / "grab").mkdir(parents=True, exist_ok=True)
+    (builtin_root / "grab" / "GrabMechanic.cpp").write_text(
         "// GrabMechanic base source\nclass GrabMechanic {};\n", encoding="utf-8"
+    )
+    (builtin_root / "BuiltinMechanicBase.h").write_text(
+        "// shared builtin base\n", encoding="utf-8"
     )
 
     ctx = PipelineContext(
@@ -650,10 +654,11 @@ def test_code_edit_task_injects_base_builtin_source(tmp_path: Path) -> None:
 
     assert len(captured) == 1
     inp = captured[0]
-    # Base source was injected (from the fake BuiltinMechanics.cpp) plus the
-    # engine-owned-behavior NOTE for grab.
+    # The grab module's own source is injected, labelled with its path...
     assert "GrabMechanic base source" in inp.base_source_block
-    assert "engine-owned behavior" in inp.base_source_block
+    assert "grab/GrabMechanic.cpp" in inp.base_source_block
+    # ...along with the shared header it depends on.
+    assert "shared builtin base" in inp.base_source_block
     # An extra instruction tells the agent to copy + adapt under a new id.
     assert any(
         "CODE-EDIT TASK" in line and "generated.custom_grab" in line

@@ -18,7 +18,27 @@ with the title **Pick your Movement Style** (Teleport / Sliding). Choosing
 
 ## Implementation notes
 
-Source: `engine/runtime/src/core/Application.cpp`.
+Each locomotion style is a real `IMechanic` in its own module:
+
+| Mechanic | Module |
+| -------- | ------ |
+| `builtin.locomotion.teleport` (alias `builtin.teleport`) | `engine/runtime/src/mechanics/builtin/teleport/` |
+| `builtin.locomotion.slide.head_relative` | `engine/runtime/src/mechanics/builtin/slide/` |
+| `builtin.locomotion.slide.controller_relative` | `engine/runtime/src/mechanics/builtin/slide/` |
+| `builtin.locomotion.snap_turn` (alias `builtin.snap_turn`) | `engine/runtime/src/mechanics/builtin/snap_turn/` |
+
+The shared thumbstick dead zone lives in
+`engine/runtime/src/mechanics/builtin/StickFilter.h` and the slide comfort
+ramp in `builtin/slide/SlideComfort.h`. Only the startup **menu** (its panel
+geometry and hit testing) is still in `Application.cpp`; it drives the
+mechanics through `ILocomotion::set_active_mode()`.
+
+All of them run in `MechanicPhase::Input` with `MechanicScope::Player`, and
+move the player exclusively through `ILocomotion` (see
+[`ptv/api/MechanicContext.h`](../engine/runtime/include/ptv/api/MechanicContext.h)),
+never by touching the rig directly. Because each one early-outs unless
+`ILocomotion::active_mode()` matches the style it implements, a scene can bind
+all three and the player can switch at runtime without them fighting.
 
 **Input map.** Left thumbstick X = strafe; **+Y = forward; -Y = backward**.
 Right thumbstick X = snap turn (45° per push, 0.30 s cooldown). This
@@ -46,16 +66,17 @@ removes the "jolt" at engagement / release that triggers vection sickness in
 sensitive users.
 
 **Per-frame direction update.** Both sliding modes recompute their forward
-basis every frame from the LATEST tracked pose, BEFORE locomotion math
-runs. There is intentionally no fixed world-space forward, no spawn-yaw
-fallback, and no fixed-direction fallback ANYWHERE on the slide path.
-The cached `last_head_forward_xz_` member defaults to the **zero
-vector** so that until the runtime has produced a valid VIEW pose at
-least once, no slide direction exists and the player simply does not
-move. (A previous build defaulted this cache to `(0, 0, -1)`, which
-caused the infamous "world-based movement" bug: pushing forward in
-head-relative mode slid the rig along world `-Z` regardless of which
-way the player was physically looking.)
+basis every frame from the LATEST tracked pose in the frame's
+`InputSnapshot` (`head_rotation` for head-relative, the left hand's
+`aim_rotation` for controller-relative). There is intentionally no fixed
+world-space forward, no spawn-yaw fallback, and no fixed-direction fallback
+ANYWHERE on the slide path. Head-relative keeps a one-entry cache of the last
+good forward, and that cache starts as the **zero vector**, so until the
+runtime has produced a valid VIEW pose at least once no slide direction
+exists and the player simply does not move. (A previous build defaulted the
+cache to `(0, 0, -1)`, which caused the infamous "world-based movement" bug:
+pushing forward in head-relative mode slid the rig along world `-Z`
+regardless of which way the player was physically looking.)
 
 **Frame timing.** `XrRuntime::begin_xr_frame()` is called at the top of
 the application loop *before* `sync_input`. It performs `xrWaitFrame`
@@ -138,31 +159,31 @@ catalog-and-promotion lifecycle.
 
 ## Scene tuning (`scene.json` → runtime)
 
-The **actual** thumbstick locomotion (teleport arc, sliding, snap turn,
-startup menu) is implemented in `engine/runtime/src/core/Application.cpp`.
-Mechanic bindings such as `builtin.locomotion.slide.head_relative` and
-`builtin.locomotion.slide.controller_relative` on the `systems_global`
-entity are **catalog-aligned stubs** in
-`engine/runtime/src/mechanics/BuiltinMechanics.cpp` -- their `tick`
-methods are deliberately empty. They exist only so a scene's mechanic
-binding list can name them without `MechanicHost` logging
-"no mechanic registered". They do **not** re-implement movement (that
-would double-apply input).
+Mechanic bindings such as `builtin.locomotion.slide.head_relative` on the
+`systems_global` entity attach the real mechanic listed in the table above.
+
+**The engine guarantees all four are attached.** The runtime menu lets the
+player select any style at any time, so a scene that binds only some of them
+would leave the others dead. `Application::ensure_player_locomotion_bindings`
+therefore adds any missing locomotion mechanic to a `player_locomotion`
+entity at scene load. Whatever the scene DID bind is left untouched, params
+included, so scene-authored tuning always wins.
 
 > **Engine-wide.** The starter room and every generated game share the
-> same `ptv_runtime.lib`, so a fix to locomotion in `Application.cpp`
+> same `ptv_runtime.lib`, so a locomotion fix in the built-in modules
 > automatically applies to all projects -- but each project's existing
 > `builds/cmake-current/.../*.exe` was built from the engine source as
 > it was at build time. After updating engine source you need to
 > re-run the **CMake Build** stage on any pre-existing project to pick
 > up the new behaviour. The next slide log line in
 > `projects/<id>/logs/...` will look like
-> `Slide[head_rel] fwd=(+0.00,-1.00) ... head_fresh=yes` and `fwd`
-> changes within ~1s when you physically rotate. See
-> `docs/troubleshooting.md` for the verification checklist.
+> `Slide[head_rel] fwd=(+0.00,-1.00) stick=(+0.00,+0.92) speed=1.38m/s
+> rig=(+0.00,-1.20)` and `fwd` changes within ~1s when you physically
+> rotate. See `docs/troubleshooting.md` for the verification checklist.
 
 Optional keys under the top-level `"player"` object are read by
-`SceneLoader` and drive Application behaviour:
+`SceneLoader` and surfaced to mechanics as `ILocomotion::tunables()`. A
+mechanic defaults to these and lets its own binding `params` override them:
 
 | JSON field | Default | Effect |
 | ---------- | ------- | ------ |

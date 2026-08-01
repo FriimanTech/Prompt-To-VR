@@ -28,9 +28,9 @@ _HEADER_WHITELIST_PREFIXES = (
     "nlohmann/",
 )
 
-# ``ptv/api/*`` is intentionally NOT a prefix match: only the three stable
-# interface headers actually exist on disk. Any other ``ptv/api/foo.h`` is
-# almost always a model hallucination (e.g. input.h, audio_capture.h).
+# ``ptv/api/*`` is intentionally NOT a prefix match: only the headers listed
+# here actually exist on disk. Any other ``ptv/api/foo.h`` is almost always a
+# model hallucination (e.g. input.h, audio_capture.h).
 _PTV_API_ALLOWED = frozenset(
     {
         "ptv/api/IMechanic.h",
@@ -38,6 +38,10 @@ _PTV_API_ALLOWED = frozenset(
         "ptv/api/IDialogueHook.h",
         # Read-only live controller/headset input handed to on_update.
         "ptv/api/InputSnapshot.h",
+        # Locomotion / physics / debug-draw / hand services handed to
+        # on_update. Pulled in by IMechanic.h, but allowed explicitly so an
+        # agent may include it directly.
+        "ptv/api/MechanicContext.h",
     }
 )
 

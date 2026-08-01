@@ -50,6 +50,8 @@ Prompt-To-VR/
 │   │   ├── src/              # subsystems: core, platform, render, xr, ecs,
 │   │   │                     # scene, physics, input, interaction, audio,
 │   │   │                     # save, debug, mechanics
+│   │   │   └── mechanics/builtin/<mechanic>/   # one module per built-in
+│   │   │                     # (teleport, slide, snap_turn, grab, throw)
 │   │   ├── shaders/          # .vert/.frag, compiled to SPIR-V via glslc
 │   │   └── tests/            # CTest smoke targets
 │   │

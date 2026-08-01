@@ -36,7 +36,7 @@ WORLD_PTV_API_EXACT = {"ptv/api/IWorldBuilder.h"}
 WORLD_HEADER_PREFIXES = ("glm/",)
 WORLD_REGISTRATION_RE = re.compile(r"\bPTV_REGISTER_WORLD_BUILDER\b")
 
-# Only the three stable interface headers live under ptv/api/. See
+# Only these stable interface headers live under ptv/api/. See
 # apps/orchestrator/ptv_orchestrator/pipeline/bounds.py for the matching
 # runtime logic.
 PTV_API_EXACT = {
@@ -45,6 +45,8 @@ PTV_API_EXACT = {
     "ptv/api/IDialogueHook.h",
     # Read-only live controller/headset input handed to on_update.
     "ptv/api/InputSnapshot.h",
+    # Locomotion / physics / debug-draw / hand services handed to on_update.
+    "ptv/api/MechanicContext.h",
 }
 
 # Keep in sync with ``_HEADER_WHITELIST_EXACT`` in

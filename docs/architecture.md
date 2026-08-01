@@ -75,7 +75,7 @@ flowchart TD
 | ECS | `src/ecs/World.h` | EnTT registry + stable id map |
 | Scene | `src/scene/SceneLoader.cpp` | JSON scene → ECS |
 | Physics | `src/physics/PhysicsWorld.cpp` | Jolt PhysicsSystem |
-| Mechanics | `src/mechanics/MechanicRegistry.cpp` + `BuiltinMechanics.cpp` | Data-driven mechanics |
+| Mechanics | `src/mechanics/MechanicRegistry.cpp` + `src/mechanics/builtin/<mechanic>/` | Data-driven mechanics; each built-in is its own `IMechanic` module |
 | Debug | `src/debug/DebugUI.cpp` | Dear ImGui overlay (mirror-window only) |
 | Save | `src/save/SaveSystem.cpp` | JSON world snapshot / load |
 | Application | `src/core/Application.cpp` | Main loop |

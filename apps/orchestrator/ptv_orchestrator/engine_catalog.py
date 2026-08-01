@@ -12,15 +12,16 @@ Design notes
 ------------
 
 * Built-in entries below mirror the actual ``PTV_REGISTER_MECHANIC`` calls
-  in ``engine/runtime/src/mechanics/BuiltinMechanics.cpp`` plus the
-  three locomotion ids implemented inline by ``engine/runtime/src/core/Application.cpp``.
-  When you add a new built-in there, add it here too.
+  in ``engine/runtime/src/mechanics/builtin/<mechanic>/``. Every built-in is
+  a real ``IMechanic`` module there -- nothing is implemented inline by
+  ``Application.cpp`` any more. When you add a new built-in module, add it
+  here too.
 * The locomotion ids use the ``builtin.locomotion.*`` namespace introduced
   alongside Meta's terminology (``slide.head_relative`` /
   ``slide.controller_relative`` / ``teleport``). The legacy short ids
-  (``builtin.teleport`` / ``builtin.smooth_locomotion`` /
-  ``builtin.snap_turn``) are kept as aliases so existing scenes keep
-  working.
+  ``builtin.teleport`` and ``builtin.snap_turn`` are kept as aliases so
+  existing scenes keep working. ``builtin.smooth_locomotion`` has been
+  REMOVED -- use the explicit ``slide.*`` id.
 * Reading the promoted registry never raises: a missing or malformed
   file just yields an empty list. Promotion is best-effort enrichment,
   not a load-bearing dependency.
@@ -72,8 +73,11 @@ _BUILTINS: tuple[CatalogEntry, ...] = (
         ),
         category="locomotion",
         params={
+            # ``max_distance_m`` is accepted as a synonym of the first one --
+            # the hand-authored starter room uses that spelling.
             "max_horizontal_m": "float, default 12.0",
-            "launch_speed": "float, default 6.0",
+            "launch_speed_mps": "float, default 6.0",
+            "hand": "'left' (default) or 'right'",
         },
         inputs=("left thumbstick magnitude",),
         comfort_notes="Discrete; safe for VR-novice users.",
@@ -132,30 +136,27 @@ _BUILTINS: tuple[CatalogEntry, ...] = (
         comfort_notes="Discrete rotation; safer than smooth turn for novices.",
         aliases=("builtin.snap_turn",),
     ),
-    # Legacy generic 'smooth_locomotion' id, kept as a thin alias of the
-    # head-relative slide so old scenes don't break.
-    CatalogEntry(
-        id="builtin.smooth_locomotion",
-        summary=(
-            "Legacy alias of 'builtin.locomotion.slide.head_relative'. "
-            "Prefer the explicit slide.* id in new BuildSpecs."
-        ),
-        category="locomotion",
-        aliases=("builtin.locomotion.slide.head_relative",),
-    ),
     # ----- Object interaction -----
     CatalogEntry(
         id="builtin.grab",
-        summary="Hand-attach a tagged 'grabbable' object on grip squeeze; release drops it.",
+        summary=(
+            "Hand-attach an object on grip squeeze; release drops it. "
+            "Binding this mechanic to an entity is what MAKES it grabbable "
+            "(it tags the entity), so no separate 'grabbable' tag is needed."
+        ),
         category="interaction",
-        params={"hold_offset_local": "Vec3 (auto if omitted)"},
+        params={"radius_m": "float, default 0.18 (reach around the hand)"},
         inputs=("either grip",),
     ),
     CatalogEntry(
         id="builtin.throw",
-        summary="When grab is released, applies an impulse based on the smoothed hand velocity.",
+        summary=(
+            "Turns releasing a grabbed object into a throw, scaling the "
+            "smoothed hand velocity. Bind it to the object alongside "
+            "builtin.grab; an object with grab but no throw simply drops."
+        ),
         category="interaction",
-        params={"impulse": "float, default 4.0"},
+        params={"impulse": "float, default 4.0 (throw strength)"},
     ),
 )
 

@@ -48,12 +48,24 @@ private:
 struct MechanicInstance {
     std::string id;
     std::unique_ptr<IMechanic> impl;
+    /** Cached from ``impl->phase()`` so the per-frame dispatch does not pay a
+     *  virtual call for every instance in every phase. */
+    MechanicPhase phase{MechanicPhase::Simulate};
+    /** Every entity this instance is attached to. Usually exactly one; a
+     *  ``MechanicScope::Player`` instance collects all of its bound entities
+     *  here so ``on_detach`` can be delivered for each. */
+    std::vector<std::uint32_t> entities;
 };
 
 class MechanicHost {
 public:
-    void attach_bindings(World& world);
-    void update(World& world, float dt, const InputSnapshot& input);
+    void attach_bindings(World& world, MechanicContext& ctx);
+    /** Tick every instance whose ``phase()`` matches ``phase``.
+     *
+     *  The frame runs ``Input`` before the InputSnapshot is frozen and before
+     *  the physics step, then ``Simulate`` after physics. See MechanicPhase. */
+    void update(World& world, float dt, const InputSnapshot& input,
+                MechanicContext& ctx, MechanicPhase phase);
     void detach_all(World& world);
 
 private:

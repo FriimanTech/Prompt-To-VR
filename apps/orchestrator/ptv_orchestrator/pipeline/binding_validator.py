@@ -8,10 +8,10 @@ bindings BEFORE scene compile:
 * Face-button hand correctness -- A/B live on the RIGHT Touch controller,
   X/Y on the LEFT. A wrong hand is auto-normalized (with a warning) rather
   than failing the run.
-* Engine-reserved controls -- the runtime already owns the left thumbstick
-  (locomotion), the right thumbstick (snap turn), and both grips (grab /
-  throw) in ``Application.cpp``. A plan mechanic that reuses one of those
-  gets a warning unless it IS that locomotion/grab mechanic.
+* Engine-reserved controls -- the built-in mechanics already own the left
+  thumbstick (locomotion), the right thumbstick (snap turn), and both grips
+  (grab / throw). A plan mechanic that reuses one of those gets a warning
+  unless it IS that locomotion/grab mechanic.
 
 Sharing a control is NOT a conflict: multiple mechanics may legitimately
 bind the same control on the same hand (e.g. a UI pointer that clicks with
@@ -38,8 +38,8 @@ _RIGHT_ONLY = {ControllerControl.a, ControllerControl.b}
 _LEFT_ONLY = {ControllerControl.x, ControllerControl.y}
 _FACE_BUTTONS = _RIGHT_ONLY | _LEFT_ONLY
 
-# Physical controls the engine core (Application.cpp) already consumes. A
-# generated mechanic that rebinds one of these fights the built-in system.
+# Physical controls the built-in mechanics already consume. A generated
+# mechanic that rebinds one of these fights the built-in system.
 # Keyed by (control, hand-as-string).
 _ENGINE_RESERVED = {
     (ControllerControl.thumbstick, "left"): "locomotion (slide / teleport aim)",

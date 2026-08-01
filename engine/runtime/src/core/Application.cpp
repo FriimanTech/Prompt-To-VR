@@ -450,99 +450,378 @@ static void push_menu_pad(std::vector<Renderer::DrawItem>& out,
     }
 }
 
-// Push a parabolic teleport arc using a sequence of thin cyan cubes. One
-// cube per 20cm of arc keeps the draw-item count reasonable.
-static void push_arc(std::vector<Renderer::DrawItem>& out,
-                     const std::vector<Vec3>& pts,
-                     const Vec4& color) {
-    for (size_t i = 0; i + 1 < pts.size(); ++i) {
-        Vec3 a = pts[i];
-        Vec3 b = pts[i + 1];
-        Vec3 mid = (a + b) * 0.5f;
-        Vec3 d = b - a;
-        float len = glm::length(d);
-        if (len < 1e-4f) continue;
-        Vec3 dir = d / len;
-        // Build a yaw rotation so the cube's local Z aligns with ``dir``.
-        float yaw = std::atan2(dir.x, dir.z);
-        Mat4 m = glm::translate(Mat4(1.0f), mid);
-        m = glm::rotate(m, yaw, Vec3(0, 1, 0));
-        m = glm::scale(m, Vec3(0.015f, 0.015f, len * 0.5f));
-        Renderer::DrawItem di;
-        di.model = m;
-        di.color = color;
-        di.material_id = 3.0f;  // emissive hint for renderer if it chooses to
-        out.push_back(di);
-    }
+// ---------------------------------------------------------------------------
+// Mechanic services
+//
+// These are the ONLY way a mechanic (built-in or generated) can move the
+// player, touch physics, or draw. Every mutating entry point validates and
+// clamps its arguments: generated code is untrusted, so a bad value must
+// degrade into "nothing happens", never into a player flung out of the world
+// or a NaN poisoning the physics solver.
+// ---------------------------------------------------------------------------
+namespace {
+
+bool is_finite(const Vec3& v) {
+    return std::isfinite(v.x) && std::isfinite(v.y) && std::isfinite(v.z);
+}
+bool is_finite(const Quat& q) {
+    return std::isfinite(q.w) && std::isfinite(q.x) && std::isfinite(q.y) &&
+           std::isfinite(q.z);
 }
 
-// Compute a parabolic teleport arc from ``origin`` along ``forward`` with the
-// given launch speed and gravity. Returns the ground intersection (y = 0) in
-// ``out_target`` and fills ``out_points`` with sampled world-space points.
-// Returns true if the arc hits the floor within ``max_horizontal_m``.
-static bool compute_teleport_arc(const Vec3& origin,
-                                 const Vec3& forward,
-                                 float launch_speed,
-                                 float gravity,
-                                 float floor_y,
-                                 float max_horizontal_m,
-                                 std::vector<Vec3>& out_points,
-                                 Vec3& out_target,
-                                 const PhysicsWorld* physics = nullptr) {
-    out_points.clear();
-    Vec3 v0 = forward * launch_speed;
+// Generous bounds: legitimate gameplay never approaches these, so hitting one
+// means a mechanic is misbehaving.
+constexpr float kMaxTranslatePerCall = 2.0f;    // metres
+constexpr float kMaxImpulseMagnitude = 200.0f;  // kg*m/s
 
-    // Sample the arc at ~10ms steps until it hits the floor or exits the range.
-    const float dt = 0.033f;
-    const int max_steps = 240;   // ~8 seconds of flight, plenty.
+/** Log a clamp the first time each distinct site trips, so a broken mechanic
+ *  is visible in logcat without spamming every frame. */
+#define PTV_WARN_CLAMP_ONCE(...)          \
+    do {                                  \
+        static bool _warned = false;      \
+        if (!_warned) {                   \
+            _warned = true;               \
+            PTV_WARN(__VA_ARGS__);        \
+        }                                 \
+    } while (0)
 
-    Vec3 pos = origin;
-    Vec3 vel = v0;
-    out_points.push_back(pos);
-    for (int i = 0; i < max_steps; ++i) {
-        Vec3 prev = pos;
-        vel.y -= gravity * dt;
-        pos += vel * dt;
-        out_points.push_back(pos);
+}  // namespace
 
-        // Prefer a real physics hit against the generated environment so the
-        // player can teleport onto ground/platforms/terrain at any height.
-        if (physics != nullptr) {
-            Vec3 seg = pos - prev;
-            float seg_len = glm::length(seg);
-            Vec3 hit, normal;
-            if (seg_len > 1e-5f &&
-                physics->raycast(prev, seg, seg_len, hit, normal)) {
-                out_points.back() = hit;
-                Vec3 horiz = hit - origin;
-                horiz.y = 0.0f;
-                if (glm::length(horiz) > max_horizontal_m) return false;
-                // Reject near-vertical surfaces (walls) as landing spots.
-                if (normal.y < 0.4f) return false;
-                out_target = hit;
-                return true;
-            }
+class Application::LocomotionService final : public ILocomotion {
+public:
+    explicit LocomotionService(Application* app) : app_(app) {}
+
+    Vec3 position() const override {
+        return Vec3(app_->rig_.pos_x, app_->rig_.pos_y, app_->rig_.pos_z);
+    }
+    float yaw_radians() const override { return app_->rig_.yaw_rad; }
+
+    void translate(const Vec3& delta) override {
+        if (!is_finite(delta)) {
+            PTV_WARN_CLAMP_ONCE("locomotion: rejected non-finite translate");
+            return;
+        }
+        Vec3 d = delta;
+        const float len = glm::length(d);
+        if (len > kMaxTranslatePerCall) {
+            PTV_WARN_CLAMP_ONCE(
+                "locomotion: translate of {:.1f} m clamped to {:.1f} m", len,
+                kMaxTranslatePerCall);
+            d *= (kMaxTranslatePerCall / len);
+        }
+        app_->rig_.pos_x += d.x;
+        app_->rig_.pos_y += d.y;
+        app_->rig_.pos_z += d.z;
+    }
+
+    void rotate_yaw(float radians) override {
+        if (!std::isfinite(radians)) {
+            PTV_WARN_CLAMP_ONCE("locomotion: rejected non-finite rotate_yaw");
+            return;
+        }
+        // A single call should never spin more than half a turn.
+        constexpr float kPi = 3.14159265358979323846f;
+        app_->rig_.yaw_rad += std::max(-kPi, std::min(kPi, radians));
+    }
+
+    void teleport_to(const Vec3& target) override {
+        if (!is_finite(target)) {
+            PTV_WARN_CLAMP_ONCE("locomotion: rejected non-finite teleport_to");
+            return;
+        }
+        Vec3 dst = target;
+        // Cap horizontal distance to what the scene allows.
+        const Vec3 here(app_->rig_.pos_x, app_->rig_.pos_y, app_->rig_.pos_z);
+        Vec3 flat(dst.x - here.x, 0.0f, dst.z - here.z);
+        const float dist = glm::length(flat);
+        const float max_d = std::max(0.1f, app_->teleport_max_horizontal_m_);
+        if (dist > max_d) {
+            PTV_WARN_CLAMP_ONCE(
+                "locomotion: teleport of {:.1f} m clamped to {:.1f} m", dist,
+                max_d);
+            flat *= (max_d / dist);
+            dst.x = here.x + flat.x;
+            dst.z = here.z + flat.z;
+        }
+        // Never drop the player under the floor plane.
+        if (dst.y < app_->teleport_floor_y_) {
+            dst.y = app_->teleport_floor_y_;
+        }
+        app_->rig_.pos_x = dst.x;
+        app_->rig_.pos_y = dst.y;
+        app_->rig_.pos_z = dst.z;
+    }
+
+    // NOTE: must be fully qualified. Inside a nested class of Application,
+    // unqualified ``LocomotionMode`` resolves to Application's own private
+    // enum, not the public API one.
+    ::ptv::LocomotionMode active_mode() const override {
+        switch (app_->locomotion_) {
+            case Application::LocomotionMode::SlideHeadRelative:
+                return ::ptv::LocomotionMode::SlideHeadRelative;
+            case Application::LocomotionMode::SlideControllerRelative:
+                return ::ptv::LocomotionMode::SlideControllerRelative;
+            case Application::LocomotionMode::Teleport:
+            default:
+                return ::ptv::LocomotionMode::Teleport;
+        }
+    }
+    void set_active_mode(::ptv::LocomotionMode mode) override {
+        switch (mode) {
+            case ::ptv::LocomotionMode::SlideHeadRelative:
+                app_->locomotion_ = Application::LocomotionMode::SlideHeadRelative;
+                break;
+            case ::ptv::LocomotionMode::SlideControllerRelative:
+                app_->locomotion_ =
+                    Application::LocomotionMode::SlideControllerRelative;
+                break;
+            case ::ptv::LocomotionMode::Teleport:
+            default:
+                app_->locomotion_ = Application::LocomotionMode::Teleport;
+                break;
+        }
+    }
+
+    bool input_locked() const override {
+        // The locomotion menu owns the sticks while it is open.
+        return app_->locomotion_menu_enabled_ &&
+               app_->menu_.page != Application::MenuPage::Closed;
+    }
+
+    const LocomotionTunables& tunables() const override {
+        // Refreshed from the scene's player block each call so a mechanic
+        // always sees the values the scene actually authored.
+        tunables_.slide_max_speed_mps = app_->slide_max_speed_mps_;
+        tunables_.slide_accel_tau_s = app_->slide_accel_tau_s_;
+        tunables_.slide_decel_tau_s = app_->slide_decel_tau_s_;
+        tunables_.teleport_launch_speed_mps = app_->teleport_launch_speed_mps_;
+        tunables_.teleport_max_horizontal_m = app_->teleport_max_horizontal_m_;
+        tunables_.teleport_floor_y = app_->teleport_floor_y_;
+        tunables_.snap_turn_degrees = app_->snap_turn_degrees_;
+        tunables_.snap_turn_cooldown_s = app_->snap_turn_cooldown_s_;
+        return tunables_;
+    }
+
+private:
+    Application* app_;
+    mutable LocomotionTunables tunables_{};
+};
+
+class Application::PhysicsAccessService final : public IPhysicsAccess {
+public:
+    explicit PhysicsAccessService(Application* app) : app_(app) {}
+
+    bool raycast(const Vec3& origin, const Vec3& dir, float max_dist,
+                 PhysicsRayHit& out) const override {
+        out = PhysicsRayHit{};
+        if (!is_finite(origin) || !is_finite(dir) || !std::isfinite(max_dist)) {
+            return false;
+        }
+        Vec3 hit(0.0f);
+        Vec3 normal(0.0f, 1.0f, 0.0f);
+        if (!app_->physics_.raycast(origin, dir, max_dist, hit, normal)) {
+            return false;
+        }
+        out.point = hit;
+        out.normal = normal;
+        out.hit = true;
+        return true;
+    }
+
+    bool has_body(std::uint32_t entity) const override {
+        return app_->physics_.has_body(entity);
+    }
+
+    void set_kinematic(std::uint32_t entity, bool kinematic) override {
+        app_->physics_.set_kinematic(entity, kinematic);
+    }
+
+    void move_kinematic(std::uint32_t entity, const Vec3& pos, const Quat& rot,
+                        float dt) override {
+        if (!is_finite(pos) || !is_finite(rot) || !std::isfinite(dt)) {
+            PTV_WARN_CLAMP_ONCE("physics: rejected non-finite move_kinematic");
+            return;
+        }
+        app_->physics_.move_kinematic(entity, pos, rot, dt);
+    }
+
+    void apply_impulse(std::uint32_t entity, const Vec3& impulse) override {
+        if (!is_finite(impulse)) {
+            PTV_WARN_CLAMP_ONCE("physics: rejected non-finite impulse");
+            return;
+        }
+        Vec3 imp = impulse;
+        const float mag = glm::length(imp);
+        if (mag > kMaxImpulseMagnitude) {
+            PTV_WARN_CLAMP_ONCE(
+                "physics: impulse of {:.0f} clamped to {:.0f}", mag,
+                kMaxImpulseMagnitude);
+            imp *= (kMaxImpulseMagnitude / mag);
+        }
+        app_->physics_.apply_impulse(entity, imp);
+    }
+
+private:
+    Application* app_;
+};
+
+class Application::DebugDrawService final : public IDebugDraw {
+public:
+    explicit DebugDrawService(Application* app) : app_(app) {}
+
+    void line(const Vec3& a, const Vec3& b, const Vec4& color,
+              float thickness) override {
+        if (!is_finite(a) || !is_finite(b)) return;
+        push_segment(a, b, color, thickness);
+    }
+
+    void polyline(const Vec3* points, std::size_t count, const Vec4& color,
+                  float thickness) override {
+        if (points == nullptr || count < 2) return;
+        for (std::size_t i = 1; i < count; ++i) {
+            if (!is_finite(points[i - 1]) || !is_finite(points[i])) continue;
+            push_segment(points[i - 1], points[i], color, thickness);
+        }
+    }
+
+    void marker(const Vec3& center, float radius, const Vec4& color) override {
+        if (!is_finite(center) || !std::isfinite(radius)) return;
+        const float r = std::max(0.01f, radius);
+        Renderer::DrawItem it{};
+        // Unit cube spans -1..1, so scale is a HALF extent: a flat disc of
+        // diameter 2*r, 2cm thick.
+        it.model = glm::translate(Mat4(1.0f), center) *
+                   glm::scale(Mat4(1.0f), Vec3(r, 0.01f, r));
+        it.color = color;
+        it.material_id = 3.0f;
+        it.mesh_slot = -1;
+        app_->mech_draw_items_.push_back(it);
+    }
+
+private:
+    // A segment is a thin scaled cube spanning a..b -- the same trick the
+    // engine already used for the teleport arc, but oriented in full 3D
+    // rather than yaw-only, so a steep arc's segments actually follow it.
+    void push_segment(const Vec3& a, const Vec3& b, const Vec4& color,
+                      float thickness) {
+        const Vec3 delta = b - a;
+        const float len = glm::length(delta);
+        if (len < 1e-5f) return;
+        const Vec3 dir = delta / len;
+        const Vec3 up(0.0f, 1.0f, 0.0f);
+
+        // Rotation taking the cube's local +Y onto ``dir``.
+        Quat rot(1.0f, 0.0f, 0.0f, 0.0f);
+        const float cos_a = std::max(-1.0f, std::min(1.0f, glm::dot(up, dir)));
+        Vec3 axis = glm::cross(up, dir);
+        const float axis_len = glm::length(axis);
+        if (axis_len > 1e-5f) {
+            rot = glm::angleAxis(std::acos(cos_a), axis / axis_len);
+        } else if (cos_a < 0.0f) {
+            rot = glm::angleAxis(3.14159265f, Vec3(1.0f, 0.0f, 0.0f));
         }
 
-        if (pos.y <= floor_y && prev.y > floor_y) {
-            // Linearly interpolate the crossing point.
-            float t = (prev.y - floor_y) / (prev.y - pos.y);
-            Vec3 hit = prev + (pos - prev) * t;
-            hit.y = floor_y;
-            out_points.back() = hit;
-            Vec3 horiz = hit - origin;
-            horiz.y = 0.0f;
-            if (glm::length(horiz) > max_horizontal_m) return false;
-            out_target = hit;
+        const float half_t = std::max(0.001f, thickness) * 0.5f;
+        Renderer::DrawItem it{};
+        it.model = glm::translate(Mat4(1.0f), (a + b) * 0.5f) *
+                   glm::mat4_cast(rot) *
+                   glm::scale(Mat4(1.0f), Vec3(half_t, len * 0.5f, half_t));
+        it.color = color;
+        it.material_id = 3.0f;
+        it.mesh_slot = -1;
+        app_->mech_draw_items_.push_back(it);
+    }
+
+    Application* app_;
+};
+
+void Application::ensure_player_locomotion_bindings() {
+    // The runtime locomotion menu lets the player pick teleport, head-relative
+    // slide or controller-relative slide at ANY time. Now that each of those
+    // is a real mechanic rather than a hard-coded branch, a mode with nothing
+    // bound would silently do nothing -- the player would flip to sliding and
+    // simply be unable to move.
+    //
+    // Most scenes bind only what their prompt asked for (the starter room
+    // binds teleport and snap turn), so the engine guarantees the rest here.
+    // Anything the scene DID bind is left completely alone, params included.
+    static constexpr const char* kRequired[] = {
+        "builtin.locomotion.teleport",
+        "builtin.locomotion.slide.head_relative",
+        "builtin.locomotion.slide.controller_relative",
+        "builtin.locomotion.snap_turn",
+    };
+    // Aliases the hand-authored sample uses for the same mechanics.
+    auto satisfies = [](const std::string& bound, const char* required) {
+        if (bound == required) return true;
+        if (bound == "builtin.teleport" &&
+            std::string(required) == "builtin.locomotion.teleport") {
             return true;
         }
-        if (glm::length(Vec3(pos.x - origin.x, 0, pos.z - origin.z)) >
-            max_horizontal_m + 1.0f) {
-            break;
+        if (bound == "builtin.snap_turn" &&
+            std::string(required) == "builtin.locomotion.snap_turn") {
+            return true;
+        }
+        return false;
+    };
+
+    std::vector<std::string> bound_ids;
+    for (auto e : world_.registry().view<CMechanicBinding>()) {
+        for (const auto& entry :
+             world_.registry().get<CMechanicBinding>(e).entries) {
+            bound_ids.push_back(entry.builtin_id.empty() ? entry.id
+                                                         : entry.builtin_id);
         }
     }
-    return false;
+
+    std::vector<std::string> missing;
+    for (const char* required : kRequired) {
+        bool found = false;
+        for (const auto& bound : bound_ids) {
+            if (satisfies(bound, required)) {
+                found = true;
+                break;
+            }
+        }
+        if (!found) missing.emplace_back(required);
+    }
+    if (missing.empty()) return;
+
+    const auto holder = world_.registry().create();
+    world_.registry().emplace<CTag>(holder, CTag{{"player_locomotion"}});
+    CMechanicBinding binding;
+    for (const auto& id : missing) {
+        binding.entries.push_back(CMechanicBinding::Entry{id, id, "{}"});
+    }
+    world_.registry().emplace<CMechanicBinding>(holder, std::move(binding));
+    PTV_INFO("Auto-bound {} locomotion mechanic(s) the scene did not declare",
+             missing.size());
 }
+
+class Application::HandsService final : public IHands {
+public:
+    explicit HandsService(Application* app) : app_(app) {}
+
+    std::uint32_t held_entity(int hand) const override {
+        if (hand < 0 || hand > 1) return InputSnapshot::kInvalidEntity;
+        const auto held = app_->hands_[hand].held;
+        return held == entt::null ? InputSnapshot::kInvalidEntity
+                                  : static_cast<std::uint32_t>(held);
+    }
+
+    void set_held_entity(int hand, std::uint32_t entity) override {
+        if (hand < 0 || hand > 1) return;
+        app_->hands_[hand].held = (entity == InputSnapshot::kInvalidEntity)
+                                      ? entt::null
+                                      : static_cast<entt::entity>(entity);
+    }
+
+private:
+    Application* app_;
+};
+
+Application::Application() = default;
+Application::~Application() = default;
 
 int Application::run(const Config& cfg) {
     if (!initialize(cfg)) {
@@ -618,26 +897,8 @@ int Application::run(const Config& cfg) {
         XrRuntime::InputState input;
         xr_.sync_input(input);
 
-        // ------------------------------------------------------------
-        // Right-stick snap turn is always available (independent of
-        // locomotion mode, doesn't conflict with teleport aim).
-        // ------------------------------------------------------------
-        {
-            constexpr float kTurnDeadzone = 0.7f;
-
-            rig_.snap_cooldown_s =
-                std::max(0.0f, rig_.snap_cooldown_s - dt);
-            const float rx = input.thumbstick[1].x;
-            if (rig_.snap_cooldown_s <= 0.0f) {
-                if (rx > kTurnDeadzone) {
-                    rig_.yaw_rad -= snap_turn_degrees_ * 3.14159265f / 180.0f;
-                    rig_.snap_cooldown_s = snap_turn_cooldown_s_;
-                } else if (rx < -kTurnDeadzone) {
-                    rig_.yaw_rad += snap_turn_degrees_ * 3.14159265f / 180.0f;
-                    rig_.snap_cooldown_s = snap_turn_cooldown_s_;
-                }
-            }
-        }
+        // Right-stick snap turn now lives in the built-in mechanic
+        // ``builtin.locomotion.snap_turn`` (Input phase), not here.
 
         // Menu debounce timer ticks regardless of page so the first
         // frames after a page flip don't instantly consume the trigger.
@@ -753,54 +1014,9 @@ int Application::run(const Config& cfg) {
         const bool menu_open =
             locomotion_menu_enabled_ && (menu_.page != MenuPage::Closed);
 
-        // Circular deadzone per Meta's locomotion input-map guidance:
-        // we measure the *magnitude* of the stick vector and apply a single
-        // dead radius, then re-scale the surviving vector. A per-axis
-        // deadzone alone creates a square dead zone that can produce
-        // strafing while pushing diagonally near rest -- exactly the
-        // comfort issue Meta calls out. 0.18 keeps drift at bay on Quest
-        // 3 Touch Plus thumbsticks (which have noticeable cross-axis
-        // bleed after a few months of use) without eating intentional
-        // motion.
-        //
-        // After the radial pass we apply a *cardinal snap*: when one axis
-        // strongly dominates (>0.5) and the other is small (<0.18), the
-        // small axis is zeroed out. This makes "push pure right" feel
-        // like pure right rather than slow diagonal-right (which is what
-        // the user sees when the stick has 0.10 of off-axis bleed).
-        // Intentional diagonals are preserved because both axes have to
-        // be small for the snap to fire.
-        constexpr float kStickDeadRadius = 0.18f;
-        constexpr float kAxisDominant    = 0.50f;
-        constexpr float kAxisCrossSnap   = 0.18f;
-        float lx = 0.0f;
-        float ly = 0.0f;
-        float left_mag = 0.0f;
-        {
-            const float lxr = input.thumbstick[0].x;
-            const float lyr = input.thumbstick[0].y;
-            const float raw_mag = std::sqrt(lxr * lxr + lyr * lyr);
-            if (raw_mag > kStickDeadRadius) {
-                // Re-scale so the surviving range is [0, 1] linearly. This
-                // matches Unity XR Toolkit / Meta first-party samples.
-                const float scaled =
-                    (raw_mag - kStickDeadRadius) / (1.0f - kStickDeadRadius);
-                const float s = std::min(scaled, 1.0f) / raw_mag;
-                lx = lxr * s;
-                ly = lyr * s;
-                // Cardinal snap.
-                if (std::abs(lx) > kAxisDominant && std::abs(ly) < kAxisCrossSnap) {
-                    ly = 0.0f;
-                } else if (std::abs(ly) > kAxisDominant &&
-                           std::abs(lx) < kAxisCrossSnap) {
-                    lx = 0.0f;
-                }
-                // Recompute magnitude after the snap so the speed-ramp
-                // target uses the corrected vector length.
-                left_mag = std::sqrt(lx * lx + ly * ly);
-                left_mag = std::min(left_mag, 1.0f);
-            }
-        }
+        // Thumbstick dead zone + cardinal snap now live in the shared
+        // mechanics/builtin/StickFilter.h, applied by whichever locomotion
+        // mechanic is reading the stick.
 
         if (menu_open) {
             // Anchor the panel the first time we show it (and have a real
@@ -931,400 +1147,127 @@ int Application::run(const Config& cfg) {
         }
 
         // ------------------------------------------------------------
-        // Left-stick locomotion (mode-aware). Disabled while the menu is
-        // open.
-        //   * Teleport:                aim-and-commit driven by stick magnitude.
-        //   * SlideHeadRelative:       direction = HMD forward on XZ; the
-        //                              latest per-frame HMD pose feeds
-        //                              ``last_head_forward_xz_`` so turning
-        //                              the head re-steers smoothly.
-        //   * SlideControllerRelative: direction = left controller's -Z aim
-        //                              on XZ; head-independent.
-        // We cap target speed at ~1.5 m/s (Meta's recommended walking pace)
-        // and lerp ``current_slide_speed_mps_`` toward it so engagement and
-        // disengagement are smooth (vection comfort).
+        // Snapshot builder.
+        //
+        // Called TWICE per frame: once to give Input-phase mechanics a view
+        // of the world before they run, and again afterwards to freeze the
+        // immutable snapshot everything else sees. The second build is what
+        // removes the one-frame lag on ``held_entity``: grab has already
+        // resolved by then, so a weapon mechanic notices it was picked up on
+        // the SAME frame rather than the next one.
         // ------------------------------------------------------------
-        teleport_.aiming = false;
-        teleport_.have_target = false;
-        teleport_.arc_points.clear();
-
-        if (!menu_open) {
-            const float kSlideMaxSpeed = slide_max_speed_mps_;
-            const float kSlideAccelTau = slide_accel_tau_s_;
-            const float kSlideDecelTau = slide_decel_tau_s_;
-
-            if (locomotion_ == LocomotionMode::Teleport) {
-                const float kAimThreshold = 0.5f;    // push to aim
-                const float kReleaseThreshold = 0.1f;// release to commit
-
-                static bool was_aiming_prev = false;
-                static Vec3 last_target{0.0f};
-                static bool last_have_target = false;
-
-                if (hand_valid[0] && aim_world_valid[0] && left_mag > kAimThreshold) {
-                    Vec3 origin = hand_world_pos[0];
-                    // Fire the arc along the controller's AIM direction
-                    // (where the body points) rather than the GRIP -Z
-                    // axis (which is angled up because Touch's grip
-                    // handle is angled). Then bias slightly downward so
-                    // small tilts produce a comfortable medium-range arc
-                    // (~3-6m) rather than flying off.
-                    Vec3 forward = aim_world_rot[0] * Vec3(0, 0, -1);
-                    forward.y -= 0.15f;
-                    forward = glm::normalize(forward);
-
-                    Vec3 tgt;
-                    bool ok = compute_teleport_arc(
-                        origin, forward,
-                        /*launch_speed*/ teleport_launch_speed_mps_,
-                        /*gravity*/ 9.8f,
-                        /*floor_y*/ teleport_floor_y_,
-                        /*max_horizontal_m*/ teleport_max_horizontal_m_,
-                        teleport_.arc_points, tgt, &physics_);
-                    teleport_.aiming = true;
-                    teleport_.have_target = ok;
-                    if (ok) teleport_.target = tgt;
-                    last_have_target = ok;
-                    last_target = tgt;
-                    was_aiming_prev = true;
-                } else if (was_aiming_prev && left_mag < kReleaseThreshold) {
-                    // Release edge: commit if we had a valid target.
-                    if (last_have_target) {
-                        rig_.pos_x = last_target.x;
-                        rig_.pos_z = last_target.z;
-                        // Land on the surface height so the player can traverse
-                        // onto generated platforms / terrain, not just y=floor.
-                        rig_.pos_y = last_target.y;
-                        PTV_INFO("Teleport -> ({:.2f}, {:.2f}, {:.2f})",
-                                 last_target.x, last_target.y, last_target.z);
-                    }
-                    was_aiming_prev = false;
-                    last_have_target = false;
+        auto build_snapshot = [&]() {
+            InputSnapshot s;
+            s.dt = dt;
+            for (int h = 0; h < 2; ++h) {
+                auto& hs = s.hands[h];
+                hs.trigger = input.trigger[h];
+                hs.grip = input.grip[h];
+                hs.thumbstick =
+                    Vec2(input.thumbstick[h].x, input.thumbstick[h].y);
+                hs.prev_trigger = prev_input_.trigger[h];
+                hs.prev_grip = prev_input_.grip[h];
+                if (hand_valid[h]) {
+                    hs.hand_position = hand_world_pos[h];
+                    hs.hand_rotation = hand_world_rot[h];
+                    hs.hand_valid = true;
                 }
-            } else {
-                // Sliding locomotion on the XZ plane.
-                //
-                // OpenXR thumbstick convention (1.1 spec, "Standard
-                // input identifiers"): "+1 means all the way right for
-                // x axis or all the way up for y axis." Pushing the
-                // stick forward (away from the body) reads as +Y. So
-                // forward_axis = +ly. (A previous build had this
-                // negated, which is why pushing forward produced
-                // backward motion on Quest Link.)
-                const float forward_axis = ly;
-                const float strafe_axis  = lx;
-
-                // The slide-direction basis is recomputed every frame
-                // from the LATEST tracked pose (HMD or left controller,
-                // depending on mode). There is intentionally NO fixed
-                // world forward, no spawn-yaw fallback, and no stale
-                // cache: turning the head or the controller mid-stride
-                // immediately re-steers movement.
-                Vec3 fwd(0.0f);
-                Vec3 right(0.0f);
-                bool have_basis = false;
-
-                if (locomotion_ == LocomotionMode::SlideHeadRelative) {
-                    // Head-Relative sliding: forward = the HMD's current
-                    // -Z direction, projected onto the XZ ground plane.
-                    //
-                    // We require a *real* head pose source -- either
-                    // freshly located this frame (head_pose_fresh) or a
-                    // cached value previously set from a real fresh
-                    // pose. The cache defaults to the ZERO vector (see
-                    // Application.h) so that until the runtime has
-                    // delivered a single valid VIEW pose, no slide
-                    // direction is available and the player simply
-                    // stands still. There is intentionally no
-                    // fixed-world-space fallback: that bug used to make
-                    // the player slide in world -Z regardless of where
-                    // they were physically looking.
-                    Vec3 candidate(0.0f);
-                    if (head_pose_fresh) {
-                        candidate = head_forward_xz;
-                    } else if (glm::length(last_head_forward_xz_) > 1e-4f) {
-                        candidate = last_head_forward_xz_;
-                    }
-                    const float flen = glm::length(candidate);
-                    if (flen > 1e-5f) {
-                        fwd = candidate / flen;
-                        // Right-handed Y-up: when facing fwd=-Z, the
-                        // user's right is +X. The correct formula is
-                        // ``cross(fwd, up)`` (not ``cross(up, fwd)``),
-                        // which gave -X and silently swapped strafe.
-                        right = glm::normalize(
-                            glm::cross(fwd, Vec3(0.0f, 1.0f, 0.0f)));
-                        have_basis = true;
-                    }
-                } else if (locomotion_ == LocomotionMode::SlideControllerRelative) {
-                    // Controller-Relative sliding: forward = the LEFT
-                    // controller's -Z in the OpenXR /aim/pose frame
-                    // (controller body forward, NOT grip handle), then
-                    // projected onto the XZ ground plane. Independent
-                    // of head yaw -- the user can look anywhere while
-                    // gliding along the controller's aim. Tilt is
-                    // discarded so pointing the controller up/down
-                    // doesn't move the player vertically.
-                    //
-                    // We use /aim instead of /grip because Quest Touch
-                    // controllers have an angled grip handle: /grip's
-                    // -Z is along the user's hand (~30 deg up from
-                    // horizontal when held flat), while /aim's -Z is
-                    // along the controller body (where the user
-                    // intuitively expects to "point"). Using /grip
-                    // here is what made an old build feel like the
-                    // controller was tilted up.
-                    //
-                    // Strictly gated on a fresh left-controller aim
-                    // pose this frame -- if the controller is not
-                    // tracked (not yet woken up, line of sight
-                    // blocked, etc.) the player just doesn't move. We
-                    // never invent a direction.
-                    if (aim_world_valid[0]) {
-                        const Vec3 aim =
-                            aim_world_rot[0] * Vec3(0.0f, 0.0f, -1.0f);
-                        Vec3 candidate(aim.x, 0.0f, aim.z);
-                        const float flen = glm::length(candidate);
-                        if (flen > 1e-5f) {
-                            fwd = candidate / flen;
-                            right = glm::normalize(
-                                glm::cross(fwd, Vec3(0.0f, 1.0f, 0.0f)));
-                            have_basis = true;
-                        }
-                    }
+                if (aim_world_valid[h]) {
+                    hs.aim_position = mat_translation(
+                        rig_mat * xr_pose_to_matrix(aim_poses[h]));
+                    hs.aim_rotation = aim_world_rot[h];
+                    hs.aim_valid = true;
                 }
-
-                // Comfort ramp: lerp current speed toward
-                //   target = stick_magnitude * max_speed
-                // with different time-constants for accel vs decel.
-                const float target_speed =
-                    have_basis ? (left_mag * kSlideMaxSpeed) : 0.0f;
-                const float tau =
-                    (target_speed > current_slide_speed_mps_) ? kSlideAccelTau
-                                                              : kSlideDecelTau;
-                // Exponential approach: x += (target - x) * (1 - exp(-dt/tau)).
-                const float k = 1.0f - std::exp(-dt / std::max(tau, 1e-3f));
-                current_slide_speed_mps_ +=
-                    (target_speed - current_slide_speed_mps_) * k;
-
-                if (have_basis && current_slide_speed_mps_ > 1e-4f &&
-                    left_mag > 0.0f) {
-                    // Re-normalise the (forward,strafe) intent so the
-                    // resulting velocity magnitude equals the ramped speed,
-                    // independent of stick magnitude (which is already
-                    // baked into target_speed -> current_slide_speed_mps_).
-                    const float inv_mag =
-                        (left_mag > 1e-5f) ? (1.0f / left_mag) : 0.0f;
-                    const float fa = forward_axis * inv_mag;
-                    const float sa = strafe_axis * inv_mag;
-                    const float vx = fwd.x * fa + right.x * sa;
-                    const float vz = fwd.z * fa + right.z * sa;
-                    rig_.pos_x += vx * current_slide_speed_mps_ * dt;
-                    rig_.pos_z += vz * current_slide_speed_mps_ * dt;
-
-                    // 1 Hz live-trace of the slide basis. Every line
-                    // proves which tracked pose drove motion this
-                    // second: turning the head 180 deg in head-relative
-                    // mode flips the (fx,fz) direction within ~1s; a
-                    // controller-relative slide keeps fx,fz aligned to
-                    // the LEFT controller no matter where you look. If
-                    // you ever see a fixed direction across multiple
-                    // seconds while you physically rotate, something
-                    // upstream is wrong -- file the log.
-                    static float trace_accum = 0.0f;
-                    trace_accum += dt;
-                    if (trace_accum >= 1.0f) {
-                        const char* mode_name =
-                            (locomotion_ == LocomotionMode::SlideHeadRelative)
-                                ? "head_rel"
-                                : "ctrl_rel";
-                        PTV_INFO(
-                            "Slide[{}] fwd=({:+.2f},{:+.2f}) stick=({:+.2f},"
-                            "{:+.2f}) speed={:.2f}m/s rig=({:+.2f},{:+.2f}) "
-                            "head_fresh={}",
-                            mode_name, fwd.x, fwd.z, lx, ly,
-                            current_slide_speed_mps_, rig_.pos_x, rig_.pos_z,
-                            head_pose_fresh ? "yes" : "no");
-                        trace_accum = 0.0f;
-                    }
-                } else if (left_mag > 0.05f && !have_basis) {
-                    // The user is actively pushing the stick but we
-                    // refused to slide because we don't have a fresh
-                    // tracked pose to use as the forward basis.
-                    // Surface this once per second so the runtime log
-                    // tells us *why* the player isn't moving (head
-                    // pose unavailable / left controller not tracked /
-                    // VIEW reference space invalid).
-                    static float warn_accum = 0.0f;
-                    warn_accum += dt;
-                    if (warn_accum >= 1.0f) {
-                        const char* mode_name =
-                            (locomotion_ == LocomotionMode::SlideHeadRelative)
-                                ? "head_rel"
-                                : "ctrl_rel";
-                        PTV_WARN(
-                            "Slide[{}] no basis (head_fresh={}, "
-                            "left_hand_valid={}, head_valid={}). "
-                            "Player won't move until tracking is restored.",
-                            mode_name, head_pose_fresh ? "yes" : "no",
-                            hand_valid[0] ? "yes" : "no",
-                            input.head_valid ? "yes" : "no");
-                        warn_accum = 0.0f;
-                    }
-                }
+                hs.velocity = hands_[h].world_velocity;
+                hs.held_entity =
+                    (hands_[h].held == entt::null)
+                        ? InputSnapshot::kInvalidEntity
+                        : static_cast<std::uint32_t>(hands_[h].held);
             }
-        } else {
-            // Menu open -> bleed any residual slide speed so we don't
-            // resume motion the moment the user confirms.
-            current_slide_speed_mps_ = 0.0f;
-        }
+            s.button_a = input.button_a;
+            s.button_b = input.button_b;
+            s.button_x = input.button_x;
+            s.button_y = input.button_y;
+            s.prev_button_a = prev_input_.button_a;
+            s.prev_button_b = prev_input_.button_b;
+            s.prev_button_x = prev_input_.button_x;
+            s.prev_button_y = prev_input_.button_y;
+            if (input.head_valid) {
+                s.head_position = head_world_pos;
+                s.head_rotation = head_world_rot;
+                s.head_valid = true;
+            }
+            return s;
+        };
 
         // ------------------------------------------------------------
-        // Grab: grip (squeeze) edge-triggered. Press-to-grab nearest
-        // grabbable within 15cm; release-to-drop + throw impulse based
-        // on the smoothed per-frame hand velocity.
+        // Smoothed hand velocity.
+        //
+        // Part of the input layer, not gameplay: it is a derived reading of
+        // the tracked pose, published on the snapshot so throw (and any
+        // generated mechanic that cares about a swing) can use it. Raw
+        // per-frame differences of Quest 3 inside-out tracking are far too
+        // noisy to throw with, hence the exponential average.
         // ------------------------------------------------------------
-        constexpr float kGrabPress = 0.7f;
-        constexpr float kGrabRelease = 0.4f;
-        constexpr float kGrabRadius = 0.18f;
-        constexpr float kThrowScale = 1.5f;   // multiply measured velocity
-
         for (int h = 0; h < 2; ++h) {
             auto& hs = hands_[h];
-
-            // Smooth hand velocity for a stable throw impulse on release.
-            if (hand_valid[h]) {
-                if (hs.had_prev_pos && dt > 0.0f) {
-                    Vec3 inst = (hand_world_pos[h] - hs.prev_world_pos) / dt;
-                    // EMA: alpha=0.4 is a good balance between responsiveness
-                    // and filtering out the jitter of the Quest 3 cameras.
-                    hs.world_velocity = hs.world_velocity * 0.6f + inst * 0.4f;
-                }
-                hs.prev_world_pos = hand_world_pos[h];
-                hs.had_prev_pos = true;
-            } else {
+            if (!hand_valid[h]) {
                 hs.had_prev_pos = false;
                 hs.world_velocity = Vec3(0.0f);
+                continue;
             }
-
-            const float grip_now = input.grip[h];
-            const bool was_pressed = hs.prev_grip >= kGrabPress;
-            const bool is_pressed  = grip_now >= kGrabPress;
-            const bool is_released = grip_now < kGrabRelease;
-
-            if (!was_pressed && is_pressed && hs.held == entt::null && hand_valid[h]) {
-                // Edge press -> try to grab nearest grabbable.
-                entt::entity target = find_grabbable(world_, hand_world_pos[h],
-                                                     kGrabRadius);
-                if (target != entt::null) {
-                    hs.held = target;
-                    // Compute hold offset in hand-local frame so the cube
-                    // keeps its relative orientation to the hand when grabbed.
-                    const auto& ct = world_.registry().get<CTransform>(target).t;
-                    Mat4 inv_hand = glm::inverse(hand_world[h]);
-                    Vec4 local_p = inv_hand * Vec4(ct.position, 1.0f);
-                    hs.hold_local_offset = Vec3(local_p);
-                    Quat inv_hand_q = glm::inverse(hand_world_rot[h]);
-                    hs.hold_local_rot = inv_hand_q * ct.rotation;
-                    // Release the OTHER hand if it's holding the same entity.
-                    auto& other = hands_[1 - h];
-                    if (other.held == target) {
-                        other.held = entt::null;
-                    }
-                    physics_.set_kinematic(
-                        static_cast<std::uint32_t>(target), true);
-                    PTV_INFO("Grab: hand {} -> entity {}",
-                             h == 0 ? "L" : "R",
-                             static_cast<uint32_t>(target));
-                }
-            } else if (was_pressed && is_released && hs.held != entt::null) {
-                // Edge release -> drop + throw.
-                auto held = hs.held;
-                physics_.set_kinematic(
-                    static_cast<std::uint32_t>(held), false);
-                physics_.apply_impulse(
-                    static_cast<std::uint32_t>(held),
-                    hs.world_velocity * kThrowScale *
-                        /* scaled by mass ~0.4kg in scene */ 0.4f);
-                PTV_INFO("Release: hand {} drops entity {} @ {:.2f} m/s",
-                         h == 0 ? "L" : "R",
-                         static_cast<uint32_t>(held),
-                         glm::length(hs.world_velocity));
-                hs.held = entt::null;
+            if (hs.had_prev_pos && dt > 0.0f) {
+                const Vec3 inst = (hand_world_pos[h] - hs.prev_world_pos) / dt;
+                // alpha = 0.4 balances responsiveness against camera jitter.
+                hs.world_velocity = hs.world_velocity * 0.6f + inst * 0.4f;
             }
-
-            hs.prev_grip = grip_now;
+            hs.prev_world_pos = hand_world_pos[h];
+            hs.had_prev_pos = true;
         }
 
         // ------------------------------------------------------------
-        // Drive kinematic held bodies BEFORE the physics step so Jolt
-        // integrates their motion and resolves contacts correctly.
+        // Input-phase mechanics.
+        //
+        // These run BEFORE the snapshot is frozen and BEFORE the physics
+        // step, so anything they decide (where the player is, what each hand
+        // holds) is visible to every Simulate-phase mechanic this same frame.
+        // Locomotion, grab and throw all live here.
         // ------------------------------------------------------------
-        for (int h = 0; h < 2; ++h) {
-            auto& hs = hands_[h];
-            if (hs.held == entt::null || !hand_valid[h]) continue;
-            // Compose the target world transform from the recorded
-            // offset so the cube feels attached to the hand.
-            Vec3 target_pos = hand_world_pos[h] +
-                              hand_world_rot[h] * hs.hold_local_offset;
-            Quat target_rot = hand_world_rot[h] * hs.hold_local_rot;
-            physics_.move_kinematic(static_cast<std::uint32_t>(hs.held),
-                                    target_pos, target_rot, dt);
+        mech_draw_items_.clear();
+        {
+            const InputSnapshot provisional = build_snapshot();
+            mechanics_.update(world_, dt, provisional, mech_ctx_,
+                              MechanicPhase::Input);
         }
 
+        // Left-stick SLIDE locomotion now lives in the built-in mechanics
+        // builtin.locomotion.slide.head_relative and
+        // builtin.locomotion.slide.controller_relative (Input phase). They
+        // gate themselves on ILocomotion::active_mode() and input_locked(),
+        // so the locomotion menu still suppresses movement while it is open.
+
+        // Grab, throw and the kinematic follow for held objects now live in
+        // the builtin.grab / builtin.throw mechanics, which ran in the Input
+        // phase above. All this frame still owns is the hand velocity that
+        // feeds them, computed further up with the rest of the input layer.
+
         // ------------------------------------------------------------
-        // Physics + mechanics (unchanged order, but now happens AFTER
-        // locomotion + grab so kinematic targets are applied this step).
+        // Freeze the immutable snapshot every other mechanic sees.
+        //
+        // Built HERE -- after grab/throw have resolved, before physics --
+        // so ``held_entity`` is this frame's value, not last frame's.
+        // ------------------------------------------------------------
+        const InputSnapshot snapshot = build_snapshot();
+
+        // ------------------------------------------------------------
+        // Physics, then the ordinary (Simulate-phase) mechanics, which see
+        // settled transforms and an up-to-date snapshot.
         // ------------------------------------------------------------
         physics_.step(dt);
         physics_.sync_to_world(world_);
 
-        // ------------------------------------------------------------
-        // Build the read-only input snapshot handed to every mechanic.
-        // All poses are already rig-composed (world space) so generated
-        // mechanics can compare them directly against entity transforms.
-        // Grab state (hands_[h].held) was resolved above, so weapon/tool
-        // mechanics can see which hand holds them THIS frame.
-        // ------------------------------------------------------------
-        InputSnapshot snapshot;
-        snapshot.dt = dt;
-        for (int h = 0; h < 2; ++h) {
-            auto& hs = snapshot.hands[h];
-            hs.trigger = input.trigger[h];
-            hs.grip = input.grip[h];
-            hs.thumbstick = Vec2(input.thumbstick[h].x, input.thumbstick[h].y);
-            hs.prev_trigger = prev_input_.trigger[h];
-            hs.prev_grip = prev_input_.grip[h];
-            if (hand_valid[h]) {
-                hs.hand_position = hand_world_pos[h];
-                hs.hand_rotation = hand_world_rot[h];
-                hs.hand_valid = true;
-            }
-            if (aim_world_valid[h]) {
-                hs.aim_position =
-                    mat_translation(rig_mat * xr_pose_to_matrix(aim_poses[h]));
-                hs.aim_rotation = aim_world_rot[h];
-                hs.aim_valid = true;
-            }
-            hs.held_entity = (hands_[h].held == entt::null)
-                                 ? InputSnapshot::kInvalidEntity
-                                 : static_cast<std::uint32_t>(hands_[h].held);
-        }
-        snapshot.button_a = input.button_a;
-        snapshot.button_b = input.button_b;
-        snapshot.button_x = input.button_x;
-        snapshot.button_y = input.button_y;
-        snapshot.prev_button_a = prev_input_.button_a;
-        snapshot.prev_button_b = prev_input_.button_b;
-        snapshot.prev_button_x = prev_input_.button_x;
-        snapshot.prev_button_y = prev_input_.button_y;
-        if (input.head_valid) {
-            snapshot.head_position = head_world_pos;
-            snapshot.head_rotation = head_world_rot;
-            snapshot.head_valid = true;
-        }
-
-        mechanics_.update(world_, dt, snapshot);
+        mechanics_.update(world_, dt, snapshot, mech_ctx_,
+                          MechanicPhase::Simulate);
 
         // Remember this frame's raw input for next frame's edge detection.
         prev_input_ = input;
@@ -1374,9 +1317,12 @@ int Application::run(const Config& cfg) {
             // a grabbable is in range so the user knows where to squeeze.
             for (int h = 0; h < 2; ++h) {
                 if (!hand_valid[h]) continue;
+                // Mirrors builtin.grab's reach so the highlight lights up
+                // exactly when a squeeze would actually pick something up.
+                constexpr float kHoverRadius = 0.18f;
                 const bool hovering = hands_[h].held != entt::null ||
                     find_grabbable(world_, hand_world_pos[h],
-                                   kGrabRadius) != entt::null;
+                                   kHoverRadius) != entt::null;
                 const Vec4 left_base{0.35f, 0.55f, 1.00f, 1.0f};
                 const Vec4 right_base{1.00f, 0.45f, 0.40f, 1.0f};
                 Vec4 c = (h == 0) ? left_base : right_base;
@@ -1449,25 +1395,15 @@ int Application::run(const Config& cfg) {
                 }
             }
 
-            // -------- Teleport aim arc + landing marker --------
-            if (teleport_.aiming && teleport_.arc_points.size() >= 2) {
-                const Vec4 arc_color = teleport_.have_target
-                                           ? Vec4(0.30f, 0.75f, 1.00f, 1.0f)
-                                           : Vec4(0.60f, 0.30f, 0.30f, 1.0f);
-                push_arc(items, teleport_.arc_points, arc_color);
-                if (teleport_.have_target) {
-                    // Landing disc: flat cyan quad at the target point,
-                    // sized like a 0.8m circle (approximated by a box).
-                    Mat4 m = glm::translate(Mat4(1.0f), teleport_.target +
-                                                          Vec3(0, 0.01f, 0));
-                    m = glm::scale(m, Vec3(0.4f, 0.01f, 0.4f));
-                    Renderer::DrawItem di;
-                    di.model = m;
-                    di.color = Vec4(0.30f, 0.85f, 1.00f, 1.0f);
-                    di.material_id = 3.0f;
-                    items.push_back(di);
-                }
-            }
+            // The teleport aim arc + landing marker used to be drawn here.
+            // The teleport mechanic now submits them through IDebugDraw and
+            // they arrive with the mechanic draw items below.
+
+            // -------- Geometry submitted by mechanics via IDebugDraw -------
+            // One-frame lifetime: mechanics re-submit every frame they want
+            // something visible. Cleared at the top of the next frame.
+            items.insert(items.end(), mech_draw_items_.begin(),
+                         mech_draw_items_.end());
 
             xr_.render_frame(
                 [&](const std::array<XrRuntime::EyeImage, 2>& eyes,
@@ -1699,7 +1635,19 @@ bool Application::initialize(const Config& cfg) {
     // authored. Safe to call whether or not a scene was loaded.
     build_render_env();
 
-    mechanics_.attach_bindings(world_);
+    // Stand up the services mechanics are allowed to call, then attach.
+    // Must precede attach_bindings: on_attach receives the context.
+    locomotion_svc_ = std::make_unique<LocomotionService>(this);
+    physics_svc_ = std::make_unique<PhysicsAccessService>(this);
+    draw_svc_ = std::make_unique<DebugDrawService>(this);
+    hands_svc_ = std::make_unique<HandsService>(this);
+    mech_ctx_.locomotion = locomotion_svc_.get();
+    mech_ctx_.physics = physics_svc_.get();
+    mech_ctx_.draw = draw_svc_.get();
+    mech_ctx_.hands = hands_svc_.get();
+
+    ensure_player_locomotion_bindings();
+    mechanics_.attach_bindings(world_, mech_ctx_);
     // NOTE: DebugUI is intentionally NOT initialized here. See
     // README / troubleshooting: ImGui >= 1.92 asserts on first Begin()
     // without a renderer backend that sets RendererHasTextures.

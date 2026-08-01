@@ -87,7 +87,6 @@ See `docs/rendering.md` for the tier table.
 ```
 builtin.teleport
 builtin.locomotion.teleport
-builtin.smooth_locomotion
 builtin.locomotion.slide.head_relative
 builtin.locomotion.slide.controller_relative
 builtin.snap_turn

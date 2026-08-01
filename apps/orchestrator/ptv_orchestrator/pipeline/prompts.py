@@ -574,6 +574,7 @@ Public engine headers (use exactly these spellings):
   #include "ptv/api/IBehaviour.h"      // for kind=ai
   #include "ptv/api/IDialogueHook.h"   // for kind=dialogue
   #include "ptv/api/InputSnapshot.h"   // live controller/headset input (pulled in by IMechanic.h)
+  #include "ptv/api/MechanicContext.h" // locomotion/physics/draw/hand services (pulled in by IMechanic.h)
   #include "ptv/ecs/World.h"           // World, CTag, CTransform, CPhysics, CMesh, CMechanicBinding
                                        //   + tag read helper: has_tag(world, e, "x")
   #include "ptv/math/Math.h"           // Vec3, Quat, Transform, Mat4
@@ -601,10 +602,11 @@ Dependency-task generated headers (a header owned by a task in your
                                     //   depends_on: ["shooting_hub"]
 
 DO NOT include any header that is not in the lists above. In particular
-there is NO ptv/api/input.h, no ptv/api/locomotion.h, no ptv/api/haptics.h,
-no ptv/api/ui.h, no ptv/api/time.h, no ptv/api/audio_capture.h, no
-ptv/api/http.h, no ptv/api/save_state.h, no ptv/scene/node.h, no
-ptv/scene/volume.h. These do not exist. The boundary checker will REJECT
+there is NO ptv/api/input.h, no ptv/api/haptics.h, no ptv/api/ui.h, no
+ptv/api/time.h, no ptv/api/audio_capture.h, no ptv/api/http.h, no
+ptv/api/save_state.h, no ptv/scene/node.h, no ptv/scene/volume.h. (Locomotion
+and physics ARE available -- through MechanicContext, described below, NOT
+through a header of their own.) These do not exist. The boundary checker will REJECT
 your task (not silently strip) and you will see a clear error message.
 
 Standard headers are limited to the deterministic, side-effect-free set
@@ -626,14 +628,31 @@ For kind=mechanic (most common):
     class IMechanic {
     public:
         virtual ~IMechanic() = default;
+        // NOTE the 4th / 5th arguments: a read-only InputSnapshot with live
+        // controller+headset input, and a MechanicContext of engine services.
+        // You MUST match these signatures exactly.
         virtual void on_attach(World& world, std::uint32_t entity,
-                               const nlohmann::json& params) = 0;
-        // NOTE: on_update takes a 4th argument -- a read-only InputSnapshot
-        // with live controller/headset input. You MUST match this signature.
-        virtual void on_update(World& world, std::uint32_t entity,
-                               float dt, const InputSnapshot& input) = 0;
+                               const nlohmann::json& params,
+                               MechanicContext& ctx);
+        virtual void on_update(World& world, std::uint32_t entity, float dt,
+                               const InputSnapshot& input,
+                               MechanicContext& ctx);
         virtual void on_detach(World& world, std::uint32_t entity) = 0;
         virtual std::string id() const = 0;
+
+        // Optional. Override ONLY if you need to; the defaults are right for
+        // almost every generated mechanic.
+        //   MechanicPhase::Simulate (default) -- runs after physics.
+        //   MechanicPhase::Input             -- runs before the InputSnapshot
+        //     is frozen and before the physics step. Needed only if your
+        //     mechanic moves the player or decides what a hand is holding.
+        virtual MechanicPhase phase() const;
+        //   MechanicScope::Entity (default) -- one instance per bound entity.
+        //   MechanicScope::Player           -- ONE shared instance no matter
+        //     how many entities bind it; on_attach still runs per entity but
+        //     on_update ticks once. Use for player-global systems, otherwise
+        //     a loop over both hands would run once per bound entity.
+        virtual MechanicScope scope() const;
     };
     }
 
@@ -735,6 +754,7 @@ ptv/api/InputSnapshot.h) exposes:
     .thumbstick               // glm::vec2
     .hand_position/.hand_rotation/.hand_valid  // grip (palm) pose, world space
     .aim_position/.aim_rotation/.aim_valid     // controller-forward pose (rays/muzzle)
+    .velocity                 // smoothed world hand velocity, m/s (throws/swings)
     .held_entity              // entity this hand holds, or kInvalidEntity
   input.button_a/b/x/y        // A/B on RIGHT controller, X/Y on LEFT
   input.head_position/.head_rotation/.head_valid  // HMD pose, world space
@@ -759,6 +779,48 @@ So the robust pattern is:
     // or for a trigger/grip on a specific hand:
     auto h = (hand_str_ == "left") ? InputSnapshot::Left : InputSnapshot::Right;
     if (input.trigger_pressed(h)) { /* ... */ }
+
+# Engine services (MechanicContext)
+
+``on_update`` also receives ``MechanicContext& ctx`` -- the ONLY sanctioned
+way to move the player or touch physics. All four pointers are non-null
+while a scene is loaded. Every mutating call is validated and CLAMPED by the
+engine (non-finite values rejected, teleport distance capped to the scene's
+limit and never below the floor, impulse magnitude and per-call rig
+translation capped), so a bad value degrades to "nothing happens" rather
+than breaking the player out of the world.
+
+  ctx.locomotion   // move the player rig (the stage origin in world space)
+    ->position() / ->yaw_radians()
+    ->translate(Vec3 delta) / ->rotate_yaw(float radians)
+    ->teleport_to(Vec3 position)
+    ->active_mode() / ->set_active_mode(LocomotionMode)  // Teleport |
+                     // SlideHeadRelative | SlideControllerRelative
+    ->input_locked()   // true while the locomotion menu owns the sticks;
+                       // locomotion mechanics MUST NOT move on those frames
+    ->tunables()       // scene-authored comfort values -- default to these
+                       // (slide_max_speed_mps, teleport_max_horizontal_m,
+                       //  snap_turn_degrees, accel/decel taus, ...)
+
+  ctx.physics      // narrow facade; do NOT include ptv/physics/ or Jolt
+    ->raycast(origin, dir, max_dist, PhysicsRayHit& out) -> bool
+    ->has_body(entity)
+    ->set_kinematic(entity, bool) / ->move_kinematic(entity, pos, rot, dt)
+    ->apply_impulse(entity, Vec3 impulse)
+
+  ctx.draw         // one-frame debug/gameplay geometry; re-submit each frame
+    ->line(a, b, color, thickness) / ->polyline(points, count, color, thickness)
+    ->marker(center, radius, color)
+
+  ctx.hands        // what each hand holds; normally just read
+                   // input.hands[h].held_entity instead
+    ->held_entity(hand) / ->set_held_entity(hand, entity)
+
+If you write a locomotion mechanic, gate it on
+``ctx.locomotion->active_mode()`` matching the style you implement and on
+``!ctx.locomotion->input_locked()``, and declare
+``MechanicPhase::Input`` + ``MechanicScope::Player``. Otherwise several
+locomotion mechanics bound in the same scene will all move the player at once.
 
 Poses are already in WORLD space (same frame as CTransform), so you can
 compare ``input.hands[h].hand_position`` directly against entity positions
@@ -806,10 +868,15 @@ If the user message contains a "BASE BUILT-IN SOURCE" block, this is a
 ``builtin+config_code_edit`` task: COPY that source as your starting point
 and EDIT it to satisfy the CodeTask description. Do NOT rewrite from scratch
 and do NOT modify or replace the built-in itself -- register your result
-under the NEW id ``generated.<code_task_id>``. If the base note says the
-built-in's real behavior lives in the engine core (grab/throw/locomotion/
-snap turn), re-implement the needed behavior here via IMechanic +
-InputSnapshot + World (you cannot call engine internals).
+under the NEW id ``generated.<code_task_id>``, so the original built-in stays
+available unchanged for other games and other bindings in this one.
+
+The injected source is the built-in's COMPLETE implementation (its module may
+span several files, all of which are provided). Built-ins are written against
+exactly the API you are allowed to use -- IMechanic, InputSnapshot, World and
+MechanicContext -- so everything you see is fair game to keep, change or drop.
+If the module uses a shared helper header, copy the parts you need into your
+own emitted files rather than including the engine's copy by path.
 
 # Minimum viable mechanic example (compiles as-is)
 
@@ -832,11 +899,13 @@ the macro called EXACTLY ONCE across the entire file set).
 
     class ExampleBlink : public IMechanic {
     public:
-        void on_attach(World&, std::uint32_t, const nlohmann::json& p) override {
+        void on_attach(World&, std::uint32_t, const nlohmann::json& p,
+                       MechanicContext&) override {
             period_ = p.value("period_sec", 1.0f);
         }
         void on_update(World& w, std::uint32_t e, float dt,
-                       const InputSnapshot& input) override {
+                       const InputSnapshot& input,
+                       MechanicContext& ctx) override {
             t_ += dt;
             // Use world.has<>/world.get<> -- never world.registry().all_of<>(e)
             if (!w.has<CTransform>(e)) return;
@@ -871,9 +940,12 @@ the macro called EXACTLY ONCE across the entire file set).
    NOT ``REGISTER_MECHANIC``.
 4. Do NOT write ``class X : public ptv::IMechanic`` with custom method
    names like ``OnStart`` / ``Configure`` / ``Update(ctx)``. The only
-   overridable methods are the four listed in the interface above.
-5. Do NOT reference ``ctx.input`` / ``ctx.locomotion`` / ``ctx.haptics``
-   / ``ctx.time`` / ``ctx.save`` / ``ctx.ui``. No such context exists.
+   overridable methods are the ones listed in the interface above.
+5. The ``MechanicContext& ctx`` argument has EXACTLY four members:
+   ``ctx.locomotion``, ``ctx.physics``, ``ctx.draw`` and ``ctx.hands``.
+   There is no ``ctx.input`` (input arrives as the separate
+   ``InputSnapshot`` argument), and no ``ctx.haptics`` / ``ctx.time`` /
+   ``ctx.save`` / ``ctx.ui``.
 6. There is NO per-file line cap and NO requirement to use a single
    .cpp. Use the natural file split for the mechanic. When you split
    across files, use a shared ``.h`` header that you also emit in your

@@ -23,9 +23,17 @@ orchestrator and a reusable Vulkan + OpenXR engine core.
    submission / release signing remains out of scope.
 4. Schema-first development. Once a schema exists in `packages/schemas`,
    downstream stages MUST consume the structured artifact, not the raw prompt.
-5. Reuse built-in VR mechanics. The engine ships reusable, data-driven modules
-   (teleport, smooth locomotion, grab, throw, trigger zones, etc.). Generated
-   code adds mechanics; it does not reimplement basic VR behavior.
+5. Reuse built-in VR mechanics. The engine ships reusable, data-driven
+   modules under `engine/runtime/src/mechanics/builtin/<mechanic>/`
+   (teleport, head-relative and controller-relative slide, snap turn, grab,
+   throw). Each is a real `IMechanic` written against the same public API
+   generated code uses — `InputSnapshot`, `World` and `MechanicContext`
+   (locomotion / physics / debug-draw / hand services, all engine-clamped) —
+   so a `builtin+config_code_edit` task can copy one and edit it into a NEW
+   generated mechanic. Generated code adds mechanics; it does not
+   reimplement basic VR behavior, and it never modifies a built-in.
+   `builtin.smooth_locomotion` has been REMOVED; use the explicit
+   `builtin.locomotion.slide.*` ids.
 6. Generated C++ (`.cpp`, `.h`, `.hpp`) is confined to
    `engine/generated/{mechanics,ai,dialogue,world}/`. It MUST NOT modify the
    renderer, XR session loop, platform layer, memory core, or base ECS.

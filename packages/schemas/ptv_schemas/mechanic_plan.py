@@ -70,11 +70,11 @@ class ControllerBinding(StrictModel):
 
 
 # Canonical ids of built-in reusable mechanics. Keep this list in sync with
-# engine/runtime/src/mechanics/MechanicRegistry.cpp.
+# the PTV_REGISTER_MECHANIC calls under
+# engine/runtime/src/mechanics/builtin/<mechanic>/.
 BUILTIN_MECHANIC_IDS = {
     "builtin.teleport",
     "builtin.locomotion.teleport",
-    "builtin.smooth_locomotion",
     "builtin.locomotion.slide.head_relative",
     "builtin.locomotion.slide.controller_relative",
     "builtin.snap_turn",

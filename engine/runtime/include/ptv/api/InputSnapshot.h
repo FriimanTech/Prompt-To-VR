@@ -54,6 +54,12 @@ struct InputSnapshot {
         glm::quat aim_rotation{1.0f, 0.0f, 0.0f, 0.0f};
         bool aim_valid{false};
 
+        // Smoothed world-space hand velocity in m/s. Exponentially averaged
+        // by the engine, because the raw per-frame difference of Quest 3
+        // inside-out tracking is far too noisy to drive a throw. Zero while
+        // the hand is untracked.
+        glm::vec3 velocity{0.0f};
+
         // Entity currently held by this hand via the built-in grab system, or
         // ``kInvalidEntity`` when the hand is empty. Lets a weapon/tool
         // mechanic detect "am I being held, and by which hand?".

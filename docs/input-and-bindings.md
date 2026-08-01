@@ -10,18 +10,70 @@ OpenXR input flows into generated mechanics every frame:
 ```
 XrRuntime::sync_input  ->  InputState (raw OpenXR: triggers, grips,
                             thumbsticks, A/B/X/Y, hand/aim/head poses)
-Application.cpp         ->  builds InputSnapshot (rig-applied WORLD-space
-                            poses + per-hand held entity) and calls
-                            mechanics_.update(world, dt, snapshot)
-MechanicHost::update    ->  IMechanic::on_update(world, entity, dt, input)
+Application.cpp         ->  composes rig-applied WORLD-space poses and
+                            smoothed hand velocities
+                        ->  provisional InputSnapshot
+MechanicHost::update    ->  Phase::Input mechanics (locomotion, grab, throw)
+Application.cpp         ->  FREEZES the InputSnapshot (held_entity is now
+                            this frame's value)
+                        ->  physics step
+MechanicHost::update    ->  Phase::Simulate mechanics -- the default
 ```
+
+`IMechanic::on_update(world, entity, dt, input, ctx)` is called in whichever
+phase the mechanic declares.
+
+### Why there are two phases
+
+Some mechanics PRODUCE state that others CONSUME in the same frame. Grab is
+the canonical case: which entity a hand holds must be settled before the
+snapshot is frozen. Were grab to run after, every other mechanic would read
+last frame's `held_entity`, and a weapon mechanic would not notice it had
+been picked up until a frame later. Running grab in `Phase::Input` also puts
+its kinematic target in place *before* the physics step, so held objects do
+not lag or jitter.
+
+Generated mechanics should stay on the default `Phase::Simulate`, where ECS
+transforms are already settled for the frame. Use `Phase::Input` only to move
+the player or to decide what a hand is holding.
 
 `InputSnapshot` (`engine/runtime/include/ptv/api/InputSnapshot.h`) is a
 plain read-only POD containing NO OpenXR types (glm + std only), so it
 stays inside the generated-code include whitelist. It exposes, per hand
 (`InputSnapshot::Left` / `Right`): `trigger`, `grip`, `thumbstick`,
-previous-frame `prev_trigger` / `prev_grip`, `hand_*`/`aim_*` poses, and
-`held_entity`. Global: `button_a/b/x/y` (+ `prev_*`), `head_*`, `dt`.
+previous-frame `prev_trigger` / `prev_grip`, `hand_*`/`aim_*` poses,
+`velocity` (smoothed world m/s), and `held_entity`. Global:
+`button_a/b/x/y` (+ `prev_*`), `head_*`, `dt`.
+
+### Engine services (`MechanicContext`)
+
+`on_update` also receives `MechanicContext& ctx`
+(`engine/runtime/include/ptv/api/MechanicContext.h`) -- the only sanctioned
+way to move the player or touch physics, and the reason built-in locomotion
+and grab can be ordinary mechanics rather than engine-core special cases:
+
+| Service | Purpose |
+| ------- | ------- |
+| `ctx.locomotion` | Read/move the player rig, arbitrate the active locomotion mode, read the scene's comfort `tunables()`. |
+| `ctx.physics` | `raycast`, `set_kinematic`, `move_kinematic`, `apply_impulse`. A narrow facade -- generated code never includes `ptv/physics/` or Jolt. |
+| `ctx.draw` | One-frame lines, polylines and markers (the teleport arc uses this). |
+| `ctx.hands` | Publish/read which entity each hand holds. |
+
+Every mutating call is validated and CLAMPED inside the engine: non-finite
+values are rejected, teleport distance is capped to the scene's limit and
+never lands below the floor, and impulse magnitude and per-call rig
+translation are bounded. Generated code is untrusted, so a bad value has to
+degrade into "nothing happens" rather than fling the player out of the world.
+Clamps log once per site so they are debuggable.
+
+### Mechanic scope
+
+`MechanicScope::Entity` (the default) creates one instance per bound entity.
+`MechanicScope::Player` creates ONE shared instance no matter how many
+entities bind it -- `on_attach` still runs per entity (that is how grab marks
+each prop grabbable) but `on_update` ticks exactly once. Player-global systems
+need this: `builtin.grab` is bound to every grabbable prop, and an
+entity-scoped per-hand grab loop would grab and throw once per prop.
 
 Convenience helpers: `trigger_pressed/released/down(hand)`,
 `grip_pressed/released/down(hand)`, `button_a_pressed()` … (rising edge),
@@ -69,11 +121,13 @@ The running mechanic reads them at `on_attach` and checks the live
 `InputSnapshot` in `on_update`:
 
 ```cpp
-// on_attach
+// on_attach(World&, std::uint32_t, const nlohmann::json& params,
+//           MechanicContext&)
 control_ = params.value("control", std::string("a"));
 hand_str_ = params.value("hand", std::string("right"));
 
-// on_update
+// on_update(World&, std::uint32_t, float dt, const InputSnapshot& input,
+//           MechanicContext& ctx)
 if (control_ == "a" && input.button_a_pressed()) { /* jump */ }
 ```
 
@@ -96,6 +150,10 @@ it and cover/collision blocks it.
 ## Scope
 
 The bridge makes generated mechanics *capable* of reacting to real input;
-per-game feel still depends on the generated C++. Existing projects
-authored before the bridge must re-run the code-generation stage so their
-mechanics are regenerated against the new `on_update` signature.
+per-game feel still depends on the generated C++.
+
+`IMechanic` keeps context-free `on_attach` / `on_update` overloads that the
+context-taking ones forward to, so mechanics generated before
+`MechanicContext` existed still compile untouched. New code should override
+the context-taking forms; re-run the code-generation stage on an older
+project to regenerate it against them.
