@@ -164,23 +164,29 @@ The Tripo wrapper polls every 3 s with a 600 s timeout by default. You can
 raise the ceiling by editing `TripoConfig.timeout_s`. Very large models
 with `texture_quality="detailed"` can take 60-120 s per asset.
 
-## Tripo stage logs `No module named 'aiohttp'` for every asset
+## Tripo stage fails with `Unsupported Tripo model version`
 
-The `tripo3d` PyPI package lists `aiohttp` as an *optional* dependency even
-though its async HTTP paths (upload / poll / download) import it at runtime.
-If your venv was created before this was pinned, install aiohttp manually:
+`TRIPO_MODEL_VERSION` in `.env` is set to something V3 does not accept. The
+whitelist is `v3.1-20260211`, `v3.0-20250812`, `v2.5-20250123` and
+`P1-20260311`; leave the variable **blank** to get the default
+(`v3.1-20260211`). A common mistake is pasting `v2.5-20260210`, which is the
+auto-*rig* model version, not a generation one.
 
-```powershell
-.\vrvenv\Scripts\pip.exe install "aiohttp>=3.8.0"
-```
+Unlike V2, V3 has no server-side default for this field, so the client
+resolves and validates it at startup rather than letting the API 400
+mid-run.
 
-`ptv-provider-clients` now declares `aiohttp>=3.8.0` as a direct dependency
-so fresh installs will always pick it up.
+## Tripo stage fails with `HTTP 401` on the balance preflight
+
+Either the key is wrong, or the client is pointed at the wrong region. A
+Tripo key only validates in the region it was issued in. International keys
+use the default `https://openapi.tripo3d.ai/v3`; China-mainland keys need
+`TRIPO_BASE_URL=https://openapi.tripo3d.com/v3` in `.env`.
 
 ## Tripo stage fails with `[2010] You don't have enough credit`
 
 Your Tripo account is out of generation credits. Buy more at
-<https://platform.tripo3d.ai/billing>, then click **Resume** in the web UI
+<https://developers.tripo3d.ai>, then click **Resume** in the web UI
 on the affected project — the pipeline will restart from the Tripo stage,
 produce the GLBs, and continue through asset normalization, code generation,
 and the CMake build.

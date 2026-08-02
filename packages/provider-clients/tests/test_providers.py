@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import json
 import sys
 import types as pytypes
 from pathlib import Path
+from unittest import mock
 
+import httpx
 import pytest
+import respx
 
 from ptv_providers import (
     AnthropicClient,
@@ -18,6 +22,7 @@ from ptv_providers import (
     TripoClient,
     TripoConfig,
 )
+from ptv_providers import tripo_client as tripo_client_mod
 from ptv_providers.anthropic_client import _concat_text_blocks
 
 
@@ -242,119 +247,287 @@ def test_google_missing_key_raises(monkeypatch, tmp_path):
 # Tripo
 # ---------------------------------------------------------------------------
 
-class _FakeTripoSdk:
-    def __init__(self, tmp_path: Path):
-        self._tmp = tmp_path
-        self.last_image_kwargs: dict | None = None
-
-        outer = self
-
-        class _AsyncCtx:
-            def __init__(self, api_key: str):
-                self.api_key = api_key
-
-            async def __aenter__(self):
-                return self
-
-            async def __aexit__(self, *exc):
-                return False
-
-            async def image_to_model(self, **kwargs):
-                outer.last_image_kwargs = kwargs
-                return "fake-task-id"
-
-            async def text_to_model(self, **kwargs):
-                outer.last_image_kwargs = kwargs
-                return "fake-task-id-text"
-
-            async def wait_for_task(self, task_id, **kw):
-                class _Task:
-                    status = "success"
-
-                return _Task()
-
-            async def download_task_models(self, task, out_dir: str):
-                p = Path(out_dir) / "model.glb"
-                p.parent.mkdir(parents=True, exist_ok=True)
-                p.write_bytes(b"glb!")
-                return {"pbr_model": str(p)}
-
-        self.TripoClient = _AsyncCtx
+V3 = "https://openapi.tripo3d.ai/v3"
+MODEL_URL = "https://cdn.example.test/out/rigged.glb"
 
 
-def test_tripo_image_to_model_forces_texture_and_pbr(tmp_path):
-    cfg = TripoConfig(api_key="tripo-key")
-    c = TripoClient(cfg)
-    fake = _FakeTripoSdk(tmp_path)
-    c._sdk = fake
+def _cfg(**overrides) -> TripoConfig:
+    """Client config with the real-world waits dialled out."""
 
+    base = {
+        "api_key": "tripo-key",
+        "poll_interval_s": 0.0,
+        "min_upload_interval_s": 0.0,
+    }
+    base.update(overrides)
+    return TripoConfig(**base)
+
+
+def _ok(data: dict) -> httpx.Response:
+    """A V3 success envelope."""
+
+    return httpx.Response(200, json={"code": 0, "status": "success", "data": data})
+
+
+def _mock_happy_path(respx_mock, *, endpoint: str) -> None:
+    """Wire upload -> create -> poll -> download for one successful task."""
+
+    respx_mock.post(f"{V3}/files").mock(
+        return_value=_ok({"file_token": "file_abc123"})
+    )
+    respx_mock.post(f"{V3}{endpoint}").mock(return_value=_ok({"task_id": "task_1"}))
+    respx_mock.get(f"{V3}/tasks/task_1").mock(
+        return_value=_ok(
+            {
+                "task_id": "task_1",
+                "status": "success",
+                "output": {"model_url": MODEL_URL},
+                "created_at": "2026-08-02T12:00:00Z",
+                "credits_consumed": 20,
+            }
+        )
+    )
+    respx_mock.get(MODEL_URL).mock(return_value=httpx.Response(200, content=b"glb!"))
+
+
+def _sent_body(respx_mock, endpoint: str) -> dict:
+    request = next(
+        call.request
+        for call in respx_mock.calls
+        if call.request.url.path.endswith(endpoint)
+    )
+    return json.loads(request.content)
+
+
+@respx.mock
+def test_tripo_image_to_model_sends_v3_body(tmp_path):
+    _mock_happy_path(respx.mock, endpoint="/generation/image-to-model")
     img = tmp_path / "ref.png"
     img.write_bytes(b"PNG")
-    result = c.image_to_model(image_path=img, out_dir=tmp_path / "out")
 
-    assert result.task_id == "fake-task-id"
+    result = TripoClient(_cfg()).image_to_model(
+        image_path=img, out_dir=tmp_path / "out"
+    )
+
+    assert result.task_id == "task_1"
     assert result.status == "success"
     assert result.primary_glb is not None
     assert result.primary_glb.read_bytes() == b"glb!"
 
-    kw = fake.last_image_kwargs
-    # Quality defaults verified against Tripo's platform docs
-    # (https://platform.tripo3d.ai/docs/generation, Apr 2026):
-    # textured + PBR, image-aligned, detailed texture+geometry,
-    # autofix on, oriented to the source image, latest v3.1 checkpoint.
-    assert kw["texture"] is True
-    assert kw["pbr"] is True
-    assert kw["texture_alignment"] == "original_image"
-    assert kw["texture_quality"] == "detailed"
-    assert kw["geometry_quality"] == "detailed"
-    assert kw["enable_image_autofix"] is True
-    assert kw["auto_size"] is True
-    assert kw["orientation"] == "align_image"
-    assert kw["model_version"] == "v3.1-20260211"
-    assert kw["image"] == str(img)
+    body = _sent_body(respx.mock, "/generation/image-to-model")
+    # V3 spells the checkpoint ``model`` (V2's ``model_version``) and REQUIRES
+    # it -- there is no server-side default.
+    assert body["model"] == "v3.1-20260211"
+    assert "model_version" not in body
+    # Native single-string input form, fed the token from POST /v3/files.
+    assert body["input"] == "file_abc123"
+    # Quality defaults: textured + PBR, image-aligned, Ultra-Mode geometry,
+    # autofix on, oriented to the source image.
+    assert body["texture"] is True
+    assert body["pbr"] is True
+    assert body["texture_alignment"] == "original_image"
+    assert body["texture_quality"] == "detailed"
+    assert body["geometry_quality"] == "detailed"
+    assert body["enable_image_autofix"] is True
+    assert body["auto_size"] is True
+    assert body["orientation"] == "align_image"
+    # V2's ``type`` discriminator is gone; the endpoint carries it now.
+    assert "type" not in body
 
 
-def test_tripo_text_to_model_carries_quality_defaults(tmp_path):
-    cfg = TripoConfig(api_key="tripo-key")
-    c = TripoClient(cfg)
-    fake = _FakeTripoSdk(tmp_path)
-    c._sdk = fake
-
-    c.text_to_model(prompt="a brass key", out_dir=tmp_path / "out")
-    kw = fake.last_image_kwargs
-    assert kw["texture"] is True
-    assert kw["pbr"] is True
-    assert kw["texture_quality"] == "detailed"
-    assert kw["geometry_quality"] == "detailed"
-    assert kw["enable_image_autofix"] is True
-    assert kw["model_version"] == "v3.1-20260211"
-    # text_to_model has no ``orientation`` kwarg in the SDK signature,
-    # so the wrapper must NOT inject one.
-    assert "orientation" not in kw
-    assert kw["prompt"] == "a brass key"
-
-
-def test_tripo_geometry_quality_skipped_for_legacy_v25(tmp_path):
-    cfg = TripoConfig(api_key="tripo-key", model_version="v2.5-20250123")
-    c = TripoClient(cfg)
-    fake = _FakeTripoSdk(tmp_path)
-    c._sdk = fake
-
+@respx.mock
+def test_tripo_uploads_to_v3_files_and_reads_file_token(tmp_path):
+    _mock_happy_path(respx.mock, endpoint="/generation/image-to-model")
     img = tmp_path / "ref.png"
     img.write_bytes(b"PNG")
-    c.image_to_model(image_path=img, out_dir=tmp_path / "out")
-    kw = fake.last_image_kwargs
-    # v2.5 rejects geometry_quality; the wrapper should drop it.
-    assert "geometry_quality" not in kw
-    # All other quality knobs should still be honored.
-    assert kw["texture_quality"] == "detailed"
-    assert kw["enable_image_autofix"] is True
-    assert kw["model_version"] == "v2.5-20250123"
+
+    TripoClient(_cfg()).image_to_model(image_path=img, out_dir=tmp_path / "out")
+
+    upload = next(
+        call.request
+        for call in respx.mock.calls
+        if call.request.url.path.endswith("/files")
+    )
+    assert upload.method == "POST"
+    assert b"ref.png" in upload.content
+    assert upload.headers["Authorization"] == "Bearer tripo-key"
+
+
+@respx.mock
+def test_tripo_upload_without_file_token_fails_loudly(tmp_path):
+    # V2 returned ``data.image_token``; on V3 that key is gone. If a stale
+    # server or proxy hands one back we must fail rather than send garbage.
+    respx.mock.post(f"{V3}/files").mock(
+        return_value=_ok({"image_token": "0196-legacy-uuid"})
+    )
+    img = tmp_path / "ref.png"
+    img.write_bytes(b"PNG")
+
+    with pytest.raises(ProviderCallError, match="no file_token"):
+        TripoClient(_cfg()).image_to_model(image_path=img, out_dir=tmp_path / "out")
+
+
+@respx.mock
+def test_tripo_text_to_model_omits_image_only_fields(tmp_path):
+    _mock_happy_path(respx.mock, endpoint="/generation/text-to-model")
+
+    TripoClient(_cfg()).text_to_model(
+        prompt="a brass key", out_dir=tmp_path / "out"
+    )
+
+    body = _sent_body(respx.mock, "/generation/text-to-model")
+    assert body["prompt"] == "a brass key"
+    assert body["model"] == "v3.1-20260211"
+    assert body["texture"] is True
+    assert body["pbr"] is True
+    assert body["geometry_quality"] == "detailed"
+    # No image, so no upload and none of the image-only knobs. Tripo fixes
+    # texture_alignment server-side for this endpoint.
+    assert "input" not in body
+    assert "orientation" not in body
+    assert "texture_alignment" not in body
+    assert not [
+        c for c in respx.mock.calls if c.request.url.path.endswith("/files")
+    ]
+
+
+@respx.mock
+def test_tripo_model_version_defaults_when_caller_passes_none(tmp_path):
+    # Regression: the pipeline used to pass ``model_version=<setting> or None``.
+    # On V2 that silently downgraded to the server default (v2.5); on V3 it is
+    # a hard 400, so the config must resolve it instead of omitting it.
+    _mock_happy_path(respx.mock, endpoint="/generation/text-to-model")
+
+    TripoClient(_cfg(model_version=None)).text_to_model(
+        prompt="x", out_dir=tmp_path / "out"
+    )
+
+    assert _sent_body(respx.mock, "/generation/text-to-model")["model"] == (
+        "v3.1-20260211"
+    )
+
+
+@pytest.mark.parametrize("version", ["v2.5-20250123", "P1-20260311"])
+@respx.mock
+def test_tripo_geometry_quality_omitted_where_unsupported(tmp_path, version):
+    # v2.5 predates the parameter, and P1 rejects it outright (the
+    # international service 400s even on an explicit false).
+    _mock_happy_path(respx.mock, endpoint="/generation/text-to-model")
+
+    TripoClient(_cfg(model_version=version)).text_to_model(
+        prompt="x", out_dir=tmp_path / "out"
+    )
+
+    body = _sent_body(respx.mock, "/generation/text-to-model")
+    assert "geometry_quality" not in body
+    assert body["model"] == version
+    # Everything else still applies.
+    assert body["texture_quality"] == "detailed"
+    assert body["enable_image_autofix"] is True
+
+
+def test_tripo_rejects_model_version_outside_v3_whitelist():
+    # v2.5-20260210 is the auto-RIG model version, not a generation one; it is
+    # a common copy-paste mistake and V3 would 400 on it mid-run.
+    with pytest.raises(ProviderConfigError, match="Unsupported Tripo model"):
+        TripoConfig(api_key="k", model_version="v2.5-20260210")
+
+
+@respx.mock
+def test_tripo_failed_task_surfaces_error_code_and_message(tmp_path):
+    respx.mock.post(f"{V3}/generation/text-to-model").mock(
+        return_value=_ok({"task_id": "task_1"})
+    )
+    # V2's ``banned`` status is now ``failed`` + error_code 2008, so the code
+    # is the only way to identify a moderation rejection.
+    respx.mock.get(f"{V3}/tasks/task_1").mock(
+        return_value=_ok(
+            {
+                "status": "failed",
+                "error_code": 2008,
+                "error_message": "input rejected by moderation",
+            }
+        )
+    )
+
+    with pytest.raises(ProviderCallError) as excinfo:
+        TripoClient(_cfg()).text_to_model(prompt="x", out_dir=tmp_path / "out")
+    assert "2008" in str(excinfo.value)
+    assert "moderation" in str(excinfo.value)
+
+
+@respx.mock
+def test_tripo_success_without_model_url_fails(tmp_path):
+    # V3 merges pbr_model / model / base_model into one ``model_url``; a
+    # success with none of it is a broken response, not a silent no-op.
+    respx.mock.post(f"{V3}/generation/text-to-model").mock(
+        return_value=_ok({"task_id": "task_1"})
+    )
+    respx.mock.get(f"{V3}/tasks/task_1").mock(
+        return_value=_ok({"status": "success", "output": {}})
+    )
+
+    with pytest.raises(ProviderCallError, match="model_url"):
+        TripoClient(_cfg()).text_to_model(prompt="x", out_dir=tmp_path / "out")
+
+
+@respx.mock
+def test_tripo_balance_parses_decimals():
+    # V2 returned integers here; V3 returns decimals.
+    respx.mock.get(f"{V3}/account/balance").mock(
+        return_value=_ok({"balance": 1234.56, "frozen": 20.5})
+    )
+
+    assert TripoClient(_cfg()).get_balance() == {
+        "balance": 1234.56,
+        "frozen": 20.5,
+    }
+
+
+@respx.mock
+def test_tripo_auth_failure_detected_by_http_401():
+    # V2 signalled auth failure with body code 1002, V3 uses code 2, and some
+    # deployments still emit the old one -- so we key off the HTTP status.
+    respx.mock.get(f"{V3}/account/balance").mock(
+        return_value=httpx.Response(401, json={"code": 2, "message": "bad key"})
+    )
+
+    with pytest.raises(ProviderConfigError, match="HTTP 401"):
+        TripoClient(_cfg()).get_balance()
+
+
+@respx.mock
+def test_tripo_retries_rate_limit_then_succeeds():
+    # 1007 is the per-minute creation quota and clears on its own.
+    route = respx.mock.get(f"{V3}/account/balance").mock(
+        side_effect=[
+            httpx.Response(200, json={"code": 1007, "message": "rate limited"}),
+            _ok({"balance": 10.0, "frozen": 0.0}),
+        ]
+    )
+
+    client = TripoClient(_cfg())
+    with mock.patch.object(tripo_client_mod.time, "sleep"):
+        assert client.get_balance()["balance"] == 10.0
+    assert route.call_count == 2
+
+
+@respx.mock
+def test_tripo_does_not_retry_insufficient_credit():
+    # 2010 never resolves by retrying; fail immediately with a top-up hint.
+    route = respx.mock.get(f"{V3}/account/balance").mock(
+        return_value=httpx.Response(
+            403, json={"code": 2010, "message": "insufficient credit"}
+        )
+    )
+
+    with pytest.raises(ProviderCallError, match="developers.tripo3d.ai"):
+        TripoClient(_cfg()).get_balance()
+    assert route.call_count == 1
 
 
 def test_tripo_missing_key_raises(tmp_path):
-    cfg = TripoConfig(api_key=None)
-    c = TripoClient(cfg)
-    c._sdk = _FakeTripoSdk(tmp_path)
     with pytest.raises(ProviderConfigError):
-        c.image_to_model(image_path="x.png", out_dir=tmp_path)
+        TripoClient(TripoConfig(api_key=None)).image_to_model(
+            image_path="x.png", out_dir=tmp_path
+        )

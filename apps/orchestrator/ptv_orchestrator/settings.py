@@ -45,7 +45,14 @@ class Settings(BaseSettings):
     # endpoints are discontinued after 2026-08-17; Google recommends
     # ``gemini-3.1-flash-image`` via ``generate_content``.
     gemini_image_model: str = "gemini-3.1-flash-image"
+    # Leave empty to use the client's default (v3.1-20260211, Tripo's latest
+    # image-to-3D checkpoint). V3 has no server-side default, so an empty
+    # value here resolves to that constant rather than omitting the field.
     tripo_model_version: str | None = None
+    # Tripo V3 base URL. Defaults to the international endpoint; set to
+    # https://openapi.tripo3d.com/v3 for a China-mainland account (a key only
+    # validates in its own region).
+    tripo_base_url: str | None = None
 
     # --- LLM output budgets ---------------------------------------------
     # Caps the visible output (Claude) and the COMBINED reasoning +

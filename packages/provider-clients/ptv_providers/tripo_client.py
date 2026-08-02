@@ -1,131 +1,189 @@
-"""TripoClient: image-to-3D and text-to-3D with textured + PBR defaults.
+"""TripoClient: image-to-3D and text-to-3D against the Tripo **V3** API.
 
-Verified April 2026 against tripo3d==0.3.12 (VAST-AI-Research/tripo-python-sdk):
-    * ``TripoClient.image_to_model(...)`` and ``text_to_model(...)`` are
-      async. They return a ``task_id`` string; poll with ``wait_for_task``
-      and download with ``download_task_models`` (returns a dict with keys
-      ``model``, ``base_model``, ``pbr_model`` -- all GLB files).
-    * Highest-fidelity output is enforced here by default (verified Apr 2026
-      against https://platform.tripo3d.ai/docs/generation):
-      ``model_version="v3.1-20260211"`` (latest image-to-3D checkpoint),
-      ``texture=True``, ``pbr=True``, ``texture_alignment="original_image"``,
-      ``texture_quality="detailed"``, ``geometry_quality="detailed"``
-      ("Ultra Mode" mesh reconstruction, v3.x only),
-      ``enable_image_autofix=True`` (Tripo cleans the reference image
-      before generation), and ``orientation="align_image"`` (image-to-3D
-      only). Older SDK releases that don't list every parameter still
-      work because :func:`_accepted_kwargs` filters by signature and
-      forwards only what the installed SDK accepts.
-    * The Tripo SDK lists ``aiohttp`` as an OPTIONAL dependency on PyPI even
-      though the async HTTP paths it uses for upload / polling / download
-      actually require it. We re-declare ``aiohttp>=3.8.0`` as a direct
-      dependency of ``ptv-provider-clients`` so the orchestrator venv always
-      has it, and ``_ensure_sdk`` below double-checks at runtime.
+Talks to ``https://openapi.tripo3d.ai/v3`` directly over ``httpx``. The
+official ``tripo3d`` Python SDK is deliberately NOT used: its primary
+``BASE_URL`` is still ``https://api.tripo3d.ai/v2/openapi`` and it only
+reaches V3 for file upload, opt-in task polling, and mesh segmentation, so
+every generation call would keep running on V2 -- which is retired
+2026-11-01 (no feature updates or support after 2026-10-01).
 
-All public methods on this wrapper are synchronous. The wrapper spins up an
-event loop internally so the orchestrator does not have to be async to use
-Tripo.
+Flow (image-to-3D):
+
+    POST /v3/files                      -> data.file_token  ("file_<uuid>")
+    POST /v3/generation/image-to-model  -> data.task_id
+    GET  /v3/tasks/{task_id}            -> poll to a terminal status
+    GET  output.model_url               -> download the GLB
+
+Quality defaults are unchanged from the V2 wrapper (textured + PBR +
+image-aligned + Ultra-Mode geometry); only the transport moved. The one
+behavioural fix: ``model`` is REQUIRED on V3 (V2 silently fell back to
+``v2.5-20250123``), so the config always resolves to a concrete version
+instead of omitting the field.
+
+All public methods are synchronous.
 """
 
 from __future__ import annotations
 
-import asyncio
 import os
+import random
+import time
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
+
+import httpx
 
 from .errors import ProviderCallError, ProviderConfigError
 
 
+_DEFAULT_BASE_URL = "https://openapi.tripo3d.ai/v3"
+"""International V3 base URL. China-mainland accounts use
+``https://openapi.tripo3d.com/v3`` -- set ``TRIPO_BASE_URL`` to switch. A key
+only validates in its own region; a 401 on the balance probe usually means the
+wrong base URL rather than a bad key."""
+
 _DEFAULT_MODEL_VERSION = "v3.1-20260211"
-"""Tripo's latest image-to-3D checkpoint (per
-https://platform.tripo3d.ai/docs/generation). v3.x is the first family
-that exposes ``geometry_quality="detailed"`` ("Ultra Mode" -- maximum
-mesh detail), and v3.1 is the current best-quality default. Earlier
-checkpoints (v2.5 etc.) reject ``geometry_quality``, so we still gate
-that parameter via :func:`_model_supports_geometry_quality` below.
+"""Tripo's latest image-to-3D checkpoint. v3.x is the first family that
+exposes ``geometry_quality="detailed"`` ("Ultra Mode" -- maximum mesh detail),
+and v3.1 is the current best-quality default.
 
-Override with the ``TRIPO_MODEL_VERSION`` env var if you need to roll
-back to an older checkpoint (e.g. for cost or determinism)."""
+Override with the ``TRIPO_MODEL_VERSION`` env var to roll back (e.g. for cost
+or determinism)."""
+
+_V3_MODEL_VERSIONS = frozenset(
+    {
+        "v3.1-20260211",
+        "v3.0-20250812",
+        "v2.5-20250123",
+        "P1-20260311",
+    }
+)
+"""The complete whitelist V3 accepts for the to-model endpoints. Anything else
+is a 400 (code 1004) at request time, so we validate up front and fail with a
+readable message instead of burning a run."""
+
+# Terminal task states. V3 collapsed V2's 8-state enum down to 5: the old
+# ``banned`` and ``expired`` are now ``failed`` carrying error_code 2008 and
+# 2018 respectively.
+_TERMINAL_STATUSES = frozenset({"success", "failed", "cancelled"})
+
+# Business-level error codes worth retrying. 1007 is the per-minute creation
+# quota and 2000 is the concurrent-task cap; both clear on their own.
+_RETRYABLE_CODES = frozenset({1007, 2000})
+# Everything else raises on the first response. The ones worth calling out:
+# 1004 is a malformed request (retrying re-sends the same bad payload), 2008 is
+# a moderation rejection, and 2010 is insufficient credit (HTTP 403). See
+# _fatal_hint for the guidance attached to each.
 
 
-def _model_supports_geometry_quality(model_version: str | None) -> bool:
-    """True when ``model_version`` accepts the ``geometry_quality`` kwarg.
+def _model_forbids_geometry_quality(model_version: str) -> bool:
+    """True when ``geometry_quality`` must be OMITTED for this checkpoint.
 
-    Tripo documents that ``geometry_quality`` was introduced with the
-    v3.0 family (first checkpoint ``v3.0-20250812``). We parse the
-    leading ``vX.Y`` segment and return True for v3.x or higher.
+    Two separate reasons a version rejects it:
+
+    * P1 (the low-poly/PBR workflow) rejects ``quad``, ``smart_low_poly``,
+      ``generate_parts`` and ``geometry_quality`` when present AT ALL -- the
+      international service 400s even on an explicit ``false``.
+    * Pre-v3 checkpoints (v2.5 and older) predate the parameter.
     """
 
-    if not model_version:
-        # When we don't know, assume yes because our default is v3.0.
+    v = model_version.strip().lower()
+    if v.startswith("p1"):
         return True
-    v = model_version.lower().lstrip("v")
     try:
-        major_str = v.split("-", 1)[0].split(".", 1)[0]
-        return int(major_str) >= 3
+        major = int(v.lstrip("v").split("-", 1)[0].split(".", 1)[0])
     except (ValueError, IndexError):
-        return False
+        # Unrecognised shape: be conservative and leave the field off.
+        return True
+    return major < 3
+
+
+def _normalize_base_url(raw: str | None) -> str:
+    """Return a base URL that ends in exactly one ``/v3``.
+
+    Tripo documents the base as ``https://openapi.tripo3d.ai/v3`` while the
+    endpoint tables spell paths as ``/v3/generation/...``, which makes it very
+    easy to configure a doubled or missing ``/v3``. Accept either spelling.
+    """
+
+    base = (raw or _DEFAULT_BASE_URL).strip().rstrip("/")
+    if not base:
+        base = _DEFAULT_BASE_URL
+    if not base.endswith("/v3"):
+        base = f"{base}/v3"
+    return base
 
 
 @dataclass(frozen=True)
 class TripoConfig:
-    """Generation defaults tuned for the highest fidelity Tripo3D output
-    that the API + SDK currently expose. Verified Apr 2026 against
-    https://platform.tripo3d.ai/docs/generation.
+    """Generation defaults tuned for the highest-fidelity Tripo output.
 
-    Quality knobs (see :meth:`TripoClient._common_kwargs`):
+    Quality knobs (see :meth:`TripoClient._common_body`):
 
-    * ``texture=True``        -> emit a colored mesh (always on).
+    * ``texture=True``        -> emit a coloured mesh.
     * ``pbr=True``            -> emit BaseColor / Metallic / Roughness /
                                  Normal maps so the runtime can shade with
                                  PBR lighting.
     * ``texture_quality="detailed"``
-                              -> high-resolution texture maps; "standard"
-                                 is Tripo's lower-cost default.
+                              -> high-resolution texture maps ("standard" is
+                                 Tripo's lower-cost default).
     * ``geometry_quality="detailed"``
-                              -> "Ultra Mode" mesh reconstruction (max
-                                 detail). v3.x checkpoints only.
+                              -> "Ultra Mode" mesh reconstruction. Sent only
+                                 for checkpoints that accept it.
     * ``enable_image_autofix=True``
-                              -> Tripo pre-cleans the input image
-                                 (background removal / framing / contrast)
-                                 before generation, which materially
-                                 improves results for messy reference
-                                 images. Documented in the platform docs;
-                                 newer SDK releases forward it as a
-                                 first-class parameter, older ones drop
-                                 it silently via ``_accepted_kwargs``.
-    * ``auto_size=True``      -> approximate real-world metric scale so
-                                 VR placement looks plausible.
+                              -> Tripo pre-cleans the reference image
+                                 (background removal / framing / contrast),
+                                 which materially improves messy inputs.
+    * ``auto_size=True``      -> approximate real-world metric scale so VR
+                                 placement looks plausible.
     """
 
     api_key: str | None = None
-    # Default to v3.1, Tripo's latest+best image-to-3D checkpoint as of
-    # Apr 2026. Override with TRIPO_MODEL_VERSION to roll back if needed.
+    base_url: str = _DEFAULT_BASE_URL
+    # Always resolves to a concrete version -- see __post_init__. V3 has no
+    # server-side default and rejects a request without one.
     model_version: str | None = _DEFAULT_MODEL_VERSION
     texture: bool = True
     pbr: bool = True
     texture_quality: str = "detailed"
-    # Only sent when the selected model supports it. "detailed" is the
-    # highest tier Tripo exposes (internally "Ultra Mode"); standard is
-    # the default.
     geometry_quality: str = "detailed"
-    # Tripo's image preprocessing pass -- materially improves outputs
-    # for less-than-pristine reference renders.
     enable_image_autofix: bool = True
-    # Ask Tripo to try to auto-scale the mesh to real-world dimensions.
-    # Big quality win in VR because every asset shows up at a plausible
-    # meter-scale instead of a unit cube. Safe default, callers can
-    # still override per-asset via the Asset Manifest if needed.
     auto_size: bool = True
     poll_interval_s: float = 3.0
     timeout_s: float = 600.0
+    # V3 tightened uploads to roughly 10/min (V2 allowed ~10/s). The pipeline
+    # uploads one reference image per asset and a manifest may hold dozens, so
+    # we self-pace to stay under the limit. In practice this costs nothing:
+    # the stage is sequential and each generation already takes 30-90s, so
+    # consecutive uploads are naturally further apart than this.
+    min_upload_interval_s: float = 6.5
+    max_retries: int = 4
+
+    def __post_init__(self) -> None:
+        # Callers routinely pass ``model_version=<setting> or None`` when the
+        # setting is unset, which would otherwise defeat the field default and
+        # omit the parameter entirely. On V2 that silently downgraded to the
+        # server default (v2.5); on V3 it is a hard 400. Resolve it here so
+        # there is exactly one place that decides the version.
+        resolved = (self.model_version or _DEFAULT_MODEL_VERSION).strip()
+        if resolved not in _V3_MODEL_VERSIONS:
+            raise ProviderConfigError(
+                f"Unsupported Tripo model version {resolved!r}. "
+                f"V3 accepts: {', '.join(sorted(_V3_MODEL_VERSIONS))}. "
+                "Set TRIPO_MODEL_VERSION to one of these (or leave it empty "
+                f"for the default {_DEFAULT_MODEL_VERSION})."
+            )
+        object.__setattr__(self, "model_version", resolved)
+        object.__setattr__(self, "base_url", _normalize_base_url(self.base_url))
 
     @classmethod
     def from_env(cls) -> "TripoConfig":
         return cls(
             api_key=os.environ.get("TRIPO_API_KEY"),
+            base_url=_normalize_base_url(os.environ.get("TRIPO_BASE_URL")),
             model_version=(
                 os.environ.get("TRIPO_MODEL_VERSION") or _DEFAULT_MODEL_VERSION
             ),
@@ -141,6 +199,10 @@ class TripoTaskResult:
 
     @property
     def primary_glb(self) -> Path | None:
+        # V3 merges V2's pbr_model / model / base_model into a single
+        # ``output.model_url``, so in practice there is one entry keyed
+        # "model". The legacy key order is kept so older callers and any
+        # cached results still resolve.
         for key in ("pbr_model", "model", "base_model"):
             p = self.files.get(key)
             if p is not None:
@@ -154,7 +216,8 @@ class TripoTaskResult:
 class TripoClient:
     def __init__(self, config: TripoConfig | None = None) -> None:
         self.config = config or TripoConfig.from_env()
-        self._sdk = None
+        self._http: httpx.Client | None = None
+        self._last_upload_at: float = 0.0
 
     # ------------------------------------------------------------------
     # Public API
@@ -169,47 +232,26 @@ class TripoClient:
     ) -> TripoTaskResult:
         """Submit an image-to-3D job and block until it finishes."""
 
-        self._ensure_sdk()
         self._require_key()
-        kwargs = self._common_kwargs(
+        file_token = self._upload_file(image_path)
+
+        body = self._common_body(
             texture_quality=texture_quality,
             face_limit=face_limit,
         )
-        kwargs["image"] = str(image_path)
-        # ``orientation="align_image"`` tells Tripo to orient the generated
-        # mesh to match the reference image's front-facing view, which is
-        # exactly what we want so the VR scene places the asset the way the
-        # concept art depicted it. This is only valid on image_to_model (the
-        # text_to_model endpoint in v0.3.12 does not take an ``orientation``
-        # kwarg and will reject it).
-        kwargs["orientation"] = "align_image"
+        # V3's native single-string input form: accepts a file token, a public
+        # URL, or a bare task UUID. We always hand it a freshly uploaded token.
+        body["input"] = file_token
+        # Orient the generated mesh to the reference image's front-facing
+        # view, so the VR scene places the asset the way the concept art
+        # depicted it. image-to-model only.
+        body["orientation"] = "align_image"
+        # UVs follow the source image rather than being re-derived from the
+        # geometry. Server-fixed (and therefore omitted) for text-to-model.
+        body["texture_alignment"] = "original_image"
 
-        return self._run_async(lambda: self._image_to_model_async(out_dir, kwargs))
-
-    def get_balance(self) -> dict[str, float]:
-        """Return the Tripo account balance without spending any credits.
-
-        Hits ``GET /user/balance`` via the SDK's ``TripoClient.get_balance``
-        and returns ``{"balance": <credits>, "frozen": <credits>}``.
-        Useful as a preflight check at the start of the Tripo stage so the
-        orchestrator can fail fast with a clear "insufficient credits"
-        message instead of firing N image-to-3D requests that will all
-        fail with a 402 / empty-result response and each still count
-        against rate limits / quotas.
-        """
-
-        self._ensure_sdk()
-        self._require_key()
-        return self._run_async(self._get_balance_async)
-
-    async def _get_balance_async(self) -> dict[str, float]:
-        TripoClientCls = self._sdk.TripoClient
-        async with TripoClientCls(api_key=self._require_key()) as client:
-            b = await client.get_balance()
-            return {
-                "balance": float(getattr(b, "balance", 0.0) or 0.0),
-                "frozen": float(getattr(b, "frozen", 0.0) or 0.0),
-            }
+        task_id = self._create_task("/generation/image-to-model", body)
+        return self._await_and_download(task_id, out_dir)
 
     def text_to_model(
         self,
@@ -222,192 +264,375 @@ class TripoClient:
     ) -> TripoTaskResult:
         """Submit a text-to-3D job (fallback path when no concept art)."""
 
-        self._ensure_sdk()
         self._require_key()
-        kwargs = self._common_kwargs(
+        body = self._common_body(
             texture_quality=texture_quality,
             face_limit=face_limit,
         )
-        kwargs["prompt"] = prompt
+        body["prompt"] = prompt
         if negative_prompt:
-            kwargs["negative_prompt"] = negative_prompt
+            body["negative_prompt"] = negative_prompt
 
-        return self._run_async(lambda: self._text_to_model_async(out_dir, kwargs))
+        task_id = self._create_task("/generation/text-to-model", body)
+        return self._await_and_download(task_id, out_dir)
+
+    def get_balance(self) -> dict[str, float]:
+        """Return the Tripo account balance without spending any credits.
+
+        Used as a stage preflight so the orchestrator can fail fast with a
+        clear "insufficient credits" message instead of firing N image-to-3D
+        requests that all fail and still count against rate limits.
+
+        V3 returns decimals here (V2 returned integers), hence the float
+        parse.
+        """
+
+        self._require_key()
+        data = self._request("GET", "/account/balance")
+        return {
+            "balance": float(data.get("balance") or 0.0),
+            "frozen": float(data.get("frozen") or 0.0),
+        }
+
+    def close(self) -> None:
+        if self._http is not None:
+            self._http.close()
+            self._http = None
+
+    def __enter__(self) -> "TripoClient":
+        return self
+
+    def __exit__(self, *exc: object) -> bool:
+        self.close()
+        return False
 
     # ------------------------------------------------------------------
-    # Internals
+    # Request payloads
     # ------------------------------------------------------------------
-    def _common_kwargs(
+    def _common_body(
         self,
         *,
         texture_quality: str | None,
         face_limit: int | None,
     ) -> dict[str, Any]:
-        # These flags force the Tripo pipeline to output a fully textured,
-        # PBR-shaded GLB aligned to the reference image. ``download_task_models``
-        # will return an entry under ``pbr_model`` which is the fully coloured
-        # asset we want for the VR scene.
-        #
-        # Quality knobs (verified Apr 2026 against Tripo's public API docs at
-        # https://platform.tripo3d.ai/docs/generation and the community API
-        # reference at 3daistudio.com/Platform/API/Documentation/3d-generation/tripo):
-        #
-        #   model_version="v3.1-20260211" -> Tripo's latest image-to-3D
-        #                                  checkpoint (highest fidelity).
-        #   texture=True                -> coloured output (default).
-        #   pbr=True                    -> emit PBR maps (BaseColor/Metallic/
-        #                                  Roughness/Normal) so the VR renderer
-        #                                  can light the asset correctly.
-        #   texture_quality="detailed"  -> HD texture resolution (+20 credits).
-        #   geometry_quality="detailed" -> "Ultra Mode" higher-res mesh,
-        #                                  v3.0+ only (+40 credits). Passed
-        #                                  conditionally below so older
-        #                                  model versions like v2.5 don't
-        #                                  reject the request.
-        #   enable_image_autofix=True   -> Tripo pre-cleans the reference
-        #                                  image (bg removal, contrast,
-        #                                  framing) before generation.
-        #                                  Documented platform parameter;
-        #                                  silently dropped by older SDKs
-        #                                  via ``_accepted_kwargs``.
-        #   texture_alignment="original_image" and orientation="align_image"
-        #                                  (image_to_model only) keep the UVs
-        #                                  + pose matching the reference art.
-        #   auto_size=True              -> approximate real-world metric scale
-        #                                  so VR placement looks plausible.
-        kwargs: dict[str, Any] = {
+        model_version = self.config.model_version or _DEFAULT_MODEL_VERSION
+        body: dict[str, Any] = {
+            # ``model`` is V3's native spelling of V2's ``model_version`` and
+            # is REQUIRED here -- V3 has no server-side fallback.
+            "model": model_version,
             "texture": self.config.texture,
             "pbr": self.config.pbr,
-            "texture_alignment": "original_image",
             "texture_quality": texture_quality or self.config.texture_quality,
             "enable_image_autofix": self.config.enable_image_autofix,
             "auto_size": self.config.auto_size,
         }
-        if self.config.model_version:
-            kwargs["model_version"] = self.config.model_version
-        if _model_supports_geometry_quality(self.config.model_version):
-            kwargs["geometry_quality"] = self.config.geometry_quality
+        if not _model_forbids_geometry_quality(model_version):
+            body["geometry_quality"] = self.config.geometry_quality
         if face_limit is not None:
-            kwargs["face_limit"] = int(face_limit)
-        return kwargs
+            body["face_limit"] = int(face_limit)
+        return body
 
-    async def _image_to_model_async(
-        self,
-        out_dir: str | os.PathLike[str],
-        kwargs: dict[str, Any],
-    ) -> TripoTaskResult:
-        TripoClientCls = self._sdk.TripoClient
-        async with TripoClientCls(api_key=self._require_key()) as client:
-            accepted = _accepted_kwargs(client.image_to_model, kwargs)
-            task_id = await client.image_to_model(**accepted)
-            task = await client.wait_for_task(
-                task_id,
-                polling_interval=self.config.poll_interval_s,
-                timeout=self.config.timeout_s,
-                verbose=False,
+    # ------------------------------------------------------------------
+    # HTTP plumbing
+    # ------------------------------------------------------------------
+    def _client(self) -> httpx.Client:
+        if self._http is None:
+            self._http = httpx.Client(
+                base_url=self.config.base_url,
+                timeout=httpx.Timeout(60.0, connect=15.0),
             )
-            files = await client.download_task_models(task, str(out_dir))
-            return _to_result(task_id, task, files)
+        return self._http
 
-    async def _text_to_model_async(
+    def _headers(self) -> dict[str, str]:
+        return {
+            "Authorization": f"Bearer {self._require_key()}",
+            # V3 echoes this back and pairs it with X-Tripo-Trace-ID, which
+            # makes support requests about a specific failure tractable.
+            "X-Request-ID": uuid.uuid4().hex,
+        }
+
+    def _request(
         self,
-        out_dir: str | os.PathLike[str],
-        kwargs: dict[str, Any],
-    ) -> TripoTaskResult:
-        TripoClientCls = self._sdk.TripoClient
-        async with TripoClientCls(api_key=self._require_key()) as client:
-            accepted = _accepted_kwargs(client.text_to_model, kwargs)
-            task_id = await client.text_to_model(**accepted)
-            task = await client.wait_for_task(
-                task_id,
-                polling_interval=self.config.poll_interval_s,
-                timeout=self.config.timeout_s,
-                verbose=False,
-            )
-            files = await client.download_task_models(task, str(out_dir))
-            return _to_result(task_id, task, files)
+        method: str,
+        path: str,
+        *,
+        json_body: dict[str, Any] | None = None,
+        files: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Send one request and return the unwrapped ``data`` object.
 
-    def _run_async(self, coro_factory):
-        """Run an async job from sync code.
-
-        ``coro_factory`` is a zero-arg callable that returns a fresh coroutine,
-        so we can retry with a new event loop if needed without re-awaiting.
+        Retries rate-limit / concurrency / transport / 5xx failures with
+        exponential backoff; surfaces everything else immediately.
         """
-        try:
-            return asyncio.run(coro_factory())
-        except RuntimeError:
-            loop = asyncio.new_event_loop()
-            try:
-                return loop.run_until_complete(coro_factory())
-            finally:
-                loop.close()
 
+        client = self._client()
+        last_error: str = ""
+        for attempt in range(self.config.max_retries):
+            try:
+                response = client.request(
+                    method,
+                    path,
+                    headers=self._headers(),
+                    json=json_body,
+                    files=files,
+                )
+            except httpx.HTTPError as exc:
+                # Transport-level failure (DNS, connect, read timeout).
+                last_error = f"{type(exc).__name__}: {exc}"
+                if attempt + 1 >= self.config.max_retries:
+                    break
+                self._sleep_backoff(attempt)
+                continue
+
+            # Auth must be detected by HTTP STATUS, not by body code: V2 used
+            # code 1002 while V3 uses code 2, and some deployments still emit
+            # the old value.
+            if response.status_code == 401:
+                raise ProviderConfigError(
+                    "Tripo rejected the API key (HTTP 401). Check TRIPO_API_KEY, "
+                    f"and confirm the region: this client is pointed at "
+                    f"{self.config.base_url} and a key only validates in its "
+                    "own region."
+                )
+
+            if response.status_code == 429 or response.status_code >= 500:
+                last_error = f"HTTP {response.status_code}: {response.text[:200]}"
+                if attempt + 1 >= self.config.max_retries:
+                    break
+                self._sleep_backoff(attempt, response=response)
+                continue
+
+            payload = self._decode(response)
+            code = payload.get("code")
+            if code == 0:
+                data = payload.get("data")
+                return data if isinstance(data, dict) else {}
+
+            message = payload.get("message") or response.text[:200]
+            suggestion = payload.get("suggestion")
+            detail = f"Tripo error code {code}: {message}"
+            if suggestion:
+                detail += f" ({suggestion})"
+            request_id = payload.get("request_id")
+            if request_id:
+                detail += f" [request_id={request_id}]"
+
+            if code in _RETRYABLE_CODES and attempt + 1 < self.config.max_retries:
+                last_error = detail
+                self._sleep_backoff(attempt, response=response)
+                continue
+            raise ProviderCallError(detail + _fatal_hint(code))
+
+        raise ProviderCallError(
+            f"Tripo request {method} {path} failed after "
+            f"{self.config.max_retries} attempts. Last error: {last_error}"
+        )
+
+    @staticmethod
+    def _decode(response: httpx.Response) -> dict[str, Any]:
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            raise ProviderCallError(
+                f"Tripo returned a non-JSON response (HTTP "
+                f"{response.status_code}): {response.text[:200]}"
+            ) from exc
+        if not isinstance(payload, dict):
+            raise ProviderCallError(
+                f"Tripo returned an unexpected response shape: {payload!r}"
+            )
+        return payload
+
+    def _sleep_backoff(
+        self, attempt: int, *, response: httpx.Response | None = None
+    ) -> None:
+        # Honour Retry-After when the server sends one; otherwise exponential
+        # backoff with jitter so parallel callers don't resynchronise.
+        if response is not None:
+            retry_after = response.headers.get("Retry-After")
+            if retry_after:
+                try:
+                    time.sleep(min(60.0, float(retry_after)))
+                    return
+                except ValueError:
+                    pass
+        time.sleep(min(30.0, (2.0**attempt) + random.uniform(0.0, 0.5)))
+
+    # ------------------------------------------------------------------
+    # Upload / create / poll / download
+    # ------------------------------------------------------------------
+    def _upload_file(self, path: str | os.PathLike[str]) -> str:
+        """Upload one file and return its ``file_<uuid>`` token.
+
+        The response key is ``data.file_token``; V2's ``data.image_token`` no
+        longer exists, and V2-issued bare-UUID tokens do not resolve on V3.
+        """
+
+        src = Path(path)
+        if not src.is_file():
+            raise ProviderCallError(f"Tripo upload source not found: {src}")
+
+        self._pace_upload()
+        with src.open("rb") as handle:
+            data = self._request(
+                "POST",
+                "/files",
+                files={"file": (src.name, handle, _guess_mime(src))},
+            )
+        self._last_upload_at = time.monotonic()
+
+        token = data.get("file_token")
+        if not token:
+            raise ProviderCallError(
+                f"Tripo upload of {src.name} returned no file_token: {data!r}"
+            )
+        return str(token)
+
+    def _pace_upload(self) -> None:
+        if self._last_upload_at <= 0.0:
+            return
+        elapsed = time.monotonic() - self._last_upload_at
+        wait = self.config.min_upload_interval_s - elapsed
+        if wait > 0:
+            time.sleep(wait)
+
+    def _create_task(self, path: str, body: dict[str, Any]) -> str:
+        data = self._request("POST", path, json_body=body)
+        task_id = data.get("task_id")
+        if not task_id:
+            raise ProviderCallError(
+                f"Tripo {path} returned no task_id: {data!r}"
+            )
+        return str(task_id)
+
+    def _poll(self, task_id: str) -> dict[str, Any]:
+        """Poll until the task reaches a terminal state, then return it.
+
+        Polling GETs do not consume the creation rate-limit quota, so a
+        few-second interval is fine.
+        """
+
+        deadline = time.monotonic() + self.config.timeout_s
+        while True:
+            task = self._request("GET", f"/tasks/{task_id}")
+            status = str(task.get("status") or "").lower()
+            # Anything unrecognised is treated as terminal-failed rather than
+            # polled forever; V3's enum is only 5 values but "unknown" can
+            # still leak through in rare edge cases.
+            if status in _TERMINAL_STATUSES or status not in {"queued", "running"}:
+                return task
+            if time.monotonic() >= deadline:
+                raise ProviderCallError(
+                    f"Tripo task {task_id} did not finish within "
+                    f"{self.config.timeout_s:.0f}s (last status: {status})."
+                )
+            time.sleep(self.config.poll_interval_s)
+
+    def _await_and_download(
+        self, task_id: str, out_dir: str | os.PathLike[str]
+    ) -> TripoTaskResult:
+        task = self._poll(task_id)
+        status = str(task.get("status") or "unknown").lower()
+
+        if status != "success":
+            # V2's ``banned`` / ``expired`` statuses are now ``failed`` with
+            # error_code 2008 (moderation) / 2018 (queue timeout), so the
+            # code is the only way to tell those cases apart.
+            code = task.get("error_code")
+            message = task.get("error_message") or "no error_message returned"
+            raise ProviderCallError(
+                f"Tripo task {task_id} finished with status {status!r} "
+                f"(error_code={code}): {message}"
+            )
+
+        output = task.get("output")
+        output = output if isinstance(output, dict) else {}
+        # V3 merges V2's pbr_model / model / base_model into ONE key.
+        model_url = output.get("model_url")
+        if not model_url:
+            raise ProviderCallError(
+                f"Tripo task {task_id} succeeded but returned no "
+                f"output.model_url: {output!r}"
+            )
+
+        path = self._download(str(model_url), out_dir)
+        return TripoTaskResult(
+            task_id=task_id,
+            status=status,
+            files={"model": path},
+            raw_task=task,
+        )
+
+    def _download(self, url: str, out_dir: str | os.PathLike[str]) -> Path:
+        """Stream a signed output URL to disk.
+
+        Output URLs are signed and expire in roughly 24 hours, so we always
+        download immediately rather than storing the URL.
+        """
+
+        target_dir = Path(out_dir)
+        target_dir.mkdir(parents=True, exist_ok=True)
+        suffix = Path(urlsplit(url).path).suffix.lower() or ".glb"
+        # Named so the pipeline's "is there already a GLB here?" checks in
+        # stage_tripo_models / stage_asset_normalize (which prefer *pbr* then
+        # *model* filenames) pick it up.
+        target = target_dir / f"model{suffix}"
+
+        try:
+            with httpx.Client(timeout=httpx.Timeout(300.0, connect=15.0)) as dl:
+                with dl.stream("GET", url) as response:
+                    response.raise_for_status()
+                    with target.open("wb") as handle:
+                        for chunk in response.iter_bytes():
+                            handle.write(chunk)
+        except httpx.HTTPError as exc:
+            raise ProviderCallError(
+                f"Failed to download Tripo model from {url[:120]}: "
+                f"{type(exc).__name__}: {exc}"
+            ) from exc
+        return target
+
+    # ------------------------------------------------------------------
+    # Misc
+    # ------------------------------------------------------------------
     def _require_key(self) -> str:
         if not self.config.api_key:
             raise ProviderConfigError("TRIPO_API_KEY is not set.")
         return self.config.api_key
 
-    def _ensure_sdk(self) -> None:
-        if self._sdk is not None:
-            return
-        try:
-            import tripo3d  # type: ignore
-        except Exception as e:  # pragma: no cover
-            raise ProviderConfigError(
-                "The `tripo3d` Python package is not installed."
-                " Run `pip install 'tripo3d>=0.3.9' 'aiohttp>=3.8.0'`."
-            ) from e
-        # Tripo lists ``aiohttp`` as optional but its async code path imports
-        # it eagerly. If aiohttp is missing the SDK fails deep inside with a
-        # cryptic ``ModuleNotFoundError: No module named 'aiohttp'`` and every
-        # asset in the manifest shows that error in the Tripo stage log.
-        # Surface a clear, actionable message here instead.
-        try:
-            import aiohttp  # type: ignore  # noqa: F401
-        except Exception as e:  # pragma: no cover
-            raise ProviderConfigError(
-                "The `aiohttp` Python package is required by the tripo3d SDK"
-                " but is not installed in this environment."
-                " Run `pip install 'aiohttp>=3.8.0'`."
-            ) from e
-        self._sdk = tripo3d
+
+def _fatal_hint(code: Any) -> str:
+    """Actionable next step for the error codes that never resolve on retry."""
+
+    return {
+        1004: (
+            " -- malformed request. Most often an unsupported 'model' value;"
+            f" V3 accepts {', '.join(sorted(_V3_MODEL_VERSIONS))}."
+        ),
+        2008: (
+            " -- content moderation rejected this input or output. Rewrite the"
+            " asset prompt; retrying the same request will not help."
+        ),
+        2010: (
+            " -- insufficient Tripo credits. Top up at"
+            " https://developers.tripo3d.ai then resume."
+        ),
+    }.get(code if isinstance(code, int) else -1, "")
 
 
-def _accepted_kwargs(func, kwargs: dict[str, Any]) -> dict[str, Any]:
-    """Filter ``kwargs`` to only those accepted by ``func``'s signature.
+def _guess_mime(path: Path) -> str:
+    """Content type for the multipart upload part.
 
-    Tripo has added new params (``geometry_quality``, ``auto_size``, etc.)
-    across SDK releases. Rather than pinning to the newest release and
-    breaking users on older ones, we introspect the SDK's ``image_to_model``
-    / ``text_to_model`` methods at call time and only pass through kwargs
-    the installed SDK actually accepts. If the signature has a ``**kwargs``
-    catch-all we pass everything (the SDK will forward them to the API).
+    V3 accepts webp/png/jpeg/bmp/tiff for images (plus glb/obj/fbx/stl/3mf for
+    models); we only ever upload the Gemini reference render.
     """
 
-    import inspect
-
-    try:
-        sig = inspect.signature(func)
-    except (TypeError, ValueError):
-        return kwargs
-
-    params = sig.parameters
-    # If the callable has **kwargs, trust the caller and pass everything.
-    if any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()):
-        return kwargs
-    return {k: v for k, v in kwargs.items() if k in params}
-
-
-def _to_result(task_id: str, task, files: dict[str, str]) -> TripoTaskResult:
-    paths: dict[str, Path] = {}
-    for k, v in (files or {}).items():
-        p = Path(v)
-        if p.exists():
-            paths[k] = p
-    status = getattr(task, "status", "unknown")
-    return TripoTaskResult(
-        task_id=task_id,
-        status=str(status),
-        files=paths,
-        raw_task=task,
-    )
+    return {
+        ".png": "image/png",
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".webp": "image/webp",
+        ".bmp": "image/bmp",
+        ".tif": "image/tiff",
+        ".tiff": "image/tiff",
+    }.get(path.suffix.lower(), "application/octet-stream")

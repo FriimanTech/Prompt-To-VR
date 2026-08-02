@@ -120,7 +120,7 @@ Optional: install **Git** if you don't already have it.
 | Anthropic | BuildSpec / MechanicPlan / SceneSpec / C++ generation | Yes | <https://console.anthropic.com> → *API Keys* |
 | OpenAI (ChatGPT) | Automatic fallback for every Claude call when Claude is unavailable | Optional (recommended) | <https://platform.openai.com/api-keys> |
 | Google AI Studio | Imagen + Gemini image generation (reference images) | Yes | <https://aistudio.google.com/app/apikey> |
-| Tripo | Image-to-3D (textured / PBR) | Yes | <https://platform.tripo3d.ai> |
+| Tripo | Image-to-3D (textured / PBR) | Yes | <https://developers.tripo3d.ai> |
 
 ## 3. Environment variables to fill
 

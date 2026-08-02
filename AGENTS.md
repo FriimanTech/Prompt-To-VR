@@ -57,7 +57,8 @@ orchestrator and a reusable Vulkan + OpenXR engine core.
    falls back to OpenAI via the shared `LlmClient`
    (`OPENAI_HARD_MODEL=gpt-5`, `OPENAI_LIGHT_MODEL=gpt-5-mini`).
 8. Tripo image-to-3D calls MUST enable textured, PBR output with image-aligned
-   textures (`texture=True`, `pbr=True`, `texture_alignment="original_image"`).
+   textures (`texture=True`, `pbr=True`, `texture_alignment="original_image"`)
+   and MUST target the **V3** API; V2 is retired 2026-11-01.
 9. Verify provider SDK signatures and model names with live docs before
    changing provider client code.
 10. When code structure changes, update `/docs/` in the same change.
@@ -158,8 +159,13 @@ orchestrator and a reusable Vulkan + OpenXR engine core.
   `gemini-3.1-flash-image` with `generate_content` and
   `response_modalities=["IMAGE"]` (Imagen 4 endpoints discontinued
   2026-08-17).
-- Tripo: Python package `tripo3d`. `image_to_model(... texture=True,
-  pbr=True, texture_alignment="original_image", texture_quality="detailed")`.
+- Tripo: **V3 API** (`https://openapi.tripo3d.ai/v3`) called directly over
+  `httpx` — NOT the `tripo3d` SDK, whose base URL is still
+  `api.tripo3d.ai/v2/openapi` (V2 retires 2026-11-01). Flow:
+  `POST /v3/files` → `POST /v3/generation/image-to-model` →
+  `GET /v3/tasks/{id}` → download `output.model_url`. `model` is REQUIRED
+  (no server default); allowed values are `v3.1-20260211`, `v3.0-20250812`,
+  `v2.5-20250123`, `P1-20260311`.
 - Vulkan SDK 1.4.341.x on Windows. Requires VS 2022 or 2026 toolchain.
 - OpenXR Khronos loader via vcpkg. On Windows + Quest Link, Oculus OpenXR
   runtime is registered automatically.

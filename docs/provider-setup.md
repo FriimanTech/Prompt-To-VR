@@ -51,27 +51,48 @@ The three providers used by the pipeline.
 
 ## Tripo (image-to-3D)
 
-- Get an API key at <https://platform.tripo3d.ai> (sign up, create a key).
+- Get an API key at <https://developers.tripo3d.ai> (sign up, create a key).
 - Paste into `.env` as `TRIPO_API_KEY`.
-- Python SDK package: `tripo3d`. Installed automatically when you
-  `pip install -e packages/provider-clients`.
-- The wrapper **always** sends, by default (verified Apr 2026 against
-  <https://platform.tripo3d.ai/docs/generation>):
-  - `model_version="v3.1-20260211"` — Tripo's latest image-to-3D
-    checkpoint (highest fidelity). Override with the
-    `TRIPO_MODEL_VERSION` env var.
+- Uses the **V3 API** (`https://openapi.tripo3d.ai/v3`) over plain HTTP via
+  `httpx`. The official `tripo3d` SDK is deliberately **not** used: its
+  primary base URL is still `api.tripo3d.ai/v2/openapi`, so generation calls
+  would keep running on V2, which is retired **2026-11-01** (no feature
+  updates or support after 2026-10-01).
+- China-mainland accounts: set `TRIPO_BASE_URL=https://openapi.tripo3d.com/v3`.
+  A key only validates in its own region, so a 401 on the balance check
+  usually means the wrong base URL rather than a bad key.
+- Endpoints used: `POST /v3/files` (upload the reference image),
+  `POST /v3/generation/image-to-model` (or `text-to-model`),
+  `GET /v3/tasks/{task_id}` (poll), and `GET /v3/account/balance` (stage
+  preflight).
+- The wrapper **always** sends, by default:
+  - `model="v3.1-20260211"` — Tripo's latest image-to-3D checkpoint
+    (highest fidelity). Override with the `TRIPO_MODEL_VERSION` env var.
+    V3 **requires** this field and has no server-side default, so leaving
+    the env var blank resolves to the constant above rather than omitting
+    it. Accepted values: `v3.1-20260211`, `v3.0-20250812`, `v2.5-20250123`,
+    `P1-20260311` — anything else is rejected at startup.
   - `texture=True` — colored output.
   - `pbr=True` — emit BaseColor / Metallic / Roughness / Normal maps.
   - `texture_alignment="original_image"` — UVs match the reference.
   - `texture_quality="detailed"` — high-resolution texture maps
     (overridable per asset).
-  - `geometry_quality="detailed"` — "Ultra Mode" mesh reconstruction;
-    only applied when the selected model_version is v3.x or newer.
+  - `geometry_quality="detailed"` — "Ultra Mode" mesh reconstruction.
+    Omitted for `v2.5-20250123` (predates the parameter) and for
+    `P1-20260311` (which rejects it outright, even as an explicit `false`).
   - `enable_image_autofix=True` — Tripo pre-cleans the reference image
     (background removal, contrast, framing) before generation.
   - `auto_size=True` — approximate real-world metric scale.
   - `orientation="align_image"` (image-to-3D only) — output mesh faces
     the camera in the same way as the reference render.
+  - `texture_alignment` is image-to-3D only; Tripo fixes it server-side for
+    text-to-3D, so the wrapper does not send it there.
+- Uploads are self-paced to roughly one every 6.5s: V3 tightened the upload
+  quota to about 10/min (V2 allowed ~10/s). This costs nothing in practice
+  because the stage is sequential and each generation already takes 30-90s.
+- Rate-limit (`1007`), concurrency (`2000`), 429 and 5xx responses are
+  retried with backoff. Malformed requests (`1004`), moderation rejections
+  (`2008`) and insufficient credit (`2010`) fail immediately with a hint.
 
 ## Verifying the keys
 

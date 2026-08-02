@@ -12,13 +12,12 @@ dependencies = [
     "anthropic>=0.39",
     "openai>=1.50",
     "google-genai>=1.0",
-    # Tripo's Python SDK lists aiohttp as an OPTIONAL dep on PyPI even though
-    # every async path (image upload, polling, download) requires it, so we
-    # pin aiohttp explicitly here to guarantee it is installed alongside
-    # tripo3d. Without this the Tripo stage fails at runtime with
-    # ``ModuleNotFoundError: No module named 'aiohttp'``.
-    "tripo3d>=0.3.9",
-    "aiohttp>=3.8.0",
+    # Tripo is called over plain HTTP against the V3 API rather than through
+    # the official ``tripo3d`` SDK: that SDK's primary BASE_URL is still
+    # ``api.tripo3d.ai/v2/openapi`` and only file upload / task query /
+    # mesh-segment reach V3, so every generation call would keep running on
+    # V2 (retired 2026-11-01). ``aiohttp`` went with it -- it existed solely
+    # because the SDK's async paths required it.
     "httpx>=0.27",
     "pillow>=10.0",
     "pydantic>=2.7",

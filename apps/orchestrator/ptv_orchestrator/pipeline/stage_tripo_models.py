@@ -1,5 +1,8 @@
 """Stage 6: Tripo image-to-3D (or text-to-3D fallback) per asset.
 
+Runs against the Tripo **V3** API (``openapi.tripo3d.ai/v3``) via
+:class:`ptv_providers.TripoClient`.
+
 Idempotency: if an asset already has a valid ``.glb`` under
 ``assets/<asset_id>/``, the Tripo call for that asset is skipped. This
 matters a lot here -- each image-to-3D call costs ~20 Tripo credits and
@@ -80,20 +83,27 @@ def run(ctx: PipelineContext) -> StageResult:
         )
         return StageResult(stage=ProjectStage.tripo_models, artifacts=produced)
 
-    client = TripoClient(
-        TripoConfig(
-            api_key=ctx.settings.tripo_api_key,
-            model_version=ctx.settings.tripo_model_version or None,
-        )
-    )
+    # An unset ``tripo_model_version`` resolves to the client's default
+    # (v3.1-20260211) inside TripoConfig. Do NOT collapse it to None here and
+    # expect the server to pick: V3 requires an explicit ``model`` and 400s
+    # without one (V2 used to fall back to v2.5 silently, which is why this
+    # pipeline generated at v2.5 for a while despite the docs saying v3.1).
+    tripo_kwargs = {"api_key": ctx.settings.tripo_api_key}
+    if ctx.settings.tripo_model_version:
+        tripo_kwargs["model_version"] = ctx.settings.tripo_model_version
+    if ctx.settings.tripo_base_url:
+        tripo_kwargs["base_url"] = ctx.settings.tripo_base_url
+    client = TripoClient(TripoConfig(**tripo_kwargs))
 
     # Preflight: check Tripo account balance BEFORE firing N image-to-3D
     # requests. Without this, a user whose account is out of credits would
     # watch every single asset attempt, fail, and wait the full polling
-    # timeout. Each image-to-3D run on v2.5 costs ~20 credits, so we need
-    # at least roughly ``len(pending) * 20`` credits to complete the
-    # REMAINING work (not the whole manifest -- already-on-disk assets
-    # don't need re-billing).
+    # timeout. ~20 credits is a rough per-asset floor, so we need at least
+    # roughly ``len(pending) * 20`` credits to complete the REMAINING work
+    # (not the whole manifest -- already-on-disk assets don't need
+    # re-billing). Absolute prices vary by checkpoint and region, so this is
+    # a sanity floor, not an exact quote; the real figure comes back as
+    # ``credits_consumed`` on each finished task.
     required_credits = max(20, len(pending) * 20)
     try:
         balance_info = client.get_balance()
@@ -125,8 +135,8 @@ def run(ctx: PipelineContext) -> StageResult:
         msg = (
             f"Insufficient Tripo credits: have {available:.1f}, "
             f"need ~{required_credits} for {len(pending)} assets "
-            "(approx 20 credits per image-to-3D job on v2.5). "
-            "Top up at https://platform.tripo3d.ai then press Resume."
+            "(approx 20 credits per image-to-3D job). "
+            "Top up at https://developers.tripo3d.ai then press Resume."
         )
         ctx.store.append_log(ctx.project_id, "tripo_models", msg)
         raise RuntimeError(msg)
