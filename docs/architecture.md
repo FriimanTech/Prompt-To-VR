@@ -77,6 +77,7 @@ flowchart TD
 | XR | `src/xr/XrSession.cpp` | Instance / session / action set / swapchains / frame loop |
 | ECS | `src/ecs/World.h` | EnTT registry + stable id map |
 | Transform FX | `src/ecs/TransformOffset.cpp` | Draw-time visual offsets (recoil kick, flinch) that never touch physics |
+| Skeletal | `src/ecs/Skeleton.cpp` + `src/render/GltfSkinnedLoad.cpp` | Rig loading, clip sampling, procedural joint override, joint palettes |
 | Scene | `src/scene/SceneLoader.cpp` | JSON scene → ECS |
 | Physics | `src/physics/PhysicsWorld.cpp` | Jolt PhysicsSystem |
 | Mechanics | `src/mechanics/MechanicRegistry.cpp` + `src/mechanics/builtin/<mechanic>/` | Data-driven mechanics; each built-in is its own `IMechanic` module |
@@ -119,6 +120,41 @@ LOD chain, since decimation shifts the AABB slightly.
 Generated C++ reads them through `ctx.sockets->socket_world(entity, "muzzle")`
 and never hard-codes an offset. An unknown socket falls back to the front of
 the entity's bounding sphere rather than identity.
+
+## Skinning
+
+A socket is a fixed point on a rigid mesh. A **skin** is the other case: the
+mesh itself deforms. Rigged assets carry a joint hierarchy, per-vertex bone
+indices and weights, and inverse bind matrices; the engine renders them through
+a second Vulkan pipeline that skins in the vertex shader off a shared
+joint-matrix storage buffer.
+
+The chain is deliberately narrow so a static scene pays nothing:
+
+| Stage | Owner | Result |
+|---|---|---|
+| Parse skin, hierarchy, `JOINTS_0`/`WEIGHTS_0`, IBMs, clips | `GltfSkinnedLoad.cpp` | `SkinnedVertex` (48 B) + `SkeletonData` |
+| Preserve the rig through decimation | `ptv_glb_optimize` | LOD chain with a byte-identical skeleton at every level |
+| Record that an asset is rigged | `asset_optimization` → `scene_compile` | `mesh.skinned` / `mesh.joint_count` in `scene.json` |
+| Attach the rig, evaluate the pose | `Application::attach_skeletons`, `tick_animators` | `CSkeleton` / `CAnimator`, joint palette per frame |
+| Draw | `scene_skinned.vert` | Skinned geometry |
+
+Two rules make the pieces fit:
+
+- **Vertices stay in skin space.** Per the glTF spec a skinned mesh node's
+  transform is ignored, since the joint matrices already place the mesh. The
+  palette is therefore `jointWorld * inverseBind` with no mesh-node term, which
+  has the useful property that a bind-pose palette is the identity — so a
+  rigged mesh drawn un-posed is pixel-identical to the same mesh loaded as
+  static geometry, and that is exactly what the smoke tests assert.
+- **Joint indices are never renumbered.** They match the source skin's `joints`
+  array, because `JOINTS_0` references that ordering; a parent-first traversal
+  order is carried alongside instead.
+
+Generated C++ poses a rig through `ctx.skeleton`, either by playing a baked
+clip or by writing individual joints each frame from live input. See
+[runtime-subsystems.md](runtime-subsystems.md#skeletal-animation-ptvtick_animators)
+and [rendering.md](rendering.md#skinned-geometry-scene_skinnedvert).
 
 ## Threading
 

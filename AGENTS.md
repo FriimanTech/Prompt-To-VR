@@ -29,7 +29,7 @@ orchestrator and a reusable Vulkan + OpenXR engine core.
    throw, recoil). Each is a real `IMechanic` written against the same public
    API generated code uses — `InputSnapshot`, `World` and `MechanicContext`
    (locomotion / physics / debug-draw / hand / transform-fx / haptics / socket
-   services, all engine-clamped) —
+   / skeleton services, all engine-clamped) —
    so a `builtin+config_code_edit` task can copy one and edit it into a NEW
    generated mechanic. Generated code adds mechanics; it does not
    reimplement basic VR behavior, and it never modifies a built-in.
@@ -145,9 +145,15 @@ orchestrator and a reusable Vulkan + OpenXR engine core.
    makes any non-trivial project runnable. There is **no cap on asset count** —
    more content just means a smaller per-asset budget (never below a quality
    floor) plus more aggressive runtime culling/LOD. See `docs/rendering.md`.
+   **Rigged assets** take a skin-preserving path: bindings ride inside the
+   interleaved vertex through the remap, simplification uses
+   `meshopt_simplifyWithAttributes` + `meshopt_SimplifyRegularize` (never bone
+   data as an attribute), `--sloppy` is refused because it invents vertex
+   positions that carry no bindings, and every LOD emits a byte-identical
+   skeleton so one joint palette serves all four levels.
 9. Deterministic scene compiler merges `world.scene.json` (environment) with
    gameplay entities and emits `scene.json` + build metadata, including each
-   mesh's `lod_paths`/`bounds_radius_m`/`sockets` and the scene-level
+   mesh's `lod_paths`/`bounds_radius_m`/`sockets`/`skinned` and the scene-level
    `performance` block. It is also the **socket validator**: it is the only
    stage that sees both a CodeTask's `required_sockets` and the asset's
    derived sockets, so a mechanic requiring a socket its asset cannot supply

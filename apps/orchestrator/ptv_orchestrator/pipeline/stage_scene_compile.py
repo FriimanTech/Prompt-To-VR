@@ -346,6 +346,12 @@ def _mesh_render_fields(
         # longest axis; the runtime rescales by target_scale_meters, so the
         # world-space radius scales identically.
         out["bounds_radius_m"] = float(unit_radius) * float(target_scale_meters)
+    # Rigged assets need a CSkeleton and the skinned draw pipeline. Carrying
+    # the flag in scene.json lets the runtime decide without opening every
+    # GLB, and gives the build a record of which assets are animatable.
+    if norm.get("skinned"):
+        out["skinned"] = True
+        out["joint_count"] = int(norm.get("joint_count") or 0)
     sockets = _sockets_in_meters(contract, target_scale_meters)
     if sockets:
         out["sockets"] = sockets

@@ -1,4 +1,4 @@
-// GLB loader for the VR runtime.
+// GLB loader for the VR runtime (static geometry).
 //
 // We merge all triangle primitives into one indexed triangle list, rescale
 // to ``target_scale_meters`` on the longest axis of the model AABB, and
@@ -12,13 +12,29 @@
 // per-vertex color channel, so every Tripo / generated GLB renders with
 // its actual design color rather than a uniform tint.
 //
+// Node transforms ARE applied: primitives are baked into the world space of
+// the node that instances them, and a mesh instanced by several nodes is
+// emitted once per node. Two deliberate exceptions:
+//
+//   * A node carrying a ``skin`` contributes its geometry with an identity
+//     transform, because the glTF spec says a skinned mesh node's transform
+//     must be ignored -- the joint matrices place the mesh. This keeps a
+//     rigged asset loaded through this static path identical to its bind
+//     pose in GltfSkinnedLoad.cpp.
+//   * A file whose scene graph reaches no meshes at all falls back to
+//     emitting every mesh untransformed, which is what this loader did
+//     before node support existed. Tripo output and ptv_glb_optimize output
+//     are both single identity nodes, so neither path changes for them.
+//
 // IMPORTANT: When ``TINYGLTF_NO_STB_IMAGE`` is set, tinygltf REQUIRES a
 // LoadImageData callback registered via ``TinyGLTF::SetImageLoader``,
 // otherwise ``LoadBinaryFromFile`` aborts with
 // "No LoadImageData callback specified.". We register a no-op callback
-// (``noop_image_loader`` below) that simply succeeds without decoding so
-// the rest of the GLB (geometry + materials) parses cleanly.
+// (``gltf_accessors::noop_image_loader``) that simply succeeds without
+// decoding so the rest of the GLB (geometry + materials) parses cleanly.
 //   Reference: tinygltf README, "Optional Compile flags" section.
+//
+// This is the one translation unit that instantiates tinygltf.
 
 #define TINYGLTF_IMPLEMENTATION
 #define TINYGLTF_NO_STB_IMAGE
@@ -34,6 +50,7 @@
 #include <string>
 #include <vector>
 
+#include "GltfAccessors.h"
 #include "ptv/core/Logger.h"
 #include "ptv/platform/AssetSource.h"
 #include "ptv/render/GltfMeshLoad.h"
@@ -41,213 +58,7 @@
 namespace ptv::gltf_mesh_load {
 namespace {
 
-// No-op image loader: tinygltf calls this once per ``image`` in the GLB.
-// We don't sample textures in the renderer yet, so we simply tell tinygltf
-// "yes, the image is fine" without decoding any pixels. This is the
-// pattern recommended by tinygltf when running with ``TINYGLTF_NO_STB_IMAGE``.
-//
-// Returning true (without populating ``image->image``) means the rest of
-// the GLB parses normally. Material lookups (baseColorTexture indices,
-// baseColorFactor, etc.) still resolve and we use them below.
-bool noop_image_loader(tinygltf::Image* image,
-                       const int /*image_idx*/,
-                       std::string* /*err*/,
-                       std::string* /*warn*/,
-                       int /*req_width*/,
-                       int /*req_height*/,
-                       const unsigned char* /*bytes*/,
-                       int /*size*/,
-                       void* /*user_data*/) {
-    if (image) {
-        image->width = 0;
-        image->height = 0;
-        image->component = 0;
-        image->bits = 8;
-        image->pixel_type = TINYGLTF_COMPONENT_TYPE_UNSIGNED_BYTE;
-        image->image.clear();
-    }
-    return true;
-}
-
-size_t component_size(int component_type) {
-    switch (component_type) {
-        case TINYGLTF_COMPONENT_TYPE_BYTE:
-        case TINYGLTF_COMPONENT_TYPE_UNSIGNED_BYTE:
-            return 1;
-        case TINYGLTF_COMPONENT_TYPE_SHORT:
-        case TINYGLTF_COMPONENT_TYPE_UNSIGNED_SHORT:
-            return 2;
-        case TINYGLTF_COMPONENT_TYPE_INT:
-        case TINYGLTF_COMPONENT_TYPE_UNSIGNED_INT:
-        case TINYGLTF_COMPONENT_TYPE_FLOAT:
-            return 4;
-        default:
-            return 0;
-    }
-}
-
-size_t num_components(int type) {
-    switch (type) {
-        case TINYGLTF_TYPE_SCALAR:
-            return 1;
-        case TINYGLTF_TYPE_VEC2:
-            return 2;
-        case TINYGLTF_TYPE_VEC3:
-            return 3;
-        case TINYGLTF_TYPE_VEC4:
-            return 4;
-        default:
-            return 0;
-    }
-}
-
-bool read_accessor_float3(const tinygltf::Model& model,
-                            int accessor_idx,
-                            std::vector<std::array<float, 3>>& out) {
-    if (accessor_idx < 0 ||
-        static_cast<size_t>(accessor_idx) >= model.accessors.size()) {
-        return false;
-    }
-    const auto& acc = model.accessors[accessor_idx];
-    if (acc.type != TINYGLTF_TYPE_VEC3 ||
-        acc.componentType != TINYGLTF_COMPONENT_TYPE_FLOAT) {
-        return false;
-    }
-    if (acc.bufferView < 0 ||
-        static_cast<size_t>(acc.bufferView) >= model.bufferViews.size()) {
-        return false;
-    }
-    const auto& view = model.bufferViews[acc.bufferView];
-    if (view.buffer < 0 ||
-        static_cast<size_t>(view.buffer) >= model.buffers.size()) {
-        return false;
-    }
-    const auto& buf = model.buffers[view.buffer];
-    size_t stride = view.byteStride;
-    if (stride == 0) stride = sizeof(float) * 3;
-    const size_t base = static_cast<size_t>(acc.byteOffset + view.byteOffset);
-    if (base + acc.count * stride > buf.data.size()) return false;
-
-    out.resize(acc.count);
-    for (size_t i = 0; i < acc.count; ++i) {
-        const uint8_t* p = buf.data.data() + base + i * stride;
-        std::memcpy(out[i].data(), p, sizeof(float) * 3);
-    }
-    return true;
-}
-
-// Read a per-vertex VEC3 / VEC4 color stream (``COLOR_0``) into RGBA float.
-// Tripo and most authoring tools emit either VEC3_FLOAT or VEC4_FLOAT;
-// some pack as UNSIGNED_BYTE / UNSIGNED_SHORT normalized. We handle the
-// common cases and silently skip anything we don't recognise (the caller
-// then falls back to baseColorFactor).
-bool read_accessor_color_rgba(const tinygltf::Model& model,
-                              int accessor_idx,
-                              std::vector<std::array<float, 4>>& out) {
-    if (accessor_idx < 0 ||
-        static_cast<size_t>(accessor_idx) >= model.accessors.size()) {
-        return false;
-    }
-    const auto& acc = model.accessors[accessor_idx];
-    const size_t nc = num_components(acc.type);
-    if (nc != 3 && nc != 4) return false;
-    if (acc.bufferView < 0 ||
-        static_cast<size_t>(acc.bufferView) >= model.bufferViews.size()) {
-        return false;
-    }
-    const auto& view = model.bufferViews[acc.bufferView];
-    if (view.buffer < 0 ||
-        static_cast<size_t>(view.buffer) >= model.buffers.size()) {
-        return false;
-    }
-    const auto& buf = model.buffers[view.buffer];
-    const size_t cs = component_size(acc.componentType);
-    if (cs == 0) return false;
-    size_t stride = view.byteStride;
-    if (stride == 0) stride = cs * nc;
-    const size_t base =
-        static_cast<size_t>(acc.byteOffset + view.byteOffset);
-    if (base + acc.count * stride > buf.data.size()) return false;
-
-    out.resize(acc.count);
-    for (size_t i = 0; i < acc.count; ++i) {
-        const uint8_t* p = buf.data.data() + base + i * stride;
-        float c[4] = {1.0f, 1.0f, 1.0f, 1.0f};
-        for (size_t k = 0; k < nc; ++k) {
-            float v = 1.0f;
-            const uint8_t* q = p + k * cs;
-            switch (acc.componentType) {
-                case TINYGLTF_COMPONENT_TYPE_FLOAT: {
-                    float f;
-                    std::memcpy(&f, q, sizeof(f));
-                    v = f;
-                    break;
-                }
-                case TINYGLTF_COMPONENT_TYPE_UNSIGNED_BYTE:
-                    v = static_cast<float>(*q) / 255.0f;
-                    break;
-                case TINYGLTF_COMPONENT_TYPE_UNSIGNED_SHORT: {
-                    uint16_t u;
-                    std::memcpy(&u, q, sizeof(u));
-                    v = static_cast<float>(u) / 65535.0f;
-                    break;
-                }
-                default:
-                    return false;
-            }
-            c[k] = v;
-        }
-        out[i] = {c[0], c[1], c[2], c[3]};
-    }
-    return true;
-}
-
-bool read_accessor_indices(const tinygltf::Model& model,
-                           int accessor_idx,
-                           std::vector<uint32_t>& out) {
-    if (accessor_idx < 0 ||
-        static_cast<size_t>(accessor_idx) >= model.accessors.size()) {
-        return false;
-    }
-    const auto& acc = model.accessors[accessor_idx];
-    if (acc.type != TINYGLTF_TYPE_SCALAR) return false;
-    if (acc.bufferView < 0 ||
-        static_cast<size_t>(acc.bufferView) >= model.bufferViews.size()) {
-        return false;
-    }
-    const auto& view = model.bufferViews[acc.bufferView];
-    if (view.buffer < 0 ||
-        static_cast<size_t>(view.buffer) >= model.buffers.size()) {
-        return false;
-    }
-    const auto& buf = model.buffers[view.buffer];
-    size_t cs = component_size(acc.componentType);
-    size_t nc = num_components(acc.type);
-    if (cs == 0 || nc != 1) return false;
-    size_t stride = view.byteStride;
-    if (stride == 0) stride = cs;
-    const size_t base = static_cast<size_t>(acc.byteOffset + view.byteOffset);
-    if (base + acc.count * stride > buf.data.size()) return false;
-
-    out.resize(acc.count);
-    for (size_t i = 0; i < acc.count; ++i) {
-        const uint8_t* p = buf.data.data() + base + i * stride;
-        uint32_t v = 0;
-        if (acc.componentType == TINYGLTF_COMPONENT_TYPE_UNSIGNED_SHORT) {
-            uint16_t u;
-            std::memcpy(&u, p, sizeof(u));
-            v = u;
-        } else if (acc.componentType == TINYGLTF_COMPONENT_TYPE_UNSIGNED_INT) {
-            std::memcpy(&v, p, sizeof(v));
-        } else if (acc.componentType == TINYGLTF_COMPONENT_TYPE_UNSIGNED_BYTE) {
-            v = *p;
-        } else {
-            return false;
-        }
-        out[i] = v;
-    }
-    return true;
-}
+using namespace ptv::gltf_accessors;
 
 void compute_vertex_normals(const std::vector<uint32_t>& indices,
                             std::vector<LitVertex>& verts) {
@@ -318,6 +129,43 @@ void bounds_max_extent(const std::vector<LitVertex>& verts,
     }
 }
 
+/** One mesh to emit, plus the world transform to bake into it. */
+struct MeshInstance {
+    int mesh = -1;
+    glm::mat4 world{1.0f};
+    bool identity = true;
+};
+
+std::vector<MeshInstance> collect_mesh_instances(const tinygltf::Model& model) {
+    std::vector<MeshInstance> out;
+    const std::vector<int> parents = build_node_parents(model);
+    const std::vector<glm::mat4> world = build_node_world_matrices(model, parents);
+
+    for (size_t i = 0; i < model.nodes.size(); ++i) {
+        const auto& n = model.nodes[i];
+        if (n.mesh < 0 || static_cast<size_t>(n.mesh) >= model.meshes.size())
+            continue;
+        MeshInstance mi;
+        mi.mesh = n.mesh;
+        // Skinned nodes: joints own the placement, so the node transform is
+        // deliberately dropped (glTF 2.0, "Skins").
+        mi.world = (n.skin >= 0) ? glm::mat4(1.0f) : world[i];
+        mi.identity = (mi.world == glm::mat4(1.0f));
+        out.push_back(mi);
+    }
+
+    if (out.empty()) {
+        // No node references a mesh (malformed or node-less export). Emit
+        // everything untransformed rather than dropping the asset.
+        for (size_t m = 0; m < model.meshes.size(); ++m) {
+            MeshInstance mi;
+            mi.mesh = static_cast<int>(m);
+            out.push_back(mi);
+        }
+    }
+    return out;
+}
+
 }  // namespace
 
 bool load_glb_merged(const std::string& path,
@@ -375,7 +223,14 @@ bool load_glb_merged(const std::string& path,
         return c;
     };
 
-    for (const auto& mesh : model.meshes) {
+    for (const auto& inst : collect_mesh_instances(model)) {
+        const auto& mesh = model.meshes[static_cast<size_t>(inst.mesh)];
+        // Normals need the inverse transpose so non-uniformly scaled nodes
+        // still light correctly.
+        const glm::mat3 normal_mat =
+            inst.identity ? glm::mat3(1.0f)
+                          : glm::transpose(glm::inverse(glm::mat3(inst.world)));
+
         for (const auto& prim : mesh.primitives) {
             // mode == -1 means triangles in glTF 2.0 default.
             if (!(prim.mode == TINYGLTF_MODE_TRIANGLES || prim.mode == -1)) {
@@ -384,61 +239,86 @@ bool load_glb_merged(const std::string& path,
             auto pos_it = prim.attributes.find("POSITION");
             if (pos_it == prim.attributes.end()) continue;
 
-            std::vector<std::array<float, 3>> positions;
-            if (!read_accessor_float3(model, pos_it->second, positions)) {
+            std::string acc_err;
+            std::vector<float> positions;
+            size_t pos_comps = 0;
+            if (!read_accessor_floats(model, pos_it->second, positions,
+                                      &pos_comps, &acc_err) ||
+                pos_comps != 3) {
+                PTV_WARN("{}: skipping primitive ({})", path, acc_err);
                 continue;
             }
+            const size_t vcount = positions.size() / 3;
 
-            std::vector<std::array<float, 3>> normals;
+            std::vector<float> normals;
             auto n_it = prim.attributes.find("NORMAL");
             if (n_it != prim.attributes.end()) {
-                read_accessor_float3(model, n_it->second, normals);
+                size_t nc = 0;
+                if (!read_accessor_floats(model, n_it->second, normals, &nc,
+                                          &acc_err) ||
+                    nc != 3) {
+                    normals.clear();
+                }
             }
 
             // Optional per-vertex COLOR_0 stream. When present, glTF spec
             // says we must multiply by baseColorFactor.
-            std::vector<std::array<float, 4>> vert_colors;
+            std::vector<float> vert_colors;
+            size_t color_comps = 0;
             auto c_it = prim.attributes.find("COLOR_0");
             if (c_it != prim.attributes.end()) {
-                read_accessor_color_rgba(model, c_it->second, vert_colors);
+                if (!read_accessor_floats(model, c_it->second, vert_colors,
+                                          &color_comps, &acc_err)) {
+                    vert_colors.clear();
+                    color_comps = 0;
+                }
             }
 
             const std::array<float, 4> mat_color =
                 material_base_color(prim.material);
 
-            const uint32_t base =
-                static_cast<uint32_t>(out_verts.size());
-            for (size_t i = 0; i < positions.size(); ++i) {
+            const uint32_t base = static_cast<uint32_t>(out_verts.size());
+            for (size_t i = 0; i < vcount; ++i) {
                 LitVertex lv{};
-                lv.pos[0] = positions[i][0];
-                lv.pos[1] = positions[i][1];
-                lv.pos[2] = positions[i][2];
-                if (i < normals.size()) {
-                    lv.normal[0] = normals[i][0];
-                    lv.normal[1] = normals[i][1];
-                    lv.normal[2] = normals[i][2];
-                } else {
-                    lv.normal[0] = 0.0f;
-                    lv.normal[1] = 1.0f;
-                    lv.normal[2] = 0.0f;
+                glm::vec3 p(positions[i * 3 + 0], positions[i * 3 + 1],
+                            positions[i * 3 + 2]);
+                if (!inst.identity) {
+                    p = glm::vec3(inst.world * glm::vec4(p, 1.0f));
                 }
-                if (i < vert_colors.size()) {
-                    lv.color[0] = vert_colors[i][0] * mat_color[0];
-                    lv.color[1] = vert_colors[i][1] * mat_color[1];
-                    lv.color[2] = vert_colors[i][2] * mat_color[2];
-                    lv.color[3] = vert_colors[i][3] * mat_color[3];
-                } else {
-                    lv.color[0] = mat_color[0];
-                    lv.color[1] = mat_color[1];
-                    lv.color[2] = mat_color[2];
-                    lv.color[3] = mat_color[3];
+                lv.pos[0] = p.x;
+                lv.pos[1] = p.y;
+                lv.pos[2] = p.z;
+
+                glm::vec3 nrm(0.0f, 1.0f, 0.0f);
+                if (i * 3 + 2 < normals.size()) {
+                    nrm = glm::vec3(normals[i * 3 + 0], normals[i * 3 + 1],
+                                    normals[i * 3 + 2]);
+                    if (!inst.identity) nrm = normal_mat * nrm;
+                }
+                lv.normal[0] = nrm.x;
+                lv.normal[1] = nrm.y;
+                lv.normal[2] = nrm.z;
+
+                for (int k = 0; k < 4; ++k) {
+                    float cv = 1.0f;
+                    if (color_comps >= 3 &&
+                        static_cast<size_t>(k) < color_comps &&
+                        i * color_comps + static_cast<size_t>(k) <
+                            vert_colors.size()) {
+                        cv = vert_colors[i * color_comps +
+                                         static_cast<size_t>(k)];
+                    }
+                    lv.color[k] = cv * mat_color[static_cast<size_t>(k)];
                 }
                 out_verts.push_back(lv);
             }
 
             if (prim.indices >= 0) {
                 std::vector<uint32_t> idx;
-                if (!read_accessor_indices(model, prim.indices, idx)) {
+                size_t ic = 0;
+                if (!read_accessor_uints(model, prim.indices, idx, &ic,
+                                         &acc_err) ||
+                    ic != 1) {
                     // Drop vertices we added for this primitive if indices bad
                     out_verts.resize(base);
                     continue;
@@ -448,11 +328,11 @@ bool load_glb_merged(const std::string& path,
                 }
             } else {
                 // Non-indexed triangles
-                if (positions.size() % 3 != 0) {
+                if (vcount % 3 != 0) {
                     out_verts.resize(base);
                     continue;
                 }
-                for (size_t i = 0; i < positions.size(); i += 3) {
+                for (size_t i = 0; i < vcount; i += 3) {
                     out_indices.push_back(base + static_cast<uint32_t>(i));
                     out_indices.push_back(base + static_cast<uint32_t>(i + 1));
                     out_indices.push_back(base + static_cast<uint32_t>(i + 2));

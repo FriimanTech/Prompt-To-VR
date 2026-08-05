@@ -832,7 +832,7 @@ So the robust pattern is:
 # Engine services (MechanicContext)
 
 ``on_update`` also receives ``MechanicContext& ctx`` -- the ONLY sanctioned
-way to move the player or touch physics. All seven pointers are non-null
+way to move the player or touch physics. All eight pointers are non-null
 while a scene is loaded. Every mutating call is validated and CLAMPED by the
 engine (non-finite values rejected, teleport distance capped to the scene's
 limit and never below the floor, impulse magnitude and per-call rig
@@ -878,6 +878,16 @@ than breaking the player out of the world.
   ctx.sockets      // named attachment points baked into an asset's mesh
     ->has_socket(entity, "muzzle") -> bool
     ->socket_world(entity, "muzzle") -> Mat4
+
+  ctx.skeleton     // pose a RIGGED entity: joints and/or baked clips
+    ->has_skeleton(entity) -> bool
+    ->joint_index(entity, "bone_index_01") -> int   // -1 when absent
+    ->joint_count(entity) -> int
+    ->set_joint_rotation(entity, joint, Quat)
+    ->set_joint_translation(entity, joint, Vec3)
+    ->play_clip(entity, "walk", looping) -> bool
+    ->stop_clip(entity)
+    ->set_clip_speed(entity, speed)
 
 ## ctx.fx: how to make something visibly react
 
@@ -937,6 +947,48 @@ from nowhere. Common names: ``muzzle`` (business end / emit point) and
 
 An unknown socket does not crash -- it falls back to the front of the
 entity's bounding sphere -- but that is a safety net, not a design.
+
+## ctx.skeleton: only for RIGGED assets, and only in Phase::Simulate
+
+Most assets are a single rigid mesh and have no skeleton at all;
+``has_skeleton`` returns false and every write is ignored, so this is safe
+to call blind. Reach for it only when the asset is actually rigged -- hands,
+characters, creatures.
+
+Two ways to move a joint, and they compose:
+
+* ``play_clip`` runs motion baked into the asset (a walk cycle). Time-driven.
+* ``set_joint_rotation`` states a joint's pose for THIS frame, computed from
+  whatever you like. This is how a finger follows the trigger -- there is no
+  clip for that, because the pose is a function of live input, not of time:
+
+      // once, in on_attach: resolve the name, cache the index
+      index_joint_ = ctx.skeleton->joint_index(self, "bone_index_01");
+
+      // every frame, in on_update:
+      if (index_joint_ >= 0) {
+          const float curl = input.hands[h].trigger;   // 0..1
+          ctx.skeleton->set_joint_rotation(
+              self, index_joint_,
+              glm::angleAxis(curl * 1.4f, Vec3(0.0f, 0.0f, 1.0f)));
+      }
+
+A joint you write is left alone by the clip that frame; a joint you stop
+writing goes straight back to the clip (or to bind pose). So a character can
+play its idle animation while your code aims only its head.
+
+Two rules:
+
+* Resolve names with ``joint_index`` ONCE in ``on_attach`` and cache the int.
+  Joint names come from the rig and differ per asset, and the lookup is a
+  string hash you should not pay per joint per frame.
+* Write joints in ``Phase::Simulate``. The pose system runs right after that
+  phase; an override written anywhere else is a frame late or ignored.
+
+Do NOT couple two rigged objects to each other. If a hand grips a weapon and
+both should react to the trigger, drive BOTH from
+``input.hands[h].trigger`` -- they then stay in sync every frame with no
+event plumbing and no ordering dependency between the two mechanics.
 
 ## ctx.haptics: pulse on the EDGE, never every frame
 
@@ -1079,11 +1131,11 @@ the macro called EXACTLY ONCE across the entire file set).
 4. Do NOT write ``class X : public ptv::IMechanic`` with custom method
    names like ``OnStart`` / ``Configure`` / ``Update(ctx)``. The only
    overridable methods are the ones listed in the interface above.
-5. The ``MechanicContext& ctx`` argument has EXACTLY seven members:
+5. The ``MechanicContext& ctx`` argument has EXACTLY eight members:
    ``ctx.locomotion``, ``ctx.physics``, ``ctx.draw``, ``ctx.hands``,
-   ``ctx.fx``, ``ctx.haptics`` and ``ctx.sockets``. There is no ``ctx.input``
-   (input arrives as the separate ``InputSnapshot`` argument), and no
-   ``ctx.time`` / ``ctx.save`` / ``ctx.ui``.
+   ``ctx.fx``, ``ctx.haptics``, ``ctx.sockets`` and ``ctx.skeleton``. There
+   is no ``ctx.input`` (input arrives as the separate ``InputSnapshot``
+   argument), and no ``ctx.time`` / ``ctx.save`` / ``ctx.ui``.
 6. There is NO per-file line cap and NO requirement to use a single
    .cpp. Use the natural file split for the mechanic. When you split
    across files, use a shared ``.h`` header that you also emit in your

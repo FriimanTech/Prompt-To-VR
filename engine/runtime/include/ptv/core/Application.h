@@ -65,6 +65,7 @@ private:
     class TransformFxService;
     class HapticsService;
     class SocketsService;
+    class SkeletonService;
     friend class LocomotionService;
     friend class PhysicsAccessService;
     friend class DebugDrawService;
@@ -72,10 +73,19 @@ private:
     friend class TransformFxService;
     friend class HapticsService;
     friend class SocketsService;
+    friend class SkeletonService;
 
     bool initialize(const Config& cfg);
     void shutdown();
     void tick(float dt);
+    /** Give every entity whose GLB carries a skin a ``CSkeleton`` +
+     *  ``CAnimator``, and upload its geometry through the skinned path.
+     *
+     *  Runs once at scene load, after mesh paths are resolved and the
+     *  renderer exists. Rigged meshes are deliberately loaded here rather
+     *  than streamed: the streaming worker only knows how to build 40-byte
+     *  static vertices. */
+    void attach_skeletons();
     // Build the renderer's environment (sky/sun/ambient/fog/point lights) from
     // the loaded ``scene_``. Cached so it isn't rebuilt every frame; defaults
     // are chosen so scenes without an authored sky/lights (e.g. the starter
@@ -240,6 +250,7 @@ private:
     std::unique_ptr<TransformFxService> fx_svc_;
     std::unique_ptr<HapticsService> haptics_svc_;
     std::unique_ptr<SocketsService> sockets_svc_;
+    std::unique_ptr<SkeletonService> skeleton_svc_;
     MechanicContext mech_ctx_{};
     // Monotonic seconds since the loop started; the haptics rate limiter
     // needs a clock that does not depend on wall-clock formatting.

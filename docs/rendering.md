@@ -90,6 +90,48 @@ and a Narkowicz **ACES** tonemap. Material IDs are preserved:
 non-uniformly scaled primitives light correctly — done in-shader to avoid growing
 the push-constant block (kept at 160 bytes).
 
+## Skinned geometry (`scene_skinned.vert`)
+
+Rigged meshes go through a **second graphics pipeline**. It shares the render
+pass, the pipeline layout, the push-constant block and `scene.frag` with the
+static one; only the vertex shader and the vertex input differ, so switching
+between them costs a single `vkCmdBindPipeline`.
+
+| | Static | Skinned |
+|---|---|---|
+| Vertex struct | `LitVertex`, 40 B | `SkinnedVertex`, 48 B |
+| Attributes | pos, normal, color | + `JOINTS_0` (`R8G8B8A8_UINT`), `WEIGHTS_0` (`R8G8B8A8_UNORM`) |
+| Vertex shader | `scene.vert` | `scene_skinned.vert` |
+
+Static meshes deliberately keep the narrower vertex. Quest 3 is
+memory-bandwidth bound, and widening every vertex in the scene by 8 bytes to
+serve the handful that are rigged is the wrong trade.
+
+Skinning runs **in the vertex shader**, not a compute prepass: nothing else in
+the engine consumes the deformed positions (no shadow pass, no ray tracing, no
+GPU collision), so writing them out to memory would cost bandwidth and buy
+nothing.
+
+**Joint palettes.** Every skinned draw in a frame shares one storage buffer at
+`set 0, binding 1` — host-visible, persistently mapped, grown in powers of two,
+and filled once per frame *before* the per-eye loop (palettes are world-space,
+so both eyes read the same data). A draw records only where its slice starts,
+carried in `pc.params.y`, an already-unused push-constant component: the block
+is at 160 bytes against Vulkan's guaranteed 128, so it must not grow. The
+alternative — a descriptor set per skinned mesh — would put every character on
+its own binding change, which lands directly on the draw-call budget below.
+
+Normals use `mat3(model * skin)` rather than a full inverse-transpose, the
+standard assumption that joint matrices carry no non-uniform scale.
+
+Joints are limited to **256 per skin** by the byte-packed indices; a skin that
+exceeds it fails the load loudly rather than wrapping onto the wrong bone.
+Mixamo humanoids land near 65 and an OpenXR hand is 26.
+
+Culling uses the **bind-pose** bounding sphere, so a heavily posed character is
+culled slightly optimistically — much cheaper than re-deriving bounds per frame
+from the palette.
+
 ## Gradient sky (`sky.vert` / `sky.frag`)
 
 A fullscreen triangle (no vertex input, depth off) reconstructs a world-space
@@ -153,6 +195,23 @@ distance against the scene's `lod_switch_distances_m`, with:
   moving back up, so an object sitting on a switch boundary cannot flicker;
 - a global **`lod_bias`** the adaptive governor raises under load.
 
+**Rigged assets keep an identical skeleton at every level.** `ptv_glb_optimize`
+copies the joint hierarchy, bind pose and inverse bind matrices verbatim into
+each LOD, so one palette — built once per frame from the entity's `CSkeleton` —
+is valid for whichever level the distance check picks. Without that invariant a
+LOD switch mid-animation would snap the character into a garbage pose.
+
+Two consequences worth knowing:
+
+- `--sloppy` is **refused** for rigged input. `meshopt_simplifySloppy`
+  synthesizes vertex positions that belong to no source vertex, so there is
+  nothing to carry `JOINTS_0`/`WEIGHTS_0` and the mesh detaches from its rig.
+  Rigged LODs use `meshopt_simplifyWithAttributes` with
+  `meshopt_SimplifyRegularize` instead, fed normals and colors but never bone
+  data. (Bone indices are categorical and weights are a partition of unity;
+  neither behaves like a value the quadric metric can interpolate.)
+- Rigged meshes bypass the streaming worker entirely — see below.
+
 ## Culling
 
 Built each frame in `Renderer::build_items_from_world`:
@@ -205,6 +264,16 @@ When a scene exceeds the resident triangle budget (only enabled in `massive`),
 least-recently-used meshes are evicted one per frame. This is safe because
 `draw_frame` waits on its fence before returning, so no command buffer is still
 referencing the freed buffers.
+
+**Rigged meshes are the exception, and are uploaded up front.** The streaming
+worker only knows how to build 40-byte static vertices; letting it touch a
+rigged path would cache a static slot under that path and the entity would draw
+through the wrong pipeline forever. `Application::attach_skeletons()` therefore
+loads every rigged asset (and its whole LOD chain) synchronously at scene load
+and marks the slots non-evictable, since a skeleton outliving its geometry would
+leave the entity permanently invisible with no way to recover. Whether an asset
+is rigged comes from `mesh.skinned` in `scene.json`, so the common all-static
+scene never opens a GLB to find out.
 
 ## Fixed foveated rendering
 

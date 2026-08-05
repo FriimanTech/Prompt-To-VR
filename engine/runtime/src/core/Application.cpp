@@ -76,6 +76,7 @@
 #include <glm/gtc/matrix_transform.hpp>
 
 #include "ptv/core/Logger.h"
+#include "ptv/ecs/Skeleton.h"
 #include "ptv/ecs/TransformOffset.h"
 #include "ptv/scene/SceneLoader.h"
 
@@ -979,6 +980,173 @@ private:
     Application* app_;
 };
 
+class Application::SkeletonService final : public ISkeleton {
+public:
+    explicit SkeletonService(Application* app) : app_(app) {}
+
+    bool has_skeleton(std::uint32_t entity) const override {
+        const World& w = app_->world_;
+        return w.valid(entity) && w.has<CSkeleton>(entity) &&
+               w.get<CSkeleton>(entity).skeleton.joint_count() > 0;
+    }
+
+    int joint_index(std::uint32_t entity, const char* name) const override {
+        if (name == nullptr || !has_skeleton(entity)) return -1;
+        const auto& sk = app_->world_.get<CSkeleton>(entity).skeleton;
+        const auto it = sk.name_to_joint.find(name);
+        return (it == sk.name_to_joint.end()) ? -1 : it->second;
+    }
+
+    int joint_count(std::uint32_t entity) const override {
+        if (!has_skeleton(entity)) return 0;
+        return static_cast<int>(
+            app_->world_.get<CSkeleton>(entity).skeleton.joint_count());
+    }
+
+    void set_joint_rotation(std::uint32_t entity, int joint,
+                            const Quat& rotation) override {
+        CSkeleton* sk = nullptr;
+        CAnimator* anim = nullptr;
+        if (!resolve(entity, joint, &sk, &anim)) return;
+        // Normalizing here rather than trusting the caller: generated code
+        // routinely builds rotations by multiplying several quaternions, and
+        // drift there shows up as a joint that slowly inflates the mesh.
+        sk->local_pose[static_cast<size_t>(joint)].rotation =
+            glm::normalize(rotation);
+        anim->joint_overridden[static_cast<size_t>(joint)] = 1u;
+    }
+
+    void set_joint_translation(std::uint32_t entity, int joint,
+                               const Vec3& translation) override {
+        CSkeleton* sk = nullptr;
+        CAnimator* anim = nullptr;
+        if (!resolve(entity, joint, &sk, &anim)) return;
+        sk->local_pose[static_cast<size_t>(joint)].translation = translation;
+        anim->joint_overridden[static_cast<size_t>(joint)] = 1u;
+    }
+
+    bool play_clip(std::uint32_t entity, const char* clip_name,
+                   bool looping) override {
+        if (clip_name == nullptr || !has_skeleton(entity)) return false;
+        World& w = app_->world_;
+        if (!w.has<CAnimator>(entity)) return false;
+        auto& anim = w.get<CAnimator>(entity);
+        for (size_t i = 0; i < anim.clips.size(); ++i) {
+            if (anim.clips[i].name != clip_name) continue;
+            anim.active_clip = static_cast<int>(i);
+            anim.time_s = 0.0f;
+            anim.looping = looping;
+            anim.playing = true;
+            return true;
+        }
+        return false;
+    }
+
+    void stop_clip(std::uint32_t entity) override {
+        World& w = app_->world_;
+        if (!w.valid(entity) || !w.has<CAnimator>(entity)) return;
+        w.get<CAnimator>(entity).playing = false;
+    }
+
+    void set_clip_speed(std::uint32_t entity, float speed) override {
+        World& w = app_->world_;
+        if (!w.valid(entity) || !w.has<CAnimator>(entity)) return;
+        // Engine-clamped like every other service: a runaway speed from
+        // generated code would otherwise alias the clip into noise.
+        w.get<CAnimator>(entity).speed = std::clamp(speed, -8.0f, 8.0f);
+    }
+
+private:
+    /** Shared guard: valid entity, real skeleton, in-range joint, and an
+     *  animator to record the override flag on (created on demand so a purely
+     *  procedural rig does not need one authored in the scene). */
+    bool resolve(std::uint32_t entity, int joint, CSkeleton** out_sk,
+                 CAnimator** out_anim) {
+        if (!has_skeleton(entity)) return false;
+        World& w = app_->world_;
+        auto& sk = w.get<CSkeleton>(entity);
+        const size_t n = sk.skeleton.joint_count();
+        if (joint < 0 || static_cast<size_t>(joint) >= n) return false;
+        if (sk.local_pose.size() != n) sk.local_pose = sk.skeleton.bind_pose;
+        if (!w.has<CAnimator>(entity)) w.emplace_or_replace<CAnimator>(entity);
+        auto& anim = w.get<CAnimator>(entity);
+        if (anim.joint_overridden.size() != n) {
+            anim.joint_overridden.resize(n, 0u);
+        }
+        *out_sk = &sk;
+        *out_anim = &anim;
+        return true;
+    }
+
+    Application* app_;
+};
+
+void Application::attach_skeletons() {
+    int rigged = 0;
+    auto view = world_.registry().view<CMesh>();
+    for (auto entity : view) {
+        const auto& cm = view.get<CMesh>(entity);
+        if (cm.glb_path.empty()) continue;
+
+        // scene.json already says which assets are rigged (the optimizer
+        // reported it), so the common case costs nothing. Fall back to
+        // probing the GLB's JSON chunk for hand-authored scenes and samples
+        // that predate the flag -- still no BIN decoding.
+        if (!cm.skinned) {
+            bool has_skin = false;
+            int probe_joints = 0;
+            std::string probe_err;
+            if (!gltf_mesh_load::glb_probe_skin(cm.glb_path, &has_skin,
+                                                &probe_joints, probe_err)) {
+                PTV_WARN("skin probe failed for {}: {}", cm.glb_path,
+                         probe_err);
+                continue;
+            }
+            if (!has_skin) continue;
+        }
+
+        gltf_mesh_load::SkeletonData skel;
+        const int slot = renderer_.load_glb_skinned(
+            cm.glb_path, cm.target_scale_meters, skel);
+        if (slot < 0 || skel.joint_count() == 0) {
+            PTV_WARN("rigged mesh {} failed to load; drawing nothing for it",
+                     cm.glb_path);
+            continue;
+        }
+
+        // Every LOD shares the skeleton by construction (ptv_glb_optimize
+        // copies it verbatim), so the coarser levels only need their geometry
+        // resident for the renderer's distance switch to work.
+        for (size_t i = 1; i < cm.lod_paths.size(); ++i) {
+            gltf_mesh_load::SkeletonData ignored;
+            renderer_.load_glb_skinned(cm.lod_paths[i], cm.target_scale_meters,
+                                       ignored);
+        }
+
+        CSkeleton cs{};
+        cs.local_pose = skel.bind_pose;
+        cs.skeleton = std::move(skel);
+        gltf_mesh_load::build_joint_palette(cs.skeleton, cs.local_pose,
+                                            cs.palette);
+
+        CAnimator anim{};
+        anim.clips = cs.skeleton.clips;
+        anim.joint_overridden.assign(cs.skeleton.joint_count(), 0u);
+        // Nothing plays by default. A clip is motion the asset happens to
+        // ship; whether it should run is a gameplay decision, so a mechanic
+        // asks for it through ctx.skeleton->play_clip.
+        anim.active_clip = -1;
+
+        world_.registry().emplace_or_replace<CSkeleton>(entity, std::move(cs));
+        world_.registry().emplace_or_replace<CAnimator>(entity,
+                                                        std::move(anim));
+        ++rigged;
+    }
+    if (rigged > 0) {
+        PTV_INFO("Attached {} skeleton(s) from rigged GLBs", rigged);
+    }
+}
+
 Application::Application() = default;
 Application::~Application() = default;
 
@@ -1439,6 +1607,13 @@ int Application::run(const Config& cfg) {
         // frame, and before the draw list is built below.
         tick_transform_offsets(world_, dt);
 
+        // Evaluate skeletal poses in the same window and for the same reason:
+        // a mechanic that curled a finger from the trigger during Simulate
+        // has already written its override, so sampling clips and rebuilding
+        // joint palettes here means the pose the renderer picks up below is
+        // this frame's, not last frame's.
+        tick_animators(world_, dt);
+
         // Remember this frame's raw input for next frame's edge detection.
         prev_input_ = input;
 
@@ -1814,6 +1989,7 @@ bool Application::initialize(const Config& cfg) {
     fx_svc_ = std::make_unique<TransformFxService>(this);
     haptics_svc_ = std::make_unique<HapticsService>(this);
     sockets_svc_ = std::make_unique<SocketsService>(this);
+    skeleton_svc_ = std::make_unique<SkeletonService>(this);
     mech_ctx_.locomotion = locomotion_svc_.get();
     mech_ctx_.physics = physics_svc_.get();
     mech_ctx_.draw = draw_svc_.get();
@@ -1821,6 +1997,7 @@ bool Application::initialize(const Config& cfg) {
     mech_ctx_.fx = fx_svc_.get();
     mech_ctx_.haptics = haptics_svc_.get();
     mech_ctx_.sockets = sockets_svc_.get();
+    mech_ctx_.skeleton = skeleton_svc_.get();
 
     ensure_player_locomotion_bindings();
     mechanics_.attach_bindings(world_, mech_ctx_);
@@ -1843,6 +2020,7 @@ bool Application::initialize(const Config& cfg) {
         if (!renderer_ready_) {
             PTV_WARN("Renderer init failed; headset will not display content.");
         }
+        if (renderer_ready_) attach_skeletons();
     }
 
     // Pre-load locomotion-menu icons. The four GLBs live in the repo's

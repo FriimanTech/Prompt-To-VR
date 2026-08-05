@@ -8,6 +8,7 @@
 #include <string>
 #include <vector>
 
+
 // Forward-declare the OpenXR handles we need for the XR-aware init path.
 // We do not include <openxr/openxr.h> here to keep this header light.
 typedef struct XrInstance_T* XrInstance;
@@ -65,6 +66,15 @@ public:
     uint32_t graphics_queue_family() const { return graphics_queue_family_; }
     VkQueue graphics_queue() const { return graphics_queue_; }
     VmaAllocator allocator() const { return allocator_; }
+
+    /** Number of validation-layer ERROR messages seen since process start.
+     *
+     * Process-wide rather than per-context because the debug callback the
+     * layers invoke has no instance affinity. Tests read this to assert a
+     * frame rendered clean; without it "validation-clean" is only ever a
+     * human reading the log. Zero when validation layers are absent. */
+    static std::uint32_t validation_error_count();
+    static void reset_validation_error_count();
 
 private:
     bool pick_physical_device(const std::vector<std::string>& required_device_extensions);

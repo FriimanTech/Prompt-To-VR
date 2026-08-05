@@ -156,6 +156,8 @@ def run(ctx: PipelineContext) -> StageResult:
         info["bounds_radius_m"] = lod_info["bounds_radius_m"]
         info["triangle_budget"] = budget
         info["decimated"] = True
+        info["skinned"] = bool(lod_info.get("skinned") or False)
+        info["joint_count"] = int(lod_info.get("joint_count") or 0)
         info["optimization"] = {
             "status": "ok",
             "tier": profile.tier.value,
@@ -229,6 +231,8 @@ def _build_lod_chain(
     triangle_counts: list[int] = []
     source_triangles = 0
     unit_radius = 0.0
+    skinned = False
+    joint_count = 0
 
     for level, target in enumerate(targets):
         out_file = out_dir / f"{asset_id}_lod{level}.glb"
@@ -247,7 +251,13 @@ def _build_lod_chain(
         # The error-bounded simplifier preserves topology and can stall well
         # above very aggressive targets; allow the sloppy fallback from LOD1
         # down, where silhouette fidelity matters far less than hitting budget.
-        if level >= 1:
+        #
+        # Rigged assets are the exception, but we cannot know that before the
+        # first invocation reports it -- and the tool refuses the flag on its
+        # own regardless, because sloppy simplification invents vertex
+        # positions and would detach the mesh from its skeleton. Skipping it
+        # here once we do know just avoids a noisy log line per LOD.
+        if level >= 1 and not skinned:
             args.append("--sloppy")
 
         proc = subprocess.run(args, capture_output=True, text=True)
@@ -264,6 +274,8 @@ def _build_lod_chain(
         source_triangles = int(rep.get("source_triangles") or 0)
         triangle_counts.append(int(rep.get("output_triangles") or 0))
         unit_radius = float(rep.get("unit_bounds_radius") or 0.0)
+        skinned = bool(rep.get("skinned") or False)
+        joint_count = int(rep.get("joint_count") or 0)
         lod_paths.append(
             str(out_file.relative_to(repo_root)).replace("\\", "/")
         )
@@ -277,6 +289,12 @@ def _build_lod_chain(
         # axis; the runtime rescales by target_scale_meters, so the world-space
         # cull radius scales the same way.
         "bounds_radius_m": unit_radius,
+        # Every LOD of a rigged asset carries an identical skeleton by
+        # construction, so one flag describes the whole chain. The scene
+        # compiler forwards it so the runtime knows to attach a CSkeleton and
+        # draw through the skinned pipeline.
+        "skinned": skinned,
+        "joint_count": joint_count,
         "reused": False,
     }
     stamp_path.write_text(json.dumps(stamp, indent=2), encoding="utf-8")

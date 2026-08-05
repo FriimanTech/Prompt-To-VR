@@ -321,6 +321,69 @@ public:
 };
 
 /**
+ * Pose a rigged entity: play a baked clip, or drive individual joints.
+ *
+ * Only entities whose GLB carried a skin have a skeleton; everything else
+ * returns false / -1 and ignores writes, so calling this on a static prop is
+ * harmless.
+ *
+ * Two ways to move a joint, and they compose:
+ *
+ *   * ``play_clip`` runs motion baked into the asset -- a walk cycle from
+ *     Tripo's animation retarget, say. Time-driven.
+ *   * ``set_joint_rotation`` states a joint's pose for THIS frame, computed
+ *     from whatever you like. This is how a hand's index finger follows the
+ *     trigger:
+ *
+ *         const int j = ctx.skeleton->joint_index(self, "bone_index_01");
+ *         const float curl = input.hands[hand].trigger;   // 0..1
+ *         ctx.skeleton->set_joint_rotation(
+ *             self, j, glm::angleAxis(curl * 1.4f, Vec3(0, 0, 1)));
+ *
+ * A joint you write is left alone by the clip that frame; a joint you stop
+ * writing goes straight back to the clip (or to bind pose). So a character
+ * can play its idle animation while code aims only its head.
+ *
+ * Writes must happen in ``Phase::Simulate``: the pose system runs after that
+ * phase and before the renderer builds its draw list.
+ */
+class ISkeleton {
+public:
+    virtual ~ISkeleton() = default;
+
+    /** True when ``entity`` has a skeleton at all. */
+    virtual bool has_skeleton(std::uint32_t entity) const = 0;
+
+    /** Index of the joint called ``name``, or -1.
+     *
+     *  Names come from the rig, so they depend on the ``spec`` the asset was
+     *  rigged with (Mixamo names look like ``mixamorig:RightHandIndex1``).
+     *  Resolve once in ``on_attach`` and cache the index -- this is a string
+     *  lookup, not something to do per joint per frame. */
+    virtual int joint_index(std::uint32_t entity, const char* name) const = 0;
+
+    /** Number of joints, or 0. */
+    virtual int joint_count(std::uint32_t entity) const = 0;
+
+    /** Override one joint's local rotation for this frame. */
+    virtual void set_joint_rotation(std::uint32_t entity, int joint,
+                                    const Quat& rotation) = 0;
+    /** Override one joint's local translation for this frame. Rarely what you
+     *  want -- moving a joint off its rig position stretches the mesh. */
+    virtual void set_joint_translation(std::uint32_t entity, int joint,
+                                       const Vec3& translation) = 0;
+
+    /** Start a clip by name. Returns false when the asset has no such clip.
+     *  Restarts from zero if that clip is already the active one. */
+    virtual bool play_clip(std::uint32_t entity, const char* clip_name,
+                           bool looping) = 0;
+    /** Stop clip playback and hold the current pose. */
+    virtual void stop_clip(std::uint32_t entity) = 0;
+    /** Playback rate multiplier, clamped by the engine to a sane range. */
+    virtual void set_clip_speed(std::uint32_t entity, float speed) = 0;
+};
+
+/**
  * Bundle of engine services passed to every mechanic call.
  *
  * Pointers are owned by the engine and remain valid for the lifetime of the
@@ -335,6 +398,7 @@ struct MechanicContext {
     ITransformFx* fx{nullptr};
     IHaptics* haptics{nullptr};
     ISockets* sockets{nullptr};
+    ISkeleton* skeleton{nullptr};
 };
 
 }  // namespace ptv

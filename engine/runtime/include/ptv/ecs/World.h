@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "ptv/math/Math.h"
+#include "ptv/render/GltfSkinnedLoad.h"
 
 namespace ptv {
 
@@ -134,6 +135,53 @@ struct CMesh {
      * in metres. Read through ``MechanicContext::sockets`` rather than
      * directly, so a missing socket degrades instead of returning identity. */
     std::unordered_map<std::string, Transform> sockets;
+    /** True when the asset is rigged. The scene loader uses this to decide
+     * whether to attach a ``CSkeleton``; entities without it never touch the
+     * skinned pipeline. */
+    bool skinned{false};
+};
+
+/** Skeleton for a rigged ``CMesh``, plus the palette the renderer uploads.
+ *
+ * Joint indices match the source glTF skin's ``joints`` array exactly,
+ * because the mesh's ``JOINTS_0`` attribute references that ordering. Walk
+ * ``skeleton.order`` when you need parents before children.
+ *
+ * Attached by the scene loader only for GLBs that actually carry a skin;
+ * entities without one are drawn by the plain static pipeline and cost
+ * nothing extra. */
+struct CSkeleton {
+    /** Hierarchy, bind pose and inverse bind matrices from the GLB. */
+    gltf_mesh_load::SkeletonData skeleton;
+    /** The pose being rendered, one local transform per joint. Reset to the
+     *  bind pose at the top of every ``tick_animators`` pass, then written by
+     *  the active clip and by any procedural override. */
+    std::vector<gltf_mesh_load::JointPose> local_pose;
+    /** ``jointWorld * inverseBind`` per joint, rebuilt each frame and copied
+     *  straight into the renderer's joint buffer. */
+    std::vector<Mat4> palette;
+};
+
+/** Clip playback plus per-joint procedural override for a ``CSkeleton``.
+ *
+ * The two coexist by design. A clip is motion recorded against time; an
+ * override is a pose computed this frame from something live, typically
+ * controller input driving finger curl. Both write into the same
+ * ``CSkeleton::local_pose``, and an overridden joint simply wins over the
+ * clip for that frame, which is what lets a character play an idle animation
+ * while code aims its head or its trigger finger. */
+struct CAnimator {
+    std::vector<gltf_mesh_load::AnimationClip> clips;
+    /** Index into ``clips``, or -1 for no clip (pure procedural posing). */
+    int active_clip{-1};
+    float time_s{0.0f};
+    bool looping{true};
+    bool playing{true};
+    float speed{1.0f};
+    /** One flag per joint, set by ``ISkeleton`` writes and cleared at the end
+     *  of each tick. A set flag means "the clip must not touch this joint
+     *  this frame". */
+    std::vector<std::uint8_t> joint_overridden;
 };
 
 struct CPhysics {

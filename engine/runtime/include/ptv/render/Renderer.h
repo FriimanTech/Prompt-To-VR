@@ -16,6 +16,7 @@
 
 #include "ptv/math/Math.h"
 #include "ptv/render/GltfMeshLoad.h"
+#include "ptv/render/GltfSkinnedLoad.h"
 #include "ptv/scene/Scene.h"
 
 namespace ptv {
@@ -54,6 +55,12 @@ public:
         // -1 = draw the built-in unit cube (legacy procedural entities).
         // >=0 = index into this renderer's uploaded GLB mesh cache.
         int mesh_slot{-1};
+        // Skinning. -1 = static geometry, drawn with the plain pipeline.
+        // >=0 = first joint matrix for this item inside the frame's shared
+        // joint-palette buffer; see Renderer::push_joint_palette. The
+        // referenced mesh slot must have been created as skinned.
+        int joint_base{-1};
+        int joint_count{0};
     };
 
     struct EyeTarget {
@@ -186,6 +193,34 @@ public:
      *  times with the same path; the second call returns the cached slot. */
     int load_glb(const std::string& resolved_path, float target_scale_meters);
 
+    /** Synchronously load a rigged GLB into the mesh cache.
+     *
+     *  Returns a slot for ``DrawItem::mesh_slot`` (or -1) and fills
+     *  ``out_skeleton`` with the hierarchy the pose system needs. Unlike the
+     *  static streaming path this blocks, because a skinned entity cannot be
+     *  drawn at all until its skeleton exists -- there is no coarser LOD to
+     *  fall back to. */
+    int load_glb_skinned(const std::string& resolved_path,
+                         float target_scale_meters,
+                         gltf_mesh_load::SkeletonData& out_skeleton);
+
+    /** True when ``slot`` holds skinned geometry (48-byte vertices). */
+    bool mesh_slot_is_skinned(int slot) const;
+
+    // --- Per-frame joint palettes -------------------------------------------
+    //
+    // Every skinned draw this frame shares one storage buffer; an item just
+    // records where its matrices start. That keeps skinned meshes off the
+    // per-draw descriptor churn that would otherwise make each one its own
+    // binding change, which matters directly to the draw-call budget in
+    // ScenePerformance.
+
+    /** Drop last frame's palettes. Call once per frame before building items. */
+    void begin_joint_palettes();
+    /** Append ``count`` joint matrices; returns the base index to store in
+     *  ``DrawItem::joint_base``, or -1 if the arena is full. */
+    int push_joint_palette(const Mat4* matrices, int count);
+
     VkFormat color_format() const { return color_format_; }
     VkRenderPass render_pass() const { return render_pass_; }
 
@@ -194,7 +229,9 @@ private:
     bool create_render_pass();
     bool create_descriptors();
     bool create_pipeline();
+    bool create_skinned_pipeline();
     bool create_sky_pipeline();
+    bool ensure_joint_buffer(std::uint32_t matrix_capacity);
     bool create_cube_mesh();
     bool create_primitive_meshes();
     bool create_command_resources();
@@ -215,6 +252,10 @@ private:
         float local_radius{0.0f};   // bounding-sphere radius in mesh space
         uint64_t last_used_frame{0};
         bool evictable{false};      // false for built-in primitives / icons
+        // 48-byte SkinnedVertex geometry; must be drawn with the skinned
+        // pipeline, and drawing it with the static one would misread every
+        // attribute past the position.
+        bool skinned{false};
         std::string path;           // cache key, empty for procedural meshes
     };
 
@@ -251,6 +292,17 @@ private:
      *  built-in unit primitive meshes so buffer creation lives in one place. */
     int create_mesh_slot(const std::vector<gltf_mesh_load::LitVertex>& verts,
                          const std::vector<std::uint32_t>& indices);
+    /** Same, for 48-byte skinned vertices. Marks the slot ``skinned``. */
+    int create_mesh_slot_skinned(
+        const std::vector<gltf_mesh_load::SkinnedVertex>& verts,
+        const std::vector<std::uint32_t>& indices);
+    /** Shared body of the two above. Type-erased over the vertex struct,
+     *  which is safe because LitVertex and SkinnedVertex both begin with
+     *  ``float pos[3]`` -- the only field this needs for bounds. */
+    int create_mesh_slot_impl(const void* verts, std::size_t vert_count,
+                              std::size_t vert_stride,
+                              const std::uint32_t* indices,
+                              std::size_t index_count, bool skinned);
     /** Return cache slot for ``resolved_path`` (absolute on disk), or -1. */
     int ensure_gltf_mesh(const std::string& resolved_path,
                          float target_scale_meters);
@@ -275,8 +327,12 @@ private:
     VkSampleCountFlagBits samples_{VK_SAMPLE_COUNT_1_BIT};
 
     VkRenderPass render_pass_{VK_NULL_HANDLE};
+    // Shared by the static and skinned geometry pipelines: same descriptor
+    // set, same push-constant block, only the vertex input and vertex shader
+    // differ.
     VkPipelineLayout pipeline_layout_{VK_NULL_HANDLE};
     VkPipeline pipeline_{VK_NULL_HANDLE};
+    VkPipeline skinned_pipeline_{VK_NULL_HANDLE};
 
     // Fullscreen gradient-sky pass (drawn before geometry each eye).
     VkPipelineLayout sky_pipeline_layout_{VK_NULL_HANDLE};
@@ -286,6 +342,7 @@ private:
 
     VkShaderModule vs_{VK_NULL_HANDLE};
     VkShaderModule fs_{VK_NULL_HANDLE};
+    VkShaderModule skinned_vs_{VK_NULL_HANDLE};
 
     // Environment/lighting uniform buffer (set 0, binding 0), persistently
     // mapped and refreshed once per frame from the RenderEnv.
@@ -295,6 +352,16 @@ private:
     VkBuffer env_ubo_{VK_NULL_HANDLE};
     VmaAllocation env_ubo_alloc_{nullptr};
     void* env_ubo_mapped_{nullptr};
+
+    // Joint matrix palettes for every skinned draw this frame (set 0,
+    // binding 1). Host-visible and persistently mapped like the env UBO, and
+    // refreshed in draw_frame after the fence wait so the previous frame has
+    // finished reading it.
+    VkBuffer joint_ssbo_{VK_NULL_HANDLE};
+    VmaAllocation joint_ssbo_alloc_{nullptr};
+    void* joint_ssbo_mapped_{nullptr};
+    std::uint32_t joint_ssbo_capacity_{0};  // in matrices
+    std::vector<Mat4> joint_palettes_;
 
     VkBuffer cube_vb_{VK_NULL_HANDLE};
     VmaAllocation cube_vb_alloc_{nullptr};

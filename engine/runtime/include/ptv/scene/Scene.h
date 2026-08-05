@@ -38,6 +38,12 @@ struct MeshRef {
      * barrel tip of a pistol, a rifle or a rocket launcher: the C++ asks for
      * ``"muzzle"``, and the per-asset numbers arrive as data. */
     std::unordered_map<std::string, Transform> sockets;
+    /** True when the asset carries a skin, set by the scene compiler from the
+     * optimizer's report. Lets the runtime decide to attach a ``CSkeleton``
+     * and draw through the skinned pipeline without opening every GLB in the
+     * scene to find out. */
+    bool skinned{false};
+    int joint_count{0};
 };
 
 // Procedural primitive authored by the world-generation stage.

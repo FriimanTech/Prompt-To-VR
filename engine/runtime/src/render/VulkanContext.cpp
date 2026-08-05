@@ -37,6 +37,7 @@
 #include "ptv/render/VulkanContext.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cstring>
 #include <vector>
 
@@ -46,12 +47,15 @@ namespace ptv {
 
 namespace {
 
+std::atomic<std::uint32_t> g_validation_errors{0};
+
 VKAPI_ATTR VkBool32 VKAPI_CALL debug_cb(
     VkDebugUtilsMessageSeverityFlagBitsEXT severity,
     VkDebugUtilsMessageTypeFlagsEXT,
     const VkDebugUtilsMessengerCallbackDataEXT* data,
     void*) {
     if (severity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT) {
+        g_validation_errors.fetch_add(1, std::memory_order_relaxed);
         PTV_ERROR("[vk] {}", data->pMessage ? data->pMessage : "");
     } else if (severity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT) {
         PTV_WARN("[vk] {}", data->pMessage ? data->pMessage : "");
@@ -68,6 +72,14 @@ bool ext_supported(const std::vector<VkExtensionProperties>& props, const char* 
 }
 
 }  // namespace
+
+std::uint32_t VulkanContext::validation_error_count() {
+    return g_validation_errors.load(std::memory_order_relaxed);
+}
+
+void VulkanContext::reset_validation_error_count() {
+    g_validation_errors.store(0, std::memory_order_relaxed);
+}
 
 VulkanContext::~VulkanContext() { shutdown(); }
 

@@ -303,6 +303,7 @@ bool Renderer::initialize(VulkanContext& vk,
     if (!create_render_pass()) return false;
     if (!create_descriptors()) return false;
     if (!create_pipeline()) return false;
+    if (!create_skinned_pipeline()) return false;
     if (!create_sky_pipeline()) return false;
     if (!create_cube_mesh()) return false;
     if (!create_primitive_meshes()) return false;
@@ -404,17 +405,86 @@ bool Renderer::create_render_pass() {
            VK_SUCCESS;
 }
 
+bool Renderer::ensure_joint_buffer(std::uint32_t matrix_capacity) {
+    if (matrix_capacity <= joint_ssbo_capacity_ && joint_ssbo_) return true;
+
+    // Grow in powers of two so a scene that adds skinned characters over time
+    // reallocates a handful of times, not once per new character.
+    std::uint32_t cap = std::max<std::uint32_t>(joint_ssbo_capacity_, 256u);
+    while (cap < matrix_capacity) cap *= 2u;
+
+    VkBuffer old_buf = joint_ssbo_;
+    VmaAllocation old_alloc = joint_ssbo_alloc_;
+
+    VkBufferCreateInfo bci{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+    bci.size = static_cast<VkDeviceSize>(cap) * sizeof(Mat4);
+    bci.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+    bci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    VmaAllocationCreateInfo aci{};
+    aci.usage = VMA_MEMORY_USAGE_AUTO;
+    aci.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT |
+                VMA_ALLOCATION_CREATE_MAPPED_BIT;
+    VmaAllocationInfo ainfo{};
+    VkBuffer buf = VK_NULL_HANDLE;
+    VmaAllocation alloc = nullptr;
+    if (vmaCreateBuffer(vk_->allocator(), &bci, &aci, &buf, &alloc, &ainfo) !=
+        VK_SUCCESS) {
+        PTV_ERROR("failed to allocate joint palette buffer ({} matrices)", cap);
+        return false;
+    }
+
+    joint_ssbo_ = buf;
+    joint_ssbo_alloc_ = alloc;
+    joint_ssbo_mapped_ = ainfo.pMappedData;
+    joint_ssbo_capacity_ = cap;
+
+    // Point the descriptor at the new buffer. Callers only reach here either
+    // before the first frame or right after the frame fence, so no in-flight
+    // command buffer is reading the old one.
+    if (env_set_ != VK_NULL_HANDLE) {
+        VkDescriptorBufferInfo dbi{joint_ssbo_, 0, VK_WHOLE_SIZE};
+        VkWriteDescriptorSet w{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+        w.dstSet = env_set_;
+        w.dstBinding = 1;
+        w.descriptorCount = 1;
+        w.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        w.pBufferInfo = &dbi;
+        vkUpdateDescriptorSets(vk_->device(), 1, &w, 0, nullptr);
+    }
+
+    if (old_buf) {
+        vmaDestroyBuffer(vk_->allocator(), old_buf, old_alloc);
+    }
+    return true;
+}
+
+void Renderer::begin_joint_palettes() { joint_palettes_.clear(); }
+
+int Renderer::push_joint_palette(const Mat4* matrices, int count) {
+    if (!matrices || count <= 0) return -1;
+    const int base = static_cast<int>(joint_palettes_.size());
+    joint_palettes_.insert(joint_palettes_.end(), matrices, matrices + count);
+    return base;
+}
+
 bool Renderer::create_descriptors() {
     // Set 0, binding 0: environment/lighting UBO (fragment stage).
-    VkDescriptorSetLayoutBinding b{};
-    b.binding = 0;
-    b.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-    b.descriptorCount = 1;
-    b.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+    // Set 0, binding 1: joint matrix palettes (vertex stage). One set serves
+    // both the static and skinned pipelines; the static vertex shader simply
+    // never reads binding 1.
+    VkDescriptorSetLayoutBinding b[2]{};
+    b[0].binding = 0;
+    b[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+    b[0].descriptorCount = 1;
+    b[0].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+    b[1].binding = 1;
+    b[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    b[1].descriptorCount = 1;
+    b[1].stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
     VkDescriptorSetLayoutCreateInfo lci{
         VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
-    lci.bindingCount = 1;
-    lci.pBindings = &b;
+    lci.bindingCount = 2;
+    lci.pBindings = b;
     if (vkCreateDescriptorSetLayout(vk_->device(), &lci, nullptr,
                                     &env_set_layout_) != VK_SUCCESS) {
         return false;
@@ -436,12 +506,15 @@ bool Renderer::create_descriptors() {
     }
     env_ubo_mapped_ = ainfo.pMappedData;
 
-    VkDescriptorPoolSize ps{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1};
+    VkDescriptorPoolSize ps[2]{
+        {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1},
+        {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1},
+    };
     VkDescriptorPoolCreateInfo pci{
         VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
     pci.maxSets = 1;
-    pci.poolSizeCount = 1;
-    pci.pPoolSizes = &ps;
+    pci.poolSizeCount = 2;
+    pci.pPoolSizes = ps;
     if (vkCreateDescriptorPool(vk_->device(), &pci, nullptr, &desc_pool_) !=
         VK_SUCCESS) {
         return false;
@@ -455,6 +528,11 @@ bool Renderer::create_descriptors() {
     if (vkAllocateDescriptorSets(vk_->device(), &dsi, &env_set_) != VK_SUCCESS) {
         return false;
     }
+
+    // Binding 1 must reference a real buffer even in a scene with no skinned
+    // meshes at all: the layout declares it, so leaving it unwritten is a
+    // validation error the moment anything binds this set.
+    if (!ensure_joint_buffer(256u)) return false;
 
     VkDescriptorBufferInfo dbi{env_ubo_, 0, sizeof(GpuEnv)};
     VkWriteDescriptorSet w{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
@@ -586,6 +664,127 @@ bool Renderer::create_pipeline() {
                                      nullptr, &pipeline_) == VK_SUCCESS;
 }
 
+bool Renderer::create_skinned_pipeline() {
+    // Everything except the vertex shader and the vertex input is identical to
+    // create_pipeline, including the pipeline layout -- so the two pipelines
+    // share push constants and the same descriptor set, and switching between
+    // them costs only a vkCmdBindPipeline.
+    //
+    // Static meshes deliberately do NOT carry joints/weights. On a
+    // bandwidth-bound tile GPU, widening every vertex in the scene by 8 bytes
+    // to serve the handful that are rigged is the wrong trade.
+    const std::string base = std::string(PTV_SHADER_DIR);
+    skinned_vs_ = make_shader(vk_->device(), base + "/scene_skinned.vert.spv");
+    if (!skinned_vs_ || !fs_) return false;
+    if (pipeline_layout_ == VK_NULL_HANDLE) return false;
+
+    VkPipelineShaderStageCreateInfo stages[2]{};
+    stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
+    stages[0].module = skinned_vs_;
+    stages[0].pName = "main";
+    stages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+    stages[1].module = fs_;
+    stages[1].pName = "main";
+
+    using gltf_mesh_load::SkinnedVertex;
+    VkVertexInputBindingDescription vbd{};
+    vbd.binding = 0;
+    vbd.stride = sizeof(SkinnedVertex);
+    vbd.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
+
+    VkVertexInputAttributeDescription vattr[5]{};
+    vattr[0].location = 0;
+    vattr[0].binding = 0;
+    vattr[0].format = VK_FORMAT_R32G32B32_SFLOAT;
+    vattr[0].offset = offsetof(SkinnedVertex, pos);
+    vattr[1].location = 1;
+    vattr[1].binding = 0;
+    vattr[1].format = VK_FORMAT_R32G32B32_SFLOAT;
+    vattr[1].offset = offsetof(SkinnedVertex, normal);
+    vattr[2].location = 2;
+    vattr[2].binding = 0;
+    vattr[2].format = VK_FORMAT_R32G32B32A32_SFLOAT;
+    vattr[2].offset = offsetof(SkinnedVertex, color);
+    // Joint indices stay integral (_UINT, read as uvec4); weights are
+    // _UNORM so the hardware hands the shader the 0..1 partition directly.
+    vattr[3].location = 3;
+    vattr[3].binding = 0;
+    vattr[3].format = VK_FORMAT_R8G8B8A8_UINT;
+    vattr[3].offset = offsetof(SkinnedVertex, joints);
+    vattr[4].location = 4;
+    vattr[4].binding = 0;
+    vattr[4].format = VK_FORMAT_R8G8B8A8_UNORM;
+    vattr[4].offset = offsetof(SkinnedVertex, weights);
+
+    VkPipelineVertexInputStateCreateInfo vi{
+        VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
+    vi.vertexBindingDescriptionCount = 1;
+    vi.pVertexBindingDescriptions = &vbd;
+    vi.vertexAttributeDescriptionCount = 5;
+    vi.pVertexAttributeDescriptions = vattr;
+
+    VkPipelineInputAssemblyStateCreateInfo ia{
+        VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO};
+    ia.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+
+    VkPipelineViewportStateCreateInfo vp{
+        VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO};
+    vp.viewportCount = 1;
+    vp.scissorCount = 1;
+
+    VkPipelineRasterizationStateCreateInfo rs{
+        VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO};
+    rs.polygonMode = VK_POLYGON_MODE_FILL;
+    rs.cullMode = VK_CULL_MODE_BACK_BIT;
+    rs.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+    rs.lineWidth = 1.0f;
+
+    VkPipelineMultisampleStateCreateInfo ms{
+        VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO};
+    ms.rasterizationSamples = samples_;
+
+    VkPipelineDepthStencilStateCreateInfo ds{
+        VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO};
+    ds.depthTestEnable = VK_TRUE;
+    ds.depthWriteEnable = VK_TRUE;
+    ds.depthCompareOp = VK_COMPARE_OP_LESS;
+
+    VkPipelineColorBlendAttachmentState cba{};
+    cba.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
+                         VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+    VkPipelineColorBlendStateCreateInfo cb{
+        VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO};
+    cb.attachmentCount = 1;
+    cb.pAttachments = &cba;
+
+    VkDynamicState dyn_states[]{VK_DYNAMIC_STATE_VIEWPORT,
+                                VK_DYNAMIC_STATE_SCISSOR};
+    VkPipelineDynamicStateCreateInfo dyn{
+        VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO};
+    dyn.dynamicStateCount = 2;
+    dyn.pDynamicStates = dyn_states;
+
+    VkGraphicsPipelineCreateInfo gpci{
+        VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO};
+    gpci.stageCount = 2;
+    gpci.pStages = stages;
+    gpci.pVertexInputState = &vi;
+    gpci.pInputAssemblyState = &ia;
+    gpci.pViewportState = &vp;
+    gpci.pRasterizationState = &rs;
+    gpci.pMultisampleState = &ms;
+    gpci.pDepthStencilState = &ds;
+    gpci.pColorBlendState = &cb;
+    gpci.pDynamicState = &dyn;
+    gpci.layout = pipeline_layout_;
+    gpci.renderPass = render_pass_;
+    gpci.subpass = 0;
+    return vkCreateGraphicsPipelines(vk_->device(), VK_NULL_HANDLE, 1, &gpci,
+                                     nullptr, &skinned_pipeline_) == VK_SUCCESS;
+}
+
 bool Renderer::create_sky_pipeline() {
     const std::string base = std::string(PTV_SHADER_DIR);
     sky_vs_ = make_shader(vk_->device(), base + "/sky.vert.spv");
@@ -686,7 +885,37 @@ bool Renderer::create_sky_pipeline() {
 
 int Renderer::create_mesh_slot(const std::vector<gltf_mesh_load::LitVertex>& verts,
                                const std::vector<std::uint32_t>& indices) {
-    if (!vk_ || verts.empty() || indices.empty()) return -1;
+    return create_mesh_slot_impl(verts.data(), verts.size(), sizeof(verts[0]),
+                                 indices.data(), indices.size(),
+                                 /*skinned=*/false);
+}
+
+int Renderer::create_mesh_slot_skinned(
+    const std::vector<gltf_mesh_load::SkinnedVertex>& verts,
+    const std::vector<std::uint32_t>& indices) {
+    return create_mesh_slot_impl(verts.data(), verts.size(), sizeof(verts[0]),
+                                 indices.data(), indices.size(),
+                                 /*skinned=*/true);
+}
+
+int Renderer::create_mesh_slot_impl(const void* verts, std::size_t vert_count,
+                                    std::size_t vert_stride,
+                                    const std::uint32_t* indices,
+                                    std::size_t index_count, bool skinned) {
+    // Both vertex structs lead with float pos[3], which is all the bounding
+    // sphere below needs; the static_asserts keep that true if either layout
+    // is ever reordered.
+    static_assert(offsetof(gltf_mesh_load::LitVertex, pos) == 0,
+                  "LitVertex must start with pos[3]");
+    static_assert(offsetof(gltf_mesh_load::SkinnedVertex, pos) == 0,
+                  "SkinnedVertex must start with pos[3]");
+
+    if (!vk_ || !verts || !indices || vert_count == 0 || index_count == 0)
+        return -1;
+    auto vertex_pos = [&](std::size_t i) -> const float* {
+        return reinterpret_cast<const float*>(
+            static_cast<const std::uint8_t*>(verts) + i * vert_stride);
+    };
     auto make_vma_buffer = [&](VkBufferUsageFlags usage, VkDeviceSize size,
                                VkBuffer& buf, VmaAllocation& alloc) -> bool {
         VkBufferCreateInfo bci{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
@@ -701,43 +930,51 @@ int Renderer::create_mesh_slot(const std::vector<gltf_mesh_load::LitVertex>& ver
                                nullptr) == VK_SUCCESS;
     };
     GltfGpuMesh gm{};
+    gm.skinned = skinned;
     const VkDeviceSize vb_size =
-        static_cast<VkDeviceSize>(verts.size() * sizeof(verts[0]));
+        static_cast<VkDeviceSize>(vert_count * vert_stride);
     const VkDeviceSize ib_size =
-        static_cast<VkDeviceSize>(indices.size() * sizeof(std::uint32_t));
+        static_cast<VkDeviceSize>(index_count * sizeof(std::uint32_t));
     if (!make_vma_buffer(VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, vb_size, gm.vb,
                          gm.vb_alloc)) {
         return -1;
     }
-    upload_buffer(*vk_, gm.vb, gm.vb_alloc, verts.data(),
+    upload_buffer(*vk_, gm.vb, gm.vb_alloc, verts,
                   static_cast<size_t>(vb_size));
     if (!make_vma_buffer(VK_BUFFER_USAGE_INDEX_BUFFER_BIT, ib_size, gm.ib,
                          gm.ib_alloc)) {
         vmaDestroyBuffer(vk_->allocator(), gm.vb, gm.vb_alloc);
         return -1;
     }
-    upload_buffer(*vk_, gm.ib, gm.ib_alloc, indices.data(),
+    upload_buffer(*vk_, gm.ib, gm.ib_alloc, indices,
                   static_cast<size_t>(ib_size));
-    gm.index_count = static_cast<uint32_t>(indices.size());
+    gm.index_count = static_cast<uint32_t>(index_count);
     gm.triangle_count = gm.index_count / 3;
 
     // Bounding sphere in mesh space, used for frustum + distance culling.
     // Centre-of-AABB + max radius is tighter than an AABB-corner radius and is
     // cheap enough to compute once at upload.
+    //
+    // For a skinned mesh this is the BIND-POSE bound. A pose can push vertices
+    // outside it, so animated characters are culled slightly optimistically;
+    // that is the standard trade and far cheaper than re-deriving bounds per
+    // frame from the palette.
     float mn[3] = {FLT_MAX, FLT_MAX, FLT_MAX};
     float mx[3] = {-FLT_MAX, -FLT_MAX, -FLT_MAX};
-    for (const auto& v : verts) {
+    for (std::size_t i = 0; i < vert_count; ++i) {
+        const float* p = vertex_pos(i);
         for (int c = 0; c < 3; ++c) {
-            if (v.pos[c] < mn[c]) mn[c] = v.pos[c];
-            if (v.pos[c] > mx[c]) mx[c] = v.pos[c];
+            if (p[c] < mn[c]) mn[c] = p[c];
+            if (p[c] > mx[c]) mx[c] = p[c];
         }
     }
     const float cx = 0.5f * (mn[0] + mx[0]);
     const float cy = 0.5f * (mn[1] + mx[1]);
     const float cz = 0.5f * (mn[2] + mx[2]);
     float r2 = 0.0f;
-    for (const auto& v : verts) {
-        const float dx = v.pos[0] - cx, dy = v.pos[1] - cy, dz = v.pos[2] - cz;
+    for (std::size_t i = 0; i < vert_count; ++i) {
+        const float* p = vertex_pos(i);
+        const float dx = p[0] - cx, dy = p[1] - cy, dz = p[2] - cz;
         const float d2 = dx * dx + dy * dy + dz * dz;
         if (d2 > r2) r2 = d2;
     }
@@ -1191,6 +1428,21 @@ void Renderer::draw_frame(const std::array<EyeTarget, 2>& eyes,
         vmaFlushAllocation(vk_->allocator(), env_ubo_alloc_, 0, sizeof(g));
     }
 
+    // ---- Upload this frame's joint palettes (shared by both eyes) ---------
+    // Palettes are world-space and therefore view-independent, so this runs
+    // once here rather than per eye. Growing the buffer is safe at this point
+    // for the same reason the env UBO write is: we are past the fence, so no
+    // command buffer is still reading the old allocation.
+    if (!joint_palettes_.empty()) {
+        if (ensure_joint_buffer(
+                static_cast<std::uint32_t>(joint_palettes_.size())) &&
+            joint_ssbo_mapped_) {
+            const size_t bytes = joint_palettes_.size() * sizeof(Mat4);
+            std::memcpy(joint_ssbo_mapped_, joint_palettes_.data(), bytes);
+            vmaFlushAllocation(vk_->allocator(), joint_ssbo_alloc_, 0, bytes);
+        }
+    }
+
     vkResetCommandBuffer(cmd_, 0);
     VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
     bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
@@ -1244,30 +1496,51 @@ void Renderer::draw_frame(const std::array<EyeTarget, 2>& eyes,
         vkCmdDraw(cmd_, 3, 1, 0, 0);
 
         // ---- Geometry pass ----------------------------------------------
-        vkCmdBindPipeline(cmd_, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_);
+        // Both pipelines share pipeline_layout_ and env_set_, so the
+        // descriptor set is bound once and only vkCmdBindPipeline changes
+        // when an item switches between static and skinned geometry.
         vkCmdBindDescriptorSets(cmd_, VK_PIPELINE_BIND_POINT_GRAPHICS,
                                 pipeline_layout_, 0, 1, &env_set_, 0, nullptr);
+        VkPipeline bound = VK_NULL_HANDLE;
 
         Mat4 vp_mat = eye.projection * eye.view;
         for (const auto& it : items) {
+            const GltfGpuMesh* gm =
+                (it.mesh_slot >= 0 &&
+                 static_cast<size_t>(it.mesh_slot) < gltf_meshes_.size())
+                    ? &gltf_meshes_[static_cast<size_t>(it.mesh_slot)]
+                    : nullptr;
+
+            // Only skin when the item asked for it AND the mesh really is
+            // skinned: drawing 40-byte vertices through the skinned pipeline
+            // would read joint indices out of the next vertex's position.
+            const bool skinned = gm && gm->skinned && it.joint_base >= 0 &&
+                                 it.joint_count > 0;
+            if (gm && gm->skinned && !skinned) continue;
+
+            VkPipeline want = skinned ? skinned_pipeline_ : pipeline_;
+            if (want != bound) {
+                vkCmdBindPipeline(cmd_, VK_PIPELINE_BIND_POINT_GRAPHICS, want);
+                bound = want;
+            }
+
             PushConstants pc{};
             pc.view_proj = vp_mat;
             pc.model = it.model;
             pc.color = it.color;
-            pc.params = Vec4{it.material_id, 0.0f, 0.0f, 0.0f};
+            pc.params = Vec4{it.material_id,
+                             skinned ? static_cast<float>(it.joint_base) : 0.0f,
+                             0.0f, 0.0f};
             vkCmdPushConstants(cmd_, pipeline_layout_,
                                VK_SHADER_STAGE_VERTEX_BIT |
                                    VK_SHADER_STAGE_FRAGMENT_BIT,
                                0, sizeof(pc), &pc);
 
-            if (it.mesh_slot >= 0 &&
-                static_cast<size_t>(it.mesh_slot) < gltf_meshes_.size()) {
-                const GltfGpuMesh& gm = gltf_meshes_[static_cast<size_t>(
-                    it.mesh_slot)];
+            if (gm) {
                 VkDeviceSize voff = 0;
-                vkCmdBindVertexBuffers(cmd_, 0, 1, &gm.vb, &voff);
-                vkCmdBindIndexBuffer(cmd_, gm.ib, 0, VK_INDEX_TYPE_UINT32);
-                vkCmdDrawIndexed(cmd_, gm.index_count, 1, 0, 0, 0);
+                vkCmdBindVertexBuffers(cmd_, 0, 1, &gm->vb, &voff);
+                vkCmdBindIndexBuffer(cmd_, gm->ib, 0, VK_INDEX_TYPE_UINT32);
+                vkCmdDrawIndexed(cmd_, gm->index_count, 1, 0, 0, 0);
             } else {
                 VkDeviceSize voff = 0;
                 vkCmdBindVertexBuffers(cmd_, 0, 1, &cube_vb_, &voff);
@@ -1326,6 +1599,52 @@ void Renderer::destroy_gltf_meshes() {
 int Renderer::load_glb(const std::string& resolved_path,
                        float target_scale_meters) {
     return ensure_gltf_mesh(resolved_path, target_scale_meters);
+}
+
+bool Renderer::mesh_slot_is_skinned(int slot) const {
+    if (slot < 0 || static_cast<size_t>(slot) >= gltf_meshes_.size())
+        return false;
+    return gltf_meshes_[static_cast<size_t>(slot)].skinned;
+}
+
+int Renderer::load_glb_skinned(const std::string& resolved_path,
+                               float target_scale_meters,
+                               gltf_mesh_load::SkeletonData& out_skeleton) {
+    if (!vk_ || resolved_path.empty()) return -1;
+    if (!asset_source().exists(resolved_path)) {
+        PTV_WARN("skinned GLB not found via asset source: {}", resolved_path);
+        return -1;
+    }
+    // Cached slots are keyed by path just like the static ones, but a skinned
+    // hit still has to refill the caller's skeleton, so the parse is repeated.
+    // Skeletons are tiny next to geometry and this runs at scene load, not
+    // per frame.
+    std::vector<gltf_mesh_load::SkinnedVertex> verts;
+    std::vector<std::uint32_t> indices;
+    std::string err;
+    if (!gltf_mesh_load::load_glb_skinned(resolved_path, target_scale_meters,
+                                          verts, indices, out_skeleton, err)) {
+        PTV_WARN("skinned GLB load failed ({}): {}", resolved_path, err);
+        return -1;
+    }
+
+    auto it = gltf_path_to_slot_.find(resolved_path);
+    if (it != gltf_path_to_slot_.end()) {
+        gltf_meshes_[static_cast<size_t>(it->second)].last_used_frame =
+            frame_index_;
+        return it->second;
+    }
+
+    const int slot = create_mesh_slot_skinned(verts, indices);
+    if (slot < 0) return -1;
+    auto& gm = gltf_meshes_[static_cast<size_t>(slot)];
+    gm.path = resolved_path;
+    gm.last_used_frame = frame_index_;
+    // Not evictable: the skeleton on the entity would outlive the geometry and
+    // the entity would silently stop drawing with no way to recover it.
+    gm.evictable = false;
+    gltf_path_to_slot_[resolved_path] = slot;
+    return slot;
 }
 
 int Renderer::ensure_gltf_mesh(const std::string& resolved_path,
@@ -1481,6 +1800,10 @@ void Renderer::build_items_from_world(World& world, std::vector<DrawItem>& out,
     out.clear();
     stats_ = FrameStats{};
     stats_.resident_triangles = resident_triangles_;
+    // Palettes are rebuilt from scratch every frame alongside the draw list;
+    // a stale base index from last frame would point a skinned mesh at
+    // another entity's joints.
+    begin_joint_palettes();
 
     Frustum frustum;
     if (view_info.valid) frustum.build(view_info.view_proj);
@@ -1601,8 +1924,15 @@ void Renderer::build_items_from_world(World& world, std::vector<DrawItem>& out,
                 const std::string& wanted =
                     chain.empty() ? cm.glb_path
                                   : chain[static_cast<size_t>(desired)];
+                // A rigged entity must never go through the streaming worker:
+                // that path parses GLBs as 40-byte static geometry and would
+                // cache a static slot under the skinned mesh's own path, after
+                // which the entity draws with the wrong pipeline forever. The
+                // scene loader uploads skinned meshes up front instead.
+                const CSkeleton* skel =
+                    world.registry().try_get<CSkeleton>(entity);
                 int slot = resident_slot(wanted);
-                if (slot < 0) {
+                if (slot < 0 && !skel) {
                     request_stream(wanted, cm.target_scale_meters, distance);
                     for (size_t i = static_cast<size_t>(desired) + 1;
                          slot < 0 && i < chain.size(); ++i) {
@@ -1618,6 +1948,18 @@ void Renderer::build_items_from_world(World& world, std::vector<DrawItem>& out,
                     it.model = model;
                     it.mesh_slot = slot;
                     it.material_id = 0.0f;
+                    // Hand this frame's pose to the shared palette buffer.
+                    // Every LOD of a rigged asset carries the same joint list
+                    // by construction (see ptv_glb_optimize), so one palette
+                    // serves whichever level got picked above.
+                    if (skel && !skel->palette.empty() &&
+                        gltf_meshes_[static_cast<size_t>(slot)].skinned) {
+                        it.joint_base = push_joint_palette(
+                            skel->palette.data(),
+                            static_cast<int>(skel->palette.size()));
+                        it.joint_count =
+                            static_cast<int>(skel->palette.size());
+                    }
                     // GLB primitives carry their own per-vertex baseColor
                     // (see GltfMeshLoad). Use a near-white tint so the
                     // material color drives the look; we only nudge the
@@ -1814,6 +2156,13 @@ void Renderer::shutdown() {
     env_ubo_ = VK_NULL_HANDLE;
     env_ubo_alloc_ = nullptr;
     env_ubo_mapped_ = nullptr;
+    if (joint_ssbo_)
+        vmaDestroyBuffer(vk_->allocator(), joint_ssbo_, joint_ssbo_alloc_);
+    joint_ssbo_ = VK_NULL_HANDLE;
+    joint_ssbo_alloc_ = nullptr;
+    joint_ssbo_mapped_ = nullptr;
+    joint_ssbo_capacity_ = 0;
+    joint_palettes_.clear();
     if (desc_pool_) vkDestroyDescriptorPool(vk_->device(), desc_pool_, nullptr);
     if (env_set_layout_)
         vkDestroyDescriptorSetLayout(vk_->device(), env_set_layout_, nullptr);
@@ -1831,14 +2180,18 @@ void Renderer::shutdown() {
     sky_vs_ = sky_fs_ = VK_NULL_HANDLE;
 
     if (pipeline_) vkDestroyPipeline(vk_->device(), pipeline_, nullptr);
+    if (skinned_pipeline_)
+        vkDestroyPipeline(vk_->device(), skinned_pipeline_, nullptr);
     if (pipeline_layout_)
         vkDestroyPipelineLayout(vk_->device(), pipeline_layout_, nullptr);
     if (vs_) vkDestroyShaderModule(vk_->device(), vs_, nullptr);
     if (fs_) vkDestroyShaderModule(vk_->device(), fs_, nullptr);
+    if (skinned_vs_) vkDestroyShaderModule(vk_->device(), skinned_vs_, nullptr);
     if (render_pass_) vkDestroyRenderPass(vk_->device(), render_pass_, nullptr);
     pipeline_ = VK_NULL_HANDLE;
+    skinned_pipeline_ = VK_NULL_HANDLE;
     pipeline_layout_ = VK_NULL_HANDLE;
-    vs_ = fs_ = VK_NULL_HANDLE;
+    vs_ = fs_ = skinned_vs_ = VK_NULL_HANDLE;
     render_pass_ = VK_NULL_HANDLE;
 
     if (frame_fence_) vkDestroyFence(vk_->device(), frame_fence_, nullptr);

@@ -13,9 +13,10 @@ and the orchestrator's
 - `ptv/api/` — `IMechanic`, `IBehaviour`, `IDialogueHook` and the register
   macros, plus `InputSnapshot` (live controller/headset input) and
   `MechanicContext` (locomotion / physics / debug-draw / hand / transform-fx /
-  haptics / socket services).
+  haptics / socket / skeleton services).
 - `ptv/ecs/` — `World`, core ECS components (`CTransform`, `CMesh`, `CPhysics`, …),
-  plus `TransformOffset.h` (the draw-time visual-offset layer).
+  plus `TransformOffset.h` (the draw-time visual-offset layer) and
+  `Skeleton.h` (the per-frame pose tick).
 - `ptv/scene/` — `SceneDoc`, `LoadSceneJson`, `ApplySceneToWorld`.
 - `ptv/math/` — `Vec3`, `Quat`, `Transform` (glm wrappers).
 - `ptv/mechanics/` — `MechanicRegistry`, `MechanicHost`.
@@ -54,7 +55,7 @@ Haptics use core `xrApplyHapticFeedback` and need no extension.
 
 Thin wrapper around an EnTT registry with a stable `string_id → entity` map.
 Core components: `CTransform`, `CMesh`, `CPhysics`, `CMechanicBinding`,
-`CTag`, `CTransformOffset`.
+`CTag`, `CTransformOffset`, `CSkeleton`, `CAnimator`.
 
 ### Transform FX (`ptv::tick_transform_offsets`)
 
@@ -74,6 +75,43 @@ is built. `Renderer::build_items_from_world` composes the offset into the
 model matrix via `entity_visual_matrix`. Physics, grab, raycasts and collision
 never see it. Mechanics drive it through `ctx.fx`, which clamps magnitudes.
 
+### Skeletal animation (`ptv::tick_animators`)
+
+Rigged assets get two components. `CSkeleton` holds the hierarchy, bind pose
+and inverse bind matrices parsed from the GLB, the pose currently being
+rendered, and the joint palette the renderer uploads. `CAnimator` holds the
+asset's animation clips plus per-joint override flags.
+
+Two things can drive a joint, and they meet in `CSkeleton::local_pose`:
+
+- **A clip** — keyframe tracks advanced by a time cursor, with `STEP`,
+  `LINEAR` (SLERP for rotations) and `CUBICSPLINE` interpolation. This is what
+  Tripo's animation-retarget output produces, and what a walk cycle is.
+- **A procedural override** — a pose a mechanic computes this frame from
+  something live, typically finger curl from `input.hands[h].trigger`. There is
+  no clip for that: the pose is a function of current input, not of time.
+
+Overrides win per joint, so a character can play its idle clip while code
+steers only its head or its trigger finger. Overrides are per-frame statements,
+not sticky state: a mechanic that stops writing a joint hands it straight back
+to the clip (or to bind pose) on the next tick.
+
+`tick_animators` runs in the same slot and for the same reason as
+`tick_transform_offsets` — right after the Simulate phase, before the draw list
+is built — so an override requested this frame is on screen this frame. Per
+entity it resets non-overridden joints to bind, samples the active clip,
+composes world matrices parent-first, and writes
+`jointWorld * inverseBind` into the palette.
+
+Joint indices match the source glTF skin's `joints` array exactly, because the
+mesh's `JOINTS_0` attribute references that ordering. `SkeletonData::order`
+supplies a parent-first traversal over those indices rather than renumbering
+them.
+
+Mechanics drive all of this through `ctx.skeleton`, never by touching the
+components. See [rendering.md](rendering.md#skinned-geometry-scene_skinnedvert)
+for the GPU side.
+
 ### Scene loader (`ptv::LoadSceneJson`, `ptv::ApplySceneToWorld`)
 
 Reads the engine-facing JSON emitted by the Python scene compiler and
@@ -83,6 +121,12 @@ Each entity's `mesh` block may carry `sockets` — named local transforms in
 metres (`{"muzzle": {"position": [...], "rotation": [x,y,z,w]}}`) that reach
 gameplay through `ctx.sockets`. See
 [architecture.md](architecture.md#the-socket-contract).
+
+It may also carry `"skinned": true` with a `joint_count`, written by the scene
+compiler from the optimizer's report. `Application::attach_skeletons()` uses it
+to decide which entities get a `CSkeleton`, so an all-static scene never opens
+a GLB just to find out. Scenes predating the flag (hand-authored samples) fall
+back to probing the GLB's JSON chunk, which still decodes no geometry.
 
 ### Physics (`ptv::PhysicsWorld`)
 
