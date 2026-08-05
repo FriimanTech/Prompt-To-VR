@@ -11,6 +11,7 @@ from ..events import get_bus
 from ..settings import Settings, get_settings
 from ..storage import ProjectStore
 from . import (
+    stage_asset_contract,
     stage_asset_manifest,
     stage_asset_normalize,
     stage_asset_optimize,
@@ -60,6 +61,13 @@ _SHARED_STAGES: list[tuple[ProjectStage, StageFn]] = [
     (ProjectStage.reference_images, stage_reference_images.run),
     (ProjectStage.tripo_models, stage_tripo_models.run),
     (ProjectStage.asset_normalization, stage_asset_normalize.run),
+    # Must precede code_generation: the codegen agent needs asset_contract.json
+    # in context so it writes ctx.sockets->socket_world(self, "muzzle") against
+    # socket names that actually exist, instead of guessing a hard-coded
+    # offset. Sockets are derived in unit space from the SOURCE GLB, so running
+    # ahead of asset_optimization is safe -- the optimizer preserves the source
+    # coordinate system.
+    (ProjectStage.asset_contract, stage_asset_contract.run),
     (ProjectStage.code_generation, stage_code_generation.run),
     (ProjectStage.world_generation, stage_world_generation.run),
     # Runs here (not next to asset_normalization) so the engine build tree

@@ -138,6 +138,23 @@ set ``texture=true``, ``pbr=true``, and
 ``texture_quality="detailed"`` for hero props (player avatar, signature
 weapons, key environments) and ``"standard"`` for background dressing.
 
+SOCKET HINTS. Set ``socket_hints`` on any asset gameplay will need a
+spatial anchor on -- overwhelmingly, weapons. A socket is a named point
+on the mesh ("the muzzle is here, pointing that way"), derived from the
+geometry by a later deterministic stage and read at runtime by the
+generated C++ as ``ctx.sockets->socket_world(entity, "muzzle")``.
+
+This matters because the code-generation agent never sees the GLB. Without
+a socket it has no way to know where a barrel ends, and a guessed offset
+spawns the shot inside the player's palm. Two names are supported:
+
+  * ``muzzle`` - the business end a projectile, beam or flash comes from.
+  * ``grip``   - where a hand holds the object.
+
+Give a blaster / rifle / pistol / launcher ``["muzzle", "grip"]``. Leave
+``socket_hints`` empty for scenery, characters, UI and any prop no
+mechanic attaches to: deriving unused sockets just adds noise.
+
 STYLE CONSISTENCY. ``style_notes`` should keep every asset in the same
 art language so the generated concepts feel like one game. Echo the
 prompt's art-direction phrases (palette, mood, era, material language)
@@ -266,6 +283,26 @@ Common patterns:
 this same MechanicPlan. Do NOT depend on builtin or promoted ids --
 those are always available and need no ordering. Leave ``depends_on``
 empty when the task can run independently.
+
+SOCKETS ON GENERATED TASKS. Some mechanics need a spatial anchor ON a
+mesh -- most obviously "the projectile leaves the barrel tip", but also
+muzzle flashes, beam origins and where a hand grips a weapon. The
+codegen agent cannot see the GLB, so it must never invent an offset;
+instead it reads a NAMED socket via
+``ctx.sockets->socket_world(entity, "muzzle")``, and a deterministic
+pipeline stage supplies the per-asset transform.
+
+When a ``code_task`` reads a socket, list the names in
+``code_task.required_sockets`` (e.g. ``["muzzle"]``). Also add the same
+names to the matching ``AssetItem.socket_hints`` in the AssetManifest,
+so the asset_contract stage knows to derive them. The scene compiler
+FAILS THE BUILD when a bound entity's asset cannot supply a required
+socket, so a mismatch surfaces as a clear error rather than as a
+projectile spawning inside the player's palm.
+
+Available names today are ``muzzle`` (business end / emit point) and
+``grip`` (where a hand holds it). Leave ``required_sockets`` empty for
+mechanics with no spatial anchor -- timers, health, AI, HUD.
 
 CODE-TASK DESCRIPTIONS MUST BE COMPLETE. Each ``code_task.description``
 can be up to 10 000 characters. Use that room. A good description
@@ -752,6 +789,9 @@ ptv/api/InputSnapshot.h) exposes:
     .trigger / .grip          // 0..1 analog (this frame)
     .prev_trigger / .prev_grip// last frame (for edge detection)
     .thumbstick               // glm::vec2
+    .trigger_touched          // capsense: finger RESTING on the trigger
+    .thumbrest_touched        // capsense: thumb down on the rest
+    .prev_trigger_touched / .prev_thumbrest_touched  // last frame
     .hand_position/.hand_rotation/.hand_valid  // grip (palm) pose, world space
     .aim_position/.aim_rotation/.aim_valid     // controller-forward pose (rays/muzzle)
     .velocity                 // smoothed world hand velocity, m/s (throws/swings)
@@ -764,6 +804,15 @@ ptv/api/InputSnapshot.h) exposes:
   grip_pressed / grip_released / grip_down, button_a_pressed()... (rising
   edge), button_down("a"), button_pressed("a"), and
   input.hand_holding(entity) -> 0/1/-1.
+
+  Capsense helpers: input.trigger_touching(hand),
+  input.trigger_resting(hand) (touched but NOT pulled -- the "finger laid
+  along the trigger" pose), input.trigger_touch_started(hand),
+  input.thumbrest_touching(hand), input.thumbrest_touch_started(hand).
+  Capsense is independent of the analog value: a resting finger reports
+  touched with a trigger value of 0. On hardware or runtimes that do not
+  report capsense these are always false, so treat "not touched" as the
+  neutral case rather than as a meaningful signal.
 
 READ THE BOUND CONTROL FROM PARAMS, then check the live snapshot. The scene
 compiler writes this mechanic's controller binding into its params as
@@ -783,7 +832,7 @@ So the robust pattern is:
 # Engine services (MechanicContext)
 
 ``on_update`` also receives ``MechanicContext& ctx`` -- the ONLY sanctioned
-way to move the player or touch physics. All four pointers are non-null
+way to move the player or touch physics. All seven pointers are non-null
 while a scene is loaded. Every mutating call is validated and CLAMPED by the
 engine (non-finite values rejected, teleport distance capped to the scene's
 limit and never below the floor, impulse magnitude and per-call rig
@@ -815,6 +864,95 @@ than breaking the player out of the world.
   ctx.hands        // what each hand holds; normally just read
                    // input.hands[h].held_entity instead
     ->held_entity(hand) / ->set_held_entity(hand, entity)
+
+  ctx.fx           // short-lived VISUAL transform juice: recoil kick, hit
+                   // flinch, impact shove. Springs back to rest on its own.
+    ->impulse(entity, TransformImpulse{local_offset, local_euler_deg,
+                                       recover_tau_s})
+    ->clear(entity)
+
+  ctx.haptics      // controller vibration. hand is 0 = left, 1 = right.
+    ->pulse(hand, duration_s, amplitude)
+    ->pulse_at(hand, duration_s, frequency_hz, amplitude)
+
+  ctx.sockets      // named attachment points baked into an asset's mesh
+    ->has_socket(entity, "muzzle") -> bool
+    ->socket_world(entity, "muzzle") -> Mat4
+
+## ctx.fx: how to make something visibly react
+
+NEVER write ``CTransform`` to make an object kick, flinch or shake. For any
+entity with a physics body ``CTransform`` is an OUTPUT of the physics step --
+the engine overwrites it from the rigid body every frame, and ``builtin.grab``
+drives held objects by commanding physics rather than by setting the
+transform. A kick written into ``CTransform`` is either erased on the next
+sync or silently desyncs the drawn pose from the one raycasts and collision
+use.
+
+``ctx.fx->impulse`` is the correct channel. It accumulates a per-entity
+offset that is applied ONLY at draw time and decays back to zero, so physics,
+grab and collision never see it and nothing fights over ownership:
+
+    // 4 cm of shove back along the object's own axis + 3 degrees of nose
+    // rise, snapping home over ~70 ms.
+    TransformImpulse kick{};
+    kick.local_offset = Vec3{0.0f, 0.0f, 0.035f};
+    kick.local_euler_deg = Vec3{-3.0f, 0.0f, 0.0f};
+    kick.recover_tau_s = 0.07f;
+    ctx.fx->impulse(self, kick);
+
+The offset is in the ENTITY's local space, so a weapon kicks along its own
+barrel no matter how the player is holding it. Repeated calls compound, which
+is what makes rapid fire feel heavier than a single shot. Magnitudes are
+clamped engine-side (25 cm / 45 degrees), so ask for centimetres and degrees.
+
+This is also how you produce a hit reaction without any damage-event system:
+whatever code already detected the hit just calls ``impulse`` on the entity
+that was hit.
+
+## ctx.sockets: never hard-code a muzzle offset
+
+You cannot see the GLB, so you cannot know where any particular barrel ends --
+and a pistol, a rifle and a rocket launcher all differ. Do NOT invent an
+offset like ``Vec3(0, 0, -0.3)`` and do NOT expose one as a ``params`` number
+for someone else to guess. A wrong muzzle spawns the shot inside the player's
+palm.
+
+Ask for the socket BY NAME and let the asset supply the numbers:
+
+    const Mat4 m = ctx.sockets->socket_world(self, "muzzle");
+    const Vec3 origin    = Vec3(m[3]);   // position column
+    const Vec3 direction = Vec3(m[2]);   // +Z is the socket's forward
+    spawn_projectile(origin, direction * speed_);
+
+That exact code is correct on every weapon. The per-asset transforms are
+derived from geometry by the deterministic ``asset_contract`` pipeline stage
+and arrive as data in ``scene.json``.
+
+Declare every socket you read in the CodeTask's ``required_sockets`` (e.g.
+``["muzzle"]``). The scene compiler fails the build if a bound entity's asset
+cannot supply one, so a typo surfaces as a clear error instead of a projectile
+from nowhere. Common names: ``muzzle`` (business end / emit point) and
+``grip`` (where a hand holds it).
+
+An unknown socket does not crash -- it falls back to the front of the
+entity's bounding sphere -- but that is a safety net, not a design.
+
+## ctx.haptics: pulse on the EDGE, never every frame
+
+Pair a short pulse with the ``ctx.fx`` kick on the same frame and a weapon
+reads as having real weight:
+
+    if (input.trigger_pressed(h)) {          // RISING EDGE only
+        ctx.fx->impulse(self, kick);
+        ctx.haptics->pulse(h, 0.06f, 0.7f);  // 60 ms, fairly firm
+    }
+
+Calling ``pulse`` unconditionally in ``on_update`` is the one real mistake
+here: the pulses overlap into a flat continuous buzz that carries no
+information. The engine rate-limits each hand to protect against it, but write
+the edge check anyway. Durations are tens of milliseconds (capped at 0.5 s)
+and amplitude is 0..1.
 
 If you write a locomotion mechanic, gate it on
 ``ctx.locomotion->active_mode()`` matching the style you implement and on
@@ -941,11 +1079,11 @@ the macro called EXACTLY ONCE across the entire file set).
 4. Do NOT write ``class X : public ptv::IMechanic`` with custom method
    names like ``OnStart`` / ``Configure`` / ``Update(ctx)``. The only
    overridable methods are the ones listed in the interface above.
-5. The ``MechanicContext& ctx`` argument has EXACTLY four members:
-   ``ctx.locomotion``, ``ctx.physics``, ``ctx.draw`` and ``ctx.hands``.
-   There is no ``ctx.input`` (input arrives as the separate
-   ``InputSnapshot`` argument), and no ``ctx.haptics`` / ``ctx.time`` /
-   ``ctx.save`` / ``ctx.ui``.
+5. The ``MechanicContext& ctx`` argument has EXACTLY seven members:
+   ``ctx.locomotion``, ``ctx.physics``, ``ctx.draw``, ``ctx.hands``,
+   ``ctx.fx``, ``ctx.haptics`` and ``ctx.sockets``. There is no ``ctx.input``
+   (input arrives as the separate ``InputSnapshot`` argument), and no
+   ``ctx.time`` / ``ctx.save`` / ``ctx.ui``.
 6. There is NO per-file line cap and NO requirement to use a single
    .cpp. Use the natural file split for the mechanic. When you split
    across files, use a shared ``.h`` header that you also emit in your

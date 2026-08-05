@@ -90,6 +90,34 @@ struct CTransform {
     Transform t;
 };
 
+/** Purely visual, springy offset applied on top of ``CTransform`` at draw
+ * time. Never seen by physics, grab, raycasts or collision.
+ *
+ * This exists because ``CTransform`` is an OUTPUT of the physics step for any
+ * entity with a body: ``PhysicsWorld::sync_to_world`` overwrites position and
+ * rotation from the Jolt body every frame. A mechanic that wants a weapon to
+ * kick when it fires therefore cannot write ``CTransform`` -- it would either
+ * be erased by the next sync or silently desync the drawn pose from the
+ * physical one. The offset lives downstream of everyone who cares about where
+ * the entity "really" is, so nothing fights over ownership.
+ *
+ * Drive it through ``MechanicContext::fx`` rather than writing it directly;
+ * the service clamps the magnitudes. */
+struct CTransformOffset {
+    /** Current offset, in the entity's local space. */
+    Vec3 position{0.0f};
+    Quat rotation{1.0f, 0.0f, 0.0f, 0.0f};
+    /** Rest pose the offset springs back to. Almost always identity; a
+     * non-zero target holds a permanent lean/tilt. */
+    Vec3 target_position{0.0f};
+    Quat target_rotation{1.0f, 0.0f, 0.0f, 0.0f};
+    /** Exponential recovery time constant in seconds. */
+    float recover_tau_s{0.06f};
+    /** False once the offset has settled onto its target; the tick skips
+     * settled entities and the renderer skips the matrix multiply. */
+    bool active{false};
+};
+
 struct CMesh {
     std::string asset_id;
     std::string glb_path;
@@ -102,6 +130,10 @@ struct CMesh {
     /** World-space bounding-sphere radius (metres) used for frustum and
      * distance culling. 0 = unknown -> renderer uses a safe fallback. */
     float bounds_radius_m{0.0f};
+    /** Named attachment points ("muzzle", "grip") in the mesh's local space,
+     * in metres. Read through ``MechanicContext::sockets`` rather than
+     * directly, so a missing socket degrades instead of returning identity. */
+    std::unordered_map<std::string, Transform> sockets;
 };
 
 struct CPhysics {

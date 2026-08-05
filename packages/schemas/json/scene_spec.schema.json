@@ -136,6 +136,14 @@
           "maxLength": 512,
           "title": "Glb Path",
           "type": "string"
+        },
+        "sockets": {
+          "additionalProperties": {
+            "$ref": "#/$defs/SocketRef"
+          },
+          "description": "Named attachment points (e.g. 'muzzle', 'grip') in metres, relative to the mesh origin. Populated by the scene compiler from asset_contract.json; the SceneSpec agent leaves this empty.",
+          "title": "Sockets",
+          "type": "object"
         }
       },
       "required": [
@@ -224,6 +232,20 @@
         }
       },
       "title": "QuatXYZW",
+      "type": "object"
+    },
+    "SocketRef": {
+      "additionalProperties": false,
+      "description": "A named attachment point in the mesh's own local space.\n\nDerived deterministically from geometry by the ``asset_contract`` stage\nand converted from unit space to metres by the scene compiler, so the\nruntime can just compose ``entity_transform * socket``.",
+      "properties": {
+        "position": {
+          "$ref": "#/$defs/Vec3"
+        },
+        "rotation": {
+          "$ref": "#/$defs/QuatXYZW"
+        }
+      },
+      "title": "SocketRef",
       "type": "object"
     },
     "Transform": {

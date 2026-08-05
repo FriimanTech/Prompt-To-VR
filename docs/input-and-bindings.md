@@ -41,9 +41,33 @@ the player or to decide what a hand is holding.
 plain read-only POD containing NO OpenXR types (glm + std only), so it
 stays inside the generated-code include whitelist. It exposes, per hand
 (`InputSnapshot::Left` / `Right`): `trigger`, `grip`, `thumbstick`,
-previous-frame `prev_trigger` / `prev_grip`, `hand_*`/`aim_*` poses,
+previous-frame `prev_trigger` / `prev_grip`, `trigger_touched` /
+`thumbrest_touched` (+ `prev_*`), `hand_*`/`aim_*` poses,
 `velocity` (smoothed world m/s), and `held_entity`. Global:
 `button_a/b/x/y` (+ `prev_*`), `head_*`, `dt`.
+
+### Capacitive touch (capsense)
+
+The Touch controllers report a finger **resting** on a control before it is
+pressed, which is the difference between an index finger curled in mid-air and
+one laid along the trigger. Two boolean actions carry this, bound per hand on
+both `/interaction_profiles/oculus/touch_controller` and
+`/interaction_profiles/meta/touch_controller_plus`:
+
+| OpenXR path | Snapshot field |
+| --- | --- |
+| `/input/trigger/touch` | `hands[h].trigger_touched` |
+| `/input/thumbrest/touch` | `hands[h].thumbrest_touched` |
+
+Capsense is independent of the analog value: a resting finger reports touched
+with a `trigger` of 0. Helpers: `trigger_touching(hand)`,
+`trigger_resting(hand)` (touched but not pulled), `trigger_touch_started(hand)`,
+`thumbrest_touching(hand)`, `thumbrest_touch_started(hand)`.
+
+On hardware or runtimes that do not report capsense these stay false, which
+reads as "finger not there" -- the safe degradation. A runtime that does not
+recognise `touch_controller_plus` simply rejects that profile and keeps the
+bindings it took from `oculus/touch_controller`.
 
 ### Engine services (`MechanicContext`)
 
@@ -58,6 +82,9 @@ and grab can be ordinary mechanics rather than engine-core special cases:
 | `ctx.physics` | `raycast`, `set_kinematic`, `move_kinematic`, `apply_impulse`. A narrow facade -- generated code never includes `ptv/physics/` or Jolt. |
 | `ctx.draw` | One-frame lines, polylines and markers (the teleport arc uses this). |
 | `ctx.hands` | Publish/read which entity each hand holds. |
+| `ctx.fx` | Short-lived VISUAL transform juice: recoil kick, hit flinch, impact shove. |
+| `ctx.haptics` | Controller vibration. `pulse(hand, duration_s, amplitude)`. |
+| `ctx.sockets` | Named attachment points on an asset's mesh: `socket_world(entity, "muzzle")`. |
 
 Every mutating call is validated and CLAMPED inside the engine: non-finite
 values are rejected, teleport distance is capped to the scene's limit and
@@ -65,6 +92,54 @@ never lands below the floor, and impulse magnitude and per-call rig
 translation are bounded. Generated code is untrusted, so a bad value has to
 degrade into "nothing happens" rather than fling the player out of the world.
 Clamps log once per site so they are debuggable.
+
+#### `ctx.fx`: why not just write `CTransform`?
+
+Because for any entity with a physics body, `CTransform` is an **output** of
+the physics step. `PhysicsWorld::sync_to_world` overwrites position and
+rotation from the Jolt body every frame, and `builtin.grab` drives held
+objects by commanding physics (`move_kinematic`) rather than by setting the
+transform. A recoil kick written into `CTransform` is either erased on the
+next sync or silently desyncs the drawn pose from the one raycasts and
+collision use.
+
+`ctx.fx->impulse(entity, kick)` accumulates a per-entity offset
+(`CTransformOffset`) that decays back to rest and is applied **only at draw
+time**, in `Renderer::build_items_from_world`. Physics, grab and collision
+never see it, so nothing fights over ownership of the entity's position.
+
+Offsets are expressed in the entity's own local space, so a weapon kicks along
+its own barrel however the player is holding it. Magnitudes are clamped to
+25 cm / 45 degrees. This is also how a generated mechanic produces a hit
+reaction with no damage-event system: whatever code detected the hit calls
+`impulse`.
+
+#### `ctx.haptics`: pulse on the edge
+
+Pulse on a rising edge, never every frame -- overlapping pulses collapse into
+a flat buzz that carries no information. The engine rate-limits each hand to
+about 30 ms as a backstop. Duration is capped at 0.5 s and amplitude clamped
+to 0..1. Underneath, one `XR_ACTION_TYPE_VIBRATION_OUTPUT` action with both
+hand subaction paths drives `xrApplyHapticFeedback`; this is core OpenXR and
+needs no extension.
+
+#### `ctx.sockets`: never hard-code a muzzle offset
+
+Generated code cannot see the GLB, so it must ask for a named point and let
+the asset supply the numbers:
+
+```cpp
+const Mat4 m = ctx.sockets->socket_world(self, "muzzle");
+const Vec3 origin    = Vec3(m[3]);   // position column
+const Vec3 direction = Vec3(m[2]);   // +Z is the socket's forward
+```
+
+That same code is correct on a pistol, a rifle and a rocket launcher. The
+per-asset transforms come from the deterministic `asset_contract` stage --
+see [architecture.md](architecture.md#the-socket-contract). Declare every
+socket you read in the CodeTask's `required_sockets`; the scene compiler fails
+the build on a mismatch. An unknown socket falls back to the front of the
+entity's bounding sphere, which is a safety net rather than a design.
 
 ### Mechanic scope
 

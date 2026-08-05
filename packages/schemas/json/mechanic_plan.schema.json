@@ -56,6 +56,15 @@
         "kind": {
           "$ref": "#/$defs/CodeTaskKind"
         },
+        "required_sockets": {
+          "description": "Socket names this mechanic reads via ctx.sockets. The scene compiler fails the build if a bound entity's asset does not provide every one of them. Leave empty unless the mechanic genuinely needs a spatial anchor on the mesh.",
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 8,
+          "title": "Required Sockets",
+          "type": "array"
+        },
         "test_files": {
           "items": {
             "$ref": "#/$defs/CodeTaskFile"

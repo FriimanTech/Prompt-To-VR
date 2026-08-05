@@ -26,9 +26,10 @@ orchestrator and a reusable Vulkan + OpenXR engine core.
 5. Reuse built-in VR mechanics. The engine ships reusable, data-driven
    modules under `engine/runtime/src/mechanics/builtin/<mechanic>/`
    (teleport, head-relative and controller-relative slide, snap turn, grab,
-   throw). Each is a real `IMechanic` written against the same public API
-   generated code uses — `InputSnapshot`, `World` and `MechanicContext`
-   (locomotion / physics / debug-draw / hand services, all engine-clamped) —
+   throw, recoil). Each is a real `IMechanic` written against the same public
+   API generated code uses — `InputSnapshot`, `World` and `MechanicContext`
+   (locomotion / physics / debug-draw / hand / transform-fx / haptics / socket
+   services, all engine-clamped) —
    so a `builtin+config_code_edit` task can copy one and edit it into a NEW
    generated mechanic. Generated code adds mechanics; it does not
    reimplement basic VR behavior, and it never modifies a built-in.
@@ -111,6 +112,17 @@ orchestrator and a reusable Vulkan + OpenXR engine core.
 6. Reference images → Tripo image-to-3D (textured, PBR).
 7. Assets **validated** (`asset_normalization`): GLB header/JSON check plus
    scale / collision metadata. This stage does NOT modify geometry.
+7b. **Asset contract** (`asset_contract`): derives each asset's named
+   **sockets** (`muzzle`, `grip`) from its geometry with the deterministic
+   `ptv_glb_sockets` tool (principal-axis PCA + mass asymmetry — no model
+   calls) and writes `asset_contract.json`. Positions are stored in UNIT
+   space (normalised by the longest-axis extent) so they survive the LOD
+   chain; the scene compiler multiplies by `target_scale_meters`, exactly as
+   it already does for `bounds_radius_m`. Runs BEFORE codegen because the
+   codegen agent needs the socket NAMES in context — it writes
+   `ctx.sockets->socket_world(self, "muzzle")` and must never hard-code an
+   offset it cannot know. Which sockets to derive comes from
+   `AssetItem.socket_hints`.
 8. CodeTasks from MechanicPlan → Claude Opus → C++ files (`.cpp` + optional
    `.h`/`.hpp` headers) in `engine/generated/{mechanics,ai,dialogue}/`.
    After all tasks are written, a **compile-verify + repair loop** builds
@@ -135,7 +147,11 @@ orchestrator and a reusable Vulkan + OpenXR engine core.
    floor) plus more aggressive runtime culling/LOD. See `docs/rendering.md`.
 9. Deterministic scene compiler merges `world.scene.json` (environment) with
    gameplay entities and emits `scene.json` + build metadata, including each
-   mesh's `lod_paths`/`bounds_radius_m` and the scene-level `performance` block.
+   mesh's `lod_paths`/`bounds_radius_m`/`sockets` and the scene-level
+   `performance` block. It is also the **socket validator**: it is the only
+   stage that sees both a CodeTask's `required_sockets` and the asset's
+   derived sockets, so a mechanic requiring a socket its asset cannot supply
+   fails the build loudly, with every violation listed at once.
 10. Build (branches on `BuildSpec.target_device`):
     - `pcvr`: CMake configure + build (Visual Studio 18 2026, toolset v145) → `.exe`.
     - `quest`: `quest_build` instantiates `engine/android`, packages

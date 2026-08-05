@@ -5,6 +5,7 @@
 //    scene       — parses a trivial inline scene
 //    openxr      — tries to create an XrInstance; passes even if no runtime
 
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <string>
@@ -31,6 +32,7 @@ static int case_mechanics() {
         "builtin.locomotion.snap_turn",
         "builtin.grab",
         "builtin.throw",
+        "builtin.recoil",
     };
     for (const char* id : expected) {
         bool found = false;
@@ -59,7 +61,10 @@ static int case_scene() {
           {"id": "cube", "name": "Cube",
            "transform": {"position": [0,1,-1], "rotation": [0,0,0,1], "scale": 1.0},
            "mesh": {"asset_id": "cube", "glb_path": "missing.glb",
-                    "target_scale_meters": 0.2, "collision_shape": "aabb"},
+                    "target_scale_meters": 0.2, "collision_shape": "aabb",
+                    "sockets": {
+                      "muzzle": {"position": [0, 0.02, -0.1],
+                                 "rotation": [0, 0, 0, 1]}}},
            "physics": {"kind": "dynamic", "mass_kg": 0.5, "restitution": 0.2,
                         "friction": 0.5, "collision_shape": "aabb"},
            "mechanic_bindings": [{"id": "builtin.grab", "builtin_id": "builtin.grab",
@@ -78,9 +83,29 @@ static int case_scene() {
                      loaded.entities.size());
         return 1;
     }
+    // The socket must survive parse -> SceneDoc -> ECS. This is the contract
+    // ctx.sockets reads at runtime, so a silent drop anywhere along the chain
+    // would surface only as projectiles leaving from the wrong place.
+    if (!loaded.entities[0].mesh.has_value() ||
+        loaded.entities[0].mesh->sockets.count("muzzle") != 1) {
+        std::fprintf(stderr, "[fail] scene load lost the 'muzzle' socket\n");
+        return 1;
+    }
     ptv::World world;
     ptv::ApplySceneToWorld(loaded, world);
-    return ok("scene: 1 entity applied into ECS");
+
+    const auto e = world.find("cube");
+    if (e == entt::null || !world.registry().all_of<ptv::CMesh>(e)) {
+        std::fprintf(stderr, "[fail] cube entity missing CMesh\n");
+        return 1;
+    }
+    const auto& sockets = world.registry().get<ptv::CMesh>(e).sockets;
+    const auto it = sockets.find("muzzle");
+    if (it == sockets.end() || std::fabs(it->second.position.z + 0.1f) > 1e-5f) {
+        std::fprintf(stderr, "[fail] muzzle socket did not reach CMesh\n");
+        return 1;
+    }
+    return ok("scene: 1 entity + muzzle socket applied into ECS");
 }
 
 static int case_openxr() {

@@ -10,6 +10,7 @@
         "reference_images",
         "tripo_models",
         "asset_normalization",
+        "asset_contract",
         "asset_optimization",
         "code_generation",
         "world_generation",

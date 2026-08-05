@@ -76,6 +76,7 @@
 #include <glm/gtc/matrix_transform.hpp>
 
 #include "ptv/core/Logger.h"
+#include "ptv/ecs/TransformOffset.h"
 #include "ptv/scene/SceneLoader.h"
 
 // Desktop-only host pieces: the GLFW mirror window and the ImGui debug overlay.
@@ -474,6 +475,22 @@ bool is_finite(const Quat& q) {
 constexpr float kMaxTranslatePerCall = 2.0f;    // metres
 constexpr float kMaxImpulseMagnitude = 200.0f;  // kg*m/s
 
+// Visual transform "juice" bounds. A recoil kick is centimetres and degrees;
+// anything past these is a bug, and letting it through would visibly tear the
+// mesh away from its physics body.
+constexpr float kMaxFxOffsetMeters = 0.25f;
+constexpr float kMaxFxRotationDegrees = 45.0f;
+constexpr float kMinFxRecoverTau = 0.01f;
+constexpr float kMaxFxRecoverTau = 1.0f;
+
+// Haptics. A gameplay pulse is tens of milliseconds; half a second is already
+// a long rumble. The cooldown stops a mechanic that pulses every frame from
+// pinning the controller into a continuous buzz -- the pulses would overlap
+// into one flat vibration that carries no information anyway.
+constexpr float kMaxHapticDuration = 0.5f;
+constexpr float kDefaultHapticFrequency = 160.0f;  // Hz, generic "thump"
+constexpr float kHapticCooldownSeconds = 0.03f;
+
 /** Log a clamp the first time each distinct site trips, so a broken mechanic
  *  is visible in logcat without spamming every frame. */
 #define PTV_WARN_CLAMP_ONCE(...)          \
@@ -820,6 +837,148 @@ private:
     Application* app_;
 };
 
+class Application::TransformFxService final : public ITransformFx {
+public:
+    explicit TransformFxService(Application* app) : app_(app) {}
+
+    void impulse(std::uint32_t entity, const TransformImpulse& kick) override {
+        World& w = app_->world_;
+        if (!w.valid(entity)) return;
+        if (!is_finite(kick.local_offset) || !is_finite(kick.local_euler_deg) ||
+            !std::isfinite(kick.recover_tau_s)) {
+            PTV_WARN_CLAMP_ONCE("fx: rejected non-finite transform impulse");
+            return;
+        }
+
+        Vec3 offset = kick.local_offset;
+        Vec3 euler = kick.local_euler_deg;
+        const float offset_mag = glm::length(offset);
+        if (offset_mag > kMaxFxOffsetMeters) {
+            PTV_WARN_CLAMP_ONCE("fx: offset of {:.2f}m clamped to {:.2f}m",
+                                offset_mag, kMaxFxOffsetMeters);
+            offset *= (kMaxFxOffsetMeters / offset_mag);
+        }
+        const float euler_mag = glm::length(euler);
+        if (euler_mag > kMaxFxRotationDegrees) {
+            PTV_WARN_CLAMP_ONCE("fx: rotation of {:.1f}deg clamped to {:.1f}deg",
+                                euler_mag, kMaxFxRotationDegrees);
+            euler *= (kMaxFxRotationDegrees / euler_mag);
+        }
+        const float tau = std::clamp(kick.recover_tau_s, kMinFxRecoverTau,
+                                     kMaxFxRecoverTau);
+
+        auto& off = w.has<CTransformOffset>(entity)
+                        ? w.get<CTransformOffset>(entity)
+                        : w.emplace_or_replace<CTransformOffset>(entity);
+
+        // Accumulate rather than overwrite so rapid fire compounds instead of
+        // restarting the same kick, then re-clamp the total.
+        off.position += offset;
+        if (glm::length(off.position) > kMaxFxOffsetMeters) {
+            off.position = glm::normalize(off.position) * kMaxFxOffsetMeters;
+        }
+        const Quat kick_rot = glm::quat(glm::radians(euler));
+        off.rotation = glm::normalize(kick_rot * off.rotation);
+        off.recover_tau_s = tau;
+        off.active = true;
+    }
+
+    void clear(std::uint32_t entity) override {
+        World& w = app_->world_;
+        if (!w.valid(entity) || !w.has<CTransformOffset>(entity)) return;
+        auto& off = w.get<CTransformOffset>(entity);
+        off.position = off.target_position;
+        off.rotation = off.target_rotation;
+        off.active = false;
+    }
+
+private:
+    Application* app_;
+};
+
+class Application::HapticsService final : public IHaptics {
+public:
+    explicit HapticsService(Application* app) : app_(app) {}
+
+    void pulse(int hand, float duration_s, float amplitude) override {
+        pulse_at(hand, duration_s, kDefaultHapticFrequency, amplitude);
+    }
+
+    void pulse_at(int hand, float duration_s, float frequency_hz,
+                  float amplitude) override {
+        if (hand < 0 || hand > 1) return;
+        if (!std::isfinite(duration_s) || !std::isfinite(frequency_hz) ||
+            !std::isfinite(amplitude)) {
+            PTV_WARN_CLAMP_ONCE("haptics: rejected non-finite pulse");
+            return;
+        }
+        if (amplitude <= 0.0f || duration_s <= 0.0f) return;
+
+        // Rate limit per hand against the frame clock. A mechanic that pulses
+        // unconditionally in on_update would otherwise restart the effect
+        // every frame and produce a flat, meaningless buzz.
+        const double now = app_->haptic_clock_s_;
+        if (now - last_pulse_s_[hand] < kHapticCooldownSeconds) return;
+        last_pulse_s_[hand] = now;
+
+        app_->xr_.apply_haptic(hand, std::min(duration_s, kMaxHapticDuration),
+                               frequency_hz, std::clamp(amplitude, 0.0f, 1.0f));
+    }
+
+private:
+    Application* app_;
+    double last_pulse_s_[2]{-1.0, -1.0};
+};
+
+class Application::SocketsService final : public ISockets {
+public:
+    explicit SocketsService(Application* app) : app_(app) {}
+
+    bool has_socket(std::uint32_t entity, const char* name) const override {
+        if (name == nullptr) return false;
+        const World& w = app_->world_;
+        if (!w.valid(entity) || !w.has<CMesh>(entity)) return false;
+        const auto& sockets = w.get<CMesh>(entity).sockets;
+        return sockets.find(name) != sockets.end();
+    }
+
+    Mat4 socket_world(std::uint32_t entity, const char* name) const override {
+        World& w = app_->world_;
+        if (!w.valid(entity) || !w.has<CTransform>(entity)) return Mat4(1.0f);
+        const Mat4 base = w.get<CTransform>(entity).t.matrix();
+
+        if (name != nullptr && w.has<CMesh>(entity)) {
+            const auto& mesh = w.get<CMesh>(entity);
+            const auto it = mesh.sockets.find(name);
+            if (it != mesh.sockets.end()) {
+                return base * it->second.matrix();
+            }
+        }
+        return base * fallback_local(w, entity);
+    }
+
+private:
+    /** A pose on the forward face of the entity's bounds.
+     *
+     *  Chosen over identity deliberately: a projectile from the front of the
+     *  object reads as slightly misaligned, while one from the object's
+     *  centre spawns inside the player's palm. Degrade visibly-wrong, not
+     *  catastrophically-wrong. */
+    static Mat4 fallback_local(const World& w, std::uint32_t entity) {
+        float radius = 0.0f;
+        if (w.has<CMesh>(entity)) {
+            const auto& mesh = w.get<CMesh>(entity);
+            radius = mesh.bounds_radius_m > 0.0f
+                         ? mesh.bounds_radius_m
+                         : std::max(0.05f, mesh.target_scale_meters * 0.5f);
+        }
+        // -Z is forward in the glTF / OpenXR convention the engine uses.
+        return glm::translate(Mat4(1.0f), Vec3(0.0f, 0.0f, -radius));
+    }
+
+    Application* app_;
+};
+
 Application::Application() = default;
 Application::~Application() = default;
 
@@ -842,6 +1001,8 @@ int Application::run(const Config& cfg) {
         if (dt > 0.1f) dt = 0.1f;  // clamp long stalls
         last = now;
         world_.set_delta_time(dt);
+        // Monotonic seconds-since-start, used by the haptics rate limiter.
+        haptic_clock_s_ += dt;
 
 #if !defined(__ANDROID__)
         window_->poll_events();
@@ -1167,6 +1328,10 @@ int Application::run(const Config& cfg) {
                     Vec2(input.thumbstick[h].x, input.thumbstick[h].y);
                 hs.prev_trigger = prev_input_.trigger[h];
                 hs.prev_grip = prev_input_.grip[h];
+                hs.trigger_touched = input.trigger_touch[h];
+                hs.thumbrest_touched = input.thumbrest_touch[h];
+                hs.prev_trigger_touched = prev_input_.trigger_touch[h];
+                hs.prev_thumbrest_touched = prev_input_.thumbrest_touch[h];
                 if (hand_valid[h]) {
                     hs.hand_position = hand_world_pos[h];
                     hs.hand_rotation = hand_world_rot[h];
@@ -1268,6 +1433,11 @@ int Application::run(const Config& cfg) {
 
         mechanics_.update(world_, dt, snapshot, mech_ctx_,
                           MechanicPhase::Simulate);
+
+        // Decay the purely visual transform offsets (recoil kick, flinch)
+        // AFTER Simulate so an impulse requested this frame is drawn this
+        // frame, and before the draw list is built below.
+        tick_transform_offsets(world_, dt);
 
         // Remember this frame's raw input for next frame's edge detection.
         prev_input_ = input;
@@ -1641,10 +1811,16 @@ bool Application::initialize(const Config& cfg) {
     physics_svc_ = std::make_unique<PhysicsAccessService>(this);
     draw_svc_ = std::make_unique<DebugDrawService>(this);
     hands_svc_ = std::make_unique<HandsService>(this);
+    fx_svc_ = std::make_unique<TransformFxService>(this);
+    haptics_svc_ = std::make_unique<HapticsService>(this);
+    sockets_svc_ = std::make_unique<SocketsService>(this);
     mech_ctx_.locomotion = locomotion_svc_.get();
     mech_ctx_.physics = physics_svc_.get();
     mech_ctx_.draw = draw_svc_.get();
     mech_ctx_.hands = hands_svc_.get();
+    mech_ctx_.fx = fx_svc_.get();
+    mech_ctx_.haptics = haptics_svc_.get();
+    mech_ctx_.sockets = sockets_svc_.get();
 
     ensure_player_locomotion_bindings();
     mechanics_.attach_bindings(world_, mech_ctx_);

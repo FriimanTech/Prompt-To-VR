@@ -1,6 +1,7 @@
 #include "ptv/xr/XrSession.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 #include <sstream>
 #include <vector>
@@ -344,11 +345,17 @@ bool XrRuntime::create_action_set() {
     make_action(XR_ACTION_TYPE_BOOLEAN_INPUT, "button_b", "Button B", button_b_action_, false);
     make_action(XR_ACTION_TYPE_BOOLEAN_INPUT, "button_x", "Button X", button_x_action_, false);
     make_action(XR_ACTION_TYPE_BOOLEAN_INPUT, "button_y", "Button Y", button_y_action_, false);
-
-    // Suggested bindings: Oculus / Meta Touch controllers (covers Quest 3 + Link).
-    XrPath interaction_profile;
-    xrStringToPath(xr_instance_, "/interaction_profiles/oculus/touch_controller",
-                   &interaction_profile);
+    // Capacitive touch ("capsense"): the controller reports a finger RESTING
+    // on a control before it is pressed. This is what lets a virtual hand put
+    // its index finger on the trigger and its thumb down on the rest, instead
+    // of snapping between a flat palm and a fist.
+    make_action(XR_ACTION_TYPE_BOOLEAN_INPUT, "trigger_touch", "Trigger Touch",
+                trigger_touch_action_, true);
+    make_action(XR_ACTION_TYPE_BOOLEAN_INPUT, "thumbrest_touch",
+                "Thumbrest Touch", thumbrest_touch_action_, true);
+    // Haptics are an OUTPUT action. Core OpenXR -- no extension required.
+    make_action(XR_ACTION_TYPE_VIBRATION_OUTPUT, "haptic", "Haptic Feedback",
+                haptic_action_, true);
 
     auto path = [&](const char* s) {
         XrPath p;
@@ -371,14 +378,48 @@ bool XrRuntime::create_action_set() {
         // X / Y live on the LEFT Touch controller only.
         {button_x_action_, path("/user/hand/left/input/x/click")},
         {button_y_action_, path("/user/hand/left/input/y/click")},
+        {trigger_touch_action_, path("/user/hand/left/input/trigger/touch")},
+        {trigger_touch_action_, path("/user/hand/right/input/trigger/touch")},
+        {thumbrest_touch_action_,
+         path("/user/hand/left/input/thumbrest/touch")},
+        {thumbrest_touch_action_,
+         path("/user/hand/right/input/thumbrest/touch")},
+        {haptic_action_, path("/user/hand/left/output/haptic")},
+        {haptic_action_, path("/user/hand/right/output/haptic")},
     };
-    XrInteractionProfileSuggestedBinding ipb{
-        XR_TYPE_INTERACTION_PROFILE_SUGGESTED_BINDING};
-    ipb.interactionProfile = interaction_profile;
-    ipb.suggestedBindings = sug.data();
-    ipb.countSuggestedBindings = static_cast<uint32_t>(sug.size());
-    xr_ok(xrSuggestInteractionProfileBindings(xr_instance_, &ipb),
-          "xrSuggestInteractionProfileBindings");
+
+    // Suggest the SAME binding set against every Touch profile we support.
+    // ``oculus/touch_controller`` is the classic profile every Meta runtime
+    // exposes; ``meta/touch_controller_plus`` is the Quest 3 controller. A
+    // runtime that does not know a profile rejects it with
+    // XR_ERROR_PATH_UNSUPPORTED, which is expected rather than an error --
+    // the other profile still carries the bindings.
+    auto suggest = [&](const char* profile, bool required) {
+        XrPath profile_path;
+        if (XR_FAILED(xrStringToPath(xr_instance_, profile, &profile_path))) {
+            if (required) {
+                PTV_ERROR("XR: cannot resolve interaction profile {}", profile);
+            }
+            return;
+        }
+        XrInteractionProfileSuggestedBinding ipb{
+            XR_TYPE_INTERACTION_PROFILE_SUGGESTED_BINDING};
+        ipb.interactionProfile = profile_path;
+        ipb.suggestedBindings = sug.data();
+        ipb.countSuggestedBindings = static_cast<uint32_t>(sug.size());
+        const XrResult r =
+            xrSuggestInteractionProfileBindings(xr_instance_, &ipb);
+        if (XR_SUCCEEDED(r)) {
+            PTV_INFO("XR: bound {} actions to {}", sug.size(), profile);
+        } else if (required) {
+            xr_ok(r, "xrSuggestInteractionProfileBindings");
+        } else {
+            PTV_INFO("XR: runtime does not support {} (optional, skipped)",
+                     profile);
+        }
+    };
+    suggest("/interaction_profiles/oculus/touch_controller", true);
+    suggest("/interaction_profiles/meta/touch_controller_plus", false);
 
     // Hand (grip) pose spaces.
     for (int i = 0; i < 2; ++i) {
@@ -904,6 +945,48 @@ void XrRuntime::sync_input(InputState& out) {
     read_bool(button_b_action_, out.button_b);
     read_bool(button_x_action_, out.button_x);
     read_bool(button_y_action_, out.button_y);
+
+    // Capsense. Per-hand, so unlike the face buttons these need the subaction
+    // path. An inactive action (older controller, or a runtime that did not
+    // take the capsense bindings) simply leaves the flag false, which reads as
+    // "finger not resting there" -- the correct degradation.
+    auto read_bool_hand = [&](XrAction a, XrPath sub, bool& v) {
+        XrActionStateBoolean st{XR_TYPE_ACTION_STATE_BOOLEAN};
+        XrActionStateGetInfo gi{XR_TYPE_ACTION_STATE_GET_INFO};
+        gi.action = a;
+        gi.subactionPath = sub;
+        v = (xrGetActionStateBoolean(xr_session_, &gi, &st) == XR_SUCCESS &&
+             st.isActive && st.currentState);
+    };
+    for (int i = 0; i < 2; ++i) {
+        read_bool_hand(trigger_touch_action_, hand_paths_[i],
+                       out.trigger_touch[i]);
+        read_bool_hand(thumbrest_touch_action_, hand_paths_[i],
+                       out.thumbrest_touch[i]);
+    }
+}
+
+void XrRuntime::apply_haptic(int hand, float duration_s, float frequency_hz,
+                             float amplitude) {
+    if (!is_running_ || haptic_action_ == XR_NULL_HANDLE) return;
+    if (hand < 0 || hand > 1) return;
+    if (!std::isfinite(duration_s) || !std::isfinite(frequency_hz) ||
+        !std::isfinite(amplitude)) {
+        return;
+    }
+    if (amplitude <= 0.0f || duration_s <= 0.0f) return;
+
+    XrHapticVibration vibration{XR_TYPE_HAPTIC_VIBRATION};
+    vibration.duration =
+        static_cast<XrDuration>(static_cast<double>(duration_s) * 1e9);
+    vibration.frequency = frequency_hz;
+    vibration.amplitude = std::min(1.0f, amplitude);
+
+    XrHapticActionInfo info{XR_TYPE_HAPTIC_ACTION_INFO};
+    info.action = haptic_action_;
+    info.subactionPath = hand_paths_[hand];
+    xrApplyHapticFeedback(xr_session_, &info,
+                          reinterpret_cast<const XrHapticBaseHeader*>(&vibration));
 }
 
 void XrRuntime::shutdown() {

@@ -198,6 +198,128 @@ public:
     virtual void set_held_entity(int hand, std::uint32_t entity) = 0;
 };
 
+/** A one-shot visual displacement, expressed in the entity's local space.
+ *
+ * ``local_offset`` of ``{0, 0, -0.04}`` on a weapon kicks it 4 cm backward
+ * along its own barrel axis regardless of how the player is holding it.
+ */
+struct TransformImpulse {
+    Vec3 local_offset{0.0f, 0.0f, 0.0f};
+    Vec3 local_euler_deg{0.0f, 0.0f, 0.0f};
+    /** Exponential recovery time constant in seconds. ~0.06 reads as a crisp
+     *  snap; ~0.25 reads as a heavy wobble. */
+    float recover_tau_s{0.06f};
+};
+
+/**
+ * Short-lived, purely visual transform "juice": recoil kick, hit flinch,
+ * impact shove.
+ *
+ * Why this exists instead of writing ``CTransform`` directly: for any entity
+ * with a physics body, ``CTransform`` is an OUTPUT of the physics step. The
+ * engine overwrites it from the Jolt body every frame, and ``builtin.grab``
+ * drives held objects by commanding physics (``move_kinematic``), not by
+ * setting the transform. A mechanic that wrote a recoil offset into
+ * ``CTransform`` would either have it erased on the next sync or silently
+ * desync the drawn pose from the physical one that raycasts and collision
+ * use.
+ *
+ * Impulses accumulate onto a per-entity offset that springs back to rest, and
+ * that offset is applied only at draw time. Physics, grab, and collision
+ * never see it, so nothing fights over ownership of the entity's position.
+ *
+ * This is also how a generated mechanic produces a hit reaction without any
+ * damage-event system: whatever code detects the hit just calls ``impulse``.
+ */
+class ITransformFx {
+public:
+    virtual ~ITransformFx() = default;
+
+    /** Nudge ``entity`` and let it spring back.
+     *
+     *  Repeated calls accumulate, so rapid fire compounds into a bigger kick
+     *  rather than restarting the same one.
+     *
+     *  CLAMPED: non-finite values are rejected; the offset magnitude, the
+     *  rotation magnitude and the recovery time constant are all capped so a
+     *  runaway mechanic cannot fling a mesh across the level or freeze it in
+     *  a displaced pose. */
+    virtual void impulse(std::uint32_t entity, const TransformImpulse& kick) = 0;
+
+    /** Snap ``entity`` back to rest immediately. */
+    virtual void clear(std::uint32_t entity) = 0;
+};
+
+/**
+ * Controller vibration.
+ *
+ * Haptics are the cheapest half of "that felt like it fired". Pair a short
+ * pulse with a ``ctx.fx`` kick on the same frame and a weapon reads as having
+ * real weight, with no animation and no moving parts.
+ *
+ * Fire-and-forget: submit a pulse and forget it, do NOT call every frame
+ * while a button is held -- retriggering each frame produces a flat buzz
+ * instead of a hit. Pulse on the EDGE.
+ */
+class IHaptics {
+public:
+    virtual ~IHaptics() = default;
+
+    /** Vibrate one controller. ``hand`` is 0 = left, 1 = right.
+     *
+     *  CLAMPED: non-finite values are rejected, ``duration_s`` is capped at
+     *  0.5 s, ``amplitude`` is clamped to 0..1, and each hand is rate-limited
+     *  so a mechanic calling this every frame cannot lock the controller into
+     *  a permanent buzz. */
+    virtual void pulse(int hand, float duration_s, float amplitude) = 0;
+
+    /** Same, with an explicit carrier frequency in Hz. The default used by
+     *  ``pulse`` (about 160 Hz) is a solid generic "thump"; lower reads
+     *  heavier, higher reads sharper. Pass 0 to let the runtime choose. */
+    virtual void pulse_at(int hand, float duration_s, float frequency_hz,
+                          float amplitude) = 0;
+};
+
+/**
+ * Named attachment points on an entity's mesh.
+ *
+ * A socket is "the muzzle is here, pointing that way" -- a named local
+ * transform baked into the asset by the deterministic ``asset_contract``
+ * pipeline stage, which had the geometry open. You never see the mesh, so ask
+ * for a socket BY NAME and let the data supply the numbers:
+ *
+ *     const Mat4 m = ctx.sockets->socket_world(self, "muzzle");
+ *     const Vec3 origin    = Vec3(m[3]);  // position column
+ *     const Vec3 direction = Vec3(m[2]);  // +Z is the socket's forward
+ *
+ * That same code fires from the correct point on a pistol, a rifle and a
+ * rocket launcher. NEVER hard-code a muzzle offset: it is per-asset data you
+ * cannot know, and a guessed offset puts the shot inside the player's palm.
+ */
+class ISockets {
+public:
+    virtual ~ISockets() = default;
+
+    /** True when ``entity`` has a mesh carrying a socket called ``name``.
+     *
+     *  Worth checking for optional visuals. For a required socket just call
+     *  ``socket_world`` -- the fallback below is safe, and the scene compiler
+     *  already refused to build a scene whose mechanic declared a
+     *  ``required_sockets`` entry the asset does not have. */
+    virtual bool has_socket(std::uint32_t entity,
+                            const char* name) const = 0;
+
+    /** World transform of ``name`` on ``entity``: the entity's own transform
+     *  composed with the socket's local one.
+     *
+     *  FALLBACK: an unknown entity, an entity with no mesh, or an unknown
+     *  socket returns a pose on the forward face of the entity's bounding
+     *  sphere rather than identity -- so a missing socket looks slightly
+     *  wrong instead of spawning projectiles at the world origin. */
+    virtual Mat4 socket_world(std::uint32_t entity,
+                              const char* name) const = 0;
+};
+
 /**
  * Bundle of engine services passed to every mechanic call.
  *
@@ -210,6 +332,9 @@ struct MechanicContext {
     IPhysicsAccess* physics{nullptr};
     IDebugDraw* draw{nullptr};
     IHands* hands{nullptr};
+    ITransformFx* fx{nullptr};
+    IHaptics* haptics{nullptr};
+    ISockets* sockets{nullptr};
 };
 
 }  // namespace ptv

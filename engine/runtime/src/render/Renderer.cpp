@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "ptv/core/Logger.h"
+#include "ptv/ecs/TransformOffset.h"
 #include "ptv/ecs/World.h"
 #include "ptv/platform/AssetSource.h"
 #include "ptv/render/GltfMeshLoad.h"
@@ -1490,6 +1491,13 @@ void Renderer::build_items_from_world(World& world, std::vector<DrawItem>& out,
         const auto& ct = view.get<const CTransform>(entity).t;
         ++stats_.entities_considered;
 
+        // Draw-time pose = physics-owned CTransform + any active visual
+        // offset (recoil kick, flinch). Resolved once here so every DrawItem
+        // path below shares it; identical to ``ct.matrix()`` when no offset
+        // is active, which is the overwhelmingly common case.
+        const Mat4 entity_model = entity_visual_matrix(
+            world, static_cast<std::uint32_t>(entity), ct);
+
         // --- Skip invisible / logic-only entities --------------------------------
         // Generated scenes often include dozens of ``mesh: null`` trigger /
         // tutorial volumes. Without this guard the renderer falls through to
@@ -1521,7 +1529,7 @@ void Renderer::build_items_from_world(World& world, std::vector<DrawItem>& out,
         if (world.registry().all_of<CMesh>(entity)) {
             const auto& cm = world.registry().get<CMesh>(entity);
             if (!cm.glb_path.empty()) {
-                const Mat4 model = ct.matrix();
+                const Mat4 model = entity_model;
                 const Vec3 center{model[3][0], model[3][1], model[3][2]};
                 const float distance = view_info.valid
                                            ? glm::length(center - cam)
@@ -1666,7 +1674,7 @@ void Renderer::build_items_from_world(World& world, std::vector<DrawItem>& out,
             DrawItem it{};
             Mat4 s = glm::scale(Mat4(1.0f),
                                 Vec3(prim.size.x, prim.size.y, prim.size.z));
-            it.model = ct.matrix() * s;
+            it.model = entity_model * s;
             it.color = Vec4{prim.color.x, prim.color.y, prim.color.z, 1.0f};
             it.material_id = is_ground ? 1.0f : 0.0f;
             // Select the matching unit mesh by kind (all authored at unit
@@ -1707,7 +1715,7 @@ void Renderer::build_items_from_world(World& world, std::vector<DrawItem>& out,
                                           im.color);
             if (slot >= 0) {
                 DrawItem it{};
-                it.model = ct.matrix();
+                it.model = entity_model;
                 it.mesh_slot = slot;
                 it.color = Vec4{1.0f, 1.0f, 1.0f, 1.0f};  // vertex colors drive look
                 it.material_id = 0.0f;
@@ -1720,7 +1728,7 @@ void Renderer::build_items_from_world(World& world, std::vector<DrawItem>& out,
         }
 
         DrawItem it;
-        it.model = ct.matrix();
+        it.model = entity_model;
         it.mesh_slot = -1;
 
         // Size + color hints by tag.

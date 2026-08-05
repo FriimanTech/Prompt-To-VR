@@ -15,12 +15,32 @@ class Transform(StrictModel):
     scale: float = Field(default=1.0, gt=0.0, lt=1000.0)
 
 
+class SocketRef(StrictModel):
+    """A named attachment point in the mesh's own local space.
+
+    Derived deterministically from geometry by the ``asset_contract`` stage
+    and converted from unit space to metres by the scene compiler, so the
+    runtime can just compose ``entity_transform * socket``.
+    """
+
+    position: Vec3 = Field(default_factory=Vec3)
+    rotation: QuatXYZW = Field(default_factory=QuatXYZW)
+
+
 class MeshRef(StrictModel):
     asset_id: IdStr
     glb_path: str = Field(
         ...,
         max_length=512,
         description="Project-relative path under projects/<id>/assets/",
+    )
+    sockets: Dict[str, SocketRef] = Field(
+        default_factory=dict,
+        description=(
+            "Named attachment points (e.g. 'muzzle', 'grip') in metres,"
+            " relative to the mesh origin. Populated by the scene compiler"
+            " from asset_contract.json; the SceneSpec agent leaves this empty."
+        ),
     )
 
 

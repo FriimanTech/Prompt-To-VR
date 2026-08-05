@@ -62,10 +62,16 @@ private:
     class PhysicsAccessService;
     class DebugDrawService;
     class HandsService;
+    class TransformFxService;
+    class HapticsService;
+    class SocketsService;
     friend class LocomotionService;
     friend class PhysicsAccessService;
     friend class DebugDrawService;
     friend class HandsService;
+    friend class TransformFxService;
+    friend class HapticsService;
+    friend class SocketsService;
 
     bool initialize(const Config& cfg);
     void shutdown();
@@ -231,7 +237,13 @@ private:
     std::unique_ptr<PhysicsAccessService> physics_svc_;
     std::unique_ptr<DebugDrawService> draw_svc_;
     std::unique_ptr<HandsService> hands_svc_;
+    std::unique_ptr<TransformFxService> fx_svc_;
+    std::unique_ptr<HapticsService> haptics_svc_;
+    std::unique_ptr<SocketsService> sockets_svc_;
     MechanicContext mech_ctx_{};
+    // Monotonic seconds since the loop started; the haptics rate limiter
+    // needs a clock that does not depend on wall-clock formatting.
+    double haptic_clock_s_{0.0};
     // One-frame draw list produced by mechanics through IDebugDraw; appended
     // to the render item list and cleared every frame.
     std::vector<Renderer::DrawItem> mech_draw_items_;

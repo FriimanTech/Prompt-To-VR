@@ -395,6 +395,13 @@ class _StaticContext:
 
     scene_files: list[str]
 
+    # asset_id -> sorted socket names derived by the asset_contract stage.
+    # This is the whole reason that stage runs before codegen: the agent needs
+    # to see which named attachment points actually exist so it writes
+    # ctx.sockets->socket_world(self, "muzzle") against a real name instead of
+    # inventing a hard-coded offset it cannot possibly know.
+    sockets_by_asset: dict[str, list[str]]
+
 
 def _load_static_context(ctx: PipelineContext) -> _StaticContext:
     """Load BuildSpec + every scene_spec*.json on disk. Missing files
@@ -423,10 +430,25 @@ def _load_static_context(ctx: PipelineContext) -> _StaticContext:
                 f"failed to parse {p.name}; skipping in agent context",
             )
 
+    sockets_by_asset: dict[str, list[str]] = {}
+    contract_path = project_dir / "asset_contract.json"
+    if contract_path.exists():
+        try:
+            contract = json.loads(contract_path.read_text(encoding="utf-8"))
+            for asset_id, entry in (contract or {}).items():
+                names = sorted((entry or {}).get("sockets") or {})
+                if names:
+                    sockets_by_asset[asset_id] = names
+        except (OSError, json.JSONDecodeError):
+            # No contract is a valid state (projects predating the stage);
+            # the agent then simply sees no sockets and uses no sockets.
+            pass
+
     return _StaticContext(
         build_spec=build_spec,
         scene_specs=scene_specs,
         scene_files=scene_files,
+        sockets_by_asset=sockets_by_asset,
     )
 
 
@@ -553,7 +575,9 @@ class _StageRuntime:
         # itself doesn't need live ledger updates, only a coherent
         # view of dep exports at claim time.
         snapshot = self.board.snapshot()
-        scene_ctx_json = _scene_context_json(task, self.static.scene_specs)
+        scene_ctx_json = _scene_context_json(
+            task, self.static.scene_specs, self.static.sockets_by_asset
+        )
         bs_excerpt = _buildspec_excerpt(task, self.static.build_spec)
         output_subdir = (
             f"engine/generated/{_KIND_DIR[task.kind]}/{self.ctx.project_id}"
@@ -1150,7 +1174,11 @@ def _default_verify_compile(ctx: PipelineContext) -> tuple[bool, str]:
 # ---------------------------------------------------------------------------
 
 
-def _scene_context_json(task: CodeTask, scenes: list[SceneSpec]) -> str:
+def _scene_context_json(
+    task: CodeTask,
+    scenes: list[SceneSpec],
+    sockets_by_asset: dict[str, list[str]] | None = None,
+) -> str:
     """Build a JSON string with the SceneSpec excerpts that touch this
     task. For each scene we include:
 
@@ -1178,7 +1206,7 @@ def _scene_context_json(task: CodeTask, scenes: list[SceneSpec]) -> str:
             is_ambient = any(
                 t in ent.tags for t in ("environment", "player_avatar")
             )
-            payload = _entity_summary(ent)
+            payload = _entity_summary(ent, sockets_by_asset or {})
             if touches:
                 relevant_entities.append(payload)
             elif is_ambient:
@@ -1198,13 +1226,23 @@ def _scene_context_json(task: CodeTask, scenes: list[SceneSpec]) -> str:
     return json.dumps(excerpts, indent=2, sort_keys=True)
 
 
-def _entity_summary(ent) -> dict[str, Any]:  # ent: EntitySpec
+def _entity_summary(
+    ent, sockets_by_asset: dict[str, list[str]] | None = None
+) -> dict[str, Any]:  # ent: EntitySpec
+    mesh = _model_to_jsonable(ent.mesh) if ent.mesh else None
+    if mesh is not None and sockets_by_asset:
+        # Socket TRANSFORMS are per-asset data the agent must never see or
+        # guess; socket NAMES are the contract it writes against. Surface the
+        # names only.
+        names = sockets_by_asset.get(ent.mesh.asset_id)
+        if names:
+            mesh["available_sockets"] = names
     return {
         "id": ent.id,
         "name": ent.name,
         "tags": list(ent.tags),
         "transform": _model_to_jsonable(ent.transform),
-        "mesh": _model_to_jsonable(ent.mesh) if ent.mesh else None,
+        "mesh": mesh,
         "physics": _model_to_jsonable(ent.physics) if ent.physics else None,
         "mechanic_bindings": [
             _model_to_jsonable(b) for b in ent.mechanic_bindings

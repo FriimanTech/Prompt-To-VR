@@ -35,6 +35,7 @@ _MODULE_FOR_ID = {
     "builtin.snap_turn": "snap_turn",
     "builtin.grab": "grab",
     "builtin.throw": "throw",
+    "builtin.recoil": "recoil",
 }
 
 # Small headers shared across modules. Injected alongside a module's own files

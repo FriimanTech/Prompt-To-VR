@@ -21,6 +21,12 @@ class ProjectStage(str, Enum):
     reference_images = "reference_images"
     tripo_models = "tripo_models"
     asset_normalization = "asset_normalization"
+    # Derives each asset's named sockets (muzzle, grip) from its geometry and
+    # writes asset_contract.json. Deterministic, no model calls. Runs BEFORE
+    # code_generation because the codegen agent needs the contract in context:
+    # it writes ctx.sockets->socket_world(self, "muzzle") against socket names
+    # it can actually see, rather than guessing an offset.
+    asset_contract = "asset_contract"
     # Decimates GLBs + generates LOD chains against the device triangle
     # budget. Runs after world_generation, before scene_compile.
     asset_optimization = "asset_optimization"

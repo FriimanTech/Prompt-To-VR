@@ -41,6 +41,20 @@ struct InputSnapshot {
         float prev_trigger{0.0f};
         float prev_grip{0.0f};
 
+        // Capacitive touch ("capsense"): the finger is RESTING on the control
+        // without pressing it. This is the difference between an index finger
+        // curled in mid-air and one laid along the trigger, and between a
+        // thumb up and a thumb down on the rest -- the two poses that make a
+        // virtual hand read as alive rather than as two canned states.
+        //
+        // ``trigger_touched`` is independent of ``trigger``: a resting finger
+        // reports touched with a value of 0. False on hardware or runtimes
+        // that do not report capsense, which reads as "finger not there".
+        bool trigger_touched{false};
+        bool thumbrest_touched{false};
+        bool prev_trigger_touched{false};
+        bool prev_thumbrest_touched{false};
+
         // Grip ("hand") pose: palm-centric. Use for "where is the hand".
         // Valid only when ``hand_valid`` is true.
         glm::vec3 hand_position{0.0f};
@@ -110,6 +124,20 @@ struct InputSnapshot {
     }
     bool grip_down(Hand h, float threshold = 0.5f) const {
         return hands[h].grip >= threshold;
+    }
+
+    // Capsense helpers. ``trigger_resting`` is the pose case a hand mechanic
+    // actually wants: finger ON the trigger but not pulling it.
+    bool trigger_touching(Hand h) const { return hands[h].trigger_touched; }
+    bool trigger_resting(Hand h, float threshold = 0.5f) const {
+        return hands[h].trigger_touched && hands[h].trigger < threshold;
+    }
+    bool trigger_touch_started(Hand h) const {
+        return hands[h].trigger_touched && !hands[h].prev_trigger_touched;
+    }
+    bool thumbrest_touching(Hand h) const { return hands[h].thumbrest_touched; }
+    bool thumbrest_touch_started(Hand h) const {
+        return hands[h].thumbrest_touched && !hands[h].prev_thumbrest_touched;
     }
 
     // Face-button current-state helpers.

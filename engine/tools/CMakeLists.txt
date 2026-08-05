@@ -13,3 +13,10 @@ target_link_libraries(ptv_glb_optimize PRIVATE
   ptv_runtime
   meshoptimizer::meshoptimizer)
 set_target_properties(ptv_glb_optimize PROPERTIES FOLDER "ptv/tools")
+
+# glb_sockets: deterministic socket (muzzle / grip) derivation for the
+# pipeline's asset_contract stage. Reuses the runtime's GLB merge so the
+# geometry it measures is exactly what the engine will draw.
+add_executable(ptv_glb_sockets glb_sockets.cpp)
+target_link_libraries(ptv_glb_sockets PRIVATE ptv_runtime)
+set_target_properties(ptv_glb_sockets PROPERTIES FOLDER "ptv/tools")

@@ -81,6 +81,7 @@ BUILTIN_MECHANIC_IDS = {
     "builtin.locomotion.snap_turn",
     "builtin.grab",
     "builtin.throw",
+    "builtin.recoil",
 }
 
 

@@ -168,6 +168,26 @@ Built each frame in `Renderer::build_items_from_world`:
 Both use a bounding sphere: the pipeline-computed `bounds_radius_m` when
 available, otherwise a conservative estimate.
 
+## Draw-time transform offsets
+
+`build_items_from_world` resolves each entity's model matrix through
+`entity_visual_matrix`, which composes `CTransform` with any active
+`CTransformOffset` — the engine's visual "juice" layer for recoil kicks, hit
+flinches and impact shoves. The offset is applied to all four DrawItem paths
+(GLB mesh, procedural primitive, inline mesh, cube fallback).
+
+This lives at draw time on purpose. `CTransform` is an output of the physics
+step for anything with a rigid body, so a mechanic cannot write a kick there
+without it being overwritten or desyncing the drawn pose from the physical
+one. Because the offset is only ever composed into the model matrix, physics,
+collision and raycasts never see it, and there is no ownership conflict with
+`builtin.grab`'s kinematic follow.
+
+The cost is one hash lookup per entity per frame and, only for entities with
+an *active* offset, one extra matrix multiply. Settled offsets clear their
+`active` flag and are skipped entirely. Mechanics drive this through
+`ctx.fx->impulse(...)`, never by touching the component.
+
 ## Asset streaming
 
 GLBs are **never** loaded inside the draw loop. A worker thread does the

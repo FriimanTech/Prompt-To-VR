@@ -91,11 +91,68 @@ def _spread_xz(index: int, radius: float = 1.5) -> tuple[float, float]:
     return radius * math.cos(angle), radius * math.sin(angle)
 
 
+class SocketContractError(RuntimeError):
+    """A bound mechanic needs a socket its asset does not have.
+
+    Raised at scene-compile time because that is the only stage that can see
+    both halves of the contract: the CodeTask's ``required_sockets`` (decided
+    by the mechanic-plan agent, before any GLB existed) and the asset's
+    derived sockets (decided by the asset_contract stage, which never knew
+    which mechanic would be bound). Nothing else in the pipeline can catch the
+    mismatch, and the runtime symptom -- a projectile leaving from the front
+    of a bounding sphere instead of a barrel -- is easy to miss in a headset.
+    """
+
+
+def _check_required_sockets(
+    entity: Any,
+    plan_item: Any,
+    mesh: dict[str, Any] | None,
+    contracts: dict[str, dict[str, Any]],
+) -> list[str]:
+    """Violations for one entity/mechanic pair. Empty list when satisfied.
+
+    Mechanics with no ``code_task``, or a code task that declares no
+    ``required_sockets``, are skipped entirely -- so this is inert for every
+    project generated before sockets existed.
+    """
+    task = getattr(plan_item, "code_task", None)
+    required = list(getattr(task, "required_sockets", None) or [])
+    if not required:
+        return []
+
+    mechanic_id = getattr(task, "id", None) or getattr(plan_item, "id", "?")
+    if mesh is None:
+        return [
+            f"entity '{entity.id}' binds '{mechanic_id}' which requires"
+            f" sockets {required}, but the entity has no mesh to carry them"
+        ]
+
+    asset_id = mesh.get("asset_id", "?")
+    available = sorted((mesh.get("sockets") or {}).keys())
+    contract = contracts.get(asset_id) or {}
+    out: list[str] = []
+    for name in required:
+        if name in (mesh.get("sockets") or {}):
+            continue
+        detail = ""
+        if not contract:
+            detail = " (asset has no entry in asset_contract.json)"
+        elif contract.get("status") != "ok":
+            detail = f" (asset contract status: {contract.get('status')})"
+        out.append(
+            f"entity '{entity.id}' binds '{mechanic_id}' which requires socket"
+            f" '{name}', but asset '{asset_id}' provides {available}{detail}"
+        )
+    return out
+
+
 def _default_entity_for_asset(
     asset: AssetItem,
     glb_path: str,
     spread_index: int,
     norm: dict[str, Any] | None = None,
+    contract: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build a category-appropriate default entity for an unreferenced asset."""
 
@@ -104,7 +161,7 @@ def _default_entity_for_asset(
         "glb_path": glb_path,
         "target_scale_meters": asset.target_scale_meters,
         "collision_shape": asset.collision_shape,
-        **_mesh_render_fields(norm or {}, asset.target_scale_meters),
+        **_mesh_render_fields(norm or {}, asset.target_scale_meters, contract),
     }
     transform_identity = {
         "position": [0.0, 0.0, 0.0],
@@ -261,14 +318,20 @@ def _default_entity_for_asset(
 def _mesh_render_fields(
     norm: dict[str, Any],
     target_scale_meters: float,
+    contract: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Per-mesh rendering metadata produced by ``asset_optimization``.
+    """Per-mesh metadata from ``asset_optimization`` and ``asset_contract``.
 
     ``lod_paths`` is the decimated LOD chain (coarser as the index grows) and
     ``bounds_radius_m`` is the world-space bounding-sphere radius the renderer
     uses for frustum + distance culling. Both are omitted when the asset has
     not been optimized, in which case the runtime falls back to drawing
     ``glb_path`` at full detail with a conservative radius.
+
+    ``sockets`` are the named attachment points (muzzle, grip) the
+    ``asset_contract`` stage derived from geometry. This is where they stop
+    being unit-space and become metres -- the same conversion, and for the
+    same reason, as ``bounds_radius_m`` just below.
     """
 
     out: dict[str, Any] = {}
@@ -283,6 +346,44 @@ def _mesh_render_fields(
         # longest axis; the runtime rescales by target_scale_meters, so the
         # world-space radius scales identically.
         out["bounds_radius_m"] = float(unit_radius) * float(target_scale_meters)
+    sockets = _sockets_in_meters(contract, target_scale_meters)
+    if sockets:
+        out["sockets"] = sockets
+    return out
+
+
+def _sockets_in_meters(
+    contract: dict[str, Any] | None,
+    target_scale_meters: float,
+) -> dict[str, Any]:
+    """Convert one asset's unit-space sockets into scene.json metres.
+
+    The tool normalises socket positions by the mesh's longest-axis extent so
+    they survive decimation; the runtime scales vertices by
+    ``target_scale_meters`` about the origin. Multiplying here puts the socket
+    in exactly the same space as the geometry it sits on.
+    """
+    if not contract:
+        return {}
+    raw = contract.get("sockets") or {}
+    scale = float(target_scale_meters)
+    out: dict[str, Any] = {}
+    for name, socket in raw.items():
+        if not isinstance(socket, dict):
+            continue
+        pos = socket.get("position") or [0.0, 0.0, 0.0]
+        rot = socket.get("rotation") or [0.0, 0.0, 0.0, 1.0]
+        if len(pos) < 3 or len(rot) < 4:
+            continue
+        out[name] = {
+            "position": [float(pos[0]) * scale,
+                         float(pos[1]) * scale,
+                         float(pos[2]) * scale],
+            # Rotation is scale-invariant; pass it through as [x, y, z, w],
+            # which is the convention SceneLoader::read_quat expects.
+            "rotation": [float(rot[0]), float(rot[1]), float(rot[2]),
+                         float(rot[3])],
+        }
     return out
 
 
@@ -310,8 +411,14 @@ def compile_scene_json(
     plan: MechanicPlan,
     scene: SceneSpec,
     normalization_report: dict[str, dict[str, Any]] | None = None,
+    asset_contract: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    """Pure function: produce the engine-loadable scene JSON dict."""
+    """Pure function: produce the engine-loadable scene JSON dict.
+
+    Raises ``SocketContractError`` when a bound mechanic declares a
+    ``required_sockets`` entry the asset's contract cannot supply -- see
+    :func:`_validate_required_sockets`.
+    """
 
     asset_by_id = {a.id: a for a in manifest.items}
     # Index plan items by BOTH the mechanic-plan id and the code_task id so a
@@ -323,7 +430,9 @@ def compile_scene_json(
         if it.code_task is not None:
             plan_by_id[it.code_task.id] = it
     nrep = normalization_report or {}
+    contracts = asset_contract or {}
     referenced_asset_ids: set[str] = set()
+    socket_violations: list[str] = []
 
     entities_out: list[dict[str, Any]] = []
     for e in scene.entities:
@@ -339,7 +448,9 @@ def compile_scene_json(
                 "collision_shape": (
                     asset.collision_shape if asset is not None else "aabb"
                 ),
-                **_mesh_render_fields(norm, scale_m),
+                **_mesh_render_fields(
+                    norm, scale_m, contracts.get(e.mesh.asset_id)
+                ),
             }
             referenced_asset_ids.add(e.mesh.asset_id)
         bindings: list[dict[str, Any]] = []
@@ -374,6 +485,9 @@ def compile_scene_json(
                     resolved["params"].setdefault(
                         "hand", item.binding.hand.value
                     )
+                socket_violations.extend(
+                    _check_required_sockets(e, item, mesh, contracts)
+                )
             bindings.append(resolved)
         entities_out.append(
             {
@@ -419,10 +533,25 @@ def compile_scene_json(
             continue
         entities_out.append(
             _default_entity_for_asset(
-                asset, glb_path, auto_index, nrep.get(asset.id, {})
+                asset,
+                glb_path,
+                auto_index,
+                nrep.get(asset.id, {}),
+                contracts.get(asset.id),
             )
         )
         auto_index += 1
+
+    # Fail loudly, and all at once. Reporting every violation in a single
+    # raise means one fix-up round instead of N build-fail cycles.
+    if socket_violations:
+        raise SocketContractError(
+            "generated mechanics require sockets their assets do not have:\n"
+            + "\n".join(f"  - {v}" for v in socket_violations)
+            + "\n\nEither add the socket name to the asset's `socket_hints` in"
+            " the AssetManifest (so the asset_contract stage derives it), or"
+            " drop it from the CodeTask's `required_sockets`."
+        )
 
     return {
         "version": SCENE_JSON_VERSION,
@@ -484,7 +613,9 @@ def compile_scene_json(
 
 
 def _repoint_world_meshes_to_lods(
-    entities: list[dict], nrep: dict[str, dict[str, Any]]
+    entities: list[dict],
+    nrep: dict[str, dict[str, Any]],
+    contracts: dict[str, dict[str, Any]] | None = None,
 ) -> list[dict]:
     """Point world-generated mesh entities at the optimized LOD chain.
 
@@ -510,20 +641,25 @@ def _repoint_world_meshes_to_lods(
         merged["mesh"] = {
             **mesh,
             "glb_path": norm["glb_path"],
-            **_mesh_render_fields(norm, scale_m),
+            **_mesh_render_fields(
+                norm, scale_m, (contracts or {}).get(mesh["asset_id"])
+            ),
         }
         out.append(merged)
     return out
 
 
 def _merge_world_into_scene(
-    doc: dict, world_doc: dict, nrep: dict[str, dict[str, Any]] | None = None
+    doc: dict,
+    world_doc: dict,
+    nrep: dict[str, dict[str, Any]] | None = None,
+    contracts: dict[str, dict[str, Any]] | None = None,
 ) -> dict:
     """Merge the C++-generated environment (world.scene.json) into a compiled
     gameplay scene doc: environment entities + sky + lights + spawn come from
     the world; gameplay entities render on top of it."""
     world_entities = _repoint_world_meshes_to_lods(
-        list(world_doc.get("entities") or []), nrep or {}
+        list(world_doc.get("entities") or []), nrep or {}, contracts
     )
     doc["entities"] = list(world_entities) + list(doc.get("entities") or [])
     if "sky" in world_doc:
@@ -561,6 +697,16 @@ def run(ctx: PipelineContext) -> StageResult:
         else {}
     )
 
+    # Named sockets derived from geometry by the asset_contract stage. Absent
+    # for projects generated before that stage existed, in which case every
+    # mesh simply ships without sockets and the validator stays inert.
+    contract_path = ctx.project_dir / "asset_contract.json"
+    asset_contract = (
+        json.loads(contract_path.read_text(encoding="utf-8"))
+        if contract_path.exists()
+        else {}
+    )
+
     # The C++-generated environment for this project (from world_generation).
     world_doc: dict | None = None
     world_path = ctx.project_dir / "world.scene.json"
@@ -589,9 +735,13 @@ def run(ctx: PipelineContext) -> StageResult:
         scene_spec = SceneSpec.model_validate(
             json.loads(spec_path.read_text(encoding="utf-8"))
         )
-        doc = compile_scene_json(build_spec, manifest, plan, scene_spec, normalization)
+        doc = compile_scene_json(
+            build_spec, manifest, plan, scene_spec, normalization, asset_contract
+        )
         if world_doc is not None and scene_entry.id == entry_id:
-            doc = _merge_world_into_scene(doc, world_doc, normalization)
+            doc = _merge_world_into_scene(
+                doc, world_doc, normalization, asset_contract
+            )
         out = builds_dir / f"{scene_entry.id}.scene.json"
         out.write_text(json.dumps(doc, indent=2, sort_keys=True), encoding="utf-8")
         artifacts.append(str(out.relative_to(ctx.settings.repo_root)).replace("\\", "/"))

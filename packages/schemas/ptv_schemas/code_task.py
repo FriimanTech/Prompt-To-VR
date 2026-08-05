@@ -77,6 +77,26 @@ class CodeTask(StrictModel):
         ),
     )
 
+    # Named attachment points the generated code will look up through
+    # ``ctx.sockets->socket_world(entity, name)`` -- e.g. ["muzzle"] for a
+    # mechanic that fires from a barrel tip.
+    #
+    # This is one half of a contract whose other half (the actual per-asset
+    # transforms) is produced much later, by the deterministic asset_contract
+    # stage. Declaring the names here is what lets the scene compiler catch a
+    # mismatch and fail loudly, instead of the mechanic silently falling back
+    # to the front of a bounding sphere at runtime.
+    required_sockets: List[str] = Field(
+        default_factory=list,
+        max_length=8,
+        description=(
+            "Socket names this mechanic reads via ctx.sockets. The scene"
+            " compiler fails the build if a bound entity's asset does not"
+            " provide every one of them. Leave empty unless the mechanic"
+            " genuinely needs a spatial anchor on the mesh."
+        ),
+    )
+
     files: List[CodeTaskFile] = Field(default_factory=list, max_length=16)
     test_files: List[CodeTaskFile] = Field(default_factory=list, max_length=8)
 

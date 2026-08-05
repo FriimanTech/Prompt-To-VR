@@ -95,6 +95,13 @@ values read on screen.
   existing GLB `mesh`. Physics `collision_shape` may be `box|sphere|mesh|none`.
 - Lights carry an optional `direction` and, for point lights, an optional
   `range` (falloff radius in meters; the runtime uses 20 m when unset).
+- A GLB `mesh` may carry `sockets`: named local transforms in metres, e.g.
+  `{"muzzle": {"position": [0, 0.02, -0.18], "rotation": [0, 0, 0, 1]}}`.
+  Written by the scene compiler from `asset_contract.json` and read by
+  gameplay through `ctx.sockets`. See
+  [architecture.md](architecture.md#the-socket-contract). World builders do
+  not author sockets; `place_object` emits meshes without them, and the scene
+  compiler fills them in from the asset's contract during the merge.
 
 Runtime support: `SceneLoader` parses these into `CPrimitive` / `CInlineMesh`
 components + `SkyGradient` (incl. the ambient/fog/exposure knobs) and per-light

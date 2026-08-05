@@ -12,8 +12,10 @@ and the orchestrator's
 
 - `ptv/api/` — `IMechanic`, `IBehaviour`, `IDialogueHook` and the register
   macros, plus `InputSnapshot` (live controller/headset input) and
-  `MechanicContext` (locomotion / physics / debug-draw / hand services).
-- `ptv/ecs/` — `World`, core ECS components (`CTransform`, `CMesh`, `CPhysics`, …).
+  `MechanicContext` (locomotion / physics / debug-draw / hand / transform-fx /
+  haptics / socket services).
+- `ptv/ecs/` — `World`, core ECS components (`CTransform`, `CMesh`, `CPhysics`, …),
+  plus `TransformOffset.h` (the draw-time visual-offset layer).
 - `ptv/scene/` — `SceneDoc`, `LoadSceneJson`, `ApplySceneToWorld`.
 - `ptv/math/` — `Vec3`, `Quat`, `Transform` (glm wrappers).
 - `ptv/mechanics/` — `MechanicRegistry`, `MechanicHost`.
@@ -35,22 +37,52 @@ allocator. Validation layers are auto-detected and enabled in Debug builds.
 
 Wraps `xrCreateInstance`, `xrGetSystem`, `xrCreateSession` (via
 `XR_KHR_vulkan_enable2`), a stage reference space, one action set
-(`gameplay`) with left/right hand poses + trigger + grip + thumbstick +
-A/B/X/Y buttons bound to the Oculus Touch interaction profile, and per-eye
-color swapchains. The frame loop (`poll_events` / `begin_frame` /
-`end_frame_no_render` / `sync_input`) is public so the application can drive
-the XR session without leaking OpenXR types upward.
+(`gameplay`) and per-eye color swapchains. The frame loop (`poll_events` /
+`begin_frame` / `end_frame_no_render` / `sync_input`) is public so the
+application can drive the XR session without leaking OpenXR types upward.
+
+The `gameplay` action set carries left/right hand + aim poses, trigger, grip,
+thumbstick, A/B/X/Y buttons, capacitive `trigger/touch` and
+`thumbrest/touch`, and one `XR_ACTION_TYPE_VIBRATION_OUTPUT` haptic action.
+The same binding set is suggested against both
+`/interaction_profiles/oculus/touch_controller` and
+`/interaction_profiles/meta/touch_controller_plus`; a runtime that does not
+know the second profile rejects it, which is expected rather than an error.
+Haptics use core `xrApplyHapticFeedback` and need no extension.
 
 ### ECS (EnTT, `ptv::World`)
 
 Thin wrapper around an EnTT registry with a stable `string_id → entity` map.
 Core components: `CTransform`, `CMesh`, `CPhysics`, `CMechanicBinding`,
-`CTag`.
+`CTag`, `CTransformOffset`.
+
+### Transform FX (`ptv::tick_transform_offsets`)
+
+`CTransformOffset` is a purely visual, springy displacement applied on top of
+`CTransform` **at draw time only** — recoil kick, hit flinch, impact shove.
+
+It exists because `CTransform` is an *output* of the physics step for any
+entity with a body: `PhysicsWorld::sync_to_world` overwrites it every frame,
+and `builtin.grab` drives held objects by commanding physics rather than by
+setting the transform. A mechanic writing a kick into `CTransform` would
+either have it erased on the next sync or silently desync the drawn pose from
+the physical one.
+
+`tick_transform_offsets` runs once per frame, right after the Simulate phase
+(so a kick requested this frame is drawn this frame) and before the draw list
+is built. `Renderer::build_items_from_world` composes the offset into the
+model matrix via `entity_visual_matrix`. Physics, grab, raycasts and collision
+never see it. Mechanics drive it through `ctx.fx`, which clamps magnitudes.
 
 ### Scene loader (`ptv::LoadSceneJson`, `ptv::ApplySceneToWorld`)
 
 Reads the engine-facing JSON emitted by the Python scene compiler and
 populates the ECS. No additional LLM call; purely deterministic.
+
+Each entity's `mesh` block may carry `sockets` — named local transforms in
+metres (`{"muzzle": {"position": [...], "rotation": [x,y,z,w]}}`) that reach
+gameplay through `ctx.sockets`. See
+[architecture.md](architecture.md#the-socket-contract).
 
 ### Physics (`ptv::PhysicsWorld`)
 

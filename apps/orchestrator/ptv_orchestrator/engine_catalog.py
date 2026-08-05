@@ -158,6 +158,30 @@ _BUILTINS: tuple[CatalogEntry, ...] = (
         category="interaction",
         params={"impulse": "float, default 4.0 (throw strength)"},
     ),
+    # ----- Feedback / juice -----
+    CatalogEntry(
+        id="builtin.recoil",
+        summary=(
+            "Kicks an object backward and pitches its nose up when the bound "
+            "control is pressed, then springs it home. Purely visual (it "
+            "drives the engine's draw-time transform-offset layer), so it "
+            "never fights physics or builtin.grab. Bind it to a weapon "
+            "ALONGSIDE the mechanic that actually fires: both read the same "
+            "trigger, so they stay in sync with no coupling. This is the "
+            "cheapest 'the weapon fired' cue available -- no sockets, no "
+            "moving parts and no skinning required."
+        ),
+        category="interaction",
+        params={
+            "kick_back_m": "float, default 0.035 (shove along the object's +Z)",
+            "kick_up_deg": "float, default 3.0 (muzzle rise)",
+            "recover_tau_s": "float, default 0.07 (spring-back time constant)",
+            "require_held": (
+                "bool, default true (only kick while a hand holds the object)"
+            ),
+        },
+        inputs=("the bound control on whichever hand holds the object",),
+    ),
 )
 
 

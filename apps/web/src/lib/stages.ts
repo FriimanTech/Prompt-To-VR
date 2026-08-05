@@ -7,6 +7,7 @@ export const STAGE_ORDER = [
   "reference_images",
   "tripo_models",
   "asset_normalization",
+  "asset_contract",
   "code_generation",
   "world_generation",
   "asset_optimization",
@@ -26,22 +27,23 @@ export const STAGE_LABELS: Record<string, string> = {
   reference_images: "5. Reference images",
   tripo_models: "6. Tripo 3D",
   asset_normalization: "7. Asset normalization",
-  code_generation: "8. C++ gameplay codegen",
-  world_generation: "9. VR world generation",
-  asset_optimization: "10. Asset decimation + LODs",
-  scene_compile: "11. Scene compile",
-  cmake_configure: "12. CMake configure",
-  cmake_build: "12. CMake configure + build",
-  quest_build: "12. Quest APK build",
-  quest_install: "13. Install on Quest",
-  engine_promotion: "13. Engine promotion",
+  asset_contract: "8. Asset sockets",
+  code_generation: "9. C++ gameplay codegen",
+  world_generation: "10. VR world generation",
+  asset_optimization: "11. Asset decimation + LODs",
+  scene_compile: "12. Scene compile",
+  cmake_configure: "13. CMake configure",
+  cmake_build: "13. CMake configure + build",
+  quest_build: "13. Quest APK build",
+  quest_install: "14. Install on Quest",
+  engine_promotion: "14. Engine promotion",
   ready_to_launch: "Ready to launch",
   failed: "Failed",
 };
 
 // The stages the pipeline can actually run, in order. Mirrors the backend
 // ``_stages_for(target_device)`` in apps/orchestrator/.../pipeline/orchestrator.py.
-// Stages 1-11 are shared; the build tail differs by device (cmake_build for
+// Stages 1-12 are shared; the build tail differs by device (cmake_build for
 // PC VR, quest_build for Quest). ``engine_promotion`` is the final stage.
 const SHARED_STAGES = [
   "build_spec",
@@ -51,6 +53,7 @@ const SHARED_STAGES = [
   "reference_images",
   "tripo_models",
   "asset_normalization",
+  "asset_contract",
   "code_generation",
   "world_generation",
   "asset_optimization",

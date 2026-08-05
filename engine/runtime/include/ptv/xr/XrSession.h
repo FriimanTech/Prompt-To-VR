@@ -113,6 +113,15 @@ public:
         bool button_b{false};
         bool button_x{false};
         bool button_y{false};
+        // Capacitive touch ("capsense"): the finger is RESTING on the control
+        // without pressing it. Distinguishing rest from press is what lets a
+        // virtual hand pose its index finger on the trigger and its thumb on
+        // the rest instead of snapping between flat palm and fist.
+        //
+        // False on hardware or runtimes that do not report capsense, which
+        // reads as "finger not there" -- the safe degradation.
+        bool trigger_touch[2]{false, false};    // [0]=left, [1]=right
+        bool thumbrest_touch[2]{false, false};
     };
 
     XrRuntime() = default;
@@ -174,6 +183,15 @@ public:
      *  begin is pending (no-op). */
     void submit_pending_empty_frame();
     void sync_input(InputState& out);
+
+    /** Vibrate one controller. ``hand`` is 0 = left, 1 = right.
+     *
+     *  Fire-and-forget: the runtime owns the pulse once submitted. A second
+     *  call to the same hand while a pulse is playing replaces it. No-ops when
+     *  the session is not running or the runtime took no haptic binding, so
+     *  callers never have to check. Core OpenXR -- no extension needed. */
+    void apply_haptic(int hand, float duration_s, float frequency_hz,
+                      float amplitude);
 
     // Per-eye swapchain resources exposed to the renderer.
     struct EyeImage {
@@ -249,6 +267,9 @@ private:
     XrAction button_b_action_{XR_NULL_HANDLE};   // right controller B
     XrAction button_x_action_{XR_NULL_HANDLE};   // left controller X
     XrAction button_y_action_{XR_NULL_HANDLE};   // left controller Y
+    XrAction trigger_touch_action_{XR_NULL_HANDLE};    // capsense, per hand
+    XrAction thumbrest_touch_action_{XR_NULL_HANDLE};  // capsense, per hand
+    XrAction haptic_action_{XR_NULL_HANDLE};     // vibration output, per hand
     XrPath hand_paths_[2]{XR_NULL_PATH, XR_NULL_PATH};
 
     std::vector<XrSwapchain> color_swapchains_;

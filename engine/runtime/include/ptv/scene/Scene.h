@@ -29,6 +29,15 @@ struct MeshRef {
      * for frustum + distance culling. 0 means "unknown": the renderer then
      * falls back to a conservative radius so nothing is wrongly culled. */
     float bounds_radius_m{0.0f};
+    /** Named attachment points in the mesh's own local space, already in
+     * METRES at ``target_scale_meters`` (the scene compiler converts them
+     * from the unit-space values in ``asset_contract.json``, exactly as it
+     * does for ``bounds_radius_m``).
+     *
+     * This is what lets one weapon-agnostic generated mechanic fire from the
+     * barrel tip of a pistol, a rifle or a rocket launcher: the C++ asks for
+     * ``"muzzle"``, and the per-asset numbers arrive as data. */
+    std::unordered_map<std::string, Transform> sockets;
 };
 
 // Procedural primitive authored by the world-generation stage.

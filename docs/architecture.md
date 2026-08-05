@@ -56,10 +56,13 @@ flowchart TD
   SceneSpec --> Refs[images/*/ref_NN.png]
   Refs --> Tripo[assets/*/model.glb]
   Tripo --> Normalize[asset_normalization.json]
-  Normalize --> Optimize["asset_optimization: decimate + LOD chain"]
+  Normalize --> Contract["asset_contract: derive sockets"]
+  Contract --> Optimize["asset_optimization: decimate + LOD chain"]
+  Contract --> CppGen
   MechanicPlan --> CppGen["engine/generated/<kind>/<project_id>/*.cpp"]
   SceneSpec --> SceneCompile[scene.json]
   Optimize --> SceneCompile
+  Contract --> SceneCompile
   SceneCompile --> CMake[builds/cmake-*/*.exe]
   CppGen --> CMake
   CMake --> Launch[exe launch via OpenXR]
@@ -73,6 +76,7 @@ flowchart TD
 | Render | `src/render/VulkanContext.cpp` | Instance / device / queue / VMA |
 | XR | `src/xr/XrSession.cpp` | Instance / session / action set / swapchains / frame loop |
 | ECS | `src/ecs/World.h` | EnTT registry + stable id map |
+| Transform FX | `src/ecs/TransformOffset.cpp` | Draw-time visual offsets (recoil kick, flinch) that never touch physics |
 | Scene | `src/scene/SceneLoader.cpp` | JSON scene → ECS |
 | Physics | `src/physics/PhysicsWorld.cpp` | Jolt PhysicsSystem |
 | Mechanics | `src/mechanics/MechanicRegistry.cpp` + `src/mechanics/builtin/<mechanic>/` | Data-driven mechanics; each built-in is its own `IMechanic` module |
@@ -85,6 +89,36 @@ Generated C++ may only include headers rooted at `ptv/api/`, `ptv/ecs/`,
 `ptv/scene/`, `ptv/math/`, `ptv/mechanics/`, `ptv/dialogue/`, `ptv/ai/`,
 plus common STL and well-known third-party prefixes (`glm/`, `entt/`,
 `nlohmann/`).
+
+## The socket contract
+
+A **socket** is a named local transform on an asset -- "the muzzle is here,
+pointing that way". Sockets exist because of a hard constraint in the
+pipeline: the code-generation agent never sees the GLB, so it cannot know
+where any particular barrel ends, and a pistol, a rifle and a rocket launcher
+all differ. Three stages each own one third of the answer, and no single stage
+can hold the whole thing:
+
+| Clause | Owner | Artifact |
+|---|---|---|
+| "this mechanic needs a muzzle" | `mechanic_plan` -> `CodeTask.required_sockets` | `mechanic_plan.json` |
+| "this asset's muzzle is at (x, y, z)" | `asset_contract` (deterministic, `ptv_glb_sockets`) | `asset_contract.json` |
+| "this mechanic is bound to this entity" | `scene_spec` | `scene_spec.*.json` |
+
+`scene_compile` is the only stage that runs after all three, so it is both the
+join point (writing `mesh.sockets` in metres) and the validator: a mechanic
+requiring a socket its asset cannot supply fails the build with every
+violation listed at once.
+
+Socket positions are stored in `asset_contract.json` in **unit space**
+(normalised by the mesh's longest-axis extent) and converted to metres at
+compile time by multiplying `target_scale_meters` -- the same convention
+`bounds_radius_m` already uses. Unit space is what makes a socket survive the
+LOD chain, since decimation shifts the AABB slightly.
+
+Generated C++ reads them through `ctx.sockets->socket_world(entity, "muzzle")`
+and never hard-codes an offset. An unknown socket falls back to the front of
+the entity's bounding sphere rather than identity.
 
 ## Threading
 

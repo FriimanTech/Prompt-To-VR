@@ -90,6 +90,20 @@ class AssetItem(StrictModel):
         ),
     )
     rigged: bool = False
+    socket_hints: List[str] = Field(
+        default_factory=list,
+        max_length=8,
+        description=(
+            "Named attachment points gameplay will need on this asset, e.g."
+            " ['muzzle', 'grip'] for a weapon. The deterministic"
+            " asset_contract stage derives their transforms from the geometry"
+            " and the scene compiler writes them into scene.json, so generated"
+            " C++ can fire from the barrel tip via"
+            " ctx.sockets->socket_world(self, 'muzzle') without ever"
+            " inspecting the mesh. Leave empty for scenery and any asset no"
+            " mechanic attaches to."
+        ),
+    )
     # --- Optional performance hints -------------------------------------
     # Both are optional: the asset_optimization stage derives sensible values
     # from category/scale/interactivity when the planner leaves them unset.

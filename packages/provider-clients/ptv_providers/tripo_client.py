@@ -45,7 +45,7 @@ _DEFAULT_BASE_URL = "https://openapi.tripo3d.ai/v3"
 only validates in its own region; a 401 on the balance probe usually means the
 wrong base URL rather than a bad key."""
 
-_DEFAULT_MODEL_VERSION = "v3.1-20260211"
+_DEFAULT_MODEL_VERSION = "v3.0-20250812"
 """Tripo's latest image-to-3D checkpoint. v3.x is the first family that
 exposes ``geometry_quality="detailed"`` ("Ultra Mode" -- maximum mesh detail),
 and v3.1 is the current best-quality default.
