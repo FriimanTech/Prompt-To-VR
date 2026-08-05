@@ -326,8 +326,8 @@ def test_tripo_image_to_model_sends_v3_body(tmp_path):
     assert body["texture"] is True
     assert body["pbr"] is True
     assert body["texture_alignment"] == "original_image"
-    assert body["texture_quality"] == "detailed"
-    assert body["geometry_quality"] == "detailed"
+    assert body["texture_quality"] == "standard"
+    assert body["geometry_quality"] == "standard"
     assert body["enable_image_autofix"] is True
     assert body["auto_size"] is True
     assert body["orientation"] == "align_image"
@@ -380,7 +380,7 @@ def test_tripo_text_to_model_omits_image_only_fields(tmp_path):
     assert body["model"] == "v3.1-20260211"
     assert body["texture"] is True
     assert body["pbr"] is True
-    assert body["geometry_quality"] == "detailed"
+    assert body["geometry_quality"] == "standard"
     # No image, so no upload and none of the image-only knobs. Tripo fixes
     # texture_alignment server-side for this endpoint.
     assert "input" not in body
@@ -422,7 +422,7 @@ def test_tripo_geometry_quality_omitted_where_unsupported(tmp_path, version):
     assert "geometry_quality" not in body
     assert body["model"] == version
     # Everything else still applies.
-    assert body["texture_quality"] == "detailed"
+    assert body["texture_quality"] == "standard"
     assert body["enable_image_autofix"] is True
 
 

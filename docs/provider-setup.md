@@ -75,9 +75,10 @@ The three providers used by the pipeline.
   - `texture=True` — colored output.
   - `pbr=True` — emit BaseColor / Metallic / Roughness / Normal maps.
   - `texture_alignment="original_image"` — UVs match the reference.
-  - `texture_quality="detailed"` — high-resolution texture maps
-    (overridable per asset).
-  - `geometry_quality="detailed"` — "Ultra Mode" mesh reconstruction.
+  - `texture_quality="standard"` — balanced texture maps
+    (overridable per asset; opt up to `"detailed"` when needed).
+  - `geometry_quality="standard"` — balanced mesh reconstruction
+    (opt up to `"detailed"` / Ultra Mode when needed).
     Omitted for `v2.5-20250123` (predates the parameter) and for
     `P1-20260311` (which rejects it outright, even as an explicit `false`).
   - `enable_image_autofix=True` — Tripo pre-cleans the reference image

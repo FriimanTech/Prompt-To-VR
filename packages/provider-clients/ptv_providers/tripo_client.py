@@ -45,7 +45,7 @@ _DEFAULT_BASE_URL = "https://openapi.tripo3d.ai/v3"
 only validates in its own region; a 401 on the balance probe usually means the
 wrong base URL rather than a bad key."""
 
-_DEFAULT_MODEL_VERSION = "v3.0-20250812"
+_DEFAULT_MODEL_VERSION = "v3.1-20260211"
 """Tripo's latest image-to-3D checkpoint. v3.x is the first family that
 exposes ``geometry_quality="detailed"`` ("Ultra Mode" -- maximum mesh detail),
 and v3.1 is the current best-quality default.
@@ -127,12 +127,13 @@ class TripoConfig:
     * ``pbr=True``            -> emit BaseColor / Metallic / Roughness /
                                  Normal maps so the runtime can shade with
                                  PBR lighting.
-    * ``texture_quality="detailed"``
-                              -> high-resolution texture maps ("standard" is
-                                 Tripo's lower-cost default).
-    * ``geometry_quality="detailed"``
-                              -> "Ultra Mode" mesh reconstruction. Sent only
-                                 for checkpoints that accept it.
+    * ``texture_quality="standard"``
+                              -> balanced texture maps (opt up to "detailed"
+                                 / "extreme" per call when needed).
+    * ``geometry_quality="standard"``
+                              -> balanced mesh reconstruction. Sent only for
+                                 checkpoints that accept it; opt up to
+                                 "detailed" (Ultra Mode) when needed.
     * ``enable_image_autofix=True``
                               -> Tripo pre-cleans the reference image
                                  (background removal / framing / contrast),
@@ -148,8 +149,8 @@ class TripoConfig:
     model_version: str | None = _DEFAULT_MODEL_VERSION
     texture: bool = True
     pbr: bool = True
-    texture_quality: str = "detailed"
-    geometry_quality: str = "detailed"
+    texture_quality: str = "standard"
+    geometry_quality: str = "standard"
     enable_image_autofix: bool = True
     auto_size: bool = True
     poll_interval_s: float = 3.0

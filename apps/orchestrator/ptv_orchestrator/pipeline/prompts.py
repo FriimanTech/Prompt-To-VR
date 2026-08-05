@@ -135,8 +135,8 @@ one. A good image prompt is a single focused paragraph:
 TRIPO DEFAULTS (REQUIRED). Every asset intended for image-to-3D MUST
 set ``texture=true``, ``pbr=true``, and
 ``texture_alignment="original_image"``. Use
-``texture_quality="detailed"`` for hero props (player avatar, signature
-weapons, key environments) and ``"standard"`` for background dressing.
+``texture_quality="standard"`` by default (balanced cost and quality).
+Only use ``"standard"``for now.
 
 SOCKET HINTS. Set ``socket_hints`` on any asset gameplay will need a
 spatial anchor on -- overwhelmingly, weapons. A socket is a named point

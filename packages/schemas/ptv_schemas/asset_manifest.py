@@ -42,7 +42,7 @@ class TripoRequest(StrictModel):
 
     texture: bool = True
     pbr: bool = True
-    texture_quality: TripoTextureQuality = TripoTextureQuality.detailed
+    texture_quality: TripoTextureQuality = TripoTextureQuality.standard
     texture_alignment: TripoTextureAlignment = (
         TripoTextureAlignment.original_image
     )

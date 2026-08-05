@@ -216,7 +216,7 @@
         },
         "texture_quality": {
           "$ref": "#/$defs/TripoTextureQuality",
-          "default": "detailed"
+          "default": "standard"
         }
       },
       "title": "TripoRequest",
