@@ -112,6 +112,23 @@ Mechanics drive all of this through `ctx.skeleton`, never by touching the
 components. See [rendering.md](rendering.md#skinned-geometry-scene_skinnedvert)
 for the GPU side.
 
+### Player hands
+
+The player's hands are the engine's own rigged entities, `__hand_left` and
+`__hand_right`, created by `Application::create_hand_entities` from the
+16-joint meshes generated at build time under `PTV_ENGINE_ASSET_DIR`. Being
+ordinary entities with `CTransform` + `CMesh` + `CSkeleton` means the normal
+draw path renders them through the skinned pipeline with no special-casing;
+the only per-frame work the application does is keep their `CTransform` on the
+`/grip/pose`.
+
+`builtin.hand_pose` curls the fingers from the controller, and
+`ctx.hands->hand_entity(h)` is how any mechanic reaches them. When the
+generated mesh is absent the entities are never created, `hand_entity` returns
+invalid, and the render loop falls back to the procedural palm-and-wrist
+blocks — so a checkout without Python still shows hands. See
+[input-and-bindings.md](input-and-bindings.md#player-hand-poses-builtinhand_pose).
+
 ### Scene loader (`ptv::LoadSceneJson`, `ptv::ApplySceneToWorld`)
 
 Reads the engine-facing JSON emitted by the Python scene compiler and

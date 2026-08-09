@@ -10,6 +10,9 @@
 //    skinning_gpu <glb>  — one real validated frame through the skinned pipeline
 //    pose_system <glb>   — clip sampling + procedural joint override
 //    lod_skinning <glb…> — every decimated LOD keeps the same skeleton
+//    hand_asset <glb>    — the generated hand matches builtin.hand_pose's contract
+//    hand_pose <glb>     — curling one finger moves only that finger
+//    grab_socket         — a grip socket lands in the hand from any approach
 
 #include <algorithm>
 #include <cmath>
@@ -49,6 +52,7 @@ static int case_mechanics() {
         "builtin.grab",
         "builtin.throw",
         "builtin.recoil",
+        "builtin.hand_pose",
     };
     for (const char* id : expected) {
         bool found = false;
@@ -692,6 +696,228 @@ static int case_lod_skinning(int count, char** paths) {
               "level");
 }
 
+// The generated hand asset is what makes builtin.hand_pose possible, so it
+// has a contract the mechanic depends on by name: 16 joints, mixamo-style
+// bone names, and knuckle vertices that blend two joints (a hand rigidly
+// bound one-box-per-joint would tear open at every bend).
+static int case_hand_asset(const char* glb) {
+    namespace gml = ptv::gltf_mesh_load;
+    std::string err;
+
+    std::vector<gml::SkinnedVertex> verts;
+    std::vector<std::uint32_t> indices;
+    gml::SkeletonData skel;
+    if (!gml::load_glb_skinned(glb, 0.0f, verts, indices, skel, err)) {
+        std::fprintf(stderr, "[fail] load_glb_skinned: %s\n", err.c_str());
+        return 1;
+    }
+
+    if (skel.joint_count() != 16) {
+        std::fprintf(stderr, "[fail] hand has %zu joints, want 16\n",
+                     skel.joint_count());
+        return 1;
+    }
+    if (skel.name_to_joint.count("mixamorig:hand_root") != 1)
+        return fail("hand has no mixamorig:hand_root");
+
+    // Exactly the names builtin.hand_pose resolves. A rename here silently
+    // turns the whole mechanic into a no-op, so assert the contract.
+    const char* fingers[5] = {"thumb", "index", "middle", "ring", "pinky"};
+    for (const char* finger : fingers) {
+        for (int s = 1; s <= 3; ++s) {
+            const std::string name =
+                std::string("mixamorig:") + finger + "_0" + std::to_string(s);
+            if (skel.name_to_joint.count(name) != 1) {
+                std::fprintf(stderr, "[fail] hand is missing joint %s\n",
+                             name.c_str());
+                return 1;
+            }
+        }
+    }
+
+    // Every finger joint must hang off the wrist chain, or curling a knuckle
+    // would not carry the segments beyond it.
+    const int root = skel.name_to_joint.at("mixamorig:hand_root");
+    for (const char* finger : fingers) {
+        const int proximal =
+            skel.name_to_joint.at(std::string("mixamorig:") + finger + "_01");
+        if (skel.parents[static_cast<size_t>(proximal)] != root) {
+            std::fprintf(stderr, "[fail] %s_01 is not parented to the wrist\n",
+                         finger);
+            return 1;
+        }
+    }
+
+    size_t blended = 0;
+    for (const auto& v : verts) {
+        int sum = 0;
+        for (int k = 0; k < 4; ++k) {
+            if (v.joints[k] >= skel.joint_count() && v.weights[k] != 0)
+                return fail("hand vertex references a joint outside the skin");
+            sum += v.weights[k];
+        }
+        if (sum != 255) return fail("hand weights do not sum to 255");
+        if (v.weights[0] != 0 && v.weights[1] != 0) ++blended;
+    }
+    if (blended == 0)
+        return fail("no knuckle vertices blend two joints; bends would tear");
+
+    std::printf(
+        "[ok] hand asset: %zu verts, %zu tris, %zu joints, %zu blended "
+        "knuckle vertices\n",
+        verts.size(), indices.size() / 3, skel.joint_count(), blended);
+    return 0;
+}
+
+// Mirrors what builtin.hand_pose does to the skeleton and asserts the two
+// properties that make a curl read as a hand: the right fingers move for the
+// right control, and nothing else does.
+static int case_hand_pose(const char* glb) {
+    namespace gml = ptv::gltf_mesh_load;
+    std::string err;
+
+    gml::SkeletonData skel;
+    if (!gml::load_glb_skeleton(glb, 0.0f, skel, err)) {
+        std::fprintf(stderr, "[fail] load_glb_skeleton: %s\n", err.c_str());
+        return 1;
+    }
+
+    auto joint = [&](const char* finger, int seg) {
+        return skel.name_to_joint.at(std::string("mixamorig:") + finger + "_0" +
+                                     std::to_string(seg));
+    };
+
+    // Tip of each finger in bind pose, so we can see which ones moved.
+    auto tip_position = [&](const char* finger,
+                            const std::vector<ptv::Mat4>& palette) {
+        const int j = joint(finger, 3);
+        // The palette maps bind-space to posed space, so applying it to the
+        // joint's own bind-space origin gives where the tip ended up.
+        ptv::Mat4 world(1.0f);
+        int cur = j;
+        ptv::Vec3 bind(0.0f);
+        while (cur >= 0) {
+            bind += skel.bind_pose[static_cast<size_t>(cur)].translation;
+            cur = skel.parents[static_cast<size_t>(cur)];
+        }
+        (void)world;
+        return ptv::Vec3(palette[static_cast<size_t>(j)] *
+                         ptv::Vec4(bind, 1.0f));
+    };
+
+    std::vector<ptv::Mat4> bind_palette;
+    gml::build_joint_palette(skel, skel.bind_pose, bind_palette);
+
+    // Curl ONLY the index finger, the way a full trigger pull would.
+    std::vector<gml::JointPose> pose = skel.bind_pose;
+    for (int s = 1; s <= 3; ++s) {
+        const int j = joint("index", s);
+        pose[static_cast<size_t>(j)].rotation =
+            glm::angleAxis(1.2f, ptv::Vec3(1.0f, 0.0f, 0.0f));
+    }
+    std::vector<ptv::Mat4> posed;
+    gml::build_joint_palette(skel, pose, posed);
+
+    const float index_shift = glm::length(tip_position("index", posed) -
+                                          tip_position("index", bind_palette));
+    if (index_shift < 0.02f) {
+        std::fprintf(stderr,
+                     "[fail] index tip moved only %.4f m on a full curl\n",
+                     index_shift);
+        return 1;
+    }
+    for (const char* other : {"middle", "ring", "pinky", "thumb"}) {
+        const float shift = glm::length(tip_position(other, posed) -
+                                        tip_position(other, bind_palette));
+        if (shift > 1e-5f) {
+            std::fprintf(stderr,
+                         "[fail] curling the index moved %s by %.5f m\n",
+                         other, shift);
+            return 1;
+        }
+    }
+
+    // A resting touch has to land strictly between open and closed, or
+    // capsense buys nothing over the plain analog value.
+    std::vector<gml::JointPose> resting = skel.bind_pose;
+    for (int s = 1; s <= 3; ++s) {
+        const int j = joint("index", s);
+        resting[static_cast<size_t>(j)].rotation =
+            glm::angleAxis(0.18f * 1.2f, ptv::Vec3(1.0f, 0.0f, 0.0f));
+    }
+    std::vector<ptv::Mat4> resting_palette;
+    gml::build_joint_palette(skel, resting, resting_palette);
+    const float rest_shift =
+        glm::length(tip_position("index", resting_palette) -
+                    tip_position("index", bind_palette));
+    if (!(rest_shift > 1e-4f && rest_shift < index_shift)) {
+        std::fprintf(stderr,
+                     "[fail] resting curl %.4f m is not between 0 and the "
+                     "full curl %.4f m\n",
+                     rest_shift, index_shift);
+        return 1;
+    }
+
+    std::printf(
+        "[ok] hand pose: index tip travels %.3f m at full curl, %.3f m at "
+        "rest, other fingers unmoved\n",
+        index_shift, rest_shift);
+    return 0;
+}
+
+// builtin.grab's grip-socket alignment, evaluated with the same maths the
+// mechanic uses. The point of the feature is that the result does NOT depend
+// on how the player reached for the object, so the test grabs from two very
+// different hand poses and expects the same outcome.
+static int case_grab_socket() {
+    // A weapon whose grip sits 12 cm back and 3 cm down from the origin,
+    // rotated a quarter turn about Y -- i.e. nothing like identity.
+    ptv::Transform socket;
+    socket.position = ptv::Vec3(0.0f, -0.03f, 0.12f);
+    socket.rotation =
+        glm::angleAxis(glm::radians(90.0f), ptv::Vec3(0.0f, 1.0f, 0.0f));
+
+    // Same solve as GrabMechanic::grip_hold_from_socket.
+    const ptv::Quat inv_socket = glm::inverse(socket.rotation);
+    const ptv::Vec3 local_offset = -(inv_socket * socket.position);
+    const ptv::Quat local_rotation = inv_socket;
+
+    struct HandPose {
+        ptv::Vec3 position;
+        ptv::Quat rotation;
+    };
+    const HandPose poses[2] = {
+        {ptv::Vec3(0.2f, 1.1f, -0.4f),
+         glm::angleAxis(glm::radians(35.0f), ptv::Vec3(0.0f, 1.0f, 0.0f))},
+        // Reaching from a completely different angle.
+        {ptv::Vec3(-0.7f, 0.6f, 0.9f),
+         glm::angleAxis(glm::radians(-110.0f),
+                        glm::normalize(ptv::Vec3(0.3f, 1.0f, 0.2f)))},
+    };
+
+    for (const auto& hand : poses) {
+        // What the mechanic's per-frame kinematic follow will command.
+        const ptv::Vec3 obj_pos =
+            hand.position + hand.rotation * local_offset;
+        const ptv::Quat obj_rot = hand.rotation * local_rotation;
+
+        // Where the grip socket actually ends up.
+        const ptv::Vec3 socket_pos = obj_pos + obj_rot * socket.position;
+        const ptv::Quat socket_rot = obj_rot * socket.rotation;
+
+        if (glm::length(socket_pos - hand.position) > 1e-4f) {
+            std::fprintf(stderr,
+                         "[fail] grip socket landed %.5f m from the hand\n",
+                         glm::length(socket_pos - hand.position));
+            return 1;
+        }
+        if (std::fabs(glm::dot(socket_rot, hand.rotation)) < 0.9999f)
+            return fail("grip socket orientation does not match the hand");
+    }
+
+    return ok("grab socket: the grip lands in the hand from any approach");
+}
+
 static int case_openxr() {
     XrApplicationInfo ai{};
     std::strncpy(ai.applicationName, "ptv_smoke",
@@ -761,6 +987,21 @@ int main(int argc, char** argv) {
         }
         return case_pose_system(argv[2]);
     }
+    if (what == "hand_asset") {
+        if (argc < 3) {
+            std::fprintf(stderr, "usage: ptv_smoke hand_asset <hand.glb>\n");
+            return 2;
+        }
+        return case_hand_asset(argv[2]);
+    }
+    if (what == "hand_pose") {
+        if (argc < 3) {
+            std::fprintf(stderr, "usage: ptv_smoke hand_pose <hand.glb>\n");
+            return 2;
+        }
+        return case_hand_pose(argv[2]);
+    }
+    if (what == "grab_socket") return case_grab_socket();
     if (what == "lod_skinning") {
         if (argc < 4) {
             std::fprintf(stderr,

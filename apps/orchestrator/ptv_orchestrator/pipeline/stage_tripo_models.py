@@ -17,6 +17,7 @@ out on "insufficient credits" when the remaining work would fit.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from ptv_providers import TripoClient, TripoConfig
@@ -183,6 +184,7 @@ def run(ctx: PipelineContext) -> StageResult:
             produced.append(
                 str(result.primary_glb.relative_to(ctx.settings.repo_root)).replace("\\", "/")
             )
+            _write_task_record(item_dir, item.id, result.task_id)
             ctx.emit(ProjectStage.tripo_models, "info", f"{item.id}: {result.status}")
         except Exception as e:
             ctx.store.append_log(
@@ -221,6 +223,29 @@ def run(ctx: PipelineContext) -> StageResult:
     return StageResult(stage=ProjectStage.tripo_models, artifacts=produced)
 
 
+def _write_task_record(item_dir: Path, asset_id: str, task_id: str) -> None:
+    """Remember the generation task id next to the GLB it produced.
+
+    The rigging stage prefers feeding Tripo a task id over re-uploading the
+    mesh: it is free, instant, and avoids pushing a 30 MB GLB back through an
+    endpoint that is rate-limited to roughly ten uploads a minute. Rigging
+    still works without this file (it falls back to uploading), which is what
+    keeps projects generated before this record existed usable.
+    """
+
+    if not task_id:
+        return
+    record = {"asset_id": asset_id, "task_id": task_id}
+    try:
+        (item_dir / "tripo_task.json").write_text(
+            json.dumps(record, indent=2), encoding="utf-8"
+        )
+    except OSError:
+        # A missing task id only costs an upload later; never fail the stage
+        # over bookkeeping.
+        pass
+
+
 def _pick_reference_image(images_dir: Path) -> Path | None:
     if not images_dir.exists():
         return None
@@ -240,7 +265,8 @@ def _existing_glb(item_dir: Path) -> Path | None:
     We require a real-looking GLB (header magic) so a 0-byte truncated
     file from a crashed prior run gets RE-GENERATED instead of being
     treated as "done". Matches the same primary-GLB picking rule as
-    :mod:`stage_asset_normalize`: prefer ``*pbr*`` / ``*model*`` files.
+    :mod:`stage_asset_normalize`: prefer ``*rigged*``, then ``*pbr*`` /
+    ``*model*`` files.
     """
 
     if not item_dir.exists():
@@ -250,6 +276,7 @@ def _existing_glb(item_dir: Path) -> Path | None:
         return None
     glbs.sort(
         key=lambda p: (
+            0 if "rigged" in p.name.lower() else 1,
             0 if "pbr" in p.name.lower() else 1,
             0 if "model" in p.name.lower() else 1,
             p.name.lower(),

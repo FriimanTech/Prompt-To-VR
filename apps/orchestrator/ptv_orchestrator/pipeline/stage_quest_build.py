@@ -98,6 +98,44 @@ def _compile_shaders(engine_dir: Path, assets_dir: Path) -> list[str]:
     return notes
 
 
+def _package_engine_assets(engine_dir: Path, assets_dir: Path) -> list[str]:
+    """Generate the rigged hand meshes into ``assets/engine/``.
+
+    These are engine-owned rather than project-owned, so they are produced
+    here from the committed script rather than copied out of the project
+    directory. Matches ``PTV_ENGINE_ASSET_DIR="engine"`` in the Android
+    CMakeLists. Failure is non-fatal: the runtime falls back to the
+    procedural block hands.
+    """
+    import subprocess
+    import sys
+
+    notes: list[str] = []
+    script = engine_dir / "tools" / "make_hand_fixture.py"
+    if not script.is_file():
+        notes.append("make_hand_fixture.py missing; hands NOT packaged")
+        return notes
+
+    out_dir = assets_dir / "engine"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    for hand in ("left", "right"):
+        out = out_dir / f"hand_{hand}.glb"
+        try:
+            subprocess.run(
+                [sys.executable, str(script), "--output", str(out),
+                 "--hand", hand],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+        except subprocess.CalledProcessError as exc:
+            notes.append(
+                f"hand generation failed ({hand}): "
+                f"{(exc.stderr or exc.stdout)[:200]}"
+            )
+    return notes
+
+
 def _is_superseded_by_lods(glb: Path) -> bool:
     """True for a raw source GLB whose directory already holds an LOD chain.
 
@@ -154,6 +192,7 @@ def _package_assets(ctx: PipelineContext, build_dir: Path) -> list[str]:
         )
 
     notes.extend(_compile_shaders(ctx.settings.engine_dir, assets_dir))
+    notes.extend(_package_engine_assets(ctx.settings.engine_dir, assets_dir))
     return notes
 
 

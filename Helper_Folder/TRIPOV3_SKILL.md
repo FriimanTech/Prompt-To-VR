@@ -314,8 +314,10 @@ code sends it, drop the field or pick another preset and tell the user the FBX
 export behaviour may change). Non-default options still trigger the "complex
 convert" price tier.
 
-**animate_rig** — `original_model_task_id`, `out_format` (glb/fbx), `spec`
-(mixamo/tripo), `rig_type` (or legacy `topology`) unchanged. Version: §3.2.
+**animate_rig** — `input` (task_id / file_token / URL; V2's
+`original_model_task_id` is NOT read), `model` (V2's `model_version`),
+`out_format` (glb/fbx), `spec` (mixamo/tripo), `rig_type` (or legacy
+`topology`). Version: §3.2. See §A.10 for the corrected field names.
 
 **animate_retarget** — `original_model_task_id` (must be a successful rig task),
 `animation` (single) or `animations` (≤5, billed per animation), `out_format`,
@@ -636,18 +638,26 @@ with the user before porting.
 
 ## A.9 animate_prerigcheck → POST /v3/animations/rig-check
 
+> **Corrected against the live docs (2026-08).** These two endpoints take a
+> single `input` field like the to-model endpoints, NOT
+> `original_model_task_id`, and the rig version field is `model`, not
+> `model_version`. Earlier revisions of this guide said otherwise.
+
 | V2 field | V3 | Constraints |
 |---|---|---|
-| `original_model_task_id` | keep | required; source task must be success with model output |
+| `original_model_task_id` | **rename to `input`** | required; accepts a task_id, a `file_token`, or a public URL — exactly one. GLB only, ≤150 MB |
 
-Output parsing: `output.riggable` (bool) unchanged; `topology` key → `rig_type`.
+Output parsing: `output.riggable` (bool) unchanged; `topology` key → `rig_type`
+(`biped` / `quadruped` / `hexapod` / `octopod` / `avian` / `serpentine` /
+`aquatic`). Costs 0 credits.
 
 ## A.10 animate_rig → POST /v3/animations/rig
 
 | V2 field | V3 | Constraints |
 |---|---|---|
-| `original_model_task_id` | keep | required |
-| `model_version` | translate | allowed: `v1.0-20240301` (default) / `v2.5-20260210`; **`v2.0-20250506` → `v2.5-20260210`** |
+| `original_model_task_id` | **rename to `input`** | required; task_id / `file_token` / URL. Accepts GLB, GLTF, FBX, OBJ, STL ≤150 MB |
+| `model_version` | **rename to `model`** | allowed: `v1.0-20240301` (default, **biped only**) / `v2.5-20260210` (non-humanoid); **`v2.0-20250506` → `v2.5-20260210`**. Pair it with `rig_type` — a quadruped sent to the biped model does not error, it just rigs badly |
+| `spec` | keep | `tripo` (default) / `mixamo` bone naming |
 | `out_format` | keep | glb / fbx |
 | `spec` | keep | mixamo / tripo |
 | `rig_type` (or legacy `topology`) | keep | default biped |
@@ -1029,9 +1039,11 @@ ret = post(f"{BASE}/task", json={
 
 ```python
 rig = post(f"{BASE}/animations/rig", json={
-    "original_model_task_id": model_task_id,
+    "input": model_task_id,                  # NOT original_model_task_id
     "out_format": "glb",
-    "model_version": "v2.5-20260210",        # v2.0-20250506 no longer exists
+    "spec": "mixamo",
+    "rig_type": "biped",                     # from /animations/rig-check
+    "model": "v1.0-20240301",                # NOT model_version; biped model
 })
 ret = post(f"{BASE}/animations/retarget", json={
     "original_model_task_id": rig_task_id,

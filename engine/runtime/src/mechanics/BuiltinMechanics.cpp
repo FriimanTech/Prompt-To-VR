@@ -26,12 +26,14 @@ extern "C" int ptv_force_link_builtin_slide;
 extern "C" int ptv_force_link_builtin_grab;
 extern "C" int ptv_force_link_builtin_throw;
 extern "C" int ptv_force_link_builtin_recoil;
+extern "C" int ptv_force_link_builtin_hand_pose;
 
 namespace {
 int sum_builtin_module_anchors() {
     return ptv_force_link_builtin_snap_turn + ptv_force_link_builtin_teleport +
            ptv_force_link_builtin_slide + ptv_force_link_builtin_grab +
-           ptv_force_link_builtin_throw + ptv_force_link_builtin_recoil;
+           ptv_force_link_builtin_throw + ptv_force_link_builtin_recoil +
+           ptv_force_link_builtin_hand_pose;
 }
 // Deliberately ``volatile``: a const, unused aggregate of the same values
 // gets constant-folded away and the modules go missing from the link again.

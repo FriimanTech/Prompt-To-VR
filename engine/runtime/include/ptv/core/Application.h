@@ -86,6 +86,12 @@ private:
      *  than streamed: the streaming worker only knows how to build 40-byte
      *  static vertices. */
     void attach_skeletons();
+    /** Create the player's two rigged hand entities from the generated hand
+     *  meshes under ``PTV_ENGINE_ASSET_DIR``.
+     *
+     *  No-op when the assets are missing, in which case ``hand_entities_``
+     *  stays null and the render loop falls back to ``push_hand_mesh``. */
+    void create_hand_entities();
     // Build the renderer's environment (sky/sun/ambient/fog/point lights) from
     // the loaded ``scene_``. Cached so it isn't rebuilt every frame; defaults
     // are chosen so scenes without an authored sky/lights (e.g. the starter
@@ -191,6 +197,11 @@ private:
     bool running_{false};
     PlayerRig rig_{};
     std::array<HandGrab, 2> hands_{};
+    // The player's rigged hand entities, or entt::null when the generated
+    // hand mesh was not found and the procedural block hands are drawn
+    // instead. Exposed to mechanics through IHands::hand_entity so a hand-pose
+    // mechanic can drive their joints.
+    std::array<entt::entity, 2> hand_entities_{entt::null, entt::null};
     // Previous frame's raw OpenXR input, kept so the per-frame InputSnapshot
     // handed to mechanics can expose edge transitions (trigger/grip/button
     // rising + falling edges).

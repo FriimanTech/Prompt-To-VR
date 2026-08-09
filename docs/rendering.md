@@ -273,7 +273,8 @@ loads every rigged asset (and its whole LOD chain) synchronously at scene load
 and marks the slots non-evictable, since a skeleton outliving its geometry would
 leave the entity permanently invisible with no way to recover. Whether an asset
 is rigged comes from `mesh.skinned` in `scene.json`, so the common all-static
-scene never opens a GLB to find out.
+scene never opens a GLB to find out. The player's two hand entities take the
+same synchronous path, for the same reason.
 
 ## Fixed foveated rendering
 

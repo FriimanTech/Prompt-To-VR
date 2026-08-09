@@ -95,6 +95,46 @@ The three providers used by the pipeline.
   retried with backoff. Malformed requests (`1004`), moderation rejections
   (`2008`) and insufficient credit (`2010`) fail immediately with a hint.
 
+### Auto-rigging (`asset_rigging`)
+
+Two endpoints, always in this order:
+
+| Call | Cost | Returns |
+|---|---|---|
+| `POST /v3/animations/rig-check` | free | `riggable`, `rig_type` |
+| `POST /v3/animations/rig` | ~30 credits | the rigged GLB |
+
+Both take a single `input` field — a generation `task_id`, a `file_token`, or
+a public URL. This is **not** V2's `original_model_task_id`, and the rig
+version field is `model`, not `model_version`; the migration notes in
+`Helper_Folder/TRIPOV3_SKILL.md` were wrong about both and have been
+corrected.
+
+The `model` must match the rig type, because the two checkpoints are not
+interchangeable and the wrong pairing produces a bad skeleton rather than an
+error:
+
+| `rig_type` | `model` |
+|---|---|
+| `biped` | `v1.0-20240301` (humanoid only; 90+ animation presets) |
+| `quadruped`, `hexapod`, `octopod`, `avian`, `serpentine`, `aquatic` | `v2.5-20260210` |
+
+`spec="mixamo"` and `out_format="glb"` always. Mixamo bone naming is chosen so
+the codegen agent — which never sees the asset — can be told the naming
+convention up front.
+
+Notice that every rig type describes a **whole creature**. Props, weapons,
+vehicles and disembodied body parts are not riggable, which is exactly why the
+free pre-check runs first: it turns "this was never going to work" from a
+30-credit mistake into a no-op. Which assets are even candidates comes from
+`AssetItem.rigged`, set by the asset-manifest agent.
+
+Results are recorded in `asset_rig.json` so a Resume never re-bills, and the
+rigged mesh lands as `model_rigged.glb` beside the original so a re-run rigs
+the source rather than an already-rigged mesh. Set
+`PTV_TRIPO_RIGGING_ENABLED=false` to skip the stage entirely; assets then
+render as static geometry and nothing downstream breaks.
+
 ## Verifying the keys
 
 ```powershell

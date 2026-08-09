@@ -79,12 +79,18 @@ def run(ctx: PipelineContext) -> StageResult:
 def _pick_primary_glb(d: Path) -> Path | None:
     if not d.exists():
         return None
-    # Prefer files named *pbr* or *model*; fall back to first .glb.
+    # Prefer *rigged*, then *pbr* / *model*; fall back to first .glb.
+    #
+    # The rigged key has to lead. ``asset_rigging`` writes ``model_rigged.glb``
+    # beside the original ``model.glb`` so a re-run can rig the source again,
+    # and on the *model* key alone plain "model.glb" would sort first and the
+    # skeleton would silently never reach the scene.
     glbs = [p for p in d.rglob("*.glb") if p.is_file()]
     if not glbs:
         return None
     glbs.sort(
         key=lambda p: (
+            0 if "rigged" in p.name.lower() else 1,
             0 if "pbr" in p.name.lower() else 1,
             0 if "model" in p.name.lower() else 1,
             p.name.lower(),

@@ -78,7 +78,15 @@
 #include "ptv/core/Logger.h"
 #include "ptv/ecs/Skeleton.h"
 #include "ptv/ecs/TransformOffset.h"
+#include "ptv/platform/AssetSource.h"
 #include "ptv/scene/SceneLoader.h"
+
+// Where the generated hand meshes live. CMake supplies an absolute build path
+// on desktop and the bare APK-relative "engine" on Quest; this fallback only
+// matters for a hand-rolled build that sets neither.
+#ifndef PTV_ENGINE_ASSET_DIR
+#define PTV_ENGINE_ASSET_DIR "assets"
+#endif
 
 // Desktop-only host pieces: the GLFW mirror window and the ImGui debug overlay.
 // On Quest (standalone Android) there is no desktop window; the loop is driven
@@ -768,6 +776,12 @@ void Application::ensure_player_locomotion_bindings() {
         "builtin.locomotion.slide.head_relative",
         "builtin.locomotion.slide.controller_relative",
         "builtin.locomotion.snap_turn",
+        // Not locomotion, but the same argument: the player's own hands are
+        // engine furniture, not scene content, so posing their fingers must
+        // not depend on a generated scene remembering to ask for it. Costs
+        // nothing when the rigged hand asset is absent -- the mechanic sees
+        // no hand entity and returns immediately.
+        "builtin.hand_pose",
     };
     // Aliases the hand-authored sample uses for the same mechanics.
     auto satisfies = [](const std::string& bound, const char* required) {
@@ -832,6 +846,13 @@ public:
         app_->hands_[hand].held = (entity == InputSnapshot::kInvalidEntity)
                                       ? entt::null
                                       : static_cast<entt::entity>(entity);
+    }
+
+    std::uint32_t hand_entity(int hand) const override {
+        if (hand < 0 || hand > 1) return InputSnapshot::kInvalidEntity;
+        const auto e = app_->hand_entities_[hand];
+        return e == entt::null ? InputSnapshot::kInvalidEntity
+                               : static_cast<std::uint32_t>(e);
     }
 
 private:
@@ -1081,6 +1102,64 @@ private:
     Application* app_;
 };
 
+void Application::create_hand_entities() {
+    // Engine-owned assets, not project assets: generated at build time from
+    // engine/tools/make_hand_fixture.py. Absolute build path on desktop, a
+    // bare APK-relative path on Quest -- same split as PTV_SHADER_DIR.
+    const std::string base = std::string(PTV_ENGINE_ASSET_DIR);
+    const char* names[2] = {"hand_left", "hand_right"};
+
+    for (int h = 0; h < 2; ++h) {
+        const std::string path = base + "/" + names[h] + ".glb";
+        if (!asset_source().exists(path)) {
+            PTV_WARN(
+                "rigged hand mesh not found ({}); falling back to procedural "
+                "block hands",
+                path);
+            return;
+        }
+
+        gltf_mesh_load::SkeletonData skel;
+        // target_scale_meters = 0 keeps the authored size: the generator
+        // already works in metres against the OpenXR grip frame, so rescaling
+        // to a longest-axis target would resize a correctly-proportioned hand.
+        const int slot = renderer_.load_glb_skinned(path, 0.0f, skel);
+        if (slot < 0 || skel.joint_count() == 0) {
+            PTV_WARN("rigged hand mesh {} failed to load", path);
+            return;
+        }
+
+        const auto e = world_.create_entity(std::string("__") + names[h]);
+        world_.registry().emplace<CTransform>(e, CTransform{});
+
+        CMesh mesh{};
+        mesh.asset_id = names[h];
+        mesh.glb_path = path;
+        mesh.target_scale_meters = 1.0f;
+        mesh.skinned = true;
+        world_.registry().emplace<CMesh>(e, std::move(mesh));
+
+        CSkeleton cs{};
+        cs.local_pose = skel.bind_pose;
+        cs.skeleton = std::move(skel);
+        gltf_mesh_load::build_joint_palette(cs.skeleton, cs.local_pose,
+                                            cs.palette);
+        world_.registry().emplace<CSkeleton>(e, std::move(cs));
+        world_.registry().emplace<CAnimator>(e, CAnimator{});
+
+        // Tagged so gameplay can recognise them, and deliberately NOT tagged
+        // grabbable: a hand is not a prop.
+        world_.registry().emplace<CTag>(
+            e, CTag{{"player_hand", names[h]}});
+
+        hand_entities_[static_cast<size_t>(h)] = e;
+    }
+
+    PTV_INFO("Rigged player hands ready ({} joints each)",
+             world_.registry().get<CSkeleton>(hand_entities_[0])
+                 .skeleton.joint_count());
+}
+
 void Application::attach_skeletons() {
     int rigged = 0;
     auto view = world_.registry().view<CMesh>();
@@ -1279,6 +1358,19 @@ int Application::run(const Config& cfg) {
                 // so the user knows why the angle feels off.
                 aim_world_rot[h] = hand_world_rot[h];
                 aim_world_valid[h] = true;
+            }
+
+            // Keep the rigged hand entity on the controller. Writing
+            // CTransform here rather than at draw time means grab, sockets
+            // and any mechanic that reads the hand entity all agree with what
+            // is on screen. Position/rotation only -- the pose of the FINGERS
+            // is builtin.hand_pose's business.
+            const auto he = hand_entities_[static_cast<size_t>(h)];
+            if (he != entt::null && hand_valid[h] &&
+                world_.registry().all_of<CTransform>(he)) {
+                auto& t = world_.registry().get<CTransform>(he).t;
+                t.position = hand_world_pos[h];
+                t.rotation = hand_world_rot[h];
             }
         }
 
@@ -1657,11 +1749,13 @@ int Application::run(const Config& cfg) {
             }
             renderer_.build_items_from_world(world_, items, view_info);
 
-            // Hand visuals: procedural palm + wrist + thumb in blue (left)
-            // and red (right). The grab highlights light up brighter when
-            // a grabbable is in range so the user knows where to squeeze.
+            // Hand visuals. When the rigged hand meshes loaded, the hands are
+            // ordinary entities that build_items_from_world has already drawn
+            // through the skinned pipeline, so the only work left here is the
+            // procedural fallback for a build with no generated hand asset.
             for (int h = 0; h < 2; ++h) {
                 if (!hand_valid[h]) continue;
+                if (hand_entities_[h] != entt::null) continue;
                 // Mirrors builtin.grab's reach so the highlight lights up
                 // exactly when a squeeze would actually pick something up.
                 constexpr float kHoverRadius = 0.18f;
@@ -2022,6 +2116,10 @@ bool Application::initialize(const Config& cfg) {
         }
         if (renderer_ready_) attach_skeletons();
     }
+    // The hands belong to the player, not the scene, so they are created even
+    // when no scene loaded -- that is exactly the case where you want to see
+    // whether tracking works.
+    if (renderer_ready_) create_hand_entities();
 
     // Pre-load locomotion-menu icons. The four GLBs live in the repo's
     // 3D_Objects/ folder; we walk up from the running .exe to find it so

@@ -53,6 +53,11 @@ class Settings(BaseSettings):
     # https://openapi.tripo3d.com/v3 for a China-mainland account (a key only
     # validates in its own region).
     tripo_base_url: str | None = None
+    # Auto-rigging (Stage 6b). rig-check is free but each rig is ~30 credits,
+    # so this exists to turn the whole stage off for a cost-sensitive run
+    # without editing the pipeline. Assets stay un-rigged and render as static
+    # geometry; nothing downstream breaks.
+    tripo_rigging_enabled: bool = True
 
     # --- LLM output budgets ---------------------------------------------
     # Caps the visible output (Claude) and the COMBINED reasoning +

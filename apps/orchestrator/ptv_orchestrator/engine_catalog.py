@@ -142,10 +142,21 @@ _BUILTINS: tuple[CatalogEntry, ...] = (
         summary=(
             "Hand-attach an object on grip squeeze; release drops it. "
             "Binding this mechanic to an entity is what MAKES it grabbable "
-            "(it tags the entity), so no separate 'grabbable' tag is needed."
+            "(it tags the entity), so no separate 'grabbable' tag is needed. "
+            "When the asset has a derived 'grip' socket the object snaps so "
+            "that socket sits in the hand, which is what stops a weapon from "
+            "being held sideways just because the player reached for it from "
+            "above."
         ),
         category="interaction",
-        params={"radius_m": "float, default 0.18 (reach around the hand)"},
+        params={
+            "radius_m": "float, default 0.18 (reach around the hand)",
+            "snap_to_grip": (
+                "bool, default true. Align the object's 'grip' socket to the "
+                "hand. Set false for something with no single correct "
+                "orientation (a ball, a rock, a crate)."
+            ),
+        },
         inputs=("either grip",),
     ),
     CatalogEntry(
@@ -181,6 +192,33 @@ _BUILTINS: tuple[CatalogEntry, ...] = (
             ),
         },
         inputs=("the bound control on whichever hand holds the object",),
+    ),
+    CatalogEntry(
+        id="builtin.hand_pose",
+        summary=(
+            "Curls the PLAYER'S OWN fingers from the controller: index "
+            "follows the trigger, the other three follow the grip, and the "
+            "thumb folds when it touches the thumbrest or a face button. "
+            "Capacitive touch gives a resting bend, so a finger lying on the "
+            "trigger without pulling it looks relaxed instead of pointing. "
+            "The engine binds this automatically -- you do NOT need to plan "
+            "it, and it is not a mechanic for scene objects. Listed here so "
+            "you know the player's hands already animate themselves: do not "
+            "generate a mechanic to do it, and never couple a weapon to the "
+            "hand (both read the same trigger value and stay in sync on "
+            "their own)."
+        ),
+        category="interaction",
+        params={
+            "smoothing_tau_s": (
+                "float, default 0.045 (finger curl smoothing time constant)"
+            ),
+            "hold_curl": (
+                "float, default 0.85 (how closed the fingers sit while the "
+                "hand is holding something)"
+            ),
+        },
+        inputs=("both triggers", "both grips", "trigger/thumbrest touch"),
     ),
 )
 

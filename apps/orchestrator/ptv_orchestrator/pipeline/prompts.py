@@ -155,6 +155,24 @@ Give a blaster / rifle / pistol / launcher ``["muzzle", "grip"]``. Leave
 ``socket_hints`` empty for scenery, characters, UI and any prop no
 mechanic attaches to: deriving unused sockets just adds noise.
 
+RIGGING. Set ``rigged: true`` ONLY on assets that are a whole creature
+with a real skeleton and that need to move their own body -- a humanoid
+character, an enemy animal, a bird, a snake, a fish. Everything else
+stays ``false``.
+
+The auto-rigger can only produce these skeletons: biped, quadruped,
+hexapod, octopod, avian, serpentine, aquatic. Anything outside that list
+is rejected, so weapons, props, vehicles, scenery, FX, UI panels and
+disembodied body parts (a floating hand, a severed head) must be
+``false``. Marking one of those ``true`` does not break the build -- a
+free pre-check catches it -- but it wastes a round trip, and the asset
+renders as static geometry either way.
+
+An asset with ``rigged: true`` becomes animatable at runtime: generated
+C++ can play its baked clips or drive individual joints through
+``ctx.skeleton``. An asset with ``rigged: false`` can still be moved,
+thrown, and shot -- it just cannot deform.
+
 STYLE CONSISTENCY. ``style_notes`` should keep every asset in the same
 art language so the generated concepts feel like one game. Echo the
 prompt's art-direction phrases (palette, mood, era, material language)

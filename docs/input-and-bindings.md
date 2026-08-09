@@ -69,6 +69,44 @@ reads as "finger not there" -- the safe degradation. A runtime that does not
 recognise `touch_controller_plus` simply rejects that profile and keeps the
 bindings it took from `oculus/touch_controller`.
 
+Capsense exists for exactly one visible reason: `builtin.hand_pose` uses it to
+give a finger that is RESTING on a control a slight bend. Without it every
+idle hand curls its fingers only when a control is actually pulled, so the
+player's hand looks like it is permanently pointing.
+
+### Player hand poses (`builtin.hand_pose`)
+
+The player's hands are rigged entities, not decoration: a 16-joint skinned
+mesh generated at build time by
+[`engine/tools/make_hand_fixture.py`](../engine/tools/make_hand_fixture.py)
+(Tripo cannot rig a hand -- every rig type it offers is a whole creature).
+`Application::create_hand_entities` loads them, keeps their `CTransform` on
+the `/grip/pose` each frame, and exposes them through
+`ctx.hands->hand_entity(h)`.
+
+`builtin.hand_pose` is Player-scoped, runs in `Phase::Simulate`, and states
+the finger pose every frame from the current input:
+
+| Fingers | Driver |
+|---|---|
+| Index | `trigger`; `trigger_touched` without a pull gives a resting bend |
+| Middle, ring, pinky | `grip`; pinned closed while the hand holds something |
+| Thumb | `thumbrest_touched`, or a face-button touch on that hand |
+
+The engine binds it automatically alongside the locomotion built-ins, so a
+generated scene never has to ask for it and generated code must never
+re-implement it. Curl is smoothed with the same exponential time constant the
+locomotion built-ins use, so fingers do not snap between frames.
+
+If the generated hand mesh is missing, `hand_entity` returns invalid, the
+mechanic does nothing, and the renderer falls back to the old procedural
+palm-and-wrist blocks.
+
+A weapon that reacts to the trigger must NOT be coupled to the hand. Both read
+the same `input.hands[h].trigger` scalar, which keeps them synchronised every
+frame with no event plumbing and no ordering dependency between the two
+mechanics.
+
 ### Engine services (`MechanicContext`)
 
 `on_update` also receives `MechanicContext& ctx`

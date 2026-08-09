@@ -133,6 +133,7 @@ The chain is deliberately narrow so a static scene pays nothing:
 
 | Stage | Owner | Result |
 |---|---|---|
+| Add a skeleton to a generated creature | `asset_rigging` (Tripo rig-check + rig) | `model_rigged.glb` |
 | Parse skin, hierarchy, `JOINTS_0`/`WEIGHTS_0`, IBMs, clips | `GltfSkinnedLoad.cpp` | `SkinnedVertex` (48 B) + `SkeletonData` |
 | Preserve the rig through decimation | `ptv_glb_optimize` | LOD chain with a byte-identical skeleton at every level |
 | Record that an asset is rigged | `asset_optimization` → `scene_compile` | `mesh.skinned` / `mesh.joint_count` in `scene.json` |
@@ -155,6 +156,37 @@ Generated C++ poses a rig through `ctx.skeleton`, either by playing a baked
 clip or by writing individual joints each frame from live input. See
 [runtime-subsystems.md](runtime-subsystems.md#skeletal-animation-ptvtick_animators)
 and [rendering.md](rendering.md#skinned-geometry-scene_skinnedvert).
+
+Two rigs come from different places, and the split is not arbitrary:
+
+- **Creatures** are rigged by Tripo in the `asset_rigging` stage. Its rig
+  types (`biped`, `quadruped`, `hexapod`, `octopod`, `avian`, `serpentine`,
+  `aquatic`) all describe a whole animal, and the free `rig-check` call gates
+  the paid one.
+- **The player's hands** are generated locally by
+  [engine/tools/make_hand_fixture.py](../engine/tools/make_hand_fixture.py),
+  because a disembodied hand is not any of those rig types and Tripo would
+  refuse it. They are ordinary ECS entities carrying the rigged mesh, so the
+  same skinned pipeline draws them, and `builtin.hand_pose` curls their
+  fingers from the controller.
+
+## Grabbing by the grip socket
+
+`builtin.grab` used to freeze whatever relative pose an object happened to
+have when the player squeezed, so a weapon approached from above stayed held
+from above. It now solves for the pose that puts the asset's derived `grip`
+socket in the hand:
+
+```
+local_rotation = inverse(socket.rotation)
+local_offset   = -(inverse(socket.rotation) * (scale * socket.position))
+```
+
+The hand cancels out of that solve entirely, which is the point: the object
+lands the same way no matter how it was reached for. An asset with no `grip`
+socket keeps the old relative hold, and `snap_to_grip: false` opts out for
+things with no correct orientation (a ball, a rock). This is the socket
+system paying off a second time, with no new stage and no new schema field.
 
 ## Threading
 

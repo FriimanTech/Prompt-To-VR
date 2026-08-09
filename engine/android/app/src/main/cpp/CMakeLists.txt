@@ -102,8 +102,11 @@ set(PTV_COMPILE_DEFS
   VK_USE_PLATFORM_ANDROID_KHR
   XR_USE_GRAPHICS_API_VULKAN
   XR_USE_PLATFORM_ANDROID
-  # Shaders are read from the APK assets root via AAssetManager.
-  PTV_SHADER_DIR="shaders")
+  # Shaders and the generated hand meshes are read from the APK assets root
+  # via AAssetManager, so both are bare relative paths here rather than the
+  # absolute build-tree paths the desktop build uses.
+  PTV_SHADER_DIR="shaders"
+  PTV_ENGINE_ASSET_DIR="engine")
 
 set(PTV_INCLUDE_DIRS
   "${PTV_RUNTIME_DIR}/include"

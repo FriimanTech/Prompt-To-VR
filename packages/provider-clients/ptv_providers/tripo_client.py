@@ -65,6 +65,52 @@ _V3_MODEL_VERSIONS = frozenset(
 is a 400 (code 1004) at request time, so we validate up front and fail with a
 readable message instead of burning a run."""
 
+# --- Auto-rigging ----------------------------------------------------------
+#
+# ``/v3/animations/rig-check`` and ``/v3/animations/rig`` both take a single
+# ``input`` field (task_id | file_token | URL), like the to-model endpoints --
+# NOT the ``original_model_task_id`` spelling the V2->V3 migration notes use.
+# Verified against the live docs (developers.tripo3d.ai/en/docs/animations-rig
+# and .../animations-rig-check).
+
+_RIG_TYPES = frozenset(
+    {
+        "biped",
+        "quadruped",
+        "hexapod",
+        "octopod",
+        "avian",
+        "serpentine",
+        "aquatic",
+    }
+)
+"""Every rig type ``rig-check`` can recommend. All of them describe a WHOLE
+creature -- there is no rig type for a hand, a weapon or a vehicle, which is
+why non-character assets come back ``riggable: false``."""
+
+_RIG_MODEL_BIPED = "v1.0-20240301"
+_RIG_MODEL_CREATURE = "v2.5-20260210"
+
+
+def rig_model_for_type(rig_type: str) -> str:
+    """The ``model`` version that can actually rig this skeleton shape.
+
+    The two rigging checkpoints are not interchangeable: ``v1.0-20240301`` is
+    humanoid-only (and the one with 90+ animation presets behind it), while
+    ``v2.5-20260210`` handles the non-humanoid shapes. Sending a quadruped to
+    the biped model does not error -- it produces a bad skeleton -- so this
+    mapping is the only thing standing between a creature and a silently
+    mangled rig.
+    """
+
+    key = (rig_type or "").strip().lower()
+    if key not in _RIG_TYPES:
+        raise ProviderConfigError(
+            f"Unknown Tripo rig_type {rig_type!r}. Expected one of: "
+            f"{', '.join(sorted(_RIG_TYPES))}."
+        )
+    return _RIG_MODEL_BIPED if key == "biped" else _RIG_MODEL_CREATURE
+
 # Terminal task states. V3 collapsed V2's 8-state enum down to 5: the old
 # ``banned`` and ``expired`` are now ``failed`` carrying error_code 2008 and
 # 2018 respectively.
@@ -192,6 +238,26 @@ class TripoConfig:
 
 
 @dataclass
+class TripoRigCheck:
+    """Result of ``/v3/animations/rig-check``.
+
+    Costs no credits, which is what makes it worth calling unconditionally
+    before every rig: a rig is 30 credits and most assets in a project are
+    props that can never be rigged at all.
+    """
+
+    task_id: str
+    riggable: bool
+    rig_type: str
+    raw_task: Any | None = None
+
+    @property
+    def rig_model(self) -> str:
+        """The rigging checkpoint matching ``rig_type``."""
+        return rig_model_for_type(self.rig_type)
+
+
+@dataclass
 class TripoTaskResult:
     task_id: str
     status: str
@@ -276,6 +342,101 @@ class TripoClient:
 
         task_id = self._create_task("/generation/text-to-model", body)
         return self._await_and_download(task_id, out_dir)
+
+    # ------------------------------------------------------------------
+    # Auto-rigging
+    # ------------------------------------------------------------------
+    def rig_check(
+        self,
+        *,
+        task_id: str | None = None,
+        glb_path: str | os.PathLike[str] | None = None,
+    ) -> TripoRigCheck:
+        """Ask whether a model can be rigged, and how.
+
+        Free, so there is no reason not to call it before every rig. Returns
+        ``riggable=False`` for anything that is not a whole creature -- props,
+        weapons, scenery and disembodied body parts all land there.
+        """
+
+        self._require_key()
+        body = {"input": self._rig_input(task_id, glb_path)}
+        rig_task = self._create_task("/animations/rig-check", body)
+        task = self._poll(rig_task)
+        status = str(task.get("status") or "unknown").lower()
+        if status != "success":
+            code = task.get("error_code")
+            message = task.get("error_message") or "no error_message returned"
+            raise ProviderCallError(
+                f"Tripo rig-check {rig_task} finished with status {status!r} "
+                f"(error_code={code}): {message}"
+            )
+
+        output = task.get("output")
+        output = output if isinstance(output, dict) else {}
+        # Absent rig_type is normal when riggable is false; default to biped so
+        # ``rig_model`` stays callable, and let the caller gate on ``riggable``.
+        return TripoRigCheck(
+            task_id=rig_task,
+            riggable=bool(output.get("riggable")),
+            rig_type=str(output.get("rig_type") or "biped").strip().lower(),
+            raw_task=task,
+        )
+
+    def rig(
+        self,
+        *,
+        out_dir: str | os.PathLike[str],
+        task_id: str | None = None,
+        glb_path: str | os.PathLike[str] | None = None,
+        rig_type: str = "biped",
+        spec: str = "mixamo",
+        out_format: str = "glb",
+        model: str | None = None,
+    ) -> TripoTaskResult:
+        """Add a skeleton and skin weights to a model. Costs ~30 credits.
+
+        ``spec="mixamo"`` is the default here rather than Tripo's own
+        ``tripo`` naming because Mixamo bone names are the de-facto standard
+        the codegen agent can be told about up front -- it never sees the
+        asset, so it has to write ``joint_index(self, "mixamorig:...")``
+        against a naming convention that is fixed in advance.
+
+        ``model`` is derived from ``rig_type`` unless overridden; see
+        :func:`rig_model_for_type` for why that pairing is load-bearing.
+        """
+
+        self._require_key()
+        body = {
+            "input": self._rig_input(task_id, glb_path),
+            "model": model or rig_model_for_type(rig_type),
+            "rig_type": rig_type,
+            "spec": spec,
+            "out_format": out_format,
+        }
+        rig_task = self._create_task("/animations/rig", body)
+        return self._await_and_download(rig_task, out_dir)
+
+    def _rig_input(
+        self,
+        task_id: str | None,
+        glb_path: str | os.PathLike[str] | None,
+    ) -> str:
+        """Resolve the single ``input`` field the rig endpoints accept.
+
+        Prefers a generation task id: it is free and instant. Falls back to
+        uploading the GLB, which is what keeps rigging usable after a resume
+        or on a project directory copied between machines, where the original
+        task id is gone or expired.
+        """
+
+        if task_id:
+            return str(task_id)
+        if glb_path is not None:
+            return self._upload_file(glb_path)
+        raise ProviderCallError(
+            "Tripo rig call needs either a task_id or a glb_path to upload."
+        )
 
     def get_balance(self) -> dict[str, float]:
         """Return the Tripo account balance without spending any credits.

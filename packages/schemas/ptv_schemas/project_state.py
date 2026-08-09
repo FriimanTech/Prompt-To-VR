@@ -20,6 +20,7 @@ class ProjectStage(str, Enum):
     scene_spec = "scene_spec"
     reference_images = "reference_images"
     tripo_models = "tripo_models"
+    asset_rigging = "asset_rigging"
     asset_normalization = "asset_normalization"
     # Derives each asset's named sockets (muzzle, grip) from its geometry and
     # writes asset_contract.json. Deterministic, no model calls. Runs BEFORE

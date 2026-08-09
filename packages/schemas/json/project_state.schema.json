@@ -9,6 +9,7 @@
         "scene_spec",
         "reference_images",
         "tripo_models",
+        "asset_rigging",
         "asset_normalization",
         "asset_contract",
         "asset_optimization",

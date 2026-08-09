@@ -626,6 +626,208 @@ def test_tripo_stage_preflight_fails_on_insufficient_balance(tmp_path: Path, mon
     assert calls == [], f"Preflight failed but generation was still attempted: {calls}"
 
 
+# ---------------------------------------------------------------------------
+# Auto-rigging stage
+# ---------------------------------------------------------------------------
+
+
+def _rig_manifest(rigged: bool):
+    return AssetManifest(
+        prompt_id="demo",
+        items=[
+            AssetItem(
+                id="hero",
+                name="Hero",
+                category=AssetCategory.character,
+                style_notes="a humanoid",
+                reference=ReferenceImageRequest(prompt="a humanoid character"),
+                rigged=rigged,
+            )
+        ],
+    )
+
+
+def _rig_ctx(tmp_path: Path, *, rigged: bool):
+    from ptv_orchestrator.events import EventBus
+    from ptv_orchestrator.pipeline.context import PipelineContext
+    from ptv_orchestrator.settings import Settings
+
+    settings = Settings(repo_root=tmp_path, projects_dir=tmp_path / "projects")
+    store = ProjectStore(settings.projects_dir)
+    state = store.create("Rig Test", "a tiny prompt for the test")
+    store.save_asset_manifest(state.project_id, _rig_manifest(rigged))
+
+    item_dir = store.dir_for(state.project_id) / "assets" / "hero"
+    item_dir.mkdir(parents=True, exist_ok=True)
+    (item_dir / "model.glb").write_bytes(b"glTF\x02\x00\x00\x00")
+
+    ctx = PipelineContext(
+        project_id=state.project_id,
+        settings=settings,
+        store=store,
+        bus=EventBus(),
+    )
+    return ctx, item_dir
+
+
+class _FakeRigCheck:
+    def __init__(self, riggable: bool, rig_type: str = "biped"):
+        self.task_id = "rigchk_1"
+        self.riggable = riggable
+        self.rig_type = rig_type
+
+    @property
+    def rig_model(self):
+        from ptv_providers import rig_model_for_type
+
+        return rig_model_for_type(self.rig_type)
+
+
+def test_rigging_stage_skips_assets_that_are_not_marked_rigged(
+    tmp_path: Path, monkeypatch
+):
+    """An un-marked asset must never reach Tripo. Each rig is ~30 credits,
+    so rigging every prop in a scene would be a large silent bill."""
+
+    from ptv_orchestrator.pipeline import stage_asset_rigging
+
+    calls: list[str] = []
+
+    class _Tripo:
+        def __init__(self, *a, **kw):
+            pass
+
+        def get_balance(self):
+            calls.append("balance")
+            return {"balance": 10000.0, "frozen": 0.0}
+
+        def rig_check(self, **kw):
+            calls.append("rig_check")
+            raise AssertionError("must not be called")
+
+    monkeypatch.setattr(stage_asset_rigging, "TripoClient", _Tripo)
+
+    ctx, _ = _rig_ctx(tmp_path, rigged=False)
+    result = stage_asset_rigging.run(ctx)
+
+    assert result.artifacts == []
+    # Not even the free balance probe: there is nothing to price.
+    assert calls == []
+
+
+def test_rigging_stage_does_not_pay_for_a_rig_that_cannot_happen(
+    tmp_path: Path, monkeypatch
+):
+    """rig-check is free and rig is ~30 credits, so a `riggable: false`
+    answer must stop the sequence rather than optimistically rigging."""
+
+    from ptv_orchestrator.pipeline import stage_asset_rigging
+
+    calls: list[str] = []
+
+    class _Tripo:
+        def __init__(self, *a, **kw):
+            pass
+
+        def get_balance(self):
+            return {"balance": 10000.0, "frozen": 0.0}
+
+        def rig_check(self, **kw):
+            calls.append("rig_check")
+            return _FakeRigCheck(riggable=False)
+
+        def rig(self, **kw):
+            calls.append("rig")
+            raise AssertionError("must not rig a non-riggable asset")
+
+    monkeypatch.setattr(stage_asset_rigging, "TripoClient", _Tripo)
+
+    ctx, item_dir = _rig_ctx(tmp_path, rigged=True)
+    stage_asset_rigging.run(ctx)
+
+    assert calls == ["rig_check"]
+    assert not (item_dir / "model_rigged.glb").exists()
+
+    report = json.loads(
+        (ctx.project_dir / "asset_rig.json").read_text(encoding="utf-8")
+    )
+    assert report["hero"]["status"] == "not_riggable"
+
+
+def test_rigging_stage_rigs_and_then_reuses_the_recorded_result(
+    tmp_path: Path, monkeypatch
+):
+    """The rig must land as model_rigged.glb (so the un-rigged source
+    survives a re-run) and a second pass must not re-bill."""
+
+    from ptv_orchestrator.pipeline import stage_asset_rigging
+
+    calls: list[str] = []
+
+    class _Tripo:
+        def __init__(self, *a, **kw):
+            pass
+
+        def get_balance(self):
+            return {"balance": 10000.0, "frozen": 0.0}
+
+        def rig_check(self, **kw):
+            calls.append("rig_check")
+            return _FakeRigCheck(riggable=True, rig_type="biped")
+
+        def rig(self, *, out_dir, **kw):
+            calls.append("rig")
+            assert kw["spec"] == "mixamo"
+            assert kw["out_format"] == "glb"
+            assert kw["model"] == "v1.0-20240301"
+            # The real client always names its download ``model.glb``, which
+            # collides with the un-rigged source; reproduce that here so the
+            # staging-directory handling stays covered.
+            out_path = Path(out_dir)
+            out_path.mkdir(parents=True, exist_ok=True)
+            out = out_path / "model.glb"
+            out.write_bytes(b"glTF-rigged")
+
+            class _R:
+                task_id = "rig_1"
+                primary_glb = out
+
+            return _R()
+
+    monkeypatch.setattr(stage_asset_rigging, "TripoClient", _Tripo)
+
+    ctx, item_dir = _rig_ctx(tmp_path, rigged=True)
+    stage_asset_rigging.run(ctx)
+
+    rigged_glb = item_dir / "model_rigged.glb"
+    assert rigged_glb.read_bytes() == b"glTF-rigged"
+    # The original Tripo output has to survive, or a re-run would rig an
+    # already-rigged mesh.
+    assert (item_dir / "model.glb").read_bytes().startswith(b"glTF")
+    assert calls == ["rig_check", "rig"]
+
+    # Second pass: recorded result is reused, no further Tripo calls.
+    stage_asset_rigging.run(ctx)
+    assert calls == ["rig_check", "rig"]
+
+
+def test_rigged_glb_wins_the_primary_glb_pick(tmp_path: Path):
+    """Both pickers must prefer the rigged file. On the *model* key alone
+    'model.glb' sorts before 'model_rigged.glb' and the skeleton would
+    silently never reach the scene."""
+
+    from ptv_orchestrator.pipeline.stage_asset_normalize import _pick_primary_glb
+    from ptv_orchestrator.pipeline.stage_tripo_models import _existing_glb
+
+    d = tmp_path / "asset"
+    d.mkdir()
+    (d / "model.glb").write_bytes(b"glTF\x02\x00\x00\x00")
+    (d / "model_rigged.glb").write_bytes(b"glTF\x02\x00\x00\x00")
+
+    assert _pick_primary_glb(d).name == "model_rigged.glb"
+    assert _existing_glb(d).name == "model_rigged.glb"
+
+
 def test_artifact_id_accepts_vcpkg_leading_underscore_filenames(tmp_path: Path):
     """Regression for ValidationError on ``_features.hpp`` and friends that
     vcpkg drops into the build tree. ``list_artifacts`` must produce a valid

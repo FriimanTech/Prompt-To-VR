@@ -21,6 +21,7 @@ from ptv_providers import (
     ProviderConfigError,
     TripoClient,
     TripoConfig,
+    rig_model_for_type,
 )
 from ptv_providers import tripo_client as tripo_client_mod
 from ptv_providers.anthropic_client import _concat_text_blocks
@@ -431,6 +432,124 @@ def test_tripo_rejects_model_version_outside_v3_whitelist():
     # a common copy-paste mistake and V3 would 400 on it mid-run.
     with pytest.raises(ProviderConfigError, match="Unsupported Tripo model"):
         TripoConfig(api_key="k", model_version="v2.5-20260210")
+
+
+# ---------------------------------------------------------------------------
+# Tripo auto-rigging
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "rig_type,expected",
+    [
+        ("biped", "v1.0-20240301"),
+        ("quadruped", "v2.5-20260210"),
+        ("hexapod", "v2.5-20260210"),
+        ("octopod", "v2.5-20260210"),
+        ("avian", "v2.5-20260210"),
+        ("serpentine", "v2.5-20260210"),
+        ("aquatic", "v2.5-20260210"),
+        ("BIPED", "v1.0-20240301"),
+    ],
+)
+def test_rig_model_follows_rig_type(rig_type, expected):
+    # The two rigging checkpoints are not interchangeable: v1.0 is humanoid
+    # only. Sending a quadruped to it does not error, it just rigs badly, so
+    # this mapping is the only guard.
+    assert rig_model_for_type(rig_type) == expected
+
+
+def test_rig_model_rejects_unknown_rig_type():
+    with pytest.raises(ProviderConfigError, match="Unknown Tripo rig_type"):
+        rig_model_for_type("centaur")
+
+
+def _mock_rig_check(respx_mock, *, riggable: bool, rig_type: str = "biped"):
+    respx_mock.post(f"{V3}/animations/rig-check").mock(
+        return_value=_ok({"task_id": "rigchk_1"})
+    )
+    respx_mock.get(f"{V3}/tasks/rigchk_1").mock(
+        return_value=_ok(
+            {
+                "task_id": "rigchk_1",
+                "status": "success",
+                "output": {"riggable": riggable, "rig_type": rig_type},
+                "credits_consumed": 0,
+            }
+        )
+    )
+
+
+@respx.mock
+def test_tripo_rig_check_reports_riggability_without_downloading():
+    _mock_rig_check(respx.mock, riggable=True, rig_type="quadruped")
+
+    check = TripoClient(_cfg()).rig_check(task_id="task_src")
+
+    assert check.riggable is True
+    assert check.rig_type == "quadruped"
+    # rig-check has no output.model_url, so the poll-only path must not try
+    # to download anything.
+    assert check.rig_model == "v2.5-20260210"
+    body = _sent_body(respx.mock, "/animations/rig-check")
+    # V3 spells this ``input``, NOT V2's ``original_model_task_id``.
+    assert body == {"input": "task_src"}
+
+
+@respx.mock
+def test_tripo_rig_sends_mixamo_glb_and_type_matched_model(tmp_path):
+    respx.mock.post(f"{V3}/animations/rig").mock(
+        return_value=_ok({"task_id": "rig_1"})
+    )
+    respx.mock.get(f"{V3}/tasks/rig_1").mock(
+        return_value=_ok(
+            {
+                "task_id": "rig_1",
+                "status": "success",
+                "output": {"model_url": MODEL_URL},
+                "credits_consumed": 30,
+            }
+        )
+    )
+    respx.mock.get(MODEL_URL).mock(return_value=httpx.Response(200, content=b"glb!"))
+
+    result = TripoClient(_cfg()).rig(
+        out_dir=tmp_path / "out", task_id="task_src", rig_type="avian"
+    )
+
+    assert result.primary_glb is not None
+    body = _sent_body(respx.mock, "/animations/rig")
+    assert body["input"] == "task_src"
+    assert body["spec"] == "mixamo"
+    assert body["out_format"] == "glb"
+    assert body["rig_type"] == "avian"
+    # Derived from rig_type, not from the generation checkpoint.
+    assert body["model"] == "v2.5-20260210"
+
+
+@respx.mock
+def test_tripo_rig_uploads_the_glb_when_no_task_id_is_known(tmp_path):
+    # Resume, or a project directory copied between machines: the generation
+    # task id is gone, so the mesh itself has to be the input.
+    respx.mock.post(f"{V3}/files").mock(
+        return_value=_ok({"file_token": "file_rig1"})
+    )
+    _mock_rig_check(respx.mock, riggable=True)
+
+    src = tmp_path / "model.glb"
+    src.write_bytes(b"glTF")
+
+    check = TripoClient(_cfg()).rig_check(glb_path=src)
+
+    assert check.riggable is True
+    assert _sent_body(respx.mock, "/animations/rig-check") == {
+        "input": "file_rig1"
+    }
+
+
+def test_tripo_rig_without_any_input_fails_loudly():
+    with pytest.raises(ProviderCallError, match="task_id or a glb_path"):
+        TripoClient(_cfg()).rig_check()
 
 
 @respx.mock

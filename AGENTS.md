@@ -26,7 +26,7 @@ orchestrator and a reusable Vulkan + OpenXR engine core.
 5. Reuse built-in VR mechanics. The engine ships reusable, data-driven
    modules under `engine/runtime/src/mechanics/builtin/<mechanic>/`
    (teleport, head-relative and controller-relative slide, snap turn, grab,
-   throw, recoil). Each is a real `IMechanic` written against the same public
+   throw, recoil, hand_pose). Each is a real `IMechanic` written against the same public
    API generated code uses — `InputSnapshot`, `World` and `MechanicContext`
    (locomotion / physics / debug-draw / hand / transform-fx / haptics / socket
    / skeleton services, all engine-clamped) —
@@ -34,7 +34,11 @@ orchestrator and a reusable Vulkan + OpenXR engine core.
    generated mechanic. Generated code adds mechanics; it does not
    reimplement basic VR behavior, and it never modifies a built-in.
    `builtin.smooth_locomotion` has been REMOVED; use the explicit
-   `builtin.locomotion.slide.*` ids.
+   `builtin.locomotion.slide.*` ids. The player's own hands are rigged
+   entities posed by `builtin.hand_pose`, which the engine binds
+   automatically — generated code must never re-implement finger curl, and
+   must never couple a weapon to the hand (both read the same
+   `input.hands[h].trigger` and stay in sync on their own).
 6. Generated C++ (`.cpp`, `.h`, `.hpp`) is confined to
    `engine/generated/{mechanics,ai,dialogue,world}/`. It MUST NOT modify the
    renderer, XR session loop, platform layer, memory core, or base ECS.
@@ -109,7 +113,24 @@ orchestrator and a reusable Vulkan + OpenXR engine core.
    `scene_spec_max_repair_rounds`. Scenes fan out across
    `scene_spec_max_parallel_workers` agents.
 5. Reference images for each object `AssetItem` → Gemini / Imagen.
-6. Reference images → Tripo image-to-3D (textured, PBR).
+6. Reference images → Tripo image-to-3D (textured, PBR). The generation
+   `task_id` is recorded as `assets/<id>/tripo_task.json` so rigging can
+   reference it instead of re-uploading the mesh.
+6b. **Auto-rigging** (`asset_rigging`): for every `AssetItem` with
+   `rigged: true`, call `POST /v3/animations/rig-check` (free) and, only if
+   it answers `riggable: true`, `POST /v3/animations/rig` (~30 credits).
+   Both endpoints take a single `input` field — a task_id, a `file_token`,
+   or a URL — NOT V2's `original_model_task_id`. The rig `model` is derived
+   from the returned `rig_type`: `v1.0-20240301` for `biped`,
+   `v2.5-20260210` for every non-humanoid shape (`quadruped`, `hexapod`,
+   `octopod`, `avian`, `serpentine`, `aquatic`). `spec="mixamo"` and
+   `out_format="glb"` always. Output lands as `model_rigged.glb` beside the
+   original, and `asset_rig.json` records the outcome so a Resume never
+   re-bills. Runs BEFORE normalization so the rigged mesh is what every
+   later stage validates, sockets, decimates and compiles. Every rig type
+   Tripo offers describes a WHOLE creature, so props, weapons and body
+   parts are not riggable — the free pre-check is what keeps that from
+   costing anything.
 7. Assets **validated** (`asset_normalization`): GLB header/JSON check plus
    scale / collision metadata. This stage does NOT modify geometry.
 7b. **Asset contract** (`asset_contract`): derives each asset's named

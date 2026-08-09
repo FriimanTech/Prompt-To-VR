@@ -14,6 +14,10 @@
 // Input phase: the held entity has to be decided before the frame's
 // InputSnapshot is frozen, so a weapon mechanic sees "I am now held" on the
 // same frame it was picked up rather than one frame later.
+//
+// Where the object sits in the hand comes from its derived ``grip`` socket
+// when it has one (see grip_hold_from_socket), and otherwise from whatever
+// relative pose it had when squeezed.
 
 #include <algorithm>
 #include <cmath>
@@ -84,6 +88,12 @@ public:
         if (p.contains("radius_m") && p["radius_m"].is_number()) {
             radius_m_ = std::max(0.01f, p.value("radius_m", kGrabRadius));
         }
+        // On by default: an asset that bothered to derive a grip socket
+        // almost certainly wants to be held by it. Set false for something
+        // with no single correct orientation -- a ball, a rock, a crate.
+        if (p.contains("snap_to_grip") && p["snap_to_grip"].is_boolean()) {
+            snap_to_grip_ = p.value("snap_to_grip", true);
+        }
     }
 
     void on_detach(World&, std::uint32_t) override {}
@@ -138,13 +148,31 @@ private:
         if (!world.registry().all_of<CTransform>(e)) return;
         const auto& ct = world.registry().get<CTransform>(e).t;
 
-        // Record the object's pose in the hand's frame so it keeps the
-        // relative orientation it had at the moment of the grab, rather than
-        // snapping to a canned pose.
-        const Quat inv_hand = glm::inverse(hand.hand_rotation);
         hold_[h].entity = target;
-        hold_[h].local_offset = inv_hand * (ct.position - hand.hand_position);
-        hold_[h].local_rotation = inv_hand * ct.rotation;
+
+        // Prefer the asset's own grip socket. Freezing whatever relative pose
+        // the object happened to have at the instant of the squeeze is how a
+        // weapon ends up held sideways, or by the barrel: the player reaches
+        // toward it from above and that arbitrary approach angle becomes the
+        // permanent hold. The socket says where the asset is MEANT to be held,
+        // and asset_contract derives it from the geometry, so nothing has to
+        // guess.
+        Vec3 grip_offset{0.0f};
+        Quat grip_rotation{1.0f, 0.0f, 0.0f, 0.0f};
+        if (snap_to_grip_ &&
+            grip_hold_from_socket(world, target, &grip_offset,
+                                  &grip_rotation)) {
+            hold_[h].local_offset = grip_offset;
+            hold_[h].local_rotation = grip_rotation;
+        } else {
+            // No grip socket on this asset: keep the object's pose in the
+            // hand's frame, so it holds the relative orientation it had at the
+            // moment of the grab.
+            const Quat inv_hand = glm::inverse(hand.hand_rotation);
+            hold_[h].local_offset =
+                inv_hand * (ct.position - hand.hand_position);
+            hold_[h].local_rotation = inv_hand * ct.rotation;
+        }
 
         // Steal it from the other hand if that hand had it.
         if (hold_[1 - h].entity == target) {
@@ -155,6 +183,40 @@ private:
         ctx.physics->set_kinematic(target, true);
         ctx.hands->set_held_entity(h, target);
         PTV_INFO("Grab: hand {} -> entity {}", h == 0 ? "L" : "R", target);
+    }
+
+    /** Hold offsets that put the asset's ``grip`` socket in the hand.
+     *
+     *  The hold is applied as
+     *  ``obj_pos = hand_pos + hand_rot * local_offset`` and
+     *  ``obj_rot = hand_rot * local_rotation``, while the socket sits at
+     *  ``obj_pos + obj_rot * (scale * s_pos)`` with rotation
+     *  ``obj_rot * s_rot``. Solving "socket pose == hand pose" for the two
+     *  hold terms cancels the hand out entirely, which is the point: the
+     *  result depends only on the asset, so the object lands in the same
+     *  orientation no matter how the player reached for it.
+     *
+     *  Returns false when the asset has no grip socket, leaving the caller to
+     *  fall back to the relative hold. */
+    static bool grip_hold_from_socket(World& world, std::uint32_t entity,
+                                      Vec3* out_offset, Quat* out_rotation) {
+        const auto e = static_cast<entt::entity>(entity);
+        if (!world.registry().all_of<CMesh>(e)) return false;
+        const auto& mesh = world.registry().get<CMesh>(e);
+        const auto it = mesh.sockets.find("grip");
+        if (it == mesh.sockets.end()) return false;
+
+        const Transform& socket = it->second;
+        const Quat inv_socket = glm::inverse(socket.rotation);
+        // Socket positions arrive in metres at the asset's authored scale;
+        // the entity's own CTransform scale still applies on top.
+        float entity_scale = 1.0f;
+        if (world.registry().all_of<CTransform>(e)) {
+            entity_scale = world.registry().get<CTransform>(e).t.scale;
+        }
+        *out_rotation = inv_socket;
+        *out_offset = -(inv_socket * (socket.position * entity_scale));
+        return true;
     }
 
     void release(int h, const InputSnapshot::HandState& hand,
@@ -175,6 +237,7 @@ private:
 
     Hold hold_[2]{};
     float radius_m_{kGrabRadius};
+    bool snap_to_grip_{true};
 };
 
 }  // namespace

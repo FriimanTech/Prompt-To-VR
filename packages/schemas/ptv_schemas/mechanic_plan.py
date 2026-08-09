@@ -82,6 +82,7 @@ BUILTIN_MECHANIC_IDS = {
     "builtin.grab",
     "builtin.throw",
     "builtin.recoil",
+    "builtin.hand_pose",
 }
 
 

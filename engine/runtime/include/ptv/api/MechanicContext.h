@@ -196,6 +196,18 @@ public:
     /** Publish what ``hand`` is holding. Pass
      *  ``InputSnapshot::kInvalidEntity`` to clear. */
     virtual void set_held_entity(int hand, std::uint32_t entity) = 0;
+
+    /** The player's own hand entity for ``hand``, or
+     *  ``InputSnapshot::kInvalidEntity``.
+     *
+     *  These are real ECS entities carrying the rigged hand mesh, which is
+     *  what lets a mechanic pose the fingers through ``ctx.skeleton``. They
+     *  do not exist when the engine falls back to the procedural block hands
+     *  (no generated hand asset on disk), so always check the return value.
+     *
+     *  Do NOT grab, throw or apply physics to these -- they follow the
+     *  controller and are not simulated. */
+    virtual std::uint32_t hand_entity(int hand) const = 0;
 };
 
 /** A one-shot visual displacement, expressed in the entity's local space.
