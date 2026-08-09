@@ -21,6 +21,7 @@ from ptv_providers import (
     ProviderConfigError,
     TripoClient,
     TripoConfig,
+    resolve_animations,
     rig_model_for_type,
 )
 from ptv_providers import tripo_client as tripo_client_mod
@@ -497,7 +498,7 @@ def test_tripo_rig_check_reports_riggability_without_downloading():
 
 
 @respx.mock
-def test_tripo_rig_sends_mixamo_glb_and_type_matched_model(tmp_path):
+def test_tripo_rig_sends_tripo_spec_glb_and_type_matched_model(tmp_path):
     respx.mock.post(f"{V3}/animations/rig").mock(
         return_value=_ok({"task_id": "rig_1"})
     )
@@ -520,7 +521,7 @@ def test_tripo_rig_sends_mixamo_glb_and_type_matched_model(tmp_path):
     assert result.primary_glb is not None
     body = _sent_body(respx.mock, "/animations/rig")
     assert body["input"] == "task_src"
-    assert body["spec"] == "mixamo"
+    assert body["spec"] == "tripo"
     assert body["out_format"] == "glb"
     assert body["rig_type"] == "avian"
     # Derived from rig_type, not from the generation checkpoint.
@@ -550,6 +551,119 @@ def test_tripo_rig_uploads_the_glb_when_no_task_id_is_known(tmp_path):
 def test_tripo_rig_without_any_input_fails_loudly():
     with pytest.raises(ProviderCallError, match="task_id or a glb_path"):
         TripoClient(_cfg()).rig_check()
+
+
+# ---------------------------------------------------------------------------
+# Tripo animation retargeting
+# ---------------------------------------------------------------------------
+
+
+def test_biped_intents_use_the_v1_namespaced_presets():
+    presets, mapping, dropped = resolve_animations(
+        ["idle", "walk", "run", "shoot"], "biped"
+    )
+    # A biped rigs on v1.0-20240301, whose presets are all ``preset:biped:*``.
+    assert presets == [
+        "preset:biped:idle",
+        "preset:biped:walk",
+        "preset:biped:run",
+        "preset:biped:shoot",
+    ]
+    assert mapping["walk"] == "preset:biped:walk"
+    assert dropped == []
+
+
+def test_biped_on_v25_uses_the_short_unnamespaced_list():
+    presets, _mapping, dropped = resolve_animations(
+        ["idle", "attack"], "biped", "v2.5-20260210"
+    )
+    assert presets == ["preset:idle", "preset:slash"]
+    assert dropped == []
+    # dance/wave/sit only exist on the 90-preset v1.0 list.
+    _p, _m, dropped2 = resolve_animations(["dance"], "biped", "v2.5-20260210")
+    assert dropped2 == ["dance"]
+
+
+@pytest.mark.parametrize(
+    "rig_type,preset",
+    [
+        ("quadruped", "preset:quadruped:walk"),
+        ("hexapod", "preset:hexapod:walk"),
+        ("octopod", "preset:octopod:walk"),
+        ("serpentine", "preset:serpentine:march"),
+        ("aquatic", "preset:aquatic:march"),
+    ],
+)
+def test_creature_rigs_have_one_locomotion_preset(rig_type, preset):
+    presets, mapping, dropped = resolve_animations(
+        ["idle", "walk", "run", "shoot"], rig_type
+    )
+    # Only locomotion exists. walk and run share the single preset, so it is
+    # billed ONCE but both intents still resolve -- the runtime plays the same
+    # clip faster for a run.
+    assert presets == [preset]
+    assert mapping == {"walk": preset, "run": preset}
+    assert sorted(dropped) == ["idle", "shoot"]
+
+
+def test_unknown_rig_type_fails_rather_than_guessing():
+    with pytest.raises(ProviderConfigError, match="Unknown Tripo rig_type"):
+        resolve_animations(["walk"], "centaur")
+
+
+@respx.mock
+def test_tripo_retarget_sends_a_single_animation_field_for_one_clip(tmp_path):
+    _mock_happy_path(respx.mock, endpoint="/animations/retarget")
+
+    TripoClient(_cfg()).retarget(
+        out_dir=tmp_path / "out",
+        rig_task_id="task_rig",
+        animations=["preset:biped:walk"],
+    )
+
+    body = _sent_body(respx.mock, "/animations/retarget")
+    assert body["input"] == "task_rig"
+    # ``animation`` and ``animations`` are mutually exclusive; sending both
+    # is a 400.
+    assert body["animation"] == "preset:biped:walk"
+    assert "animations" not in body
+    assert body["out_format"] == "glb"
+    assert body["bake_animation"] is True
+    assert body["export_with_geometry"] is True
+    # Tripo defaults this to false; leaving it there would bake root motion
+    # into the clip and fight the engine for control of position.
+    assert body["animate_in_place"] is True
+
+
+@respx.mock
+def test_tripo_retarget_batches_multiple_clips(tmp_path):
+    _mock_happy_path(respx.mock, endpoint="/animations/retarget")
+
+    TripoClient(_cfg()).retarget(
+        out_dir=tmp_path / "out",
+        rig_task_id="task_rig",
+        animations=["preset:idle", "preset:walk", "preset:run"],
+    )
+
+    body = _sent_body(respx.mock, "/animations/retarget")
+    assert body["animations"] == ["preset:idle", "preset:walk", "preset:run"]
+    assert "animation" not in body
+
+
+def test_tripo_retarget_requires_a_rig_task(tmp_path):
+    # Retarget needs Tripo's own skeleton for that task; there is no
+    # file-upload fallback the way rig-check has one.
+    with pytest.raises(ProviderCallError, match="successful rig task"):
+        TripoClient(_cfg()).retarget(
+            out_dir=tmp_path, rig_task_id="", animations=["preset:walk"]
+        )
+
+
+def test_tripo_retarget_requires_at_least_one_animation(tmp_path):
+    with pytest.raises(ProviderCallError, match="at least one preset"):
+        TripoClient(_cfg()).retarget(
+            out_dir=tmp_path, rig_task_id="task_rig", animations=[]
+        )
 
 
 @respx.mock

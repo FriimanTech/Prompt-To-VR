@@ -352,6 +352,13 @@ def _mesh_render_fields(
     if norm.get("skinned"):
         out["skinned"] = True
         out["joint_count"] = int(norm.get("joint_count") or 0)
+    # Semantic clip contract: intent ("walk") -> the glTF animation name Tripo
+    # actually produced. Generated C++ asks for the intent, exactly as it asks
+    # for a socket by name, and never has to know what the retargeter called
+    # the clip.
+    animations = norm.get("animations")
+    if isinstance(animations, dict) and animations:
+        out["animations"] = {str(k): str(v) for k, v in animations.items()}
     sockets = _sockets_in_meters(contract, target_scale_meters)
     if sockets:
         out["sockets"] = sockets

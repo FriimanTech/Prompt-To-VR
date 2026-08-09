@@ -272,10 +272,16 @@ bool write_glb(const std::string& path, const std::vector<LitVertex>& verts,
  * ``joints`` array in the same order as the source and therefore keeps every
  * JOINTS_0 index valid without remapping.
  *
- * The skeleton written here is a verbatim copy of the source's, independent
- * of how hard this particular LOD was decimated. Every level of an asset
- * therefore agrees on joint count, joint order and inverse bind matrices,
- * which is what makes a mid-animation LOD switch safe. */
+ * The skeleton AND its animation clips are verbatim copies of the source's,
+ * independent of how hard this particular LOD was decimated. Every level of
+ * an asset therefore agrees on joint count, joint order, inverse bind
+ * matrices and clip names, which is what makes a mid-animation LOD switch
+ * safe.
+ *
+ * Carrying the clips is not optional: the runtime loads LOD0, so dropping
+ * them here would silently throw away every animation the pipeline paid Tripo
+ * to retarget. Decimation cannot invalidate them because animation channels
+ * target nodes, not vertices. */
 bool write_glb_skinned(const std::string& path,
                        const std::vector<SkinnedVertex>& verts,
                        const std::vector<std::uint32_t>& indices,
@@ -324,6 +330,52 @@ bool write_glb_skinned(const std::string& path,
     const std::size_t ibm_off = bin.size();
     append_padded(bin, ibm.data(), ibm.size() * sizeof(float));
 
+    // --- animation payloads ------------------------------------------------
+    //
+    // Decimation cannot invalidate a clip: animations target NODES, and the
+    // node tree is copied through verbatim. So the clips are appended
+    // unchanged, and every LOD ends up animating identically -- which is the
+    // same invariant that lets one joint palette serve all four levels.
+    //
+    // Buffer views are laid out first so their indices are known before the
+    // accessor array is built below.
+    struct ChannelBlob {
+        std::size_t times_off{0};
+        std::size_t times_bytes{0};
+        std::size_t values_off{0};
+        std::size_t values_bytes{0};
+        float time_min{0.0f};
+        float time_max{0.0f};
+        std::size_t key_count{0};
+        std::size_t value_count{0};
+        int components{3};
+    };
+    std::vector<std::vector<ChannelBlob>> clip_blobs(skel.clips.size());
+    for (std::size_t c = 0; c < skel.clips.size(); ++c) {
+        const auto& clip = skel.clips[c];
+        clip_blobs[c].reserve(clip.channels.size());
+        for (const auto& ch : clip.channels) {
+            ChannelBlob b{};
+            b.components =
+                (ch.path == ptv::gltf_mesh_load::AnimPath::Rotation) ? 4 : 3;
+            b.key_count = ch.times.size();
+            b.value_count = ch.values.size() / static_cast<std::size_t>(
+                                                   b.components);
+            b.time_min = ch.times.empty() ? 0.0f : ch.times.front();
+            b.time_max = ch.times.empty() ? 0.0f : ch.times.back();
+
+            b.times_off = bin.size();
+            b.times_bytes = ch.times.size() * sizeof(float);
+            append_padded(bin, ch.times.data(), b.times_bytes);
+
+            b.values_off = bin.size();
+            b.values_bytes = ch.values.size() * sizeof(float);
+            append_padded(bin, ch.values.data(), b.values_bytes);
+
+            clip_blobs[c].push_back(b);
+        }
+    }
+
     auto view = [](std::size_t off, std::size_t len,
                    int target) -> nlohmann::json {
         nlohmann::json v{{"buffer", 0},
@@ -348,6 +400,15 @@ bool write_glb_skinned(const std::string& path,
         view(wgt_off, weights.size() * sizeof(float), 34962),
         view(ibm_off, ibm.size() * sizeof(float), 0),
     });
+    // Two views per animation channel: sampler input (times) and output
+    // (values). No target -- like inverse bind matrices these are neither
+    // vertex nor index data, and the spec forbids one.
+    for (const auto& blobs : clip_blobs) {
+        for (const auto& b : blobs) {
+            doc["bufferViews"].push_back(view(b.times_off, b.times_bytes, 0));
+            doc["bufferViews"].push_back(view(b.values_off, b.values_bytes, 0));
+        }
+    }
 
     // 5121 = UNSIGNED_BYTE, 5125 = UNSIGNED_INT, 5126 = FLOAT.
     doc["accessors"] = nlohmann::json::array({
@@ -382,6 +443,32 @@ bool write_glb_skinned(const std::string& path,
          {"count", static_cast<std::uint64_t>(joint_count)},
          {"type", "MAT4"}},
     });
+
+    // Animation accessors, in the same order the views were appended above so
+    // view index 7 + 2k pairs with accessor index 7 + 2k.
+    {
+        int next_view = 7;
+        for (const auto& blobs : clip_blobs) {
+            for (const auto& b : blobs) {
+                // Sampler inputs REQUIRE min/max per the spec; a viewer that
+                // trusts them will clamp the clip to nothing without them.
+                doc["accessors"].push_back({
+                    {"bufferView", next_view++},
+                    {"componentType", 5126},
+                    {"count", static_cast<std::uint64_t>(b.key_count)},
+                    {"type", "SCALAR"},
+                    {"min", {b.time_min}},
+                    {"max", {b.time_max}},
+                });
+                doc["accessors"].push_back({
+                    {"bufferView", next_view++},
+                    {"componentType", 5126},
+                    {"count", static_cast<std::uint64_t>(b.value_count)},
+                    {"type", b.components == 4 ? "VEC4" : "VEC3"},
+                });
+            }
+        }
+    }
 
     doc["materials"] = nlohmann::json::array({{
         {"name", "ptv_baked_vertex_color"},
@@ -449,6 +536,69 @@ bool write_glb_skinned(const std::string& path,
     for (int r : roots) scene_nodes.push_back(r + 1);
     doc["scenes"] = nlohmann::json::array({{{"nodes", scene_nodes}}});
     doc["scene"] = 0;
+
+    // --- animations --------------------------------------------------------
+    //
+    // Clip NAMES are preserved verbatim: ISkeleton::play_clip matches on them,
+    // so renaming here would break every generated mechanic that asks for a
+    // clip by name.
+    if (!skel.clips.empty()) {
+        nlohmann::json animations = nlohmann::json::array();
+        int accessor = 7;
+        for (std::size_t c = 0; c < skel.clips.size(); ++c) {
+            const auto& clip = skel.clips[c];
+            nlohmann::json samplers = nlohmann::json::array();
+            nlohmann::json channels = nlohmann::json::array();
+
+            for (const auto& ch : clip.channels) {
+                const int input_accessor = accessor++;
+                const int output_accessor = accessor++;
+
+                const char* interp = "LINEAR";
+                switch (ch.interp) {
+                    case ptv::gltf_mesh_load::AnimInterp::Step:
+                        interp = "STEP";
+                        break;
+                    case ptv::gltf_mesh_load::AnimInterp::CubicSpline:
+                        // The loader kept the 3-values-per-key packing, so
+                        // writing the values straight back round-trips.
+                        interp = "CUBICSPLINE";
+                        break;
+                    case ptv::gltf_mesh_load::AnimInterp::Linear:
+                        break;
+                }
+                const char* path = "rotation";
+                switch (ch.path) {
+                    case ptv::gltf_mesh_load::AnimPath::Translation:
+                        path = "translation";
+                        break;
+                    case ptv::gltf_mesh_load::AnimPath::Scale:
+                        path = "scale";
+                        break;
+                    case ptv::gltf_mesh_load::AnimPath::Rotation:
+                        break;
+                }
+
+                const int sampler_index = static_cast<int>(samplers.size());
+                samplers.push_back({
+                    {"input", input_accessor},
+                    {"output", output_accessor},
+                    {"interpolation", interp},
+                });
+                channels.push_back({
+                    {"sampler", sampler_index},
+                    // Joint j lives at node 1 + j, matching the node array
+                    // written above.
+                    {"target", {{"node", ch.joint + 1}, {"path", path}}},
+                });
+            }
+
+            nlohmann::json anim{{"samplers", samplers}, {"channels", channels}};
+            if (!clip.name.empty()) anim["name"] = clip.name;
+            animations.push_back(anim);
+        }
+        doc["animations"] = animations;
+    }
 
     return write_glb_container(path, doc, bin);
 }

@@ -34,6 +34,32 @@ class TripoTextureAlignment(str, Enum):
     geometry = "geometry"
 
 
+class AnimationIntent(str, Enum):
+    """Semantic animations an asset can be given, independent of rig type.
+
+    Deliberately NOT raw Tripo preset ids. Which presets exist depends on the
+    rig type and rig model, neither of which is known until the free
+    rig-check runs -- long after the manifest is written. The animation stage
+    maps these onto concrete presets once it knows the rig, and silently has
+    fewer options for a creature (a quadruped rig ships exactly one
+    locomotion preset) than for a humanoid.
+    """
+
+    idle = "idle"
+    walk = "walk"
+    run = "run"
+    attack = "attack"
+    shoot = "shoot"
+    hurt = "hurt"
+    die = "die"
+    jump = "jump"
+    turn = "turn"
+    climb = "climb"
+    dance = "dance"
+    wave = "wave"
+    sit = "sit"
+
+
 class TripoRequest(StrictModel):
     """Shape of the Tripo image-to-3D / text-to-3D request.
 
@@ -90,6 +116,19 @@ class AssetItem(StrictModel):
         ),
     )
     rigged: bool = False
+    animations: List[AnimationIntent] = Field(
+        default_factory=list,
+        max_length=5,
+        description=(
+            "Animations this asset needs, as semantic intents rather than"
+            " Tripo preset ids. Only meaningful when 'rigged' is true; ignored"
+            " otherwise. Each one is a separate billed retarget call, so ask"
+            " for what the gameplay actually uses -- an enemy that patrols and"
+            " attacks needs ['idle', 'walk', 'run', 'attack'], while a"
+            " background villager may need only ['idle', 'walk']. Intents the"
+            " asset's rig cannot express are dropped automatically."
+        ),
+    )
     socket_hints: List[str] = Field(
         default_factory=list,
         max_length=8,

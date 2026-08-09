@@ -43,9 +43,9 @@
 namespace ptv {
 namespace {
 
-// Joint naming from engine/tools/make_hand_fixture.py, which uses the
-// ``mixamorig:`` prefix so it matches the spec="mixamo" convention the
-// auto-rigging stage requests for characters.
+// Joint naming from engine/tools/make_hand_fixture.py. The mixamorig:
+// prefix is the hand fixture's own contract for builtin.hand_pose; Tripo
+// character auto-rig uses spec="tripo" and does not share these names.
 constexpr const char* kBonePrefix = "mixamorig:";
 
 constexpr int kFingerCount = 5;

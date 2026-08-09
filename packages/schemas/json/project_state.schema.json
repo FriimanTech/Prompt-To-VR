@@ -10,6 +10,7 @@
         "reference_images",
         "tripo_models",
         "asset_rigging",
+        "asset_animation",
         "asset_normalization",
         "asset_contract",
         "asset_optimization",

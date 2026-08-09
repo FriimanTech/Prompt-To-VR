@@ -7,6 +7,9 @@ from .tripo_client import (
     TripoConfig,
     TripoRigCheck,
     TripoTaskResult,
+    animation_intents,
+    presets_for_rig,
+    resolve_animations,
     rig_model_for_type,
 )
 from .openai_client import OpenAIClient, OpenAIConfig
@@ -24,6 +27,9 @@ __all__ = [
     "TripoConfig",
     "TripoRigCheck",
     "TripoTaskResult",
+    "animation_intents",
+    "presets_for_rig",
+    "resolve_animations",
     "rig_model_for_type",
     "OpenAIClient",
     "OpenAIConfig",

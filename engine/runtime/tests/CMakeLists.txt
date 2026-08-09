@@ -99,9 +99,13 @@ if(Python3_Interpreter_FOUND)
     add_test(NAME ptv_smoke_hand_pose
              COMMAND ptv_smoke hand_pose "${PTV_HAND_GLB}")
   endif()
-  add_test(NAME ptv_smoke_grab_socket COMMAND ptv_smoke grab_socket)
 else()
   message(WARNING
     "Python3 not found; skipping the rigged GLB fixture and the skinning "
     "smoke tests.")
 endif()
+
+# These two need no generated asset at all -- one is pure transform maths, the
+# other parses an inline scene -- so they run even without Python.
+add_test(NAME ptv_smoke_grab_socket COMMAND ptv_smoke grab_socket)
+add_test(NAME ptv_smoke_clip_contract COMMAND ptv_smoke clip_contract)

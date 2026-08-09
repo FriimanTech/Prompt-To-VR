@@ -12,9 +12,9 @@ namespace ptv::gltf_mesh_load {
 /** Hard ceiling on joints per skin.
  *
  * ``SkinnedVertex::joints`` is four bytes, so index 255 is the largest value
- * that survives the GPU upload. Mixamo humanoids land near 65 and an OpenXR
- * hand is 26, so this is generous -- but a skin that exceeds it must fail
- * loudly instead of wrapping around and skinning to the wrong bone. */
+ * that survives the GPU upload. Typical humanoid skeletons land near 65 and
+ * an OpenXR hand is 26, so this is generous -- but a skin that exceeds it must
+ * fail loudly instead of wrapping around and skinning to the wrong bone. */
 inline constexpr int kMaxJointsPerSkin = 256;
 
 /** Vertex layout for skinned geometry: 48 bytes.

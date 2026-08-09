@@ -173,6 +173,35 @@ C++ can play its baked clips or drive individual joints through
 ``ctx.skeleton``. An asset with ``rigged: false`` can still be moved,
 thrown, and shot -- it just cannot deform.
 
+ANIMATIONS. On every asset you marked ``rigged: true``, set ``animations``
+to the movements that asset's gameplay actually needs. Leave it empty on
+anything not rigged; it is ignored there.
+
+Pick from exactly these intents:
+
+  idle, walk, run, attack, shoot, hurt, die, jump, turn, climb, dance,
+  wave, sit
+
+These are SEMANTIC, not animation file names. A later stage maps each one
+onto the right preset for whatever skeleton the rigger produced, so you
+never have to know whether the asset ended up a biped or a quadruped.
+
+Choose what the game will really play. An enemy that patrols, charges and
+fires needs ``["idle", "walk", "run", "shoot"]``. A melee creature wants
+``["idle", "walk", "run", "attack"]``. A background villager may need only
+``["idle", "walk"]``. A boss that reacts to damage might want
+``["idle", "walk", "attack", "hurt"]``.
+
+Two limits worth respecting. Each animation is a separate paid call, so
+asking for movements nothing triggers is pure waste -- cap yourself at
+four. And a non-humanoid rig (quadruped, bird, snake, fish) only has
+locomotion available, so extras like ``shoot`` are silently dropped for
+those; request them only on humanoids.
+
+Almost every rigged asset should include ``idle``: it is what the engine
+plays by default, and without it an enemy stands frozen in its bind pose
+until some mechanic starts a clip.
+
 STYLE CONSISTENCY. ``style_notes`` should keep every asset in the same
 art language so the generated concepts feel like one game. Echo the
 prompt's art-direction phrases (palette, mood, era, material language)
@@ -903,7 +932,7 @@ than breaking the player out of the world.
     ->joint_count(entity) -> int
     ->set_joint_rotation(entity, joint, Quat)
     ->set_joint_translation(entity, joint, Vec3)
-    ->play_clip(entity, "walk", looping) -> bool
+    ->play_clip(entity, "walk", looping) -> bool   // SEMANTIC intent, see below
     ->stop_clip(entity)
     ->set_clip_speed(entity, speed)
 
@@ -972,6 +1001,27 @@ Most assets are a single rigid mesh and have no skeleton at all;
 ``has_skeleton`` returns false and every write is ignored, so this is safe
 to call blind. Reach for it only when the asset is actually rigged -- hands,
 characters, creatures.
+
+CLIP NAMES ARE SEMANTIC INTENTS. Ask for a clip by what it MEANS, from
+exactly this vocabulary:
+
+  idle, walk, run, attack, shoot, hurt, die, jump, turn, climb, dance,
+  wave, sit
+
+    ctx.skeleton->play_clip(self, "walk", /*looping=*/true);
+
+The retargeter names the underlying clips, not this pipeline, so the real
+name inside the GLB might be "Walk", "preset_walk" or anything else. The
+engine resolves your intent through a per-asset map, exactly the way
+``socket_world(self, "muzzle")`` resolves a socket. NEVER guess a raw clip
+name, and never hard-code one from a preset list.
+
+``play_clip`` returns false when the asset has no clip for that intent -- a
+quadruped rig, for instance, only ships locomotion, so ``shoot`` will not
+exist on it. Check the return value when the behaviour depends on it.
+
+An asset that has an ``idle`` clip is ALREADY playing it on a loop when the
+scene loads, so you only need ``play_clip`` when the state changes.
 
 Two ways to move a joint, and they compose:
 

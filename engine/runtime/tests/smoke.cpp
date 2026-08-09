@@ -13,6 +13,7 @@
 //    hand_asset <glb>    — the generated hand matches builtin.hand_pose's contract
 //    hand_pose <glb>     — curling one finger moves only that finger
 //    grab_socket         — a grip socket lands in the hand from any approach
+//    clip_contract       — animation intents resolve to real glTF clip names
 
 #include <algorithm>
 #include <cmath>
@@ -656,6 +657,13 @@ static int case_lod_skinning(int count, char** paths) {
             }
         }
 
+        // Animation clips must survive decimation. They target NODES, so
+        // nothing about simplifying the mesh can invalidate them -- but the
+        // optimizer has to actually write them back out, and for a while it
+        // did not, which silently left every LOD un-animatable.
+        if (skel.clips.empty())
+            return fail("a LOD lost its animation clips entirely");
+
         if (i == 0) {
             reference = skel;
         } else {
@@ -678,6 +686,32 @@ static int case_lod_skinning(int count, char** paths) {
                     }
                 }
             }
+
+            if (skel.clips.size() != reference.clips.size())
+                return fail("LOD clip counts differ");
+            for (size_t c = 0; c < reference.clips.size(); ++c) {
+                const auto& got = skel.clips[c];
+                const auto& want = reference.clips[c];
+                // The NAME is the contract ISkeleton::play_clip matches on,
+                // so a rename between levels would break a mechanic the
+                // moment the player walked far enough to switch LOD.
+                if (got.name != want.name)
+                    return fail("LOD clip names differ");
+                if (std::fabs(got.duration - want.duration) > 1e-5f)
+                    return fail("LOD clip durations differ");
+                if (got.channels.size() != want.channels.size())
+                    return fail("LOD clip channel counts differ");
+                for (size_t ch = 0; ch < want.channels.size(); ++ch) {
+                    const auto& a = got.channels[ch];
+                    const auto& b = want.channels[ch];
+                    if (a.joint != b.joint || a.path != b.path ||
+                        a.interp != b.interp) {
+                        return fail("LOD clip channel targets differ");
+                    }
+                    if (a.times != b.times || a.values != b.values)
+                        return fail("LOD clip keyframe data differs");
+                }
+            }
         }
 
         const std::size_t tris = indices.size() / 3;
@@ -688,18 +722,20 @@ static int case_lod_skinning(int count, char** paths) {
             return 1;
         }
         prev_tris = tris;
-        std::printf("       LOD %d: %zu tris, %zu verts, %zu joints\n", i, tris,
-                    verts.size(), skel.joint_count());
+        std::printf("       LOD %d: %zu tris, %zu verts, %zu joints, %zu clip(s)\n",
+                    i, tris, verts.size(), skel.joint_count(),
+                    skel.clips.size());
     }
 
-    return ok("lod skinning: identical skeleton and valid bindings at every "
+    return ok("lod skinning: identical skeleton, bindings and clips at every "
               "level");
 }
 
 // The generated hand asset is what makes builtin.hand_pose possible, so it
-// has a contract the mechanic depends on by name: 16 joints, mixamo-style
-// bone names, and knuckle vertices that blend two joints (a hand rigidly
-// bound one-box-per-joint would tear open at every bend).
+// has a contract the mechanic depends on by name: 16 joints, mixamorig:
+// bone names (hand fixture only; Tripo NPCs use spec=tripo), and knuckle
+// vertices that blend two joints (a hand rigidly bound one-box-per-joint
+// would tear open at every bend).
 static int case_hand_asset(const char* glb) {
     namespace gml = ptv::gltf_mesh_load;
     std::string err;
@@ -918,6 +954,64 @@ static int case_grab_socket() {
     return ok("grab socket: the grip lands in the hand from any approach");
 }
 
+// The clip contract: a mechanic asks for the semantic intent "walk" and the
+// engine finds whatever the retargeter actually named that clip. Without this
+// indirection every generated play_clip call is a coin flip, because Tripo
+// picks the names and codegen never sees the asset.
+static int case_clip_contract() {
+    const char* doc = R"({
+        "version": 1, "prompt_id": "t", "scene_id": "s", "title": "T", "name": "S",
+        "player": {"height_meters": 1.7, "locomotion": "teleport", "comfort": "comfort",
+                    "spawn": {"position": [0,0,0], "rotation": [0,0,0,1]}},
+        "sky_color": [0,0,0], "ambient_intensity": 0.1,
+        "lights": [],
+        "entities": [
+          {"id": "goblin", "name": "Goblin",
+           "transform": {"position": [0,0,-2], "rotation": [0,0,0,1], "scale": 1.0},
+           "mesh": {"asset_id": "goblin", "glb_path": "missing.glb",
+                    "target_scale_meters": 1.6, "collision_shape": "capsule",
+                    "skinned": true, "joint_count": 65,
+                    "animations": {"idle": "Idle", "walk": "Walk_01",
+                                   "run": "Run_Fast"}},
+           "tags": ["enemy"]}
+        ]
+    })";
+    const char* path = "ptv_smoke_clip_scene.json";
+    std::FILE* f = std::fopen(path, "wb");
+    std::fwrite(doc, 1, std::strlen(doc), f);
+    std::fclose(f);
+
+    auto loaded = ptv::LoadSceneJson(path);
+    if (loaded.entities.size() != 1 || !loaded.entities[0].mesh.has_value())
+        return fail("clip scene did not load");
+
+    const auto& mesh = *loaded.entities[0].mesh;
+    if (mesh.animations.size() != 3)
+        return fail("animations map did not survive the scene parse");
+    if (mesh.animations.at("walk") != "Walk_01")
+        return fail("intent 'walk' resolved to the wrong clip name");
+
+    ptv::World world;
+    ptv::ApplySceneToWorld(loaded, world);
+    const auto e = world.find("goblin");
+    if (e == entt::null || !world.registry().all_of<ptv::CMesh>(e))
+        return fail("goblin entity missing CMesh");
+
+    const auto& cm = world.registry().get<ptv::CMesh>(e);
+    if (cm.animations.size() != 3)
+        return fail("animations map did not reach CMesh");
+    // The resolution play_clip performs: intent in, real clip name out.
+    if (cm.animations.at("run") != "Run_Fast")
+        return fail("intent 'run' did not reach the ECS intact");
+    // An intent the asset does not have must simply be absent, so play_clip
+    // returns false instead of starting the wrong animation.
+    if (cm.animations.count("shoot") != 0)
+        return fail("an unrequested intent appeared in the map");
+
+    return ok("clip contract: intents resolve to real clip names through the "
+              "scene into the ECS");
+}
+
 static int case_openxr() {
     XrApplicationInfo ai{};
     std::strncpy(ai.applicationName, "ptv_smoke",
@@ -1002,6 +1096,7 @@ int main(int argc, char** argv) {
         return case_hand_pose(argv[2]);
     }
     if (what == "grab_socket") return case_grab_socket();
+    if (what == "clip_contract") return case_clip_contract();
     if (what == "lod_skinning") {
         if (argc < 4) {
             std::fprintf(stderr,

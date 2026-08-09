@@ -44,6 +44,14 @@ struct MeshRef {
      * scene to find out. */
     bool skinned{false};
     int joint_count{0};
+    /** Semantic animation intent ("walk", "attack") -> the glTF clip name
+     * actually present in the GLB.
+     *
+     * Tripo's retargeter names the clips, not this pipeline, so without this
+     * map generated C++ would have to guess. It is the exact same contract
+     * as ``sockets``: ask by a name fixed in advance, let per-asset data
+     * supply the specifics. */
+    std::unordered_map<std::string, std::string> animations;
 };
 
 // Procedural primitive authored by the world-generation stage.

@@ -1,5 +1,25 @@
 {
   "$defs": {
+    "AnimationIntent": {
+      "description": "Semantic animations an asset can be given, independent of rig type.\n\nDeliberately NOT raw Tripo preset ids. Which presets exist depends on the\nrig type and rig model, neither of which is known until the free\nrig-check runs -- long after the manifest is written. The animation stage\nmaps these onto concrete presets once it knows the rig, and silently has\nfewer options for a creature (a quadruped rig ships exactly one\nlocomotion preset) than for a humanoid.",
+      "enum": [
+        "idle",
+        "walk",
+        "run",
+        "attack",
+        "shoot",
+        "hurt",
+        "die",
+        "jump",
+        "turn",
+        "climb",
+        "dance",
+        "wave",
+        "sit"
+      ],
+      "title": "AnimationIntent",
+      "type": "string"
+    },
     "AssetCategory": {
       "enum": [
         "environment",
@@ -24,6 +44,15 @@
     "AssetItem": {
       "additionalProperties": false,
       "properties": {
+        "animations": {
+          "description": "Animations this asset needs, as semantic intents rather than Tripo preset ids. Only meaningful when 'rigged' is true; ignored otherwise. Each one is a separate billed retarget call, so ask for what the gameplay actually uses -- an enemy that patrols and attacks needs ['idle', 'walk', 'run', 'attack'], while a background villager may need only ['idle', 'walk']. Intents the asset's rig cannot express are dropped automatically.",
+          "items": {
+            "$ref": "#/$defs/AnimationIntent"
+          },
+          "maxItems": 5,
+          "title": "Animations",
+          "type": "array"
+        },
         "category": {
           "$ref": "#/$defs/AssetCategory"
         },

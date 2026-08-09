@@ -25,6 +25,7 @@ def run(ctx: PipelineContext) -> StageResult:
     manifest = ctx.asset_manifest or ctx.store.load_asset_manifest(ctx.project_id)
     assets_dir = ctx.project_dir / "assets"
     report: dict[str, dict[str, Any]] = {}
+    animation_map = _animation_clip_names(ctx.project_dir)
     ok = 0
     rejected = 0
 
@@ -42,6 +43,12 @@ def run(ctx: PipelineContext) -> StageResult:
         info["target_scale_meters"] = item.target_scale_meters
         info["collision_shape"] = item.collision_shape
         info["glb_path"] = str(glb.relative_to(ctx.settings.repo_root)).replace("\\", "/")
+        # Semantic intent -> real glTF clip name, from the animation stage.
+        # Rides on this report so it reaches the scene compiler the same way
+        # ``skinned`` and ``lod_paths`` do, with no extra plumbing.
+        clips = animation_map.get(item.id)
+        if clips:
+            info["animations"] = dict(clips)
         if info["valid"] and info["has_any_material"]:
             info["status"] = "ok"
             ok += 1
@@ -76,20 +83,51 @@ def run(ctx: PipelineContext) -> StageResult:
     )
 
 
+def _animation_clip_names(project_dir: Path) -> dict[str, dict[str, str]]:
+    """Per-asset intent -> clip-name maps recorded by ``asset_animation``.
+
+    Empty for projects with no animated assets, and for anything generated
+    before that stage existed.
+    """
+
+    path = project_dir / "asset_animation.json"
+    if not path.is_file():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+
+    out: dict[str, dict[str, str]] = {}
+    for asset_id, entry in data.items():
+        if not isinstance(entry, dict) or entry.get("status") != "animated":
+            continue
+        clips = entry.get("animations")
+        if isinstance(clips, dict) and clips:
+            out[str(asset_id)] = {str(k): str(v) for k, v in clips.items()}
+    return out
+
+
 def _pick_primary_glb(d: Path) -> Path | None:
     if not d.exists():
         return None
-    # Prefer *rigged*, then *pbr* / *model*; fall back to first .glb.
+    # Prefer *animated*, then *rigged*, then *pbr* / *model*; fall back to the
+    # first .glb.
     #
-    # The rigged key has to lead. ``asset_rigging`` writes ``model_rigged.glb``
-    # beside the original ``model.glb`` so a re-run can rig the source again,
-    # and on the *model* key alone plain "model.glb" would sort first and the
-    # skeleton would silently never reach the scene.
+    # Order matters and is not alphabetical by accident. Each stage writes its
+    # output BESIDE the input rather than over it, so a re-run can start from
+    # the original: ``asset_rigging`` adds ``model_rigged.glb`` next to
+    # ``model.glb``, and ``asset_animation`` adds ``model_animated.glb`` next
+    # to that. On the *model* key alone plain "model.glb" sorts first, and the
+    # skeleton and clips would silently never reach the scene.
     glbs = [p for p in d.rglob("*.glb") if p.is_file()]
     if not glbs:
         return None
     glbs.sort(
         key=lambda p: (
+            0 if "animated" in p.name.lower() else 1,
             0 if "rigged" in p.name.lower() else 1,
             0 if "pbr" in p.name.lower() else 1,
             0 if "model" in p.name.lower() else 1,

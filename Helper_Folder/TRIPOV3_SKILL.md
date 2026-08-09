@@ -316,7 +316,8 @@ convert" price tier.
 
 **animate_rig** — `input` (task_id / file_token / URL; V2's
 `original_model_task_id` is NOT read), `model` (V2's `model_version`),
-`out_format` (glb/fbx), `spec` (mixamo/tripo), `rig_type` (or legacy
+`out_format` (glb/fbx), `spec` (`tripo` required for retarget; `mixamo`
+breaks `/animations/retarget` with error 1004), `rig_type` (or legacy
 `topology`). Version: §3.2. See §A.10 for the corrected field names.
 
 **animate_retarget** — `original_model_task_id` (must be a successful rig task),
@@ -657,9 +658,8 @@ Output parsing: `output.riggable` (bool) unchanged; `topology` key → `rig_type
 |---|---|---|
 | `original_model_task_id` | **rename to `input`** | required; task_id / `file_token` / URL. Accepts GLB, GLTF, FBX, OBJ, STL ≤150 MB |
 | `model_version` | **rename to `model`** | allowed: `v1.0-20240301` (default, **biped only**) / `v2.5-20260210` (non-humanoid); **`v2.0-20250506` → `v2.5-20260210`**. Pair it with `rig_type` — a quadruped sent to the biped model does not error, it just rigs badly |
-| `spec` | keep | `tripo` (default) / `mixamo` bone naming |
+| `spec` | keep | `tripo` (default) / `mixamo` bone naming. **This pipeline always sends `tripo`** — Mixamo-spec skeletons make every follow-on `/animations/retarget` call fail with Tripo error 1004 |
 | `out_format` | keep | glb / fbx |
-| `spec` | keep | mixamo / tripo |
 | `rig_type` (or legacy `topology`) | keep | default biped |
 
 ## A.11 animate_retarget → POST /v3/animations/retarget
@@ -1041,12 +1041,12 @@ ret = post(f"{BASE}/task", json={
 rig = post(f"{BASE}/animations/rig", json={
     "input": model_task_id,                  # NOT original_model_task_id
     "out_format": "glb",
-    "spec": "mixamo",
+    "spec": "tripo",                         # NOT mixamo — mixamo breaks retarget (1004)
     "rig_type": "biped",                     # from /animations/rig-check
     "model": "v1.0-20240301",                # NOT model_version; biped model
 })
 ret = post(f"{BASE}/animations/retarget", json={
-    "original_model_task_id": rig_task_id,
+    "input": rig_task_id,                    # NOT original_model_task_id
     "animations": ["preset:walk", "preset:run"],
 })
 ```

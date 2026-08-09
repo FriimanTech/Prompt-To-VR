@@ -123,14 +123,34 @@ orchestrator and a reusable Vulkan + OpenXR engine core.
    or a URL — NOT V2's `original_model_task_id`. The rig `model` is derived
    from the returned `rig_type`: `v1.0-20240301` for `biped`,
    `v2.5-20260210` for every non-humanoid shape (`quadruped`, `hexapod`,
-   `octopod`, `avian`, `serpentine`, `aquatic`). `spec="mixamo"` and
-   `out_format="glb"` always. Output lands as `model_rigged.glb` beside the
+   `octopod`, `avian`, `serpentine`, `aquatic`). `spec="tripo"` and
+   `out_format="glb"` always — Mixamo-spec skeletons make every follow-on
+   `/animations/retarget` call fail with Tripo error 1004. Output lands as
+   `model_rigged.glb` beside the
    original, and `asset_rig.json` records the outcome so a Resume never
    re-bills. Runs BEFORE normalization so the rigged mesh is what every
    later stage validates, sockets, decimates and compiles. Every rig type
    Tripo offers describes a WHOLE creature, so props, weapons and body
    parts are not riggable — the free pre-check is what keeps that from
    costing anything.
+6c. **Animation retarget** (`asset_animation`): for every successfully rigged
+   asset whose `AssetItem.animations` is non-empty, `POST
+   /v3/animations/retarget` (~20 credits PER animation, ≤5 per call).
+   `AssetItem.animations` holds semantic INTENTS (`idle`, `walk`, `run`,
+   `attack`, `shoot`, `hurt`, `die`, `jump`, `turn`, `climb`, `dance`,
+   `wave`, `sit`), never raw preset ids — which presets exist depends on the
+   `rig_type` and rig `model`, neither known until rig-check has run, and
+   `resolve_animations` maps intent→preset from what `asset_rig.json`
+   recorded. A creature rig has only locomotion, so `walk` and `run` share
+   one preset (billed once) and other intents are dropped loudly.
+   `input` MUST be a rig `task_id`; there is no upload fallback.
+   `animate_in_place=True` always — a clip with baked root motion would
+   translate the mesh on top of the engine moving the entity, so the
+   character covers double the ground and snaps back on every loop.
+   `export_with_geometry=True` because the runtime reads mesh, skin and
+   clips from one GLB. Output is `model_animated.glb`; `asset_animation.json`
+   records intent → the clip name Tripo ACTUALLY produced (read back out of
+   the GLB, never assumed).
 7. Assets **validated** (`asset_normalization`): GLB header/JSON check plus
    scale / collision metadata. This stage does NOT modify geometry.
 7b. **Asset contract** (`asset_contract`): derives each asset's named
@@ -166,7 +186,11 @@ orchestrator and a reusable Vulkan + OpenXR engine core.
    makes any non-trivial project runnable. There is **no cap on asset count** —
    more content just means a smaller per-asset budget (never below a quality
    floor) plus more aggressive runtime culling/LOD. See `docs/rendering.md`.
-   **Rigged assets** take a skin-preserving path: bindings ride inside the
+   **Rigged assets** take a skin-preserving path: animation clips are copied
+   through verbatim (they target nodes, so decimation cannot invalidate
+   them — but the writer has to actually emit them, and for a while it did
+   not, which silently left every LOD un-animatable),
+   bindings ride inside the
    interleaved vertex through the remap, simplification uses
    `meshopt_simplifyWithAttributes` + `meshopt_SimplifyRegularize` (never bone
    data as an attribute), `--sloppy` is refused because it invents vertex
@@ -174,8 +198,11 @@ orchestrator and a reusable Vulkan + OpenXR engine core.
    skeleton so one joint palette serves all four levels.
 9. Deterministic scene compiler merges `world.scene.json` (environment) with
    gameplay entities and emits `scene.json` + build metadata, including each
-   mesh's `lod_paths`/`bounds_radius_m`/`sockets`/`skinned` and the scene-level
-   `performance` block. It is also the **socket validator**: it is the only
+   mesh's `lod_paths`/`bounds_radius_m`/`sockets`/`skinned`/`animations` and
+   the scene-level `performance` block. `mesh.animations` is the clip
+   contract: semantic intent → real glTF clip name, so generated C++ writes
+   `ctx.skeleton->play_clip(self, "walk", true)` without knowing what the
+   retargeter called it, exactly as `socket_world(self, "muzzle")` works. It is also the **socket validator**: it is the only
    stage that sees both a CodeTask's `required_sockets` and the asset's
    derived sockets, so a mechanic requiring a socket its asset cannot supply
    fails the build loudly, with every violation listed at once.

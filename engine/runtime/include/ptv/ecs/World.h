@@ -139,6 +139,9 @@ struct CMesh {
      * whether to attach a ``CSkeleton``; entities without it never touch the
      * skinned pipeline. */
     bool skinned{false};
+    /** Animation intent ("walk") -> the real glTF clip name in this asset.
+     * Read through ``MechanicContext::skeleton`` rather than directly. */
+    std::unordered_map<std::string, std::string> animations;
 };
 
 /** Skeleton for a rigged ``CMesh``, plus the palette the renderer uploads.

@@ -777,7 +777,7 @@ def test_rigging_stage_rigs_and_then_reuses_the_recorded_result(
 
         def rig(self, *, out_dir, **kw):
             calls.append("rig")
-            assert kw["spec"] == "mixamo"
+            assert kw["spec"] == "tripo"
             assert kw["out_format"] == "glb"
             assert kw["model"] == "v1.0-20240301"
             # The real client always names its download ``model.glb``, which
@@ -826,6 +826,292 @@ def test_rigged_glb_wins_the_primary_glb_pick(tmp_path: Path):
 
     assert _pick_primary_glb(d).name == "model_rigged.glb"
     assert _existing_glb(d).name == "model_rigged.glb"
+
+
+def test_animated_glb_outranks_the_rigged_one(tmp_path: Path):
+    """Each stage writes beside its input so a re-run can start from the
+    original, which means the pickers carry the whole precedence chain."""
+
+    from ptv_orchestrator.pipeline.stage_asset_normalize import _pick_primary_glb
+    from ptv_orchestrator.pipeline.stage_asset_rigging import _source_glb
+    from ptv_orchestrator.pipeline.stage_tripo_models import _existing_glb
+
+    d = tmp_path / "asset"
+    d.mkdir()
+    for name in ("model.glb", "model_rigged.glb", "model_animated.glb"):
+        (d / name).write_bytes(b"glTF\x02\x00\x00\x00")
+
+    assert _pick_primary_glb(d).name == "model_animated.glb"
+    assert _existing_glb(d).name == "model_animated.glb"
+    # Rigging must still start from the untouched Tripo output, or a re-run
+    # would rig a mesh that already has a skeleton and clips.
+    assert _source_glb(d).name == "model.glb"
+
+
+# ---------------------------------------------------------------------------
+# Animation stage
+# ---------------------------------------------------------------------------
+
+
+def _animated_glb_bytes(clip_names: list[str]) -> bytes:
+    """A minimal GLB whose JSON chunk advertises the given animations."""
+    import struct
+
+    doc = {
+        "asset": {"version": "2.0"},
+        "animations": [{"name": n} for n in clip_names],
+    }
+    payload = json.dumps(doc).encode("utf-8")
+    payload += b" " * ((4 - len(payload) % 4) % 4)
+    out = struct.pack("<III", 0x46546C67, 2, 12 + 8 + len(payload))
+    out += struct.pack("<II", len(payload), 0x4E4F534A)
+    out += payload
+    return out
+
+
+def _anim_ctx(tmp_path: Path, *, intents, rig_entry):
+    from ptv_orchestrator.events import EventBus
+    from ptv_orchestrator.pipeline.context import PipelineContext
+    from ptv_orchestrator.settings import Settings
+    from ptv_schemas import AnimationIntent
+
+    settings = Settings(repo_root=tmp_path, projects_dir=tmp_path / "projects")
+    store = ProjectStore(settings.projects_dir)
+    state = store.create("Anim Test", "a tiny prompt for the test")
+    store.save_asset_manifest(
+        state.project_id,
+        AssetManifest(
+            prompt_id="demo",
+            items=[
+                AssetItem(
+                    id="hero",
+                    name="Hero",
+                    category=AssetCategory.character,
+                    style_notes="a humanoid",
+                    reference=ReferenceImageRequest(prompt="a humanoid"),
+                    rigged=True,
+                    animations=[AnimationIntent(i) for i in intents],
+                )
+            ],
+        ),
+    )
+
+    project_dir = store.dir_for(state.project_id)
+    (project_dir / "assets" / "hero").mkdir(parents=True, exist_ok=True)
+    if rig_entry is not None:
+        (project_dir / "asset_rig.json").write_text(
+            json.dumps({"hero": rig_entry}), encoding="utf-8"
+        )
+
+    ctx = PipelineContext(
+        project_id=state.project_id,
+        settings=settings,
+        store=store,
+        bus=EventBus(),
+    )
+    return ctx, project_dir / "assets" / "hero"
+
+
+def test_animation_stage_maps_intents_and_records_real_clip_names(
+    tmp_path: Path, monkeypatch
+):
+    """Tripo names the clips, so the stage must read the names actually in
+    the returned GLB rather than assuming they match the presets."""
+
+    from ptv_orchestrator.pipeline import stage_asset_animation
+
+    sent: dict = {}
+
+    class _Tripo:
+        def __init__(self, *a, **kw):
+            pass
+
+        def get_balance(self):
+            return {"balance": 10000.0, "frozen": 0.0}
+
+        def retarget(self, *, out_dir, rig_task_id, animations, **kw):
+            sent["rig_task_id"] = rig_task_id
+            sent["animations"] = list(animations)
+            sent.update(kw)
+            out = Path(out_dir)
+            out.mkdir(parents=True, exist_ok=True)
+            glb = out / "model.glb"
+            # Tripo's own naming, deliberately unlike the preset ids.
+            glb.write_bytes(_animated_glb_bytes(["Idle", "Walk", "Run"]))
+
+            class _R:
+                task_id = "task_anim"
+                primary_glb = glb
+
+            return _R()
+
+    monkeypatch.setattr(stage_asset_animation, "TripoClient", _Tripo)
+
+    ctx, item_dir = _anim_ctx(
+        tmp_path,
+        intents=["idle", "walk", "run"],
+        rig_entry={
+            "status": "rigged",
+            "rig_task_id": "task_rig",
+            "rig_type": "biped",
+            "model": "v1.0-20240301",
+        },
+    )
+    stage_asset_animation.run(ctx)
+
+    assert sent["rig_task_id"] == "task_rig"
+    assert sent["animations"] == [
+        "preset:biped:idle",
+        "preset:biped:walk",
+        "preset:biped:run",
+    ]
+    assert sent["animate_in_place"] is True
+    assert sent["export_with_geometry"] is True
+
+    assert (item_dir / "model_animated.glb").is_file()
+    report = json.loads(
+        (ctx.project_dir / "asset_animation.json").read_text(encoding="utf-8")
+    )
+    entry = report["hero"]
+    assert entry["status"] == "animated"
+    # The contract generated C++ relies on: semantic intent -> real clip name.
+    assert entry["animations"] == {
+        "idle": "Idle",
+        "walk": "Walk",
+        "run": "Run",
+    }
+
+
+def test_animation_stage_skips_an_asset_with_no_recorded_rig_task(
+    tmp_path: Path, monkeypatch
+):
+    """Retarget takes a rig task id and nothing else, so an asset rigged
+    before the pipeline recorded one cannot be animated -- and must say so
+    rather than burning a call."""
+
+    from ptv_orchestrator.pipeline import stage_asset_animation
+
+    calls: list[str] = []
+
+    class _Tripo:
+        def __init__(self, *a, **kw):
+            pass
+
+        def get_balance(self):
+            calls.append("balance")
+            return {"balance": 10000.0, "frozen": 0.0}
+
+        def retarget(self, **kw):
+            calls.append("retarget")
+            raise AssertionError("must not be called")
+
+    monkeypatch.setattr(stage_asset_animation, "TripoClient", _Tripo)
+
+    ctx, _ = _anim_ctx(
+        tmp_path,
+        intents=["idle", "walk"],
+        rig_entry={"status": "rigged", "rig_type": "biped"},
+    )
+    stage_asset_animation.run(ctx)
+
+    assert calls == []
+    report = json.loads(
+        (ctx.project_dir / "asset_animation.json").read_text(encoding="utf-8")
+    )
+    assert report["hero"]["status"] == "missing_rig_task"
+
+
+def test_animation_map_reaches_scene_json_through_normalization():
+    """The clip contract has to survive two hops: the animation stage records
+    it, normalization carries it, and scene_compile emits it. A break anywhere
+    leaves generated C++ guessing clip names."""
+
+    from ptv_orchestrator.pipeline.stage_scene_compile import _mesh_render_fields
+
+    norm = {
+        "skinned": True,
+        "joint_count": 65,
+        "animations": {"idle": "Idle", "walk": "Walk_01"},
+    }
+    out = _mesh_render_fields(norm, 1.6, None)
+
+    assert out["skinned"] is True
+    assert out["animations"] == {"idle": "Idle", "walk": "Walk_01"}
+
+    # An un-animated asset must not gain an empty map -- the runtime treats
+    # absence as "no contract" and falls back to exact-name matching.
+    assert "animations" not in _mesh_render_fields({"skinned": True}, 1.0, None)
+
+
+def test_normalization_picks_up_the_animation_report(tmp_path: Path):
+    from ptv_orchestrator.pipeline.stage_asset_normalize import (
+        _animation_clip_names,
+    )
+
+    (tmp_path / "asset_animation.json").write_text(
+        json.dumps(
+            {
+                "hero": {
+                    "status": "animated",
+                    "animations": {"walk": "Walk_01"},
+                },
+                # Failed and skipped assets must not contribute a contract.
+                "rock": {"status": "not_rigged"},
+                "ogre": {"status": "failed", "error": "boom"},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    got = _animation_clip_names(tmp_path)
+    assert got == {"hero": {"walk": "Walk_01"}}
+    # Missing file is the normal case for a project with no animated assets.
+    assert _animation_clip_names(tmp_path / "nope") == {}
+
+
+def test_animation_stage_does_not_rebill_on_a_second_pass(
+    tmp_path: Path, monkeypatch
+):
+    from ptv_orchestrator.pipeline import stage_asset_animation
+
+    calls: list[str] = []
+
+    class _Tripo:
+        def __init__(self, *a, **kw):
+            pass
+
+        def get_balance(self):
+            return {"balance": 10000.0, "frozen": 0.0}
+
+        def retarget(self, *, out_dir, **kw):
+            calls.append("retarget")
+            out = Path(out_dir)
+            out.mkdir(parents=True, exist_ok=True)
+            glb = out / "model.glb"
+            glb.write_bytes(_animated_glb_bytes(["Walk"]))
+
+            class _R:
+                task_id = "task_anim"
+                primary_glb = glb
+
+            return _R()
+
+    monkeypatch.setattr(stage_asset_animation, "TripoClient", _Tripo)
+
+    ctx, _ = _anim_ctx(
+        tmp_path,
+        intents=["walk"],
+        rig_entry={
+            "status": "rigged",
+            "rig_task_id": "task_rig",
+            "rig_type": "biped",
+            "model": "v1.0-20240301",
+        },
+    )
+    stage_asset_animation.run(ctx)
+    stage_asset_animation.run(ctx)
+
+    assert calls == ["retarget"]
 
 
 def test_artifact_id_accepts_vcpkg_leading_underscore_filenames(tmp_path: Path):

@@ -58,6 +58,11 @@ class Settings(BaseSettings):
     # without editing the pipeline. Assets stay un-rigged and render as static
     # geometry; nothing downstream breaks.
     tripo_rigging_enabled: bool = True
+    # Animation retarget (Stage 6c). Billed PER ANIMATION (~20 credits each),
+    # so the cap matters: four clips on six enemies is already ~480 credits.
+    # Disabling leaves rigged assets as static skinned meshes.
+    tripo_animation_enabled: bool = True
+    tripo_animation_max_per_asset: int = 4
 
     # --- LLM output budgets ---------------------------------------------
     # Caps the visible output (Claude) and the COMBINED reasoning +

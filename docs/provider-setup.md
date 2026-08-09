@@ -119,9 +119,11 @@ error:
 | `biped` | `v1.0-20240301` (humanoid only; 90+ animation presets) |
 | `quadruped`, `hexapod`, `octopod`, `avian`, `serpentine`, `aquatic` | `v2.5-20260210` |
 
-`spec="mixamo"` and `out_format="glb"` always. Mixamo bone naming is chosen so
-the codegen agent — which never sees the asset — can be told the naming
-convention up front.
+`spec="tripo"` and `out_format="glb"` always. Tripo's native bone naming is
+required because `/animations/retarget` rejects Mixamo-spec skeletons with
+error 1004 ("does not support mixamo skeleton retarget"). Generated C++ plays
+clips by semantic intent via `ISkeleton::play_clip`, so Mixamo joint names are
+not needed for NPC animation.
 
 Notice that every rig type describes a **whole creature**. Props, weapons,
 vehicles and disembodied body parts are not riggable, which is exactly why the
@@ -134,6 +136,48 @@ rigged mesh lands as `model_rigged.glb` beside the original so a re-run rigs
 the source rather than an already-rigged mesh. Set
 `PTV_TRIPO_RIGGING_ENABLED=false` to skip the stage entirely; assets then
 render as static geometry and nothing downstream breaks.
+
+### Animation retarget (`asset_animation`)
+
+`POST /v3/animations/retarget`, billed **per animation** (~20 credits each,
+at most 5 per call). `input` must be the `task_id` of a successful **rig**
+task — unlike rig-check there is no upload fallback, so an asset rigged
+before the pipeline recorded a `rig_task_id` has to be re-rigged first.
+
+| Parameter | Value | Why |
+|---|---|---|
+| `animation` / `animations` | one, or a list | Mutually exclusive; the client picks based on count |
+| `out_format` | `glb` | |
+| `bake_animation` | `true` | Writes the motion into the file so nothing depends on Tripo at runtime |
+| `export_with_geometry` | `true` | The runtime loads mesh, skin and clips from ONE GLB |
+| `animate_in_place` | `true` | See below. Tripo defaults this to `false`, so it is always sent explicitly |
+
+**Why in-place is forced.** A locomotion clip normally carries root motion:
+the character's forward travel is baked into the root joint. Play that while
+the engine is also driving the entity's `CTransform` and the two stack — the
+character covers double the ground, then snaps back to the origin every time
+the clip loops. With `animate_in_place: true` only the limbs cycle and
+`CTransform` stays the single source of truth for position. The "enemy runs
+on the spot" case uses the same flag; you simply do not move the entity.
+
+**Presets are chosen from intents, not by hand.** Which ids exist depends on
+the rig: `v1.0-20240301` (biped) has 90+ namespaced `preset:biped:*`,
+`v2.5-20260210` biped has 11 un-namespaced `preset:*`, and each creature rig
+has exactly one locomotion preset. `AssetItem.animations` therefore holds
+semantic intents and `ptv_providers.resolve_animations` does the mapping from
+the `rig_type` and `model` in `asset_rig.json`. For a creature, `walk` and
+`run` resolve to the same preset — billed once, and the runtime plays it
+faster for a run.
+
+**Clip names come back from Tripo, so the stage reads them.** After download
+it parses the GLB's JSON chunk for the `animations[].name` values that are
+actually present and records intent → real name in `asset_animation.json`.
+If a batch returns fewer clips than were paid for, that is logged loudly and
+only the clips that exist are exposed; nothing downstream silently references
+a clip that is not there.
+
+Set `PTV_TRIPO_ANIMATION_ENABLED=false` to skip the stage, or
+`PTV_TRIPO_ANIMATION_MAX_PER_ASSET` (default 4) to cap the bill.
 
 ## Verifying the keys
 

@@ -134,6 +134,7 @@ The chain is deliberately narrow so a static scene pays nothing:
 | Stage | Owner | Result |
 |---|---|---|
 | Add a skeleton to a generated creature | `asset_rigging` (Tripo rig-check + rig) | `model_rigged.glb` |
+| Retarget preset clips onto that skeleton | `asset_animation` (Tripo retarget) | `model_animated.glb` + intent→clip map |
 | Parse skin, hierarchy, `JOINTS_0`/`WEIGHTS_0`, IBMs, clips | `GltfSkinnedLoad.cpp` | `SkinnedVertex` (48 B) + `SkeletonData` |
 | Preserve the rig through decimation | `ptv_glb_optimize` | LOD chain with a byte-identical skeleton at every level |
 | Record that an asset is rigged | `asset_optimization` → `scene_compile` | `mesh.skinned` / `mesh.joint_count` in `scene.json` |
@@ -169,6 +170,30 @@ Two rigs come from different places, and the split is not arbitrary:
   refuse it. They are ordinary ECS entities carrying the rigged mesh, so the
   same skinned pipeline draws them, and `builtin.hand_pose` curls their
   fingers from the controller.
+
+## The clip contract
+
+Sockets solved "the codegen agent cannot see the mesh". Animation clips have
+the identical problem one layer up: **Tripo's retargeter names the clips**, so
+a generated mechanic writing `play_clip(self, "walk")` would be guessing.
+
+The fix is the same shape. `AssetItem.animations` holds semantic intents;
+`asset_animation` maps each to a preset, retargets, then reads back the names
+that are really in the returned GLB and records intent → real name;
+`scene_compile` writes that map as `mesh.animations`; and
+`ISkeleton::play_clip` resolves through it before falling back to an exact
+name match.
+
+| Clause | Owner | Artifact |
+|---|---|---|
+| "this enemy needs to walk and shoot" | `asset_manifest` → `AssetItem.animations` | `asset_manifest.json` |
+| "walk is the clip called Walk_01 on this asset" | `asset_animation` | `asset_animation.json` |
+| "this asset is on this entity" | `scene_spec` | `scene_spec.*.json` |
+
+An asset that ships an `idle` clip starts it looping the moment the scene
+loads. That is the one clip choice with an obvious answer, and without it a
+room of enemies holds its bind pose until some mechanic thinks to start
+them — which reads as broken rather than idle.
 
 ## Grabbing by the grip socket
 

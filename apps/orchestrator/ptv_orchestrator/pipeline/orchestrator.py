@@ -13,6 +13,7 @@ from ..storage import ProjectStore
 from . import (
     stage_asset_contract,
     stage_asset_manifest,
+    stage_asset_animation,
     stage_asset_normalize,
     stage_asset_optimize,
     stage_asset_rigging,
@@ -66,6 +67,11 @@ _SHARED_STAGES: list[tuple[ProjectStage, StageFn]] = [
     # scene's mesh.skinned flag) has to see the rigged mesh. Rigging after
     # optimization would leave the entire LOD chain un-rigged.
     (ProjectStage.asset_rigging, stage_asset_rigging.run),
+    # Retarget onto the skeleton the previous stage produced, still before
+    # normalization so the ANIMATED GLB is the one everything downstream
+    # validates, sockets, decimates and compiles. A rigged enemy with no
+    # clips is a statue that slides across the floor.
+    (ProjectStage.asset_animation, stage_asset_animation.run),
     (ProjectStage.asset_normalization, stage_asset_normalize.run),
     # Must precede code_generation: the codegen agent needs asset_contract.json
     # in context so it writes ctx.sockets->socket_world(self, "muzzle") against

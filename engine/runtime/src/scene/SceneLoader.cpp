@@ -190,6 +190,14 @@ SceneDoc LoadSceneJson(const std::string& path) {
             m.bounds_radius_m = e["mesh"].value("bounds_radius_m", 0.0f);
             m.skinned = e["mesh"].value("skinned", false);
             m.joint_count = e["mesh"].value("joint_count", 0);
+            const auto& anims = e["mesh"].value("animations", Json::object());
+            if (anims.is_object()) {
+                for (auto it = anims.begin(); it != anims.end(); ++it) {
+                    if (!it.value().is_string()) continue;
+                    m.animations.emplace(it.key(),
+                                         it.value().get<std::string>());
+                }
+            }
             // Named attachment points, already in metres (see MeshRef).
             const auto& sockets = e["mesh"].value("sockets", Json::object());
             if (sockets.is_object()) {
@@ -258,7 +266,7 @@ void ApplySceneToWorld(const SceneDoc& doc, World& world) {
                 e, CMesh{es.mesh->asset_id, es.mesh->glb_path,
                          es.mesh->target_scale_meters, es.mesh->lod_paths,
                          es.mesh->bounds_radius_m, es.mesh->sockets,
-                         es.mesh->skinned});
+                         es.mesh->skinned, es.mesh->animations});
         }
         if (es.primitive.has_value()) {
             world.registry().emplace<CPrimitive>(

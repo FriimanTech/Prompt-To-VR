@@ -126,7 +126,7 @@ standard assumption that joint matrices carry no non-uniform scale.
 
 Joints are limited to **256 per skin** by the byte-packed indices; a skin that
 exceeds it fails the load loudly rather than wrapping onto the wrong bone.
-Mixamo humanoids land near 65 and an OpenXR hand is 26.
+Typical humanoid skeletons land near 65 joints and an OpenXR hand is 26.
 
 Culling uses the **bind-pose** bounding sphere, so a heavily posed character is
 culled slightly optimistically — much cheaper than re-deriving bounds per frame
@@ -196,10 +196,17 @@ distance against the scene's `lod_switch_distances_m`, with:
 - a global **`lod_bias`** the adaptive governor raises under load.
 
 **Rigged assets keep an identical skeleton at every level.** `ptv_glb_optimize`
-copies the joint hierarchy, bind pose and inverse bind matrices verbatim into
-each LOD, so one palette — built once per frame from the entity's `CSkeleton` —
-is valid for whichever level the distance check picks. Without that invariant a
-LOD switch mid-animation would snap the character into a garbage pose.
+copies the joint hierarchy, bind pose, inverse bind matrices **and animation
+clips** verbatim into each LOD, so one palette — built once per frame from the
+entity's `CSkeleton` — is valid for whichever level the distance check picks.
+Without that invariant a LOD switch mid-animation would snap the character into
+a garbage pose.
+
+Clips ride through for free: a glTF animation targets NODES, and the node tree
+is copied unchanged, so decimating the mesh cannot invalidate a keyframe. The
+writer does have to actually emit them, though — it did not at first, and the
+result was that every clip Tripo produced was silently discarded before it
+reached the headset, because the runtime loads LOD0.
 
 Two consequences worth knowing:
 

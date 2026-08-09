@@ -368,10 +368,11 @@ public:
 
     /** Index of the joint called ``name``, or -1.
      *
-     *  Names come from the rig, so they depend on the ``spec`` the asset was
-     *  rigged with (Mixamo names look like ``mixamorig:RightHandIndex1``).
-     *  Resolve once in ``on_attach`` and cache the index -- this is a string
-     *  lookup, not something to do per joint per frame. */
+     *  Names come from the rig. Tripo character assets use ``spec="tripo"``
+     *  (native bone names); the player-hand fixture uses a separate
+     *  ``mixamorig:`` naming contract for ``builtin.hand_pose``. Resolve once
+     *  in ``on_attach`` and cache the index -- this is a string lookup, not
+     *  something to do per joint per frame. */
     virtual int joint_index(std::uint32_t entity, const char* name) const = 0;
 
     /** Number of joints, or 0. */

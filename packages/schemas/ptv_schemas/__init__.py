@@ -30,6 +30,7 @@ from .performance import (
     importance_weight,
 )
 from .asset_manifest import (
+    AnimationIntent,
     AssetManifest,
     AssetItem,
     AssetCategory,
@@ -77,6 +78,7 @@ __all__ = [
     "MechanicType",
     "AssetEntry",
     "TestEntry",
+    "AnimationIntent",
     "AssetManifest",
     "AssetItem",
     "AssetCategory",

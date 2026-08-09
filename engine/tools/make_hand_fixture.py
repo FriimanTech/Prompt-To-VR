@@ -16,9 +16,10 @@ JOINTS_0 attribute imposes.
       ring_01 -> _02 -> _03
       pinky_01 -> _02 -> _03
 
-Names are prefixed ``mixamorig:`` to match the ``spec="mixamo"`` convention the
-auto-rigging stage requests for characters, so generated C++ resolves joints
-the same way regardless of where the rig came from.
+Names are prefixed ``mixamorig:`` as a stable contract for
+``builtin.hand_pose`` only. Tripo character auto-rig uses ``spec="tripo"``
+(Mixamo-spec characters cannot be retargeted), so hand joint names are
+deliberately independent of Tripo NPC skeletons.
 
 Geometry is deliberately blocky: each bone owns one tapered box segment, hard
 bound to that joint (weight 1.0) except at the knuckles, where a narrow band

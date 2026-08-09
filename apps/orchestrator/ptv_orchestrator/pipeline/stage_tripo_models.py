@@ -265,8 +265,8 @@ def _existing_glb(item_dir: Path) -> Path | None:
     We require a real-looking GLB (header magic) so a 0-byte truncated
     file from a crashed prior run gets RE-GENERATED instead of being
     treated as "done". Matches the same primary-GLB picking rule as
-    :mod:`stage_asset_normalize`: prefer ``*rigged*``, then ``*pbr*`` /
-    ``*model*`` files.
+    :mod:`stage_asset_normalize`: prefer ``*animated*``, then ``*rigged*``,
+    then ``*pbr*`` / ``*model*`` files.
     """
 
     if not item_dir.exists():
@@ -276,6 +276,7 @@ def _existing_glb(item_dir: Path) -> Path | None:
         return None
     glbs.sort(
         key=lambda p: (
+            0 if "animated" in p.name.lower() else 1,
             0 if "rigged" in p.name.lower() else 1,
             0 if "pbr" in p.name.lower() else 1,
             0 if "model" in p.name.lower() else 1,

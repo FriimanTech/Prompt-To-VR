@@ -111,6 +111,146 @@ def rig_model_for_type(rig_type: str) -> str:
         )
     return _RIG_MODEL_BIPED if key == "biped" else _RIG_MODEL_CREATURE
 
+
+# --- Animation retargeting -------------------------------------------------
+#
+# Which preset ids exist depends on BOTH the rig model and the rig type, and
+# the three lists barely overlap:
+#
+#   v1.0-20240301  biped only, 90+ presets, all namespaced ``preset:biped:``
+#   v2.5-20260210  biped, 11 presets, namespaced plain ``preset:``
+#   v2.5-20260210  every other rig type: exactly ONE walk-ish preset
+#
+# Callers therefore work in semantic INTENTS ("walk", "attack") and let this
+# module pick the preset. An agent choosing preset strings directly would have
+# to know which of the three lists applies before rig-check has even run, and
+# a wrong string is a paid call that fails.
+
+_ANIMATION_INTENTS = (
+    "idle",
+    "walk",
+    "run",
+    "attack",
+    "shoot",
+    "hurt",
+    "die",
+    "jump",
+    "turn",
+    "climb",
+    "dance",
+    "wave",
+    "sit",
+)
+
+# v1.0-20240301: biped only, but by far the richest list.
+_PRESETS_BIPED_V1 = {
+    "idle": "preset:biped:idle",
+    "walk": "preset:biped:walk",
+    "run": "preset:biped:run",
+    "attack": "preset:biped:slash",
+    "shoot": "preset:biped:shoot",
+    "hurt": "preset:biped:hurt",
+    "die": "preset:biped:fall",
+    "jump": "preset:biped:jump",
+    "turn": "preset:biped:turn",
+    "climb": "preset:biped:climb",
+    "dance": "preset:biped:dance_01",
+    "wave": "preset:biped:wave_goodbye_01",
+    "sit": "preset:biped:sit",
+}
+
+# v2.5-20260210 biped: the short list, un-namespaced.
+_PRESETS_BIPED_V25 = {
+    "idle": "preset:idle",
+    "walk": "preset:walk",
+    "run": "preset:run",
+    "attack": "preset:slash",
+    "shoot": "preset:shoot",
+    "hurt": "preset:hurt",
+    "die": "preset:fall",
+    "jump": "preset:jump",
+    "turn": "preset:turn",
+    "climb": "preset:climb",
+}
+
+# v2.5-20260210 creatures: one locomotion preset each. ``walk`` and ``run``
+# both resolve to it -- the runtime plays the same clip faster for a run --
+# and the caller de-duplicates so only one animation is billed.
+_PRESETS_CREATURE = {
+    "quadruped": "preset:quadruped:walk",
+    "hexapod": "preset:hexapod:walk",
+    "octopod": "preset:octopod:walk",
+    "serpentine": "preset:serpentine:march",
+    "aquatic": "preset:aquatic:march",
+}
+
+
+def animation_intents() -> tuple[str, ...]:
+    """The semantic vocabulary callers may request."""
+    return _ANIMATION_INTENTS
+
+
+def presets_for_rig(rig_type: str, model: str | None = None) -> dict[str, str]:
+    """Intent -> preset id for one rig, containing only what actually exists.
+
+    An intent missing from the returned map has no equivalent for that rig
+    (a quadruped cannot ``shoot``), and the caller should drop it rather than
+    substitute something that would animate wrongly.
+    """
+
+    key = (rig_type or "").strip().lower()
+    if key not in _RIG_TYPES:
+        raise ProviderConfigError(
+            f"Unknown Tripo rig_type {rig_type!r}. Expected one of: "
+            f"{', '.join(sorted(_RIG_TYPES))}."
+        )
+    resolved_model = (model or rig_model_for_type(key)).strip()
+
+    if key == "biped":
+        return dict(
+            _PRESETS_BIPED_V1
+            if resolved_model == _RIG_MODEL_BIPED
+            else _PRESETS_BIPED_V25
+        )
+
+    preset = _PRESETS_CREATURE.get(key)
+    if not preset:
+        return {}
+    # Only locomotion exists for creature rigs; run reuses walk's clip.
+    return {"walk": preset, "run": preset}
+
+
+def resolve_animations(
+    intents: list[str], rig_type: str, model: str | None = None
+) -> tuple[list[str], dict[str, str], list[str]]:
+    """Turn requested intents into the preset list to actually send.
+
+    Returns ``(presets, intent_to_preset, dropped)``:
+
+    * ``presets`` is de-duplicated and order-preserving, because Tripo bills
+      per animation and two intents can legitimately share one preset.
+    * ``intent_to_preset`` keeps BOTH intents pointing at that shared preset,
+      so a quadruped still answers a "run" request with its walk clip.
+    * ``dropped`` lists intents this rig has no preset for.
+    """
+
+    table = presets_for_rig(rig_type, model)
+    presets: list[str] = []
+    mapping: dict[str, str] = {}
+    dropped: list[str] = []
+    for raw in intents or []:
+        intent = (raw or "").strip().lower()
+        if not intent:
+            continue
+        preset = table.get(intent)
+        if not preset:
+            dropped.append(intent)
+            continue
+        mapping[intent] = preset
+        if preset not in presets:
+            presets.append(preset)
+    return presets, mapping, dropped
+
 # Terminal task states. V3 collapsed V2's 8-state enum down to 5: the old
 # ``banned`` and ``expired`` are now ``failed`` carrying error_code 2008 and
 # 2018 respectively.
@@ -390,17 +530,19 @@ class TripoClient:
         task_id: str | None = None,
         glb_path: str | os.PathLike[str] | None = None,
         rig_type: str = "biped",
-        spec: str = "mixamo",
+        spec: str = "tripo",
         out_format: str = "glb",
         model: str | None = None,
     ) -> TripoTaskResult:
         """Add a skeleton and skin weights to a model. Costs ~30 credits.
 
-        ``spec="mixamo"`` is the default here rather than Tripo's own
-        ``tripo`` naming because Mixamo bone names are the de-facto standard
-        the codegen agent can be told about up front -- it never sees the
-        asset, so it has to write ``joint_index(self, "mixamorig:...")``
-        against a naming convention that is fixed in advance.
+        ``spec="tripo"`` (Tripo's native bone naming) is required for the
+        follow-on ``/animations/retarget`` call. Live Tripo rejects Mixamo-
+        named skeletons with error 1004 ("does not support mixamo skeleton
+        retarget"), so Mixamo naming is deliberately NOT the default even
+        though Unity/Unreal docs still advertise it. Generated C++ plays
+        clips by semantic intent via ``ISkeleton::play_clip`` and does not
+        hard-code Mixamo joint names for NPCs.
 
         ``model`` is derived from ``rig_type`` unless overridden; see
         :func:`rig_model_for_type` for why that pairing is load-bearing.
@@ -416,6 +558,70 @@ class TripoClient:
         }
         rig_task = self._create_task("/animations/rig", body)
         return self._await_and_download(rig_task, out_dir)
+
+    def retarget(
+        self,
+        *,
+        out_dir: str | os.PathLike[str],
+        rig_task_id: str,
+        animations: list[str],
+        out_format: str = "glb",
+        bake_animation: bool = True,
+        export_with_geometry: bool = True,
+        animate_in_place: bool = True,
+    ) -> TripoTaskResult:
+        """Retarget preset animations onto an already-rigged model.
+
+        Billed PER ANIMATION (~20 credits each), so the caller decides how
+        many are worth it -- this just sends what it is given.
+
+        ``input`` must be a successful **rig** task id. There is deliberately
+        no file-upload fallback the way ``rig_check`` has one: retargeting
+        needs Tripo's own skeleton for that task, and uploading a rigged GLB
+        would hand it a mesh with no task lineage. An asset whose rig task id
+        was lost has to be re-rigged.
+
+        ``animate_in_place=True`` is the default and should essentially always
+        stay that way. With it false the clip carries baked root motion, so a
+        character translates on its own ON TOP of whatever the engine does to
+        its transform -- the entity covers double the ground and then snaps
+        back to the origin every time the clip loops. In-place keeps
+        ``CTransform`` the single source of truth for position. Note this
+        inverts Tripo's own default of false, so it is always sent explicitly.
+
+        ``export_with_geometry=True`` is required by this engine: the runtime
+        loads one GLB per mesh and reads its skin AND its clips from that same
+        file, so a geometry-less animation export would have nothing to skin.
+        """
+
+        self._require_key()
+        if not rig_task_id:
+            raise ProviderCallError(
+                "Tripo retarget needs the task_id of a successful rig task; "
+                "re-run rigging for this asset to obtain one."
+            )
+        cleaned = [a for a in (animations or []) if a]
+        if not cleaned:
+            raise ProviderCallError(
+                "Tripo retarget needs at least one preset animation id."
+            )
+
+        body: dict[str, Any] = {
+            "input": str(rig_task_id),
+            "out_format": out_format,
+            "bake_animation": bake_animation,
+            "export_with_geometry": export_with_geometry,
+            "animate_in_place": animate_in_place,
+        }
+        # ``animation`` and ``animations`` are mutually exclusive; sending
+        # both is a 400.
+        if len(cleaned) == 1:
+            body["animation"] = cleaned[0]
+        else:
+            body["animations"] = cleaned
+
+        task = self._create_task("/animations/retarget", body)
+        return self._await_and_download(task, out_dir)
 
     def _rig_input(
         self,

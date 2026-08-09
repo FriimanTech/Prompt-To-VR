@@ -1051,9 +1051,24 @@ public:
         if (clip_name == nullptr || !has_skeleton(entity)) return false;
         World& w = app_->world_;
         if (!w.has<CAnimator>(entity)) return false;
+
+        // Resolve a semantic intent ("walk") to the clip the asset really
+        // carries. Tripo's retargeter names the clips, so a mechanic asking
+        // for "walk" has no way to know it is called "Walk" or
+        // "preset_walk_01" in this particular GLB -- the map from
+        // asset_animation.json is what closes that gap. Falls through to an
+        // exact-name match so hand-authored assets and direct clip names
+        // still work.
+        std::string wanted = clip_name;
+        if (w.has<CMesh>(entity)) {
+            const auto& anims = w.get<CMesh>(entity).animations;
+            const auto it = anims.find(wanted);
+            if (it != anims.end()) wanted = it->second;
+        }
+
         auto& anim = w.get<CAnimator>(entity);
         for (size_t i = 0; i < anim.clips.size(); ++i) {
-            if (anim.clips[i].name != clip_name) continue;
+            if (anim.clips[i].name != wanted) continue;
             anim.active_clip = static_cast<int>(i);
             anim.time_s = 0.0f;
             anim.looping = looping;
@@ -1211,10 +1226,23 @@ void Application::attach_skeletons() {
         CAnimator anim{};
         anim.clips = cs.skeleton.clips;
         anim.joint_overridden.assign(cs.skeleton.joint_count(), 0u);
-        // Nothing plays by default. A clip is motion the asset happens to
-        // ship; whether it should run is a gameplay decision, so a mechanic
-        // asks for it through ctx.skeleton->play_clip.
         anim.active_clip = -1;
+
+        // Start an idle loop when the asset has one. Which clip to play IS a
+        // gameplay decision in general, but "stand still" is the one case
+        // with an obvious answer, and without it every enemy in the scene
+        // holds its bind pose until some mechanic thinks to start it -- a
+        // room full of T-posing goblins reads as broken, not as idle.
+        const auto idle = cm.animations.find("idle");
+        if (idle != cm.animations.end()) {
+            for (size_t i = 0; i < anim.clips.size(); ++i) {
+                if (anim.clips[i].name != idle->second) continue;
+                anim.active_clip = static_cast<int>(i);
+                anim.looping = true;
+                anim.playing = true;
+                break;
+            }
+        }
 
         world_.registry().emplace_or_replace<CSkeleton>(entity, std::move(cs));
         world_.registry().emplace_or_replace<CAnimator>(entity,

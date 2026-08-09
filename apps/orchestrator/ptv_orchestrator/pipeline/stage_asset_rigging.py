@@ -212,7 +212,9 @@ def run(ctx: PipelineContext) -> StageResult:
                 task_id=task_id,
                 glb_path=None if task_id else source,
                 rig_type=check.rig_type,
-                spec="mixamo",
+                # tripo (not mixamo): Mixamo-spec skeletons make every
+                # subsequent /animations/retarget call fail with error 1004.
+                spec="tripo",
                 out_format="glb",
                 model=rig_model,
             )
@@ -232,7 +234,7 @@ def run(ctx: PipelineContext) -> StageResult:
                 "rig_task_id": result.task_id,
                 "rig_type": check.rig_type,
                 "model": rig_model,
-                "spec": "mixamo",
+                "spec": "tripo",
                 "out_format": "glb",
                 "source_glb": _rel(ctx, source),
                 "rigged_glb": _rel(ctx, final),
@@ -290,16 +292,18 @@ def _rel(ctx: PipelineContext, path: Path) -> str:
 def _source_glb(item_dir: Path) -> Path | None:
     """The UN-rigged Tripo output for this asset.
 
-    Deliberately not the shared "primary GLB" picker: that one now prefers
-    rigged files, which would make a second run rig an already-rigged mesh.
+    Deliberately not the shared "primary GLB" picker: that one prefers
+    animated then rigged files, which would make a second run rig a mesh that
+    already has a skeleton (and possibly clips) on it.
     """
 
     if not item_dir.is_dir():
         return None
+    skip = ("rigged", "animated", "_lod")
     candidates = [
         p
         for p in item_dir.glob("*.glb")
-        if p.is_file() and "rigged" not in p.name.lower() and "_lod" not in p.name.lower()
+        if p.is_file() and not any(s in p.name.lower() for s in skip)
     ]
     if not candidates:
         return None
