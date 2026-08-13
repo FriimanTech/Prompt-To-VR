@@ -57,9 +57,18 @@ inside `namespace ptv::world` in a `.cpp`.
 
 `WorldContext` (pure data builder): `sky`, `ground`, `light`, `player_spawn`,
 `spawn_primitive` (box/plane/cylinder/sphere/ramp), `add_mesh` (arbitrary
-procedural triangles), `place_object` (anchor a prop GLB), `seed()`. Header-only
+procedural triangles), `place_object` (anchor a prop GLB), `nav_region` /
+`nav_link` (declare the walkable space), `seed()`. Header-only
 convenience builders live in `ptv::world::helpers` (`building_grid`, `wall_shell`,
 `path`, `platform_set`).
+
+`nav_region` / `nav_link` exist because the builder is the only thing that
+knows this level's layout -- it just created it. NPCs cannot infer it, and
+without a declaration they fall back to local obstacle avoidance, which
+cannot find a doorway. Reconstructing the topology from finished geometry
+(the Recast approach) would rebuild something the author already knew. A
+deterministic validator then checks the declaration against itself before the
+world is accepted. See [navigation.md](navigation.md).
 
 `MeshDesc` (for `add_mesh`) uses FLAT float buffers: `positions` and `normals`
 are `std::vector<float>` xyz triples (`{x0,y0,z0, x1,y1,z1, ...}`), NOT
@@ -95,6 +104,11 @@ values read on screen.
   existing GLB `mesh`. Physics `collision_shape` may be `box|sphere|mesh|none`.
 - Lights carry an optional `direction` and, for point lights, an optional
   `range` (falloff radius in meters; the runtime uses 20 m when unset).
+- `navigation`: `{ regions: [{id, min, max, floor_y}], links: [{from, to,
+  point, cost_multiplier?, bidirectional?}] }`. Omitted entirely when the
+  builder declared none, which the runtime reads as "steering only" rather
+  than "nowhere is walkable". Carried through the scene-compile merge and
+  loaded into `ptv::nav::NavGraph`.
 - A GLB `mesh` may carry `sockets`: named local transforms in metres, e.g.
   `{"muzzle": {"position": [0, 0.02, -0.18], "rotation": [0, 0, 0, 1]}}`.
   Written by the scene compiler from `asset_contract.json` and read by

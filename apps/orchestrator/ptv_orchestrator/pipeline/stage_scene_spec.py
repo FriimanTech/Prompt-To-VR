@@ -82,7 +82,7 @@ import os
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Mapping, Optional
 
@@ -204,7 +204,8 @@ def run_with_composer_factory(
     if ctx.settings.openai_api_key and not os.environ.get("OPENAI_API_KEY"):
         os.environ["OPENAI_API_KEY"] = ctx.settings.openai_api_key
 
-    static = _StaticContext.build(build_spec, manifest, plan)
+    npc_plan = ctx.npc_plan or ctx.store.load_npc_plan(ctx.project_id)
+    static = _StaticContext.build(build_spec, manifest, plan, npc_plan)
     max_repair_rounds = int(ctx.settings.scene_spec_max_repair_rounds)
 
     max_workers = max(
@@ -717,6 +718,25 @@ def _build_user_message(scene_entry: Any, static: "_StaticContext") -> str:
         + "\n\nMECHANICS (use 'binding_id' as the MechanicBinding "
           "mechanic_id, forward 'config' into params):\n"
         + _pretty(static.mechanics_compact)
+        + (
+            "\n\nNPCS (already decided; place them accordingly):\n"
+            + _pretty(static.npcs_compact)
+            + "\n"
+            "For each NPC asset you place:\n"
+            "  * set 'health' from its max_health and 'faction' from its "
+            "faction + hostile_to, or nothing can damage it and no one will "
+            "target it;\n"
+            "  * bind 'builtin.character_locomotion' with params from its "
+            "locomotion block, and 'animated': false when movement_style is "
+            "slide_no_animation;\n"
+            "  * use physics.kind 'kinematic' and collision_shape 'capsule';\n"
+            "  * when spawn.waves is true or initial_count exceeds what "
+            "should exist at load, place ONE hidden copy tagged 'template' "
+            "at a far-off position and let a spawner mechanic clone it, "
+            "instead of placing every instance up front.\n"
+            if static.npcs_compact
+            else ""
+        )
         + "\n\nOutput obeys the supplied JSON Schema exactly. No "
           "prose, no markdown."
     )
@@ -737,6 +757,7 @@ class _StaticContext:
     scenes_min: list[dict[str, Any]]
     assets_compact: list[dict[str, Any]]
     mechanics_compact: list[dict[str, Any]]
+    npcs_compact: list[dict[str, Any]] = field(default_factory=list)
 
     @classmethod
     def build(
@@ -744,6 +765,7 @@ class _StaticContext:
         build_spec: BuildSpec,
         manifest: AssetManifest,
         plan: MechanicPlan,
+        npc_plan: Any = None,
     ) -> "_StaticContext":
         return cls(
             build_spec_meta=_compress_build_spec_meta(build_spec),
@@ -752,7 +774,38 @@ class _StaticContext:
             ],
             assets_compact=[_compress_asset(a) for a in manifest.items],
             mechanics_compact=_compress_mechanics(build_spec, plan),
+            npcs_compact=_compress_npcs(npc_plan),
         )
+
+
+def _compress_npcs(npc_plan: Any) -> list[dict[str, Any]]:
+    """Just the fields that change how an NPC is PLACED.
+
+    Behaviours and perception matter to the codegen agent, not to scene
+    composition, and paying for those tokens once per scene is what made this
+    stage expensive before.
+    """
+    if npc_plan is None or not getattr(npc_plan, "npcs", None):
+        return []
+    out: list[dict[str, Any]] = []
+    for npc in npc_plan.npcs:
+        out.append(
+            {
+                "asset_id": npc.asset_id,
+                "role": npc.role.value,
+                "faction": npc.faction,
+                "hostile_to": list(npc.hostile_to),
+                "movement_style": npc.movement_style.value,
+                "max_health": npc.combat.max_health,
+                "walk_speed_mps": npc.locomotion.walk_speed_mps,
+                "run_speed_mps": npc.locomotion.run_speed_mps,
+                "turn_rate_deg_s": npc.locomotion.turn_rate_deg_s,
+                "initial_count": npc.spawn.initial_count,
+                "max_concurrent": npc.spawn.max_concurrent,
+                "waves": npc.spawn.waves,
+            }
+        )
+    return out
 
 
 def _compress_build_spec_meta(build_spec: BuildSpec) -> dict[str, Any]:

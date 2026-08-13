@@ -120,6 +120,7 @@ def test_export_all_writes_files(tmp_path: Path):
     assert set(written) == {
         "build_spec",
         "asset_manifest",
+        "npc_plan",
         "mechanic_plan",
         "scene_spec",
         "code_task",

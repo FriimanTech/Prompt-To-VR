@@ -160,6 +160,14 @@ Meta's published guidance for Quest 3 is **1.3M–1.8M triangles per frame** and
 two-pass stereo, draw calls are `2 x visible entities`, so the visible entity
 count is the practical ceiling.
 
+"Busy simulation" is Meta's own term for an app with many animated NPCs, and
+they call out animation and skinning specifically as work that delays the
+render thread. So animated characters carry a **separate budget** from
+geometry — see [Animated agents](#animated-agents) below. A scene can sit
+comfortably inside its triangle and draw-call numbers and still miss frame
+rate on skeletons alone, and without counting them that looks like a
+rendering problem.
+
 ### Budget tiers (no content caps)
 
 The pipeline never limits how many assets a prompt may ask for. Instead the
@@ -184,6 +192,34 @@ Per-asset budgets are weighted by importance (`hero` / `standard` /
 `background`, derived from category, scale and interactivity) with a hard
 floor so small props never become blobs, and are never raised above the source
 mesh — decimation only.
+
+### Animated agents
+
+Skinning and behaviour evaluation are CPU work competing with the render
+thread, so characters are budgeted separately from triangles. Three fields on
+`PerformanceProfile` carry the policy into `scene.json`:
+
+| Field | Standard Quest tier | Meaning |
+|---|---|---|
+| `max_animated_agents` | 12 | Ceiling on simultaneously animated characters |
+| `animation_lod_distances_m` | `[8, 15, 40]` | Full rate / half rate / stop posing |
+| `ai_tick_rates_hz` | `[30, 10, 3]` | Behaviour update rate in those same bands |
+
+Larger tiers allow fewer characters; PC VR roughly triples the count and
+doubles the distances, because a desktop has CPU headroom a headset does not.
+
+Enforcement happens where it matters rather than as a guess at compile time:
+`ctx.spawn` refuses to clone a skinned entity once the cap is reached, so the
+worst case is "enemies stop appearing" instead of a stuttering headset. The
+scene compiler additionally warns when a scene *places* more animated
+characters than the budget allows, and says to spawn the extras from a hidden
+`template` entity instead.
+
+Animation LOD banks the time it skips and repays it on the next sample, so a
+distant character walks at the correct speed — only the sampling gets coarser,
+which is invisible at that range. The per-second `perf:` telemetry line
+reports `rigs N (M animating, budget B)` next to the draw-call and triangle
+counts.
 
 ## Level of detail
 

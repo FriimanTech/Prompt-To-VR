@@ -1043,6 +1043,118 @@ def test_animation_map_reaches_scene_json_through_normalization():
     assert "animations" not in _mesh_render_fields({"skinned": True}, 1.0, None)
 
 
+def test_animated_agents_get_their_own_budget_per_tier():
+    """Skinning and AI are CPU work competing with the render thread, so a
+    scene can be well inside its triangle budget and still miss frame rate on
+    skeletons alone. Characters therefore need a separate ceiling."""
+
+    from ptv_schemas import PerformanceTier, TargetDevice, derive_profile
+
+    quest = derive_profile(
+        asset_count=10, mesh_entity_count=10, target_device=TargetDevice.quest
+    )
+    assert quest.max_animated_agents > 0
+    assert len(quest.animation_lod_distances_m) == 3
+    assert len(quest.ai_tick_rates_hz) == 3
+    # Bands must increase, or "nearer than the second" is meaningless.
+    assert (
+        quest.animation_lod_distances_m[0]
+        < quest.animation_lod_distances_m[1]
+        < quest.animation_lod_distances_m[2]
+    )
+    # Distant NPCs think less often, never more.
+    assert quest.ai_tick_rates_hz[0] > quest.ai_tick_rates_hz[2]
+
+    # A bigger scene has less headroom for characters.
+    massive = derive_profile(
+        asset_count=200,
+        mesh_entity_count=400,
+        target_device=TargetDevice.quest,
+        tier_override=PerformanceTier.massive,
+    )
+    assert massive.max_animated_agents < quest.max_animated_agents
+
+    # A PC has CPU headroom the headset does not.
+    pcvr = derive_profile(
+        asset_count=10, mesh_entity_count=10, target_device=TargetDevice.pcvr
+    )
+    assert pcvr.max_animated_agents > quest.max_animated_agents
+    assert pcvr.animation_lod_distances_m[0] > quest.animation_lod_distances_m[0]
+
+
+def test_scene_compile_warns_when_too_many_characters_are_placed_at_load():
+    from ptv_orchestrator.pipeline.stage_scene_compile import (
+        check_animated_agent_budget,
+        count_animated_agents,
+    )
+
+    def entity(eid: str, skinned: bool, tags=()):
+        return {
+            "id": eid,
+            "tags": list(tags),
+            "mesh": {"asset_id": eid, "skinned": skinned},
+        }
+
+    entities = [entity(f"e{i}", True) for i in range(5)]
+    # Static props do not cost pose evaluation...
+    entities += [entity("crate", False)]
+    # ...and neither does a hidden template, which is never posed because it
+    # is never in the scene as an actor.
+    entities += [entity("spawner_src", True, tags=["template"])]
+
+    assert count_animated_agents(entities) == 5
+
+    assert check_animated_agent_budget(entities, {"max_animated_agents": 8}) == ""
+    over = check_animated_agent_budget(
+        entities, {"max_animated_agents": 3, "tier": "standard"}
+    )
+    assert "5 animated characters" in over and "allows 3" in over
+    # It has to say what to do instead, or the warning is just noise.
+    assert "template" in over
+
+    # No performance block (older projects) means no opinion.
+    assert check_animated_agent_budget(entities, None) == ""
+
+
+def test_locomotion_clips_get_a_reference_speed_scaled_by_height():
+    """Tripo retargets in place, so a walk clip carries no root motion to
+    measure. Without a reference speed the runtime cannot tell whether the
+    stride matches the ground covered, and the character skates."""
+
+    from ptv_orchestrator.pipeline.stage_scene_compile import (
+        _mesh_render_fields,
+    )
+
+    norm = {
+        "skinned": True,
+        "animations": {
+            "idle": "Idle",
+            "walk": "Walk_01",
+            "run": "Run_Fast",
+            "attack": "Slash",
+        },
+    }
+    out = _mesh_render_fields(norm, 1.8, None)
+    speeds = out["animation_speeds"]
+
+    # 1.8 m biped: ~1.4 m/s walking, ~4.0 m/s running.
+    assert speeds["walk"] == pytest.approx(1.404, abs=1e-3)
+    assert speeds["run"] == pytest.approx(3.96, abs=1e-3)
+
+    # Only locomotion gets a speed. Rate-scaling an attack or an idle to
+    # "match" a ground speed would be meaningless.
+    assert "idle" not in speeds
+    assert "attack" not in speeds
+
+    # Half-height creature, half the stride.
+    small = _mesh_render_fields(norm, 0.9, None)["animation_speeds"]
+    assert small["walk"] == pytest.approx(speeds["walk"] / 2.0, abs=1e-3)
+
+    # No height means no honest estimate, so emit nothing rather than a wrong
+    # divisor.
+    assert "animation_speeds" not in _mesh_render_fields(norm, 0.0, None)
+
+
 def test_normalization_picks_up_the_animation_report(tmp_path: Path):
     from ptv_orchestrator.pipeline.stage_asset_normalize import (
         _animation_clip_names,

@@ -108,9 +108,34 @@ mesh's `JOINTS_0` attribute references that ordering. `SkeletonData::order`
 supplies a parent-first traversal over those indices rather than renumbering
 them.
 
+**Cross-fading.** Switching clips used to be a hard cut, so every gait change
+popped. `CAnimator` keeps a `prev_clip` and a blend timer; the outgoing clip
+keeps advancing on its own clock during the fade, because blending a moving
+pose against a frozen one is still a hitch, just a softer one. With no
+incoming clip the target is the bind pose, which makes a faded `stop_clip`
+settle to rest rather than snap there.
+
+**Distance LOD.** `tick_animators(world, dt, viewer, lod)` throttles by
+distance: every frame under 8 m, every other frame under 15 m, every fourth
+beyond that, and not at all past 40 m (the bands come from
+`scene.performance.animation_lod_distances_m`). Posing a 65-joint skeleton
+costs the same whether the character fills the view or is a speck, and Meta
+call out animation and skinning as work that delays the render thread.
+Skipped time is banked in `lod_debt_s` and repaid on the next sample, so a
+distant character still covers the same ground per second — only the
+smoothness drops.
+
+**Sockets on a rigged mesh.** `CSkeleton::socket_joint` binds each named
+socket to its nearest joint at attach, and `socket_world` pushes the socket
+through that joint's palette entry, exactly as the surrounding vertices are
+pushed. Without it a `muzzle` derived from a goblin holding a rifle would
+hang in mid-air while the arm swung through the walk cycle. In bind pose the
+palette is identity, so static props are unaffected.
+
 Mechanics drive all of this through `ctx.skeleton`, never by touching the
 components. See [rendering.md](rendering.md#skinned-geometry-scene_skinnedvert)
-for the GPU side.
+for the GPU side and [npc-and-ai.md](npc-and-ai.md) for how clip choice is
+driven by movement.
 
 ### Player hands
 
@@ -152,6 +177,48 @@ rigid bodies for every entity with a `CPhysics` component, using its
 `collision_shape`. `step()` advances the simulation; `sync_to_world()`
 writes transforms back.
 
+Shapes are box, sphere, triangle mesh (static, from `CInlineMesh`) and
+**capsule**. A capsule takes its height from the mesh's
+`target_scale_meters` — for an upright character the longest axis IS the
+height, and that is exactly what the asset pipeline normalises. Its radius is
+a fraction of height rather than a second measured extent, because a
+T-posed character's arm span is roughly its height and a measured X extent
+would produce a capsule too wide to fit any doorway. Dynamic capsules lock
+their X/Z rotation DOFs so a character does not topple on first contact.
+
+`add_body_for` / `remove_body` create and destroy a single entity's body.
+`rebuild_from_world` runs once at load, so without them anything spawned
+during play was a ghost — visible with no collider. Entities tagged
+`"template"` are skipped: they are hidden spawn sources parked off-map and
+should not leave invisible obstacles lying around.
+
+Two queries exist beyond the raycast:
+
+- `slide_character(centre, height, delta, ignore)` sweeps a capsule and
+  returns the movement actually available, sliding along whatever it hits.
+  This is what stops the player and NPCs walking through walls. It fails
+  **open**: if the sweep resolves to almost nothing the mover is probably
+  already inside geometry, and in VR being frozen is worse than clipping for
+  one frame.
+- `overlapping(entity, out)` reports every collider intersecting one entity.
+  Deliberately a query rather than a Jolt contact callback: Jolt only reports
+  contacts when at least one body is DYNAMIC, and the pair gameplay most
+  wants to know about — the player and an NPC — is kinematic on both sides,
+  because their motion is authored rather than simulated.
+
+The player is an ordinary kinematic capsule entity (`__player`, tagged
+`"player"`) that follows the headset horizontally and the rig vertically.
+Before that they were a bare transform, so nothing could collide *with* them
+and an enemy that charged the user simply passed through.
+
+### Navigation (`ptv::nav::NavGraph`)
+
+Walkable rectangles and the crossings between them, declared by the world
+builder and searched with A*. Local steering lives in the navigation service
+in `Application.cpp`; the graph is the global layer that gets an NPC through
+a doorway instead of pressing it against the wall beside one. See
+[`docs/navigation.md`](navigation.md).
+
 ### Mechanics (`ptv::MechanicRegistry`, `ptv::MechanicHost`)
 
 A static registry of `IMechanic` / `IBehaviour` / `IDialogueHook`
@@ -169,6 +236,11 @@ mechanics to a single shared instance.
 `update(world, dt, input, ctx, phase)` ticks the instances in one phase; the
 frame calls it twice, `Input` before the snapshot freezes and the physics
 step, `Simulate` after. See [`docs/input-and-bindings.md`](input-and-bindings.md).
+
+`attach_entity` / `detach_entity` do the same for one entity that appeared
+after load, so a spawned enemy's mechanics actually tick. The player-scoped
+instance map persists across calls, so a mid-game spawn joins the existing
+shared instance rather than starting a second copy of grab.
 
 ### Debug UI (`ptv::DebugUI`)
 

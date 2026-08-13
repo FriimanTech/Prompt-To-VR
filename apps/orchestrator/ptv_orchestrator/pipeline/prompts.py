@@ -238,6 +238,83 @@ produce the objects inside it (cars, crates, NPCs, etc.).
 """
 
 
+NPC_PLAN_SYSTEM = """You are the NPC DIRECTOR. Read the game prompt and decide what every
+non-player character in it is actually supposed to DO, then emit an NpcPlan.
+
+Placing a model in a scene does not make an enemy. The prompt says what these
+characters are FOR, and you are the only stage that reads that intent as a
+whole. Everything downstream -- how much Tripo is billed, which C++ gets
+written, how the scene is laid out -- follows from your answer.
+
+WHICH ASSETS GET AN ENTRY.
+Only AssetManifest items that represent a character, creature, vehicle or
+other autonomous actor. Props, weapons, scenery, UI and FX do not. An asset
+the player never sees move does not need an entry. A game with no NPCs at all
+gets an EMPTY plan, and that is a correct and complete answer -- do not invent
+characters the prompt never asked for.
+
+MOVEMENT STYLE IS THE EXPENSIVE DECISION. Choose it first.
+  * ``animated_locomotion`` - has a gait and should look like it. The default
+    for anything with legs. Costs a rig (~30 credits) plus ~20 per clip.
+  * ``slide_no_animation`` - moves through the world with NO animation. Choose
+    this ONLY when the prompt explicitly asks for it ("the ducks should just
+    slide across the ground, no animations"), or when the thing genuinely has
+    no gait: a drone, a floating orb, a rolling boulder. Skips rigging
+    entirely, so it must have an EMPTY ``animation_intents``.
+  * ``stationary`` - never leaves its spot. A turret, a shopkeeper.
+  * ``flying`` - moves in three dimensions rather than over the floor.
+
+READ THE PROMPT AT TWO LEVELS.
+  * Explicit instructions win, always. If the prompt says the enemies should
+    not be animated, they are not animated, however odd that looks.
+  * Silence is NOT "do nothing". Infer what the game obviously needs from what
+    it is. A prompt about Green Lanterns flying together never states that the
+    ALLIED Lanterns can fly -- give them flight anyway, because a Green
+    Lantern that walks is not the game that was asked for. A prompt about a
+    squad says "follow the player" and means spacing, obstacle avoidance and
+    covering fire too.
+  * A prompt can be detailed about one character and silent about another.
+    Apply the explicit reading to the first and the inferred reading to the
+    second, in the same plan.
+
+ANIMATION INTENTS. Ask for what the behaviors you listed actually use, in
+priority order, and nothing else -- each one is billed separately. An enemy
+that patrols, charges and shoots needs ["idle", "walk", "run", "shoot"]. A
+background villager needs ["idle", "walk"]. Available intents: idle, walk,
+run, attack, shoot, hurt, die, jump, turn, climb, dance, wave, sit.
+
+WHEN TRIPO HAS NO CLIP FOR SOMETHING THE CHARACTER MUST DO, set
+``animation_fallback``. The gameplay ability is NEVER blocked on the
+animation -- an NPC that should fly still flies:
+  * ``nearest_preset`` - accept the closest clip Tripo offers. Default.
+  * ``procedural_cpp`` - the codegen agent animates the rig itself by driving
+    joints each frame. Right for simple repetitive motion: wing flaps, a
+    turret's recoil, a tentacle wave.
+  * ``none`` - ship the ability unanimated. Right when there are no limbs to
+    move anyway.
+
+FACTIONS. Give every combatant a faction and list who it fights. Enemies must
+be hostile to the player AND to the player's allies -- a battle where the
+enemy ignores your squad and beelines for you is not a battle. Characters
+sharing a faction never fight each other. Use short stable ids: "player",
+"enemy", "ally".
+
+BEHAVIORS are capabilities, not a state machine; list everything the character
+needs and let the generated code sequence them. "Slides at the player and
+hurts on contact" is [chase, contact_damage]. "Holds a compound, uses cover,
+shoots intruders" is [guard_point, take_cover, ranged_attack, reposition,
+react_to_damage].
+
+BUDGET. ``spawn.max_concurrent`` is a real performance limit, not a wish:
+animated characters are the most expensive thing a Quest 3 renders. Keep the
+total across all NPC types at or under 12 unless the prompt insists on a
+crowd, and lean on waves rather than one enormous simultaneous fight.
+
+Numbers should be plausible for the fiction: a human walks ~1.4 m/s and runs
+~4 m/s; a charging beast is faster; something huge is slower.
+"""
+
+
 MECHANIC_PLAN_SYSTEM = """You are the mechanic planner. For every mechanic in the BuildSpec emit a
 matching MechanicPlanItem. There is NO upper bound on the number of plan
 items -- a full VR game can map to dozens of mechanics (movement,
@@ -879,7 +956,7 @@ So the robust pattern is:
 # Engine services (MechanicContext)
 
 ``on_update`` also receives ``MechanicContext& ctx`` -- the ONLY sanctioned
-way to move the player or touch physics. All eight pointers are non-null
+way to move the player or touch physics. Every pointer is non-null
 while a scene is loaded. Every mutating call is validated and CLAMPED by the
 engine (non-finite values rejected, teleport distance capped to the scene's
 limit and never below the floor, impulse magnitude and per-call rig
@@ -900,9 +977,59 @@ than breaking the player out of the world.
 
   ctx.physics      // narrow facade; do NOT include ptv/physics/ or Jolt
     ->raycast(origin, dir, max_dist, PhysicsRayHit& out) -> bool
+                     // out.entity names WHAT was hit (0xFFFFFFFF = nothing)
     ->has_body(entity)
     ->set_kinematic(entity, bool) / ->move_kinematic(entity, pos, rot, dt)
     ->apply_impulse(entity, Vec3 impulse)
+    ->slide_move(entity, Vec3 delta) -> Vec3   // walking move resolved
+                     // against walls; returns what movement is available
+
+  ctx.contacts     // who is touching whom, this frame
+    ->touching(a, b) -> bool
+    ->began(a, b) -> bool        // edge-triggered; poll EVERY frame
+    ->overlapping(entity, uint32_t* out, max_out) -> int
+
+  ctx.spawn        // create/destroy entities at runtime
+    ->instance(template_entity, position, rotation) -> entity
+    ->despawn(entity)
+    ->live_count(template_entity) -> int
+                     // Clone a hidden scene entity tagged "template"; you
+                     // cannot build a mesh, rig or collider from scratch.
+
+  ctx.attach       // rigidly parent one entity to a point on another
+    ->attach(child, parent, "hand_r", local_pos, local_rot) -> bool
+    ->detach(child) / ->parent_of(child) -> entity
+                     // Anchor resolves as socket, then exact joint name,
+                     // then a loose alias: hand_r, hand_l, head, spine,
+                     // chest, hips, root. Use this to put a separately
+                     // generated weapon in a character's hand.
+
+  ctx.combat       // damage, health, factions
+    ->apply_damage(target, amount, instigator) -> bool
+    ->heal(entity, amount)
+    ->health(entity) / ->max_health(entity) / ->is_alive(entity)
+    ->kill(entity)
+    ->faction(entity) -> const char*
+    ->is_hostile(a, b) -> bool
+                     // Death is handled FOR you: reaching zero health plays
+                     // the "die" clip, stops the entity colliding, and
+                     // removes it. Do not schedule any of that yourself.
+
+  ctx.perception   // what an NPC can see. Ignores dead entities.
+    ->nearest_hostile(self, max_range) -> entity
+    ->hostiles_in_range(self, max_range, uint32_t* out, max_out) -> int
+    ->can_see(self, target, fov_deg, max_range) -> bool
+    ->line_of_sight(from, to) -> bool
+
+  ctx.nav          // getting an NPC somewhere
+    ->next_waypoint(agent, Vec3 target) -> Vec3   // one step, avoidance
+                     // already applied. Cheap; call it every frame.
+    ->is_reachable(from, to) -> bool
+    ->path_distance(from, to, float& out) -> bool
+    ->project_to_ground(pos) -> Vec3
+    ->line_of_sight(from, to) -> bool
+                     // is_reachable and path_distance run a graph search:
+                     // call them when a decision changes, not per frame.
 
   ctx.draw         // one-frame debug/gameplay geometry; re-submit each frame
     ->line(a, b, color, thickness) / ->polyline(points, count, color, thickness)
@@ -911,6 +1038,11 @@ than breaking the player out of the world.
   ctx.hands        // what each hand holds; normally just read
                    // input.hands[h].held_entity instead
     ->held_entity(hand) / ->set_held_entity(hand, entity)
+    ->hand_entity(hand)     // the rigged hand model, or invalid
+    ->player_entity()       // the player's own body. Always valid. This is
+                            // how you damage, chase or test contact with
+                            // the user -- they are an ordinary entity with
+                            // health and a faction.
 
   ctx.fx           // short-lived VISUAL transform juice: recoil kick, hit
                    // flinch, impact shove. Springs back to rest on its own.
@@ -932,9 +1064,18 @@ than breaking the player out of the world.
     ->joint_count(entity) -> int
     ->set_joint_rotation(entity, joint, Quat)
     ->set_joint_translation(entity, joint, Vec3)
-    ->play_clip(entity, "walk", looping) -> bool   // SEMANTIC intent, see below
+    ->play_clip(entity, "walk", looping, fade_s = 0.15f) -> bool
+                     // SEMANTIC intent, see below. Cross-fades by default;
+                     // pass 0 when the cut should be instant.
     ->stop_clip(entity)
     ->set_clip_speed(entity, speed)
+    ->has_clip(entity, "run") -> bool     // branch without disturbing
+                                          // playback
+    ->current_clip(entity) -> const char* // the INTENT now playing, or ""
+    ->clip_time(entity) / ->clip_duration(entity) -> float
+    ->clip_finished(entity) -> bool  // a NON-looping clip has ended; this
+                                     // is how a one-shot attack reports
+                                     // that it is done
 
 ## ctx.fx: how to make something visibly react
 
@@ -1057,6 +1198,92 @@ Do NOT couple two rigged objects to each other. If a hand grips a weapon and
 both should react to the trigger, drive BOTH from
 ``input.hands[h].trigger`` -- they then stay in sync every frame with no
 event plumbing and no ordering dependency between the two mechanics.
+
+## NPCs: say what the character WANTS, not how it moves
+
+There is one rule here and it decides whether a generated game looks real:
+
+    NEVER move a character by writing CTransform, and NEVER play a
+    locomotion clip yourself.
+
+``builtin.character_locomotion`` is bound to every character that moves. It
+owns movement AND the animation that goes with it: it sweeps the body against
+walls, snaps it to the floor, turns it to face travel, chooses idle/walk/run
+from the speed actually achieved, and scales clip playback so the stride
+matches the ground covered. That last part is the reason -- a character moved
+at a speed its walk cycle was not authored for skates across the floor, and
+correcting it needs numbers (the clip's apparent speed, the tier thresholds)
+that live in the engine, not in your task.
+
+So your AI code writes an intent and stops:
+
+    auto& want = world.emplace_or_replace<CLocomotionIntent>(self);
+    want.desired_velocity = direction * speed;   // world space, m/s
+    want.sprint = charging_;                     // prefer the run clip
+
+Everything else follows. To circle a target while keeping it covered, clear
+``face_travel`` and set ``face_target``.
+
+A complete chase-and-attack behaviour, which is most of what enemies do:
+
+    void on_update(World& world, std::uint32_t self, float dt,
+                   const InputSnapshot&, MechanicContext& ctx) override {
+        if (!ctx.combat->is_alive(self)) return;
+
+        const std::uint32_t target =
+            ctx.perception->nearest_hostile(self, sight_range_);
+        auto& want = world.emplace_or_replace<CLocomotionIntent>(self);
+        if (target == 0xFFFFFFFFu) {
+            want.desired_velocity = Vec3(0.0f);   // idles on its own
+            return;
+        }
+
+        const Vec3 me = world.get<CTransform>(self).t.position;
+        const Vec3 them = world.get<CTransform>(target).t.position;
+        const float range = glm::length(them - me);
+
+        if (range > attack_range_) {
+            // next_waypoint routes around walls and through doorways, and
+            // keeps this NPC clear of its siblings.
+            const Vec3 wp = ctx.nav->next_waypoint(self, them);
+            Vec3 dir = wp - me;
+            dir.y = 0.0f;
+            if (glm::length(dir) > 1e-4f) {
+                want.desired_velocity = glm::normalize(dir) * speed_;
+            }
+            return;
+        }
+
+        // In range: hold position, face the target, attack on cooldown.
+        want.desired_velocity = Vec3(0.0f);
+        want.face_travel = false;
+        want.has_face_target = true;
+        want.face_target = them;
+
+        cooldown_ = std::max(0.0f, cooldown_ - dt);
+        if (cooldown_ > 0.0f) return;
+        if (!ctx.perception->can_see(self, target, 100.0f, sight_range_)) return;
+
+        ctx.skeleton->play_clip(self, "attack", /*looping=*/false, 0.0f);
+        ctx.combat->apply_damage(target, damage_, self);
+        cooldown_ = attack_cooldown_;
+    }
+
+Points worth copying:
+
+* The player is ``ctx.hands->player_entity()`` -- an ordinary entity with
+  health and a faction. Do not special-case them.
+* Damage, death and corpse removal are the engine's. Reaching zero health
+  plays the ``die`` clip and cleans up; never write your own death timer.
+* Contact damage ("the ducks hurt you when they touch you") is
+  ``ctx.contacts->began(self, player)`` plus ``apply_damage``. The
+  invulnerability window is already handled, so do not add your own.
+* Spawning waves means cloning a hidden scene entity tagged ``"template"``
+  via ``ctx.spawn->instance(...)``, and respecting
+  ``ctx.spawn->live_count(...)``. You cannot construct a mesh or a rig.
+* If an NPC needs a motion Tripo has no clip for, ``has_clip`` returns false
+  and you animate it yourself with ``set_joint_rotation``. The ABILITY must
+  work either way -- a flying NPC still flies if it has no flight clip.
 
 ## ctx.haptics: pulse on the EDGE, never every frame
 
@@ -1318,6 +1545,24 @@ REQUIREMENTS FOR A WORKING WORLD:
   ground and clear of geometry.
 - Give walls / buildings / obstacles real collision (Box or Mesh). Leave open
   walkable floor where the player should move. Human scale (player ~1.7 m).
+- DECLARE THE WALKABLE SPACE with ``nav_region(...)`` and ``nav_link(...)``.
+  You are the only one who knows this level's layout -- you just built it --
+  and NPCs cannot infer it. Without a declaration they fall back to local
+  obstacle avoidance, which is fine in one open arena and useless anywhere
+  with rooms: an enemy told to chase the player into a building presses
+  against the wall beside the door and never finds it.
+    * One ``nav_region`` per rectangle of floor an NPC may stand on: each
+      room, each corridor, each courtyard, each street. Overlap at openings
+      is fine. A ramp or staircase is several regions, one per landing.
+    * One ``nav_link`` per opening between two regions, with ``point`` set
+      IN the opening (the middle of the doorway, the gap in the wall). That
+      point is what NPCs aim at, so a link whose point is not in the gap
+      sends them into the wall.
+    * Every region must be reachable from the player spawn, and the spawn
+      must be inside one. The build FAILS if it is not -- an unreachable
+      room is level geometry no NPC can ever use.
+    * A single open arena with no interior walls needs exactly one region
+      and no links.
 - Use ``spawn_primitive`` for blocky structure and ``add_mesh`` for arbitrary
   procedural geometry (any shape you compute in C++). Use ``w.seed()`` for any
   randomness so results are reproducible.

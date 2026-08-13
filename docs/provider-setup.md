@@ -128,8 +128,16 @@ not needed for NPC animation.
 Notice that every rig type describes a **whole creature**. Props, weapons,
 vehicles and disembodied body parts are not riggable, which is exactly why the
 free pre-check runs first: it turns "this was never going to work" from a
-30-credit mistake into a no-op. Which assets are even candidates comes from
-`AssetItem.rigged`, set by the asset-manifest agent.
+30-credit mistake into a no-op.
+
+Which assets are candidates comes from `AssetItem.rigged`, but the authority
+on that flag is the **`npc_plan` stage**, not the asset-manifest agent. The
+manifest agent guesses from a style note; the NPC director reads the prompt's
+actual intent and reconciles the manifest against it. A prompt that says the
+ducks should just slide clears `rigged` and `animations` on the duck before
+this stage ever sees it, which is the whole reason `npc_plan` runs first — a
+duck that stays marked rigged costs a 30-credit rig plus 20 per clip for
+animation nothing will ever play. See [npc-and-ai.md](npc-and-ai.md).
 
 Results are recorded in `asset_rig.json` so a Resume never re-bills, and the
 rigged mesh lands as `model_rigged.glb` beside the original so a re-run rigs

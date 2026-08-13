@@ -17,6 +17,7 @@ from . import (
     stage_asset_normalize,
     stage_asset_optimize,
     stage_asset_rigging,
+    stage_npc_plan,
     stage_build_spec,
     stage_cmake,
     stage_code_generation,
@@ -58,6 +59,10 @@ StageFn = Callable[[PipelineContext], StageResult]
 _SHARED_STAGES: list[tuple[ProjectStage, StageFn]] = [
     (ProjectStage.build_spec, stage_build_spec.run),
     (ProjectStage.asset_manifest, stage_asset_manifest.run),
+    # Before rigging (it decides what needs animating and what does not) and
+    # before mechanic/scene planning (both need to know who the combatants
+    # are).
+    (ProjectStage.npc_plan, stage_npc_plan.run),
     (ProjectStage.mechanic_plan, stage_mechanic_plan.run),
     (ProjectStage.scene_spec, stage_scene_spec.run),
     (ProjectStage.reference_images, stage_reference_images.run),

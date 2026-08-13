@@ -131,6 +131,11 @@ class CodegenAgentInput:
     """The ``CODE_TASK_SYSTEM`` prompt (after the four-step / multi-file
     rewrite). Becomes the agent's ``instructions``."""
 
+    npc_plan_json: str = ""
+    """The NpcPlan, when the game has characters. Every task gets it, not
+    just AI ones: a wave spawner needs the spawn caps, a HUD needs the health
+    values, and a weapon needs to know which faction it damages."""
+
     base_source_block: str = ""
     """For ``builtin+config_code_edit`` tasks: the source of the base
     built-in mechanic to COPY-AND-EDIT into this new generated mechanic.
@@ -363,7 +368,17 @@ def build_user_message(inp: CodegenAgentInput) -> str:
         f"{inp.scene_context_json}\n\n"
         "================ BUILD SPEC EXCERPT ================\n"
         f"{inp.build_spec_excerpt}\n"
-        f"{base_source_section}"
+        + (
+            "\n================ NPC PLAN ================\n"
+            "What every character in this game is supposed to do, decided "
+            "once so all tasks agree. Characters here are ALREADY bound to "
+            "builtin.character_locomotion: write CLocomotionIntent, never "
+            "CTransform, and never play their walk/run clips yourself.\n"
+            f"{inp.npc_plan_json}\n"
+            if inp.npc_plan_json
+            else ""
+        )
+        + f"{base_source_section}"
     )
 
 

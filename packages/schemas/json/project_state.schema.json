@@ -5,6 +5,7 @@
         "created",
         "build_spec",
         "asset_manifest",
+        "npc_plan",
         "mechanic_plan",
         "scene_spec",
         "reference_images",

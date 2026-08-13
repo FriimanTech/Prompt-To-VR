@@ -402,6 +402,12 @@ class _StaticContext:
     # inventing a hard-coded offset it cannot possibly know.
     sockets_by_asset: dict[str, list[str]]
 
+    # What every NPC is supposed to do, as decided once by the npc_plan stage.
+    # Handed to every task rather than only AI ones: a wave spawner needs the
+    # spawn caps, a HUD needs the health values, and a weapon needs to know
+    # which faction it damages.
+    npc_plan_json: str = ""
+
 
 def _load_static_context(ctx: PipelineContext) -> _StaticContext:
     """Load BuildSpec + every scene_spec*.json on disk. Missing files
@@ -444,11 +450,22 @@ def _load_static_context(ctx: PipelineContext) -> _StaticContext:
             # the agent then simply sees no sockets and uses no sockets.
             pass
 
+    npc_plan_json = ""
+    try:
+        npc_plan = ctx.store.load_npc_plan(ctx.project_id)
+        if npc_plan.npcs:
+            npc_plan_json = npc_plan.model_dump_json(indent=2)
+    except Exception:
+        # Projects predating the stage simply have no plan; the agent then
+        # sees no NPCs, which is the pre-existing behaviour.
+        pass
+
     return _StaticContext(
         build_spec=build_spec,
         scene_specs=scene_specs,
         scene_files=scene_files,
         sockets_by_asset=sockets_by_asset,
+        npc_plan_json=npc_plan_json,
     )
 
 
@@ -610,6 +627,7 @@ class _StageRuntime:
             dep_exports_json=dep_exports_json(snapshot, list(task.depends_on)),
             scene_context_json=scene_ctx_json,
             build_spec_excerpt=bs_excerpt,
+            npc_plan_json=self.static.npc_plan_json,
             instructions=CODE_TASK_SYSTEM,
             base_source_block=base_source_block,
             repair_context=repair_context,

@@ -64,6 +64,66 @@ class PhysicsProps(StrictModel):
     friction: float = Field(default=0.5, ge=0.0, le=2.0)
 
 
+class AttachmentRef(StrictModel):
+    """Ride on a point of another entity instead of standing on your own.
+
+    This is how a separately-generated weapon ends up in a separately-
+    generated character's hand. Tripo sometimes returns "goblin holding a
+    rifle" as one mesh and sometimes returns two, and only the second case
+    needs this -- but it is common enough that a scene with no way to express
+    it cannot build half the games it is asked for.
+    """
+
+    entity_id: IdStr = Field(
+        ..., description="The entity to ride on, by scene entity id."
+    )
+    anchor: str = Field(
+        default="grip",
+        max_length=64,
+        description=(
+            "Socket or rig joint on the parent to follow. Named sockets"
+            " ('muzzle', 'grip') win; otherwise the runtime matches a joint,"
+            " including loose aliases like 'hand_r' / 'hand_l' / 'head' that"
+            " work regardless of what Tripo named the bones."
+        ),
+    )
+    position: Vec3 = Field(
+        default_factory=Vec3,
+        description="Offset from the anchor, in the anchor's space (metres).",
+    )
+    rotation: QuatXYZW = Field(
+        default_factory=QuatXYZW,
+        description="Rotation relative to the anchor.",
+    )
+
+
+class HealthProps(StrictModel):
+    """Hit points for anything that can be damaged, including the player."""
+
+    max: float = Field(default=100.0, gt=0.0, le=100_000.0)
+    invuln_after_hit_s: float = Field(
+        default=0.4,
+        ge=0.0,
+        le=10.0,
+        description=(
+            "Invulnerability window after each hit. Contact damage is tested"
+            " every frame, so without one a single touch empties a health"
+            " bar in a few frames."
+        ),
+    )
+
+
+class FactionProps(StrictModel):
+    """Which side an entity fights for.
+
+    Needed so enemies engage the player's allied NPCs and not only the
+    player. Use short stable ids: 'player', 'enemy', 'ally', 'wildlife'.
+    """
+
+    id: str = Field(default="neutral", max_length=32)
+    hostile_to: List[str] = Field(default_factory=list, max_length=8)
+
+
 class EntitySpec(StrictModel):
     id: IdStr
     name: str = Field(..., max_length=128)
@@ -72,6 +132,28 @@ class EntitySpec(StrictModel):
     physics: Optional[PhysicsProps] = None
     mechanic_bindings: List[MechanicBinding] = Field(default_factory=list)
     tags: List[str] = Field(default_factory=list, max_length=16)
+    health: Optional[HealthProps] = Field(
+        default=None,
+        description=(
+            "Give this entity hit points. Required for anything that can be"
+            " killed or can take damage."
+        ),
+    )
+    faction: Optional[FactionProps] = Field(
+        default=None,
+        description=(
+            "Which side this entity is on. Required for anything that"
+            " selects targets or can be targeted."
+        ),
+    )
+    attached_to: Optional[AttachmentRef] = Field(
+        default=None,
+        description=(
+            "Parent this entity to a point on another one. Its transform is"
+            " then driven by the parent every frame, so the authored"
+            " 'transform' above is only its pose before the first update."
+        ),
+    )
 
 
 class LightSpec(StrictModel):

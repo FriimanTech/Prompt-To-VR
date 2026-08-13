@@ -1,5 +1,6 @@
 #include "ptv/mechanics/MechanicRegistry.h"
 
+#include <algorithm>
 #include <cstddef>
 #include <unordered_map>
 
@@ -74,62 +75,107 @@ bool register_dialogue_hook(const std::string& id, DialogueHookFactory f) {
 
 void MechanicHost::attach_bindings(World& world, MechanicContext& ctx) {
     detach_all(world);
-    // Player-scoped mechanics get ONE instance no matter how many entities
-    // bind them. Tracks id -> index into instances_ so later bindings of the
-    // same id attach their entity to the existing instance instead of adding
-    // another ticking copy (otherwise grab, bound to every grabbable prop,
-    // would run its per-hand loop once per prop).
-    std::unordered_map<std::string, std::size_t> player_scoped;
 
     auto view = world.registry().view<CMechanicBinding>();
     for (auto entity : view) {
-        const auto& bindings = view.get<CMechanicBinding>(entity);
-        for (const auto& entry : bindings.entries) {
-            std::string resolved = entry.builtin_id.empty() ? entry.id : entry.builtin_id;
-            const auto eid = static_cast<std::uint32_t>(entity);
-
-            nlohmann::json params = nlohmann::json::object();
-            if (!entry.params_json.empty()) {
-                try {
-                    params = nlohmann::json::parse(entry.params_json);
-                } catch (...) { /* ignore malformed params */ }
-            }
-
-            // Already have a shared instance for this player-scoped id? Just
-            // attach this entity to it.
-            if (auto found = player_scoped.find(resolved);
-                found != player_scoped.end()) {
-                auto& existing = instances_[found->second].second;
-                existing.impl->on_attach(world, eid, params, ctx);
-                existing.entities.push_back(eid);
-                continue;
-            }
-
-            auto impl = MechanicRegistry::get().make_mechanic(resolved);
-            if (!impl) {
-                PTV_WARN("No mechanic registered for id: {}", resolved);
-                continue;
-            }
-            const bool is_player_scoped =
-                impl->scope() == MechanicScope::Player;
-            const MechanicPhase phase = impl->phase();
-
-            impl->on_attach(world, eid, params, ctx);
-            // emplace_back with explicit MechanicInstance so MSVC can move
-            // the unique_ptr through the pair constructor (brace-init of a
-            // pair containing a move-only member is rejected by MSVC).
-            MechanicInstance inst{};
-            inst.id = resolved;
-            inst.impl = std::move(impl);
-            inst.phase = phase;
-            inst.entities.push_back(eid);
-            instances_.emplace_back(eid, std::move(inst));
-            if (is_player_scoped) {
-                player_scoped.emplace(resolved, instances_.size() - 1);
-            }
-        }
+        attach_one(world, static_cast<std::uint32_t>(entity), ctx);
     }
     PTV_INFO("Attached {} mechanic instances", instances_.size());
+}
+
+void MechanicHost::attach_one(World& world, std::uint32_t entity,
+                              MechanicContext& ctx) {
+    const auto e = static_cast<entt::entity>(entity);
+    if (!world.registry().valid(e)) return;
+    const auto* bindings = world.registry().try_get<CMechanicBinding>(e);
+    if (bindings == nullptr) return;
+
+    for (const auto& entry : bindings->entries) {
+        std::string resolved =
+            entry.builtin_id.empty() ? entry.id : entry.builtin_id;
+
+        nlohmann::json params = nlohmann::json::object();
+        if (!entry.params_json.empty()) {
+            try {
+                params = nlohmann::json::parse(entry.params_json);
+            } catch (...) { /* ignore malformed params */ }
+        }
+
+        // Player-scoped mechanics get ONE instance no matter how many
+        // entities bind them, so later bindings of the same id attach their
+        // entity to the existing instance instead of adding another ticking
+        // copy (otherwise grab, bound to every grabbable prop, would run its
+        // per-hand loop once per prop).
+        if (auto found = player_scoped_.find(resolved);
+            found != player_scoped_.end()) {
+            auto& existing = instances_[found->second].second;
+            existing.impl->on_attach(world, entity, params, ctx);
+            existing.entities.push_back(entity);
+            continue;
+        }
+
+        auto impl = MechanicRegistry::get().make_mechanic(resolved);
+        if (!impl) {
+            PTV_WARN("No mechanic registered for id: {}", resolved);
+            continue;
+        }
+        const bool is_player_scoped = impl->scope() == MechanicScope::Player;
+        const MechanicPhase phase = impl->phase();
+
+        impl->on_attach(world, entity, params, ctx);
+        // emplace_back with explicit MechanicInstance so MSVC can move
+        // the unique_ptr through the pair constructor (brace-init of a
+        // pair containing a move-only member is rejected by MSVC).
+        MechanicInstance inst{};
+        inst.id = resolved;
+        inst.impl = std::move(impl);
+        inst.phase = phase;
+        inst.entities.push_back(entity);
+        instances_.emplace_back(entity, std::move(inst));
+        if (is_player_scoped) {
+            player_scoped_.emplace(resolved, instances_.size() - 1);
+        }
+    }
+}
+
+void MechanicHost::attach_entity(World& world, std::uint32_t entity,
+                                 MechanicContext& ctx) {
+    attach_one(world, entity, ctx);
+}
+
+void MechanicHost::detach_entity(World& world, std::uint32_t entity) {
+    for (auto it = instances_.begin(); it != instances_.end();) {
+        auto& inst = it->second;
+        if (it->first == entity) {
+            if (inst.impl) {
+                for (std::uint32_t attached : inst.entities) {
+                    inst.impl->on_detach(world, attached);
+                }
+            }
+            it = instances_.erase(it);
+            continue;
+        }
+        // A shared player-scoped instance owned by some other entity: drop
+        // just this entity from it, keeping the instance alive for the rest.
+        auto& list = inst.entities;
+        auto found = std::find(list.begin(), list.end(), entity);
+        if (found != list.end()) {
+            if (inst.impl) inst.impl->on_detach(world, entity);
+            list.erase(found);
+        }
+        ++it;
+    }
+    reindex_player_scoped();
+}
+
+void MechanicHost::reindex_player_scoped() {
+    player_scoped_.clear();
+    for (std::size_t i = 0; i < instances_.size(); ++i) {
+        auto& inst = instances_[i].second;
+        if (!inst.impl) continue;
+        if (inst.impl->scope() != MechanicScope::Player) continue;
+        player_scoped_.emplace(inst.id, i);
+    }
 }
 
 void MechanicHost::update(World& world, float dt, const InputSnapshot& input,
@@ -151,6 +197,7 @@ void MechanicHost::detach_all(World& world) {
         }
     }
     instances_.clear();
+    player_scoped_.clear();
 }
 
 }  // namespace ptv

@@ -489,7 +489,130 @@ def _validate_world_scene(path: Path) -> tuple[bool, str]:
     spawn = player.get("spawn") if isinstance(player, dict) else None
     if not isinstance(spawn, dict) or "position" not in spawn:
         return False, "no player spawn"
-    return True, f"{len(entities)} entities"
+
+    nav_problems = _validate_navigation(doc)
+    if nav_problems:
+        return False, "navigation: " + "; ".join(nav_problems[:4])
+
+    nav = doc.get("navigation") or {}
+    regions = nav.get("regions") or []
+    nav_note = f", {len(regions)} nav regions" if regions else ""
+    return True, f"{len(entities)} entities{nav_note}"
+
+
+# How far a doorway point may sit outside the rooms it joins before it counts
+# as a mistake rather than a rounding difference.
+_NAV_LINK_TOLERANCE_M = 1.5
+
+
+def _validate_navigation(doc: dict) -> list[str]:
+    """Check declared walkable topology against itself.
+
+    The world architect declares its own navigation graph, which is far
+    cheaper and more exact than reconstructing one from finished geometry --
+    but it is also an LLM, so the declaration can be wrong in ways that only
+    show up as NPCs standing still in a shipped game. These checks catch the
+    mistakes that actually happen: an id typo in a link, a doorway coordinate
+    that touches neither room, a room nobody can reach, a spawn point outside
+    the walkable set.
+
+    Declaring no navigation at all is legitimate -- an open arena needs none
+    and NPCs fall back to local steering -- so an absent block is not an
+    error. A malformed one is.
+    """
+    nav = doc.get("navigation")
+    if not isinstance(nav, dict):
+        return []
+    regions = nav.get("regions") or []
+    if not regions:
+        return []
+
+    problems: list[str] = []
+    by_id: dict[str, dict] = {}
+    for r in regions:
+        if not isinstance(r, dict):
+            continue
+        rid = str(r.get("id") or "")
+        mn = r.get("min") or []
+        mx = r.get("max") or []
+        if not rid or len(mn) < 3 or len(mx) < 3:
+            problems.append(f"region {rid or '<unnamed>'} is malformed")
+            continue
+        if rid in by_id:
+            problems.append(f"duplicate region id '{rid}'")
+            continue
+        width = abs(float(mx[0]) - float(mn[0]))
+        depth = abs(float(mx[2]) - float(mn[2]))
+        if width < 0.5 or depth < 0.5:
+            problems.append(
+                f"region '{rid}' is {width:.2f}x{depth:.2f} m, too small to "
+                "stand in"
+            )
+        by_id[rid] = r
+
+    def _near(region: dict, point: list) -> bool:
+        mn, mx = region["min"], region["max"]
+        dx = max(float(mn[0]) - point[0], 0.0, point[0] - float(mx[0]))
+        dz = max(float(mn[2]) - point[2], 0.0, point[2] - float(mx[2]))
+        return (dx * dx + dz * dz) <= _NAV_LINK_TOLERANCE_M ** 2
+
+    adjacency: dict[str, set[str]] = {rid: set() for rid in by_id}
+    for link in nav.get("links") or []:
+        if not isinstance(link, dict):
+            continue
+        a, b = str(link.get("from") or ""), str(link.get("to") or "")
+        if a not in by_id or b not in by_id:
+            problems.append(f"link '{a}' -> '{b}' names an unknown region")
+            continue
+        point = link.get("point") or []
+        if len(point) < 3:
+            problems.append(f"link '{a}' -> '{b}' has no crossing point")
+            continue
+        # A crossing point that touches neither room is the failure mode that
+        # looks fine in the JSON and sends every NPC into a wall.
+        if not _near(by_id[a], point) or not _near(by_id[b], point):
+            problems.append(
+                f"link '{a}' -> '{b}' crosses at a point outside both regions"
+            )
+            continue
+        adjacency[a].add(b)
+        if link.get("bidirectional", True):
+            adjacency[b].add(a)
+
+    # Everything must be reachable from where the player starts, or part of
+    # the level is walkable in theory and inert in practice.
+    spawn_pos = ((doc.get("player") or {}).get("spawn") or {}).get("position")
+    start: str | None = None
+    if isinstance(spawn_pos, list) and len(spawn_pos) >= 3:
+        for rid, r in by_id.items():
+            mn, mx = r["min"], r["max"]
+            if (float(mn[0]) <= spawn_pos[0] <= float(mx[0])
+                    and float(mn[2]) <= spawn_pos[2] <= float(mx[2])):
+                start = rid
+                break
+        if start is None:
+            problems.append(
+                "the player spawn is not inside any declared nav region"
+            )
+
+    if start is not None and len(by_id) > 1:
+        seen = {start}
+        queue = [start]
+        while queue:
+            cur = queue.pop()
+            for nxt in adjacency.get(cur, ()):
+                if nxt in seen:
+                    continue
+                seen.add(nxt)
+                queue.append(nxt)
+        stranded = sorted(set(by_id) - seen)
+        if stranded:
+            problems.append(
+                "no route from the spawn to region(s): "
+                + ", ".join(stranded[:5])
+            )
+
+    return problems
 
 
 def _load_object_assets(ctx: PipelineContext) -> tuple[dict[str, str], list[dict]]:

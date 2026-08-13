@@ -142,6 +142,17 @@ struct CMesh {
     /** Animation intent ("walk") -> the real glTF clip name in this asset.
      * Read through ``MechanicContext::skeleton`` rather than directly. */
     std::unordered_map<std::string, std::string> animations;
+    /** Animation intent -> the ground speed, in m/s, that the clip LOOKS like
+     * it is travelling at.
+     *
+     * Tripo retargets with ``animate_in_place=True``, so a walk clip has no
+     * root motion to measure -- the feet cycle but the root never moves. The
+     * scene compiler therefore derives an apparent speed from the character's
+     * height and writes it here. ``builtin.character_locomotion`` divides the
+     * entity's real speed by it to set the playback rate, which is what stops
+     * the feet from sliding over the floor. Empty means "unknown", and the
+     * mechanic falls back to a height-derived estimate. */
+    std::unordered_map<std::string, float> animation_speeds;
 };
 
 /** Skeleton for a rigged ``CMesh``, plus the palette the renderer uploads.
@@ -163,6 +174,16 @@ struct CSkeleton {
     /** ``jointWorld * inverseBind`` per joint, rebuilt each frame and copied
      *  straight into the renderer's joint buffer. */
     std::vector<Mat4> palette;
+    /** Socket name -> the joint it rides on, resolved once at attach.
+     *
+     *  ``CMesh::sockets`` are positions in the mesh's bind pose, which is
+     *  correct for a static prop and wrong the instant a character animates:
+     *  a ``muzzle`` derived from a goblin holding a rifle would stay frozen
+     *  in mid-air while the goblin's arm swung through a walk cycle. Binding
+     *  each socket to its nearest joint lets ``socket_world`` push it through
+     *  the same palette entry the surrounding vertices use, so it tracks the
+     *  limb exactly as the geometry does. */
+    std::unordered_map<std::string, int> socket_joint;
 };
 
 /** Clip playback plus per-joint procedural override for a ``CSkeleton``.
@@ -181,10 +202,59 @@ struct CAnimator {
     bool looping{true};
     bool playing{true};
     float speed{1.0f};
+    /** The clip being blended OUT of, or -1 when not cross-fading.
+     *
+     * Switching clips used to be a hard cut, which reads as a visible snap
+     * every time a character starts or stops walking. The outgoing clip keeps
+     * advancing on its own time so the blend is between two moving poses
+     * rather than between a moving pose and a frozen one. */
+    int prev_clip{-1};
+    float prev_time_s{0.0f};
+    /** Seconds remaining in the current cross-fade. */
+    float blend_t{0.0f};
+    /** Total duration of the current cross-fade, for normalising ``blend_t``. */
+    float blend_duration{0.0f};
+    /** Elapsed time owed to this animator because distance LOD skipped it.
+     *
+     * Paid back in full on the next frame it IS sampled, so a character far
+     * from the player still walks at the right speed -- only the sampling is
+     * coarser. Without this, throttling would visibly slow distant NPCs
+     * down. */
+    float lod_debt_s{0.0f};
     /** One flag per joint, set by ``ISkeleton`` writes and cleared at the end
      *  of each tick. A set flag means "the clip must not touch this joint
      *  this frame". */
     std::vector<std::uint8_t> joint_overridden;
+};
+
+/** What a character WANTS to do this frame; ``builtin.character_locomotion``
+ * turns it into actual movement and the matching animation.
+ *
+ * This is the seam between AI and locomotion, and the reason generated code
+ * never has to think about clips at all. A behaviour decides "go that way"
+ * and writes a velocity here; the built-in moves the body, turns it to face
+ * travel, picks idle / walk / run from the resulting speed, and scales the
+ * clip's playback rate so the stride matches the ground covered. Generated
+ * code that instead called ``play_clip`` itself would have to re-derive all
+ * of that, and would get the foot-sliding wrong.
+ *
+ *     auto& want = world.emplace_or_replace<CLocomotionIntent>(self);
+ *     want.desired_velocity = direction * 3.0f;
+ */
+struct CLocomotionIntent {
+    /** World-space velocity the character should move at, in m/s. The
+     *  built-in clamps it to the configured walk/run ceiling, so a behaviour
+     *  can simply ask for "as fast as possible" with a large vector. */
+    Vec3 desired_velocity{0.0f};
+    /** Prefer the run clip even at a modest speed (a scared walk-run). */
+    bool sprint{false};
+    /** Turn to face the direction of travel. Clear it to keep facing a
+     *  target while strafing or backing away -- then set ``face_target``. */
+    bool face_travel{true};
+    /** World point to face when ``face_travel`` is false. An enemy that
+     *  circles the player while keeping its weapon trained uses this. */
+    Vec3 face_target{0.0f};
+    bool has_face_target{false};
 };
 
 struct CPhysics {
@@ -193,6 +263,80 @@ struct CPhysics {
     float restitution{0.2f};
     float friction{0.5f};
     std::string collision_shape{"aabb"};
+};
+
+/** Hit points, plus the small amount of state dying needs.
+ *
+ * In the engine rather than in generated code because damage is the one
+ * mechanic every combat game re-invents, and re-invents differently: without
+ * a shared component an enemy written by one CodeTask cannot hurt a player
+ * written by another. Drive it through ``MechanicContext::combat``. */
+struct CHealth {
+    float current{100.0f};
+    float max{100.0f};
+    /** Remaining invulnerability, in seconds. Exists because contact damage
+     *  is evaluated every frame: without it, one touch from an enemy drains
+     *  a health bar in a fraction of a second. */
+    float invuln_s{0.0f};
+    /** Cooldown applied after each hit lands. */
+    float invuln_after_hit_s{0.4f};
+    bool alive{true};
+    /** Counts down while the death animation plays; the entity is removed
+     *  when it reaches zero. Negative means "not dying". */
+    float death_timer_s{-1.0f};
+};
+
+/** Which side an entity is on.
+ *
+ * Needed for the case the brief calls out: enemies must fight the player's
+ * allied NPCs too, not only the player. Target selection asks the faction,
+ * so an ally and an enemy written by different CodeTasks still recognise
+ * each other as opponents. */
+struct CFaction {
+    std::string id{"neutral"};
+    std::vector<std::string> hostile_to;
+};
+
+/** Are these two factions on opposing sides?
+ *
+ * Symmetric on purpose: it is enough for EITHER side to name the other as
+ * hostile. An asymmetric answer produces the classic bug where enemies shoot
+ * the player's allies but the allies never shoot back, because only one of
+ * the two CodeTasks that authored them thought to fill in ``hostile_to``. */
+inline bool factions_hostile(const CFaction& a, const CFaction& b) {
+    if (a.id == b.id) return false;
+    for (const auto& s : a.hostile_to) {
+        if (s == b.id) return true;
+    }
+    for (const auto& s : b.hostile_to) {
+        if (s == a.id) return true;
+    }
+    return false;
+}
+
+/** Rigidly parents one entity to a point on another.
+ *
+ * This is what puts a separately-generated weapon into a separately-generated
+ * character's hand. Tripo sometimes produces "goblin holding a rifle" as one
+ * mesh and sometimes produces a goblin and a rifle as two, and a VR engine
+ * that can only handle the first case cannot build half the games it is
+ * asked for.
+ *
+ * Resolved after the pose system runs, so the child follows the parent's
+ * ANIMATED joint rather than its bind pose -- a rifle attached to a hand
+ * swings with the walk cycle.
+ *
+ * Drive it through ``MechanicContext::attach`` rather than writing it
+ * directly; the service validates the anchor and takes the child out of
+ * physics simulation. */
+struct CAttachment {
+    /** Entity this one rides on. */
+    std::uint32_t parent{0xFFFFFFFFu};
+    /** Socket or joint on the parent to follow. */
+    std::string anchor;
+    /** Extra offset applied after the anchor, in the anchor's space. */
+    Vec3 local_position{0.0f};
+    Quat local_rotation{1.0f, 0.0f, 0.0f, 0.0f};
 };
 
 struct CMechanicBinding {

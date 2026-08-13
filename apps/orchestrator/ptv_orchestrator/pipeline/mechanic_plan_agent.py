@@ -45,6 +45,12 @@ class MechanicPlanAgentInput:
     catalog_text: str
     """Engine catalog (built-in + promoted) rendered by ``as_planner_text``."""
 
+    npc_plan_json: str = ""
+    """``NpcPlan.model_dump_json(indent=2)``, or empty for a game with no
+    characters. The planner needs it so the CodeTasks it writes cover the
+    behaviours the NPC director committed to, rather than a second, different
+    reading of the same prompt."""
+
     editable_builtins_note: str = ""
     """Short note listing which catalog built-ins have real, editable source
     available for the ``builtin+config_code_edit`` path."""
@@ -193,5 +199,15 @@ def build_planner_message(inp: MechanicPlanAgentInput) -> str:
         f"{inp.build_spec_json}\n\n"
         "================ AssetManifest (JSON) ================\n"
         f"{inp.asset_manifest_json}\n\n"
-        f"{inp.catalog_text}\n"
+        + (
+            "================ NpcPlan (JSON) ================\n"
+            "Already decided by the NPC director. Every behavior listed here "
+            "needs C++ behind it, and every character listed here is already "
+            "bound to builtin.character_locomotion -- do NOT plan a mechanic "
+            "that moves characters or plays their walk/run clips.\n"
+            f"{inp.npc_plan_json}\n\n"
+            if inp.npc_plan_json
+            else ""
+        )
+        + f"{inp.catalog_text}\n"
     )

@@ -48,11 +48,17 @@
 flowchart TD
   Prompt[prompt.txt] --> BuildSpec[build_spec.json]
   BuildSpec --> AssetManifest[asset_manifest.json]
+  Prompt --> NpcPlan[npc_plan.json]
+  AssetManifest --> NpcPlan
+  NpcPlan --> AssetManifest
   BuildSpec --> MechanicPlan[mechanic_plan.json]
   AssetManifest --> MechanicPlan
+  NpcPlan --> MechanicPlan
   MechanicPlan --> SceneSpec[scene_spec.*.json]
   BuildSpec --> SceneSpec
   AssetManifest --> SceneSpec
+  NpcPlan --> SceneSpec
+  NpcPlan --> CppGen
   SceneSpec --> Refs[images/*/ref_NN.png]
   Refs --> Tripo[assets/*/model.glb]
   Tripo --> Normalize[asset_normalization.json]
@@ -79,7 +85,8 @@ flowchart TD
 | Transform FX | `src/ecs/TransformOffset.cpp` | Draw-time visual offsets (recoil kick, flinch) that never touch physics |
 | Skeletal | `src/ecs/Skeleton.cpp` + `src/render/GltfSkinnedLoad.cpp` | Rig loading, clip sampling, procedural joint override, joint palettes |
 | Scene | `src/scene/SceneLoader.cpp` | JSON scene → ECS |
-| Physics | `src/physics/PhysicsWorld.cpp` | Jolt PhysicsSystem |
+| Physics | `src/physics/PhysicsWorld.cpp` | Jolt PhysicsSystem; capsules, character sweep, overlap queries |
+| Navigation | `src/nav/NavGraph.cpp` | Walkable regions + portals declared by the world builder; A* routing |
 | Mechanics | `src/mechanics/MechanicRegistry.cpp` + `src/mechanics/builtin/<mechanic>/` | Data-driven mechanics; each built-in is its own `IMechanic` module |
 | Debug | `src/debug/DebugUI.cpp` | Dear ImGui overlay (mirror-window only) |
 | Save | `src/save/SaveSystem.cpp` | JSON world snapshot / load |
@@ -90,6 +97,16 @@ Generated C++ may only include headers rooted at `ptv/api/`, `ptv/ecs/`,
 `ptv/scene/`, `ptv/math/`, `ptv/mechanics/`, `ptv/dialogue/`, `ptv/ai/`,
 plus common STL and well-known third-party prefixes (`glm/`, `entt/`,
 `nlohmann/`).
+
+Gameplay reaches subsystems only through `MechanicContext`, never directly.
+Beyond the original locomotion / physics / draw / hands / fx / haptics /
+sockets / skeleton set, it now carries `contacts` (overlap queries),
+`spawn` (clone a scene template at runtime), `attach` (parent an entity to a
+socket or joint), `combat` (health, damage, factions), `perception`
+(who can I see) and `nav` (how do I get there). Those six exist so that
+characters authored by different CodeTasks share one model of damage,
+targeting and movement — see [npc-and-ai.md](npc-and-ai.md) and
+[navigation.md](navigation.md).
 
 ## The socket contract
 
@@ -186,14 +203,26 @@ name match.
 
 | Clause | Owner | Artifact |
 |---|---|---|
-| "this enemy needs to walk and shoot" | `asset_manifest` → `AssetItem.animations` | `asset_manifest.json` |
+| "this enemy needs to walk and shoot" | `npc_plan` → `NpcSpec.animation_intents`, reconciled onto `AssetItem.animations` | `npc_plan.json` |
 | "walk is the clip called Walk_01 on this asset" | `asset_animation` | `asset_animation.json` |
+| "a walk on a 1.8 m biped looks like 1.4 m/s" | `scene_compile` → `mesh.animation_speeds` | `scene.json` |
 | "this asset is on this entity" | `scene_spec` | `scene_spec.*.json` |
 
 An asset that ships an `idle` clip starts it looping the moment the scene
 loads. That is the one clip choice with an obvious answer, and without it a
 room of enemies holds its bind pose until some mechanic thinks to start
 them — which reads as broken rather than idle.
+
+Clip changes cross-fade rather than cut. `play_clip` takes a `fade_s` that
+defaults to a short blend, because a hard switch between idle and walk is a
+visible snap on every gait change; pass 0 when the cut is the point, as for a
+hit reaction.
+
+The third row is what stops feet from sliding. Tripo retargets in place, so a
+walk clip has no root motion to measure — nothing in the file says how fast it
+*looks* like it is going. The scene compiler derives that from the character's
+height, and `builtin.character_locomotion` divides real speed by it to set
+playback rate. See [npc-and-ai.md](npc-and-ai.md).
 
 ## Grabbing by the grip socket
 

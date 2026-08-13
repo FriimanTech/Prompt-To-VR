@@ -142,6 +142,23 @@ void sample_animation_clip(const gltf_mesh_load::AnimationClip& clip,
 }
 
 void tick_animators(World& world, float dt) {
+    AnimationLod off{};
+    off.enabled = false;
+    tick_animators(world, dt, Vec3(0.0f), off);
+}
+
+void tick_animators(World& world, float dt, const Vec3& viewer,
+                    const AnimationLod& lod) {
+    // Scratch pose for the outgoing clip during a cross-fade. Function-static
+    // so a scene full of characters reuses one buffer instead of allocating a
+    // joint array per animator per frame.
+    static std::vector<JointPose> fade_pose;
+    // Advances once per call, so the "every other frame" and "every fourth
+    // frame" bands stay in step across the whole scene rather than each
+    // animator keeping its own counter.
+    static std::uint64_t frame_index = 0;
+    ++frame_index;
+
     auto view = world.registry().view<CSkeleton>();
     for (auto entity : view) {
         auto& sk = view.get<CSkeleton>(entity);
@@ -150,6 +167,43 @@ void tick_animators(World& world, float dt) {
         if (sk.local_pose.size() != n) sk.local_pose = sk.skeleton.bind_pose;
 
         CAnimator* anim = world.registry().try_get<CAnimator>(entity);
+
+        // --- Distance throttling --------------------------------------
+        //
+        // Skipped frames bank their dt as debt and hand it back the next
+        // time this animator is sampled, so a distant character covers the
+        // same ground per second as a near one. Only the smoothness drops.
+        float step = dt;
+        if (lod.enabled && anim != nullptr) {
+            const CTransform* ct = world.registry().try_get<CTransform>(entity);
+            if (ct != nullptr) {
+                const Vec3 d = ct->t.position - viewer;
+                const float dist = std::sqrt(glm::dot(d, d));
+                int stride = 1;
+                if (dist > lod.stop_m) {
+                    stride = 0;  // out of range entirely
+                } else if (dist > lod.half_rate_m) {
+                    stride = 4;
+                } else if (dist > lod.full_rate_m) {
+                    stride = 2;
+                }
+
+                if (stride == 0) {
+                    // Hold the last pose and keep the palette as it is. The
+                    // debt still accrues, so walking back into range does not
+                    // rewind the animation.
+                    anim->lod_debt_s += dt;
+                    continue;
+                }
+                if (stride > 1 &&
+                    (frame_index % static_cast<std::uint64_t>(stride)) != 0) {
+                    anim->lod_debt_s += dt;
+                    continue;
+                }
+                step = dt + anim->lod_debt_s;
+                anim->lod_debt_s = 0.0f;
+            }
+        }
         // Size the flags before anything reads them, or the first frame after
         // an animator is attached would treat a freshly written override as
         // absent and stamp the bind pose over it.
@@ -169,12 +223,38 @@ void tick_animators(World& world, float dt) {
         }
 
         if (anim) {
+            // --- Outgoing clip -------------------------------------------
+            //
+            // Sampled BEFORE the incoming one, into scratch, and advanced on
+            // its own clock: blending a moving pose against a frozen one
+            // still reads as a hitch, just a softer one.
+            const bool fading =
+                anim->prev_clip >= 0 &&
+                static_cast<size_t>(anim->prev_clip) < anim->clips.size() &&
+                anim->blend_duration > 1e-6f && anim->blend_t > 0.0f;
+            if (fading) {
+                const auto& pclip =
+                    anim->clips[static_cast<size_t>(anim->prev_clip)];
+                anim->prev_time_s += step * anim->speed;
+                if (pclip.duration > 1e-6f) {
+                    anim->prev_time_s =
+                        std::fmod(anim->prev_time_s, pclip.duration);
+                    if (anim->prev_time_s < 0.0f)
+                        anim->prev_time_s += pclip.duration;
+                }
+                fade_pose.assign(sk.skeleton.bind_pose.begin(),
+                                 sk.skeleton.bind_pose.end());
+                sample_animation_clip(pclip, anim->prev_time_s,
+                                      anim->joint_overridden, fade_pose);
+            }
+
+            // --- Incoming clip -------------------------------------------
             if (anim->active_clip >= 0 &&
                 static_cast<size_t>(anim->active_clip) < anim->clips.size()) {
                 const auto& clip =
                     anim->clips[static_cast<size_t>(anim->active_clip)];
                 if (anim->playing) {
-                    anim->time_s += dt * anim->speed;
+                    anim->time_s += step * anim->speed;
                     if (clip.duration > 1e-6f) {
                         if (anim->looping) {
                             anim->time_s = std::fmod(anim->time_s,
@@ -189,6 +269,41 @@ void tick_animators(World& world, float dt) {
                 }
                 sample_animation_clip(clip, anim->time_s,
                                       anim->joint_overridden, sk.local_pose);
+            }
+
+            // --- Cross-fade ----------------------------------------------
+            //
+            // ``w`` is the weight still owed to the OUTGOING clip, so it runs
+            // 1 -> 0 across the fade. With no incoming clip the target is the
+            // bind pose, which makes a faded stop_clip fall back to rest
+            // instead of snapping there.
+            if (fading && fade_pose.size() == n) {
+                const float w = std::clamp(
+                    anim->blend_t / anim->blend_duration, 0.0f, 1.0f);
+                for (size_t j = 0; j < n; ++j) {
+                    if (j < anim->joint_overridden.size() &&
+                        anim->joint_overridden[j]) {
+                        continue;
+                    }
+                    JointPose& out = sk.local_pose[j];
+                    const JointPose& prev = fade_pose[j];
+                    out.translation =
+                        glm::mix(out.translation, prev.translation, w);
+                    out.scale = glm::mix(out.scale, prev.scale, w);
+                    // glm::slerp picks the shortest arc, so opposite-sign
+                    // quaternions do not blend the long way round.
+                    out.rotation = glm::normalize(
+                        glm::slerp(out.rotation, prev.rotation, w));
+                }
+                anim->blend_t = std::max(0.0f, anim->blend_t - step);
+                if (anim->blend_t <= 0.0f) {
+                    anim->prev_clip = -1;
+                    anim->blend_duration = 0.0f;
+                }
+            } else if (anim->prev_clip >= 0) {
+                anim->prev_clip = -1;
+                anim->blend_t = 0.0f;
+                anim->blend_duration = 0.0f;
             }
         }
 

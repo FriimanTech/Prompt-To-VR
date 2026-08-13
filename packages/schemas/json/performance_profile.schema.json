@@ -74,6 +74,22 @@
   "additionalProperties": false,
   "description": "Resolved per-project rendering budget, emitted into ``scene.json``.\n\nConsumed by the C++ runtime (``ScenePerformance`` in ``ptv/scene/Scene.h``)\nto configure MSAA, foveation, culling, LOD switching and the governor.",
   "properties": {
+    "ai_tick_rates_hz": {
+      "description": "Behaviour update rate at the same three distance bands. An enemy across the arena does not need to re-decide 72 times a second.",
+      "items": {
+        "type": "number"
+      },
+      "title": "Ai Tick Rates Hz",
+      "type": "array"
+    },
+    "animation_lod_distances_m": {
+      "description": "[full_rate, half_rate, stop]. Characters nearer than the first are posed every frame, nearer than the second every other frame, then every fourth, and beyond the third not at all. Clips still advance at the right speed -- only the sampling gets coarser, which is invisible at distance.",
+      "items": {
+        "type": "number"
+      },
+      "title": "Animation Lod Distances M",
+      "type": "array"
+    },
     "cull_distance_m": {
       "description": "Entities beyond this distance are skipped. Deliberately set effectively infinite for small scenes so a compact game still renders its whole environment.",
       "exclusiveMinimum": 0.0,
@@ -123,6 +139,14 @@
       },
       "title": "Lod Switch Distances M",
       "type": "array"
+    },
+    "max_animated_agents": {
+      "default": 12,
+      "description": "Ceiling on simultaneously animated characters. The scene compiler clamps NPC spawn caps to this.",
+      "maximum": 200,
+      "minimum": 0,
+      "title": "Max Animated Agents",
+      "type": "integer"
     },
     "max_triangles_per_asset": {
       "default": 60000,

@@ -7,6 +7,7 @@ Layout per project::
         project_state.json
         build_spec.json
         asset_manifest.json
+        npc_plan.json
         mechanic_plan.json
         scene_spec.json
         acceptance_test_plan.json
@@ -36,6 +37,7 @@ from ptv_schemas import (
     AssetManifest,
     BuildSpec,
     MechanicPlan,
+    NpcPlan,
     ProjectStage,
     ProjectState,
     ProjectStatus,
@@ -220,6 +222,9 @@ class ProjectStore:
     ) -> ArtifactMetadata:
         return self.write_model(project_id, "asset_manifest.json", manifest)
 
+    def save_npc_plan(self, project_id: str, plan: NpcPlan) -> ArtifactMetadata:
+        return self.write_model(project_id, "npc_plan.json", plan)
+
     def save_mechanic_plan(
         self, project_id: str, plan: MechanicPlan
     ) -> ArtifactMetadata:
@@ -246,6 +251,18 @@ class ProjectStore:
         return _load_json_model(
             self.dir_for(project_id) / "asset_manifest.json", AssetManifest
         )
+
+    def load_npc_plan(self, project_id: str) -> NpcPlan:
+        """The NPC plan, or an empty one.
+
+        Absent is normal and not an error: a project generated before this
+        stage existed, or a game with no NPCs at all, both legitimately have
+        no file. Downstream stages read an empty plan as "no characters to
+        worry about" rather than failing. """
+        path = self.dir_for(project_id) / "npc_plan.json"
+        if not path.exists():
+            return NpcPlan(prompt_id=project_id)
+        return _load_json_model(path, NpcPlan)
 
     def load_mechanic_plan(self, project_id: str) -> MechanicPlan:
         return _load_json_model(

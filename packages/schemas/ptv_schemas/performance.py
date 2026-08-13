@@ -126,6 +126,42 @@ class PerformanceProfile(StrictModel):
         ),
     )
 
+    # --- Animated agents -------------------------------------------------
+    #
+    # Skinning and AI are CPU work that competes with the render thread, and
+    # Meta's own guidance puts a Quest 3 "busy simulation" -- their term for
+    # an app with many animated NPCs -- at 200-300 draw calls and 1.3-1.8M
+    # triangles per frame. Characters are therefore budgeted separately from
+    # geometry: a scene can be well inside its triangle budget and still miss
+    # frame rate because thirty skeletons are being posed every frame.
+    max_animated_agents: int = Field(
+        default=12,
+        ge=0,
+        le=200,
+        description=(
+            "Ceiling on simultaneously animated characters. The scene"
+            " compiler clamps NPC spawn caps to this."
+        ),
+    )
+    animation_lod_distances_m: List[float] = Field(
+        default_factory=lambda: [8.0, 15.0, 40.0],
+        description=(
+            "[full_rate, half_rate, stop]. Characters nearer than the first"
+            " are posed every frame, nearer than the second every other"
+            " frame, then every fourth, and beyond the third not at all."
+            " Clips still advance at the right speed -- only the sampling"
+            " gets coarser, which is invisible at distance."
+        ),
+    )
+    ai_tick_rates_hz: List[float] = Field(
+        default_factory=lambda: [30.0, 10.0, 3.0],
+        description=(
+            "Behaviour update rate at the same three distance bands. An"
+            " enemy across the arena does not need to re-decide 72 times a"
+            " second."
+        ),
+    )
+
     min_triangles_per_asset: int = Field(default=1500, gt=0)
     max_triangles_per_asset: int = Field(default=60000, gt=0)
     lod_ratios: List[float] = Field(
@@ -158,6 +194,9 @@ _QUEST_TIERS: dict[PerformanceTier, dict] = {
         foveation_level=0,
         cull_distance_m=UNBOUNDED_CULL_M,
         lod_switch_distances_m=[18.0, 45.0, 90.0],
+        max_animated_agents=16,
+        animation_lod_distances_m=[10.0, 20.0, 50.0],
+        ai_tick_rates_hz=[30.0, 12.0, 4.0],
         min_triangles_per_asset=3000,
         max_triangles_per_asset=60000,
         evict_when_over_budget=False,
@@ -170,6 +209,9 @@ _QUEST_TIERS: dict[PerformanceTier, dict] = {
         foveation_level=1,
         cull_distance_m=UNBOUNDED_CULL_M,
         lod_switch_distances_m=[12.0, 30.0, 65.0],
+        max_animated_agents=12,
+        animation_lod_distances_m=[8.0, 15.0, 40.0],
+        ai_tick_rates_hz=[30.0, 10.0, 3.0],
         min_triangles_per_asset=2000,
         max_triangles_per_asset=35000,
         evict_when_over_budget=False,
@@ -182,6 +224,9 @@ _QUEST_TIERS: dict[PerformanceTier, dict] = {
         foveation_level=2,
         cull_distance_m=120.0,
         lod_switch_distances_m=[8.0, 20.0, 45.0],
+        max_animated_agents=8,
+        animation_lod_distances_m=[6.0, 12.0, 30.0],
+        ai_tick_rates_hz=[20.0, 8.0, 2.0],
         min_triangles_per_asset=1500,
         max_triangles_per_asset=18000,
         evict_when_over_budget=False,
@@ -194,6 +239,9 @@ _QUEST_TIERS: dict[PerformanceTier, dict] = {
         foveation_level=3,
         cull_distance_m=80.0,
         lod_switch_distances_m=[6.0, 15.0, 32.0],
+        max_animated_agents=6,
+        animation_lod_distances_m=[5.0, 10.0, 24.0],
+        ai_tick_rates_hz=[15.0, 6.0, 2.0],
         min_triangles_per_asset=1500,
         max_triangles_per_asset=10000,
         evict_when_over_budget=True,
@@ -255,6 +303,12 @@ def derive_profile(
         base["msaa_samples"] = 4
         base["foveation_level"] = 0
         base["evict_when_over_budget"] = False
+        # A PC has CPU headroom the headset does not, and skinning plus AI is
+        # CPU work, so more characters can be alive and updated further out.
+        base["max_animated_agents"] = int(base["max_animated_agents"] * 3)
+        base["animation_lod_distances_m"] = [
+            d * 2.0 for d in base["animation_lod_distances_m"]
+        ]
 
     governor = GovernorBounds(
         # Never let the governor cull closer than the first LOD switch.

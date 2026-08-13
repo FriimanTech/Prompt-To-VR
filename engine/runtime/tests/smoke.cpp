@@ -25,9 +25,12 @@
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/quaternion.hpp>
 
+#include "ptv/api/IMechanic.h"
 #include "ptv/ecs/Skeleton.h"
 #include "ptv/ecs/World.h"
 #include "ptv/mechanics/MechanicRegistry.h"
+#include "ptv/nav/NavGraph.h"
+#include "ptv/physics/PhysicsWorld.h"
 #include "ptv/render/GltfMeshLoad.h"
 #include "ptv/render/GltfSkinnedLoad.h"
 #include "ptv/render/Renderer.h"
@@ -54,6 +57,7 @@ static int case_mechanics() {
         "builtin.throw",
         "builtin.recoil",
         "builtin.hand_pose",
+        "builtin.character_locomotion",
     };
     for (const char* id : expected) {
         bool found = false;
@@ -1012,6 +1016,1037 @@ static int case_clip_contract() {
               "scene into the ECS");
 }
 
+// A character needs a capsule, not the box it used to silently get. The scene
+// compiler has always emitted collision_shape "capsule" for characters, but
+// PhysicsWorld only knew box/sphere/mesh, so every NPC collided as a cube --
+// too wide to fit a doorway and prone to catching on its own corners.
+//
+// Rather than assert "a body exists" (which passed before this change too),
+// this drops the character onto a floor and measures where it settles. Only a
+// correctly sized capsule comes to rest with its centre one half-height up.
+static int case_physics_capsule() {
+    ptv::World world;
+
+    // Floor: 20 x 0.2 x 20 static box whose top face sits exactly at y = 0.
+    {
+        const auto e = world.create_entity("floor");
+        ptv::Transform t{};
+        t.position = ptv::Vec3(0.0f, -0.1f, 0.0f);
+        world.registry().emplace<ptv::CTransform>(e, ptv::CTransform{t});
+        world.registry().emplace<ptv::CPrimitive>(
+            e, ptv::CPrimitive{"box", ptv::Vec3(20.0f, 0.2f, 20.0f),
+                               ptv::Vec3(0.5f)});
+        ptv::CPhysics p{};
+        p.kind = "static";
+        p.collision_shape = "box";
+        world.registry().emplace<ptv::CPhysics>(e, p);
+    }
+
+    // Character: 1.8 m tall, dropped from 3 m.
+    const float kHeight = 1.8f;
+    {
+        const auto e = world.create_entity("goblin");
+        ptv::Transform t{};
+        t.position = ptv::Vec3(0.0f, 3.0f, 0.0f);
+        world.registry().emplace<ptv::CTransform>(e, ptv::CTransform{t});
+        ptv::CMesh m{};
+        m.asset_id = "goblin";
+        m.target_scale_meters = kHeight;
+        m.skinned = true;
+        world.registry().emplace<ptv::CMesh>(e, std::move(m));
+        ptv::CPhysics p{};
+        p.kind = "dynamic";
+        p.mass_kg = 70.0f;
+        p.collision_shape = "capsule";
+        world.registry().emplace<ptv::CPhysics>(e, p);
+    }
+
+    ptv::PhysicsWorld physics;
+    if (!physics.initialize()) return fail("physics failed to initialize");
+    physics.rebuild_from_world(world);
+
+    const auto goblin = static_cast<std::uint32_t>(world.find("goblin"));
+    if (!physics.has_body(goblin)) return fail("character got no body");
+
+    // Shove it sideways while it falls: a capsule that is not DOF-locked
+    // topples on landing, which is exactly what we must not allow.
+    physics.apply_impulse(goblin, ptv::Vec3(120.0f, 0.0f, 0.0f));
+
+    for (int i = 0; i < 240; ++i) physics.step(1.0f / 60.0f);
+    physics.sync_to_world(world);
+
+    const auto& t = world.get<ptv::CTransform>(goblin).t;
+    const float expected_y = 0.5f * kHeight;
+    if (std::fabs(t.position.y - expected_y) > 0.06f) {
+        std::fprintf(stderr,
+                     "  settled at y=%.3f, expected ~%.3f (capsule height "
+                     "%.2f)\n",
+                     t.position.y, expected_y, kHeight);
+        return fail("capsule did not settle at half its height above the floor");
+    }
+    if (std::fabs(t.rotation.x) > 0.02f || std::fabs(t.rotation.z) > 0.02f) {
+        std::fprintf(stderr, "  rotation x=%.3f z=%.3f\n", t.rotation.x,
+                     t.rotation.z);
+        return fail("character capsule toppled; upright DOFs are not locked");
+    }
+
+    // Runtime lifecycle: an entity created after the scene loaded must still
+    // get a body, and removing it must actually destroy it.
+    const auto spawned = world.create_entity("spawned");
+    {
+        ptv::Transform st{};
+        st.position = ptv::Vec3(4.0f, 1.0f, 0.0f);
+        world.registry().emplace<ptv::CTransform>(spawned,
+                                                  ptv::CTransform{st});
+        ptv::CPhysics p{};
+        p.kind = "dynamic";
+        p.collision_shape = "sphere";
+        world.registry().emplace<ptv::CPhysics>(spawned, p);
+    }
+    const auto spawned_id = static_cast<std::uint32_t>(spawned);
+    if (physics.has_body(spawned_id))
+        return fail("a brand-new entity already had a body");
+    if (!physics.add_body_for(world, spawned_id))
+        return fail("add_body_for refused a valid entity");
+    if (!physics.has_body(spawned_id))
+        return fail("add_body_for did not create a body");
+    if (!physics.add_body_for(world, spawned_id))
+        return fail("add_body_for is not idempotent");
+
+    physics.remove_body(spawned_id);
+    if (physics.has_body(spawned_id))
+        return fail("remove_body left the body behind");
+
+    physics.shutdown();
+    return ok("physics: character capsule sized from mesh height, stays "
+              "upright, and bodies can be added/removed at runtime");
+}
+
+// Slide locomotion used to be free-fly: ILocomotion::translate just added to
+// the rig, so the player walked through every wall the world builder placed.
+// slide_character sweeps a capsule instead, and this checks the three cases
+// that matter -- open space, head-on into a wall, and a glancing angle that
+// must keep its tangential motion instead of stopping dead.
+static int case_physics_player_slide() {
+    ptv::World world;
+
+    auto add_box = [&](const char* id, ptv::Vec3 pos, ptv::Vec3 size) {
+        const auto e = world.create_entity(id);
+        ptv::Transform t{};
+        t.position = pos;
+        world.registry().emplace<ptv::CTransform>(e, ptv::CTransform{t});
+        world.registry().emplace<ptv::CPrimitive>(
+            e, ptv::CPrimitive{"box", size, ptv::Vec3(0.5f)});
+        ptv::CPhysics p{};
+        p.kind = "static";
+        p.collision_shape = "box";
+        world.registry().emplace<ptv::CPhysics>(e, p);
+    };
+
+    add_box("floor", ptv::Vec3(0.0f, -0.1f, 0.0f),
+            ptv::Vec3(40.0f, 0.2f, 40.0f));
+    // Wall plane at x = 1.9 (near face of a 0.2 m thick slab centred on 2.0).
+    add_box("wall", ptv::Vec3(2.0f, 1.5f, 0.0f), ptv::Vec3(0.2f, 3.0f, 12.0f));
+
+    ptv::PhysicsWorld physics;
+    if (!physics.initialize()) return fail("physics failed to initialize");
+    physics.rebuild_from_world(world);
+
+    const float kHeight = 1.7f;
+    const float kRadius = 0.17f * kHeight;  // matches build_capsule_shape
+    const ptv::Vec3 center(0.0f, 0.5f * kHeight, 0.0f);
+    const std::uint32_t kNoSelf = 0xFFFFFFFFu;
+
+    // 1) Open space: nothing in the way behind the player, full delta.
+    {
+        const ptv::Vec3 want(-1.0f, 0.0f, 0.0f);
+        const ptv::Vec3 got =
+            physics.slide_character(center, kHeight, want, kNoSelf);
+        if (std::fabs(got.x - want.x) > 0.02f)
+            return fail("open-space move was obstructed");
+    }
+
+    // 2) Straight into the wall: stop just short of contact.
+    {
+        const ptv::Vec3 got = physics.slide_character(
+            center, kHeight, ptv::Vec3(2.0f, 0.0f, 0.0f), kNoSelf);
+        const float expected = 1.9f - kRadius;
+        if (got.x > expected + 0.05f) {
+            std::fprintf(stderr, "  moved x=%.3f, wall contact at %.3f\n",
+                         got.x, expected);
+            return fail("player walked into (or through) the wall");
+        }
+        if (got.x < expected - 0.20f) {
+            std::fprintf(stderr, "  moved x=%.3f, expected ~%.3f\n", got.x,
+                         expected);
+            return fail("player stopped far too early");
+        }
+    }
+
+    // 3) Glancing angle: blocked on X, but the Z component must survive or
+    //    the player gets stuck on every wall they brush past.
+    {
+        const ptv::Vec3 got = physics.slide_character(
+            center, kHeight, ptv::Vec3(2.0f, 0.0f, 1.0f), kNoSelf);
+        if (got.x > 1.9f - kRadius + 0.05f)
+            return fail("glancing move still crossed the wall");
+        if (got.z < 0.5f) {
+            std::fprintf(stderr, "  slid z=%.3f of a requested 1.0\n", got.z);
+            return fail("wall contact killed the along-wall motion");
+        }
+    }
+
+    physics.shutdown();
+    return ok("physics: player sweep blocks walls head-on and slides along "
+              "them at an angle");
+}
+
+// "The duck touched the player" is the single most common NPC question, and
+// before this there was no way to ask it: no triggers, no contact events, and
+// Jolt's own contact callbacks skip pairs where neither body is dynamic --
+// which is exactly the player-vs-NPC case, since both are kinematic.
+static int case_physics_overlap() {
+    ptv::World world;
+
+    auto add_capsule = [&](const char* id, ptv::Vec3 pos, const char* kind) {
+        const auto e = world.create_entity(id);
+        ptv::Transform t{};
+        t.position = pos;
+        t.scale = 1.8f;  // no CMesh, so the capsule takes its height here
+        world.registry().emplace<ptv::CTransform>(e, ptv::CTransform{t});
+        ptv::CPhysics p{};
+        p.kind = kind;
+        p.collision_shape = "capsule";
+        world.registry().emplace<ptv::CPhysics>(e, p);
+        return static_cast<std::uint32_t>(e);
+    };
+
+    // Both kinematic on purpose: this is the pair Jolt would never report.
+    const auto player = add_capsule("player", ptv::Vec3(0.0f, 0.9f, 0.0f),
+                                    "kinematic");
+    const auto near_duck = add_capsule("near", ptv::Vec3(0.35f, 0.9f, 0.0f),
+                                       "kinematic");
+    const auto far_duck = add_capsule("far", ptv::Vec3(6.0f, 0.9f, 0.0f),
+                                      "kinematic");
+
+    ptv::PhysicsWorld physics;
+    if (!physics.initialize()) return fail("physics failed to initialize");
+    physics.rebuild_from_world(world);
+
+    std::vector<std::uint32_t> hits;
+    physics.overlapping(player, hits);
+
+    const bool saw_near =
+        std::find(hits.begin(), hits.end(), near_duck) != hits.end();
+    const bool saw_far =
+        std::find(hits.begin(), hits.end(), far_duck) != hits.end();
+    const bool saw_self =
+        std::find(hits.begin(), hits.end(), player) != hits.end();
+
+    if (!saw_near) return fail("overlapping missed a touching kinematic body");
+    if (saw_far) return fail("overlapping reported a body 6 m away");
+    if (saw_self) return fail("overlapping reported the query entity itself");
+
+    // Move the near one away and confirm the overlap clears.
+    physics.move_kinematic(near_duck, ptv::Vec3(9.0f, 0.9f, 0.0f),
+                           ptv::Quat(1.0f, 0.0f, 0.0f, 0.0f), 1.0f / 60.0f);
+    physics.step(1.0f / 60.0f);
+    physics.overlapping(player, hits);
+    if (std::find(hits.begin(), hits.end(), near_duck) != hits.end())
+        return fail("overlap persisted after the body moved away");
+
+    physics.shutdown();
+    return ok("physics: overlap queries see kinematic-vs-kinematic contact "
+              "that Jolt's contact callbacks never report");
+}
+
+// A probe mechanic so the runtime-attach test can prove a spawned entity's
+// mechanics actually tick, rather than just that a binding component exists.
+namespace {
+int g_probe_attached = 0;
+int g_probe_ticks = 0;
+int g_probe_detached = 0;
+
+class ProbeMechanic final : public ptv::IMechanic {
+public:
+    std::string id() const override { return "test.probe"; }
+    void on_attach(ptv::World&, std::uint32_t, const nlohmann::json&,
+                   ptv::MechanicContext&) override {
+        ++g_probe_attached;
+    }
+    void on_update(ptv::World&, std::uint32_t, float,
+                   const ptv::InputSnapshot&,
+                   ptv::MechanicContext&) override {
+        ++g_probe_ticks;
+    }
+    void on_detach(ptv::World&, std::uint32_t) override { ++g_probe_detached; }
+};
+}  // namespace
+
+PTV_REGISTER_MECHANIC("test.probe", ProbeMechanic)
+
+// Everything about an entity used to be decided once, at scene load:
+// physics_.rebuild_from_world, attach_bindings and attach_skeletons all ran
+// exactly once. An enemy spawned mid-wave was therefore a ghost -- visible,
+// but with no collider and with none of its mechanics running. This checks
+// the per-entity attach path that replaces that.
+static int case_runtime_spawn() {
+    ptv::World world;
+    ptv::MechanicContext ctx{};
+    ptv::MechanicHost host;
+
+    // A "template": bindings present, but parked and tagged so it neither
+    // renders nor collides.
+    const auto tmpl = world.create_entity("enemy_template");
+    {
+        ptv::Transform t{};
+        t.position = ptv::Vec3(0.0f, -500.0f, 0.0f);
+        t.scale = 1.8f;
+        world.registry().emplace<ptv::CTransform>(tmpl, ptv::CTransform{t});
+        ptv::CPhysics p{};
+        p.kind = "kinematic";
+        p.collision_shape = "capsule";
+        world.registry().emplace<ptv::CPhysics>(tmpl, p);
+        world.registry().emplace<ptv::CTag>(tmpl, ptv::CTag{{"template",
+                                                             "enemy"}});
+        ptv::CMechanicBinding mb{};
+        mb.entries.push_back({"test.probe", "", "{}"});
+        world.registry().emplace<ptv::CMechanicBinding>(tmpl, std::move(mb));
+    }
+
+    ptv::PhysicsWorld physics;
+    if (!physics.initialize()) return fail("physics failed to initialize");
+    physics.rebuild_from_world(world);
+    host.attach_bindings(world, ctx);
+
+    // The template itself must stay inert: no collider, and although its
+    // binding does attach, that is the scene's business -- what matters is
+    // that it has no body to bump into.
+    if (physics.has_body(static_cast<std::uint32_t>(tmpl)))
+        return fail("a template entity was given a collider");
+
+    const int ticks_before = g_probe_ticks;
+    const ptv::InputSnapshot input{};
+    host.update(world, 1.0f / 60.0f, input, ctx, ptv::MechanicPhase::Simulate);
+    const int template_ticks = g_probe_ticks - ticks_before;
+
+    // Now "spawn": clone the binding onto a fresh entity the way
+    // Application::clone_entity does, then attach it at runtime.
+    const auto spawned = world.create_entity("enemy_1");
+    {
+        ptv::Transform t{};
+        t.position = ptv::Vec3(3.0f, 0.9f, 0.0f);
+        t.scale = 1.8f;
+        world.registry().emplace<ptv::CTransform>(spawned, ptv::CTransform{t});
+        world.registry().emplace<ptv::CPhysics>(
+            spawned, world.registry().get<ptv::CPhysics>(tmpl));
+        world.registry().emplace<ptv::CTag>(spawned, ptv::CTag{{"enemy"}});
+        world.registry().emplace<ptv::CMechanicBinding>(
+            spawned, world.registry().get<ptv::CMechanicBinding>(tmpl));
+    }
+    const auto spawned_id = static_cast<std::uint32_t>(spawned);
+
+    const int attached_before = g_probe_attached;
+    physics.add_body_for(world, spawned_id);
+    host.attach_entity(world, spawned_id, ctx);
+
+    if (g_probe_attached != attached_before + 1)
+        return fail("attach_entity did not attach the spawned mechanic");
+    if (!physics.has_body(spawned_id))
+        return fail("the spawned entity got no collider");
+
+    const int before = g_probe_ticks;
+    host.update(world, 1.0f / 60.0f, input, ctx, ptv::MechanicPhase::Simulate);
+    if (g_probe_ticks - before != template_ticks + 1)
+        return fail("the spawned entity's mechanic did not tick");
+
+    // Despawn: the mechanic must stop ticking and the body must go.
+    const int detached_before = g_probe_detached;
+    host.detach_entity(world, spawned_id);
+    physics.remove_body(spawned_id);
+    world.registry().destroy(spawned);
+
+    if (g_probe_detached != detached_before + 1)
+        return fail("detach_entity did not deliver on_detach");
+    if (physics.has_body(spawned_id))
+        return fail("despawn left the collider behind");
+
+    const int after_despawn = g_probe_ticks;
+    host.update(world, 1.0f / 60.0f, input, ctx, ptv::MechanicPhase::Simulate);
+    if (g_probe_ticks - after_despawn != template_ticks)
+        return fail("a despawned entity's mechanic is still ticking");
+
+    physics.shutdown();
+    return ok("lifecycle: entities spawned after scene load get a collider "
+              "and ticking mechanics, and lose both on despawn");
+}
+
+// Switching clips used to be a hard cut: active_clip changed and the pose
+// jumped on that frame. Every gait change -- idle to walk, walk to run --
+// therefore popped. tick_animators now cross-fades, and this pins the three
+// things that must hold: the fade starts on the outgoing pose, passes
+// strictly between the two, and lands exactly on the incoming one before
+// tearing the fade state down.
+static int case_clip_blend(const char* glb) {
+    namespace gml = ptv::gltf_mesh_load;
+    std::string err;
+
+    gml::SkeletonData skel;
+    if (!gml::load_glb_skeleton(glb, 0.0f, skel, err)) {
+        std::fprintf(stderr, "[fail] load_glb_skeleton: %s\n", err.c_str());
+        return 1;
+    }
+    if (skel.clips.empty()) return fail("fixture carried no clips");
+
+    ptv::World world;
+    const auto e = world.create_entity("rig");
+    const auto id = static_cast<std::uint32_t>(e);
+
+    ptv::CSkeleton cs{};
+    cs.local_pose = skel.bind_pose;
+    cs.skeleton = skel;
+    world.registry().emplace<ptv::CSkeleton>(e, std::move(cs));
+
+    // Clip 0 is the fixture's animated track. Clip 1 is a copy flattened to
+    // identity rotations, so it holds the rig still -- a stand-in for "idle"
+    // that gives the blend two visibly different poses to interpolate.
+    ptv::CAnimator anim{};
+    anim.clips = skel.clips;
+    gml::AnimationClip still = skel.clips[0];
+    still.name = "still";
+    for (auto& ch : still.channels) {
+        if (ch.path != gml::AnimPath::Rotation) continue;
+        for (size_t k = 0; k + 3 < ch.values.size(); k += 4) {
+            ch.values[k + 0] = 0.0f;
+            ch.values[k + 1] = 0.0f;
+            ch.values[k + 2] = 0.0f;
+            ch.values[k + 3] = 1.0f;
+        }
+    }
+    anim.clips.push_back(std::move(still));
+    anim.active_clip = 0;
+    anim.looping = true;
+    anim.playing = true;
+    anim.joint_overridden.assign(skel.joint_count(), 0u);
+    world.registry().emplace<ptv::CAnimator>(e, std::move(anim));
+
+    const int tip = skel.name_to_joint.at("bone_tip");
+    auto tip_angle_deg = [&]() {
+        const auto& sk = world.get<ptv::CSkeleton>(id);
+        const ptv::Quat q = sk.local_pose[static_cast<size_t>(tip)].rotation;
+        return glm::degrees(
+            2.0f * std::acos(std::min(1.0f, std::fabs(q.w))));
+    };
+
+    // Park the animated clip at its 45-degree peak and hold it there.
+    ptv::tick_animators(world, 0.5f);
+    const float animated = tip_angle_deg();
+    if (std::fabs(animated - 45.0f) > 1.0f)
+        return fail("fixture clip did not reach its expected pose");
+
+    // Start a 0.2 s fade onto the flat clip, exactly as play_clip does.
+    {
+        auto& a = world.get<ptv::CAnimator>(id);
+        a.prev_clip = a.active_clip;
+        a.prev_time_s = a.time_s;
+        a.active_clip = 1;
+        a.time_s = 0.5f;
+        a.blend_t = 0.2f;
+        a.blend_duration = 0.2f;
+    }
+
+    // First frame of the fade: still fully weighted to the outgoing clip, so
+    // nothing may jump.
+    ptv::tick_animators(world, 0.0f);
+    if (std::fabs(tip_angle_deg() - animated) > 1.0f) {
+        std::fprintf(stderr, "  fade start moved the pose to %.2f deg\n",
+                     tip_angle_deg());
+        return fail("clip switch popped instead of blending");
+    }
+
+    // Halfway: strictly between the two poses.
+    ptv::tick_animators(world, 0.1f);
+    const float mid = tip_angle_deg();
+    if (mid >= animated - 1.0f || mid <= 1.0f) {
+        std::fprintf(stderr, "  mid-fade angle %.2f, between 0 and %.2f\n",
+                     mid, animated);
+        return fail("mid-fade pose is not between the two clips");
+    }
+
+    // Run the fade out. It must land on the flat clip and clear its state,
+    // or the outgoing clip keeps being sampled forever.
+    for (int i = 0; i < 4; ++i) ptv::tick_animators(world, 0.05f);
+    if (tip_angle_deg() > 1.0f) {
+        std::fprintf(stderr, "  ended at %.2f deg, want ~0\n",
+                     tip_angle_deg());
+        return fail("fade never reached the incoming clip");
+    }
+    const auto& done = world.get<ptv::CAnimator>(id);
+    if (done.prev_clip != -1 || done.blend_t > 0.0f)
+        return fail("fade finished but left its blend state behind");
+
+    return ok("animation: clip changes cross-fade instead of snapping, and "
+              "the fade cleans itself up");
+}
+
+// Minimal stand-ins for the two services builtin.character_locomotion uses,
+// so the gait logic can be exercised without a Vulkan/OpenXR Application.
+namespace {
+
+class FakePhysics final : public ptv::IPhysicsAccess {
+public:
+    bool raycast(const ptv::Vec3& origin, const ptv::Vec3& dir, float max_dist,
+                 ptv::PhysicsRayHit& out) const override {
+        // A flat floor at y = 0, so ground snap has something to find.
+        (void)dir;
+        (void)max_dist;
+        out.point = ptv::Vec3(origin.x, 0.0f, origin.z);
+        out.normal = ptv::Vec3(0.0f, 1.0f, 0.0f);
+        out.hit = true;
+        return true;
+    }
+    bool has_body(std::uint32_t) const override { return false; }
+    void set_kinematic(std::uint32_t, bool) override {}
+    void move_kinematic(std::uint32_t, const ptv::Vec3&, const ptv::Quat&,
+                        float) override {}
+    void apply_impulse(std::uint32_t, const ptv::Vec3&) override {}
+    ptv::Vec3 slide_move(std::uint32_t, const ptv::Vec3& delta) const override {
+        return delta;  // open ground
+    }
+};
+
+class FakeSkeleton final : public ptv::ISkeleton {
+public:
+    std::string requested;
+    float speed{1.0f};
+    int play_calls{0};
+    bool have_run{true};
+
+    bool has_skeleton(std::uint32_t) const override { return true; }
+    int joint_index(std::uint32_t, const char*) const override { return -1; }
+    int joint_count(std::uint32_t) const override { return 1; }
+    void set_joint_rotation(std::uint32_t, int, const ptv::Quat&) override {}
+    void set_joint_translation(std::uint32_t, int, const ptv::Vec3&) override {}
+    bool play_clip(std::uint32_t, const char* name, bool, float) override {
+        if (name == nullptr) return false;
+        ++play_calls;
+        requested = name;
+        return true;
+    }
+    void stop_clip(std::uint32_t) override {}
+    void set_clip_speed(std::uint32_t, float s) override { speed = s; }
+    bool has_clip(std::uint32_t, const char* name) const override {
+        if (name == nullptr) return false;
+        if (std::string(name) == "run") return have_run;
+        return true;
+    }
+    const char* current_clip(std::uint32_t) const override {
+        return requested.c_str();
+    }
+    float clip_time(std::uint32_t) const override { return 0.0f; }
+    float clip_duration(std::uint32_t) const override { return 1.0f; }
+    bool clip_finished(std::uint32_t) const override { return false; }
+};
+
+}  // namespace
+
+// The heart of "animation synced to movement". A behaviour only writes a
+// desired velocity; this mechanic has to pick the gait, keep the playback
+// rate inside the window where scaling still looks like walking, and move the
+// body. Getting the rate wrong is what makes characters moon-walk.
+static int case_character_locomotion() {
+    auto mech = ptv::MechanicRegistry::get().make_mechanic(
+        "builtin.character_locomotion");
+    if (!mech) return fail("builtin.character_locomotion is not registered");
+
+    ptv::World world;
+    const auto e = world.create_entity("goblin");
+    const auto id = static_cast<std::uint32_t>(e);
+    {
+        ptv::Transform t{};
+        // Start already resting on the floor so the first tick's ground snap
+        // does not register as horizontal motion.
+        t.position = ptv::Vec3(0.0f, 0.9f, 0.0f);
+        world.registry().emplace<ptv::CTransform>(e, ptv::CTransform{t});
+        ptv::CMesh m{};
+        m.asset_id = "goblin";
+        m.target_scale_meters = 1.8f;  // -> walk ref 1.40, run ref 3.96 m/s
+        m.skinned = true;
+        world.registry().emplace<ptv::CMesh>(e, std::move(m));
+    }
+
+    FakePhysics physics;
+    FakeSkeleton skeleton;
+    ptv::MechanicContext ctx{};
+    ctx.physics = &physics;
+    ctx.skeleton = &skeleton;
+
+    const ptv::InputSnapshot input{};
+    mech->on_attach(world, id, nlohmann::json::object(), ctx);
+
+    auto drive = [&](ptv::Vec3 velocity, int frames) {
+        auto& want = world.registry().emplace_or_replace<
+            ptv::CLocomotionIntent>(e);
+        want.desired_velocity = velocity;
+        for (int i = 0; i < frames; ++i) {
+            mech->on_update(world, id, 1.0f / 60.0f, input, ctx);
+        }
+    };
+
+    // --- Standing still -> idle ------------------------------------------
+    drive(ptv::Vec3(0.0f), 3);
+    if (skeleton.requested != "idle")
+        return fail("a stationary character is not playing idle");
+
+    // --- Walking pace -> walk, at natural playback rate -------------------
+    drive(ptv::Vec3(0.0f, 0.0f, -1.4f), 10);
+    if (skeleton.requested != "walk")
+        return fail("walking pace did not select the walk clip");
+    if (std::fabs(skeleton.speed - 1.0f) > 0.12f) {
+        std::fprintf(stderr, "  walk clip rate %.3f, expected ~1.0\n",
+                     skeleton.speed);
+        return fail("walk playback rate does not match the ground covered");
+    }
+
+    // It must actually have moved, and be facing the way it went (-Z).
+    {
+        const auto& t = world.get<ptv::CTransform>(id).t;
+        if (t.position.z > -0.05f)
+            return fail("the character did not move");
+        const ptv::Vec3 fwd = t.rotation * ptv::Vec3(0.0f, 0.0f, -1.0f);
+        if (fwd.z > -0.9f) {
+            std::fprintf(stderr, "  forward = (%.2f, %.2f, %.2f)\n", fwd.x,
+                         fwd.y, fwd.z);
+            return fail("the character is not facing its direction of travel");
+        }
+    }
+
+    // --- Sprint -> run, and the rate stays inside the usable window -------
+    drive(ptv::Vec3(0.0f, 0.0f, -9.0f), 20);
+    if (skeleton.requested != "run")
+        return fail("a sprint did not select the run clip");
+    if (skeleton.speed < 0.80f - 1e-3f || skeleton.speed > 1.25f + 1e-3f) {
+        std::fprintf(stderr, "  run clip rate %.3f outside [0.80, 1.25]\n",
+                     skeleton.speed);
+        return fail("playback scaling escaped the range where it still reads "
+                    "as running");
+    }
+
+    // --- A rig with no run clip falls back to walk, not to nothing --------
+    skeleton.have_run = false;
+    drive(ptv::Vec3(0.0f, 0.0f, -9.0f), 5);
+    if (skeleton.requested != "walk")
+        return fail("a rig without a run clip did not fall back to walk");
+
+    // --- animated:false still moves, but plays nothing --------------------
+    {
+        auto duck = ptv::MechanicRegistry::get().make_mechanic(
+            "builtin.character_locomotion");
+        const auto d = world.create_entity("duck");
+        const auto did = static_cast<std::uint32_t>(d);
+        ptv::Transform t{};
+        t.position = ptv::Vec3(5.0f, 0.9f, 0.0f);
+        t.scale = 1.0f;
+        world.registry().emplace<ptv::CTransform>(d, ptv::CTransform{t});
+
+        nlohmann::json params = nlohmann::json::object();
+        params["animated"] = false;
+        duck->on_attach(world, did, params, ctx);
+
+        const int before = skeleton.play_calls;
+        auto& want =
+            world.registry().emplace_or_replace<ptv::CLocomotionIntent>(d);
+        want.desired_velocity = ptv::Vec3(-2.0f, 0.0f, 0.0f);
+        for (int i = 0; i < 10; ++i) {
+            duck->on_update(world, did, 1.0f / 60.0f, input, ctx);
+        }
+        if (skeleton.play_calls != before)
+            return fail("an un-animated slider still tried to play a clip");
+        if (world.get<ptv::CTransform>(did).t.position.x >= 5.0f)
+            return fail("an un-animated slider did not move");
+    }
+
+    return ok("character locomotion: gait follows achieved speed, playback "
+              "rate matches ground covered, and animated:false still slides");
+}
+
+// Scenario 2 from the NPC brief: the pipeline produced a goblin and a rifle
+// as two separate assets, and the goblin has to be holding the rifle. The
+// scene has to be able to SAY that, and the loader has to turn it into a
+// real parent link -- including when the weapon is authored before the
+// character it hangs off.
+static int case_attachment() {
+    const char* doc = R"({
+        "version": 1, "prompt_id": "t", "scene_id": "s", "title": "T", "name": "S",
+        "player": {"height_meters": 1.7, "locomotion": "teleport", "comfort": "comfort",
+                    "spawn": {"position": [0,0,0], "rotation": [0,0,0,1]}},
+        "sky_color": [0,0,0], "ambient_intensity": 0.1,
+        "lights": [],
+        "entities": [
+          {"id": "rifle", "name": "Rifle",
+           "transform": {"position": [0,0,0], "rotation": [0,0,0,1], "scale": 1.0},
+           "mesh": {"asset_id": "rifle", "glb_path": "rifle.glb",
+                    "target_scale_meters": 0.9, "collision_shape": "mesh"},
+           "attached_to": {"entity_id": "goblin", "anchor": "hand_r",
+                           "position": [0.02, -0.01, 0.05],
+                           "rotation": [0,0,0,1]},
+           "tags": ["weapon"]},
+          {"id": "goblin", "name": "Goblin",
+           "transform": {"position": [0,0,-3], "rotation": [0,0,0,1], "scale": 1.0},
+           "mesh": {"asset_id": "goblin", "glb_path": "goblin.glb",
+                    "target_scale_meters": 1.8, "collision_shape": "capsule",
+                    "skinned": true, "joint_count": 65,
+                    "animations": {"idle": "Idle", "walk": "Walk"},
+                    "animation_speeds": {"walk": 1.404}},
+           "tags": ["enemy"]},
+          {"id": "orphan", "name": "Orphan",
+           "transform": {"position": [1,0,0], "rotation": [0,0,0,1], "scale": 1.0},
+           "attached_to": {"entity_id": "nobody", "anchor": "grip",
+                           "position": [0,0,0], "rotation": [0,0,0,1]},
+           "tags": []}
+        ]
+    })";
+    const char* path = "ptv_smoke_attach_scene.json";
+    std::FILE* f = std::fopen(path, "wb");
+    std::fwrite(doc, 1, std::strlen(doc), f);
+    std::fclose(f);
+
+    auto loaded = ptv::LoadSceneJson(path);
+    if (loaded.entities.size() != 3) return fail("attachment scene did not load");
+
+    // The reference-speed contract has to survive the parse too, or the
+    // runtime has no divisor and falls back to guessing.
+    const auto& goblin_mesh = *loaded.entities[1].mesh;
+    if (std::fabs(goblin_mesh.animation_speeds.at("walk") - 1.404f) > 1e-3f)
+        return fail("animation_speeds did not survive the scene parse");
+
+    ptv::World world;
+    ptv::ApplySceneToWorld(loaded, world);
+
+    const auto rifle = world.find("rifle");
+    const auto goblin = world.find("goblin");
+    const auto orphan = world.find("orphan");
+    if (rifle == entt::null || goblin == entt::null)
+        return fail("attachment scene entities missing");
+
+    if (!world.registry().all_of<ptv::CAttachment>(rifle))
+        return fail("the rifle was not parented to anything");
+
+    const auto& att = world.registry().get<ptv::CAttachment>(rifle);
+    // The rifle is authored BEFORE the goblin, so a single-pass loader would
+    // have dropped this link.
+    if (att.parent != static_cast<std::uint32_t>(goblin))
+        return fail("forward reference to a later entity was not resolved");
+    if (att.anchor != "hand_r")
+        return fail("attachment anchor did not survive the parse");
+    if (std::fabs(att.local_position.z - 0.05f) > 1e-4f)
+        return fail("attachment offset did not survive the parse");
+
+    // A dangling parent must be dropped loudly, not turned into an
+    // attachment to entity 0 -- which would teleport the child onto whatever
+    // happened to be created first.
+    if (world.registry().all_of<ptv::CAttachment>(orphan))
+        return fail("an attachment to an unknown entity was still created");
+
+    return ok("attachment: a separately-generated weapon can be parented to "
+              "a character's hand, including as a forward reference");
+}
+
+// Health and factions have to be engine concepts, not per-game inventions:
+// an enemy authored by one CodeTask must be able to hurt a player set up by
+// another, and an allied NPC must recognise that enemy without the two tasks
+// having agreed on anything in advance.
+static int case_combat_factions() {
+    // --- Faction rules ---------------------------------------------------
+    const ptv::CFaction player{"player", {"enemy"}};
+    const ptv::CFaction enemy{"enemy", {"player", "ally"}};
+    const ptv::CFaction ally{"ally", {}};
+    const ptv::CFaction other_enemy{"enemy", {"player"}};
+
+    if (!ptv::factions_hostile(player, enemy))
+        return fail("player and enemy are not hostile");
+    if (ptv::factions_hostile(enemy, other_enemy))
+        return fail("two entities of the same faction are hostile");
+    if (ptv::factions_hostile(player, ally))
+        return fail("player and ally are hostile");
+    // The asymmetric case: only the enemy declared the ally hostile. If this
+    // did not resolve to "hostile" the allies would stand there being shot,
+    // which is exactly the bug the symmetric rule exists to prevent.
+    if (!ptv::factions_hostile(ally, enemy))
+        return fail("a one-sided hostility declaration was ignored");
+
+    // --- Authoring path --------------------------------------------------
+    const char* doc = R"({
+        "version": 1, "prompt_id": "t", "scene_id": "s", "title": "T", "name": "S",
+        "player": {"height_meters": 1.7, "locomotion": "teleport", "comfort": "comfort",
+                    "spawn": {"position": [0,0,0], "rotation": [0,0,0,1]}},
+        "sky_color": [0,0,0], "ambient_intensity": 0.1,
+        "lights": [],
+        "entities": [
+          {"id": "grunt", "name": "Grunt",
+           "transform": {"position": [0,0,-4], "rotation": [0,0,0,1], "scale": 1.0},
+           "health": {"max": 40.0, "invuln_after_hit_s": 0.25},
+           "faction": {"id": "enemy", "hostile_to": ["player", "ally"]},
+           "tags": ["enemy"]},
+          {"id": "crate", "name": "Crate",
+           "transform": {"position": [2,0,0], "rotation": [0,0,0,1], "scale": 1.0},
+           "tags": ["static"]}
+        ]
+    })";
+    const char* path = "ptv_smoke_combat_scene.json";
+    std::FILE* f = std::fopen(path, "wb");
+    std::fwrite(doc, 1, std::strlen(doc), f);
+    std::fclose(f);
+
+    auto loaded = ptv::LoadSceneJson(path);
+    ptv::World world;
+    ptv::ApplySceneToWorld(loaded, world);
+
+    const auto grunt = world.find("grunt");
+    const auto crate = world.find("crate");
+    if (grunt == entt::null || crate == entt::null)
+        return fail("combat scene entities missing");
+
+    if (!world.registry().all_of<ptv::CHealth>(grunt))
+        return fail("authored health did not reach the ECS");
+    const auto& hp = world.registry().get<ptv::CHealth>(grunt);
+    if (std::fabs(hp.max - 40.0f) > 1e-4f)
+        return fail("authored max health was not applied");
+    // Spawning at anything other than full health would have every enemy
+    // arrive already wounded.
+    if (std::fabs(hp.current - hp.max) > 1e-4f)
+        return fail("an entity did not spawn at full health");
+    if (std::fabs(hp.invuln_after_hit_s - 0.25f) > 1e-4f)
+        return fail("authored invulnerability window was not applied");
+
+    const auto& fac = world.registry().get<ptv::CFaction>(grunt);
+    if (fac.id != "enemy" || fac.hostile_to.size() != 2)
+        return fail("authored faction did not reach the ECS");
+
+    // Scenery must stay out of combat entirely: giving everything health
+    // would make every crate a valid target for enemy fire.
+    if (world.registry().all_of<ptv::CHealth>(crate))
+        return fail("an entity with no authored health got some anyway");
+    if (world.registry().all_of<ptv::CFaction>(crate))
+        return fail("an entity with no authored faction got one anyway");
+
+    return ok("combat: factions resolve symmetrically and authored health "
+              "reaches the ECS at full hit points");
+}
+
+// The case local steering cannot solve. Two rooms joined by one doorway: an
+// NPC in room A that only knows what its whiskers hit will press into the
+// wall next to the door and jitter there. Routing has to send it AT the
+// opening first.
+static int case_nav_graph() {
+    ptv::nav::NavGraph graph;
+
+    // Room A spans x [-10, -1], room B spans x [1, 10]; the doorway is the
+    // narrow strip between them at z = 0.
+    ptv::nav::NavRegion a{};
+    a.id = "room_a";
+    a.min = ptv::Vec3(-10.0f, 0.0f, -5.0f);
+    a.max = ptv::Vec3(-1.0f, 0.0f, 5.0f);
+    ptv::nav::NavRegion b{};
+    b.id = "room_b";
+    b.min = ptv::Vec3(1.0f, 0.0f, -5.0f);
+    b.max = ptv::Vec3(10.0f, 0.0f, 5.0f);
+    ptv::nav::NavRegion c{};  // an isolated room, no links
+    c.id = "vault";
+    c.min = ptv::Vec3(30.0f, 0.0f, 30.0f);
+    c.max = ptv::Vec3(35.0f, 0.0f, 35.0f);
+
+    const int ia = graph.add_region(a);
+    const int ib = graph.add_region(b);
+    graph.add_region(c);
+
+    ptv::nav::NavLink door{};
+    door.from = ia;
+    door.to = ib;
+    door.point = ptv::Vec3(0.0f, 0.0f, 0.0f);
+    graph.add_link(door);
+
+    // --- Containment -----------------------------------------------------
+    if (graph.region_at(ptv::Vec3(-5.0f, 0.0f, 0.0f)) != ia)
+        return fail("a point inside room A did not resolve to it");
+    if (graph.region_at(ptv::Vec3(500.0f, 0.0f, 500.0f)) >= 0)
+        return fail("a point far outside every region still resolved");
+
+    // --- Routing through the door ----------------------------------------
+    // Both on the same side of the room so the straight line between them
+    // does NOT happen to pass through the doorway; otherwise the detour is
+    // free and the distance check proves nothing.
+    const ptv::Vec3 from(-8.0f, 0.0f, 4.0f);
+    const ptv::Vec3 to(8.0f, 0.0f, 4.0f);
+    std::vector<ptv::Vec3> corners;
+    if (!graph.find_path(from, to, corners))
+        return fail("no route between two linked rooms");
+    if (corners.size() != 3) {
+        std::fprintf(stderr, "  got %zu corners, expected 3\n", corners.size());
+        return fail("the route did not pass through exactly one doorway");
+    }
+    // The middle corner must BE the doorway. That is the whole point: an NPC
+    // steered straight at the destination walks into the dividing wall.
+    if (std::fabs(corners[1].x) > 1e-4f)
+        return fail("the intermediate corner is not the doorway");
+
+    // Walking distance is longer than the straight line, because the route
+    // has to detour via the door. A caller choosing between targets needs
+    // that difference to be real.
+    float walk = 0.0f;
+    if (!graph.path_distance(from, to, walk))
+        return fail("path_distance found no route");
+    const float straight = glm::length(ptv::Vec3(to.x - from.x, 0.0f,
+                                                 to.z - from.z));
+    if (walk <= straight) {
+        std::fprintf(stderr, "  walk %.2f vs straight %.2f\n", walk, straight);
+        return fail("walking distance did not account for the detour");
+    }
+
+    // --- Same region is just a straight line ------------------------------
+    std::vector<ptv::Vec3> same;
+    if (!graph.find_path(ptv::Vec3(-8.0f, 0.0f, 0.0f),
+                         ptv::Vec3(-2.0f, 0.0f, 0.0f), same))
+        return fail("no route within one region");
+    if (same.size() != 2)
+        return fail("a route inside one region invented a detour");
+
+    // --- Unreachable is reported, not faked -------------------------------
+    if (graph.is_reachable(from, ptv::Vec3(32.0f, 0.0f, 32.0f)))
+        return fail("a sealed room was reported reachable");
+    if (!graph.is_reachable(from, to))
+        return fail("a linked room was reported unreachable");
+
+    // A level whose builder declared nothing must not freeze every NPC.
+    ptv::nav::NavGraph empty;
+    if (!empty.is_reachable(from, to))
+        return fail("an empty graph refused every destination");
+
+    return ok("navigation: routes through a doorway, reports true walking "
+              "distance, and refuses only genuinely sealed destinations");
+}
+
+// Posing a 65-joint skeleton costs the same whether the character fills the
+// view or is a speck on the horizon, and Meta's guidance singles out
+// animation and skinning as work that delays the render thread. So distant
+// characters are sampled less often -- but they must still cover the same
+// ground per second, or a Quest build would show NPCs slowing down as they
+// walk away from you.
+static int case_animation_lod(const char* glb) {
+    namespace gml = ptv::gltf_mesh_load;
+    std::string err;
+
+    gml::SkeletonData skel;
+    if (!gml::load_glb_skeleton(glb, 0.0f, skel, err)) {
+        std::fprintf(stderr, "[fail] load_glb_skeleton: %s\n", err.c_str());
+        return 1;
+    }
+    if (skel.clips.empty()) return fail("fixture carried no clips");
+
+    ptv::World world;
+    auto make = [&](const char* id, float z) {
+        const auto e = world.create_entity(id);
+        ptv::Transform t{};
+        t.position = ptv::Vec3(0.0f, 0.0f, z);
+        world.registry().emplace<ptv::CTransform>(e, ptv::CTransform{t});
+        ptv::CSkeleton cs{};
+        cs.local_pose = skel.bind_pose;
+        cs.skeleton = skel;
+        world.registry().emplace<ptv::CSkeleton>(e, std::move(cs));
+        ptv::CAnimator anim{};
+        anim.clips = skel.clips;
+        anim.active_clip = 0;
+        anim.looping = true;
+        anim.playing = true;
+        anim.joint_overridden.assign(skel.joint_count(), 0u);
+        world.registry().emplace<ptv::CAnimator>(e, std::move(anim));
+        return static_cast<std::uint32_t>(e);
+    };
+
+    const auto near_e = make("near", 2.0f);
+    const auto mid_e = make("mid", 12.0f);
+    const auto far_e = make("far", 25.0f);
+    const auto gone_e = make("gone", 200.0f);
+
+    ptv::AnimationLod lod{};
+    lod.full_rate_m = 8.0f;
+    lod.half_rate_m = 15.0f;
+    lod.stop_m = 40.0f;
+
+    const ptv::Vec3 viewer(0.0f, 0.0f, 0.0f);
+    const float dt = 1.0f / 60.0f;
+    // Half a second against a one-second clip, so the comparison never
+    // straddles the loop point where fmod makes "just before the end" and
+    // "just after the start" look maximally different.
+    const int frames = 30;
+    for (int i = 0; i < frames; ++i) {
+        ptv::tick_animators(world, dt, viewer, lod);
+    }
+
+    auto clip_time = [&](std::uint32_t e) {
+        return world.get<ptv::CAnimator>(e).time_s;
+    };
+
+    // Every character that is still in range must have advanced by the same
+    // amount of wall-clock time. This is the property that makes throttling
+    // invisible: only the sampling rate drops, never the playback speed.
+    const float expected = frames * dt;
+    for (auto [name, e] : {std::pair<const char*, std::uint32_t>{"near", near_e},
+                           {"mid", mid_e},
+                           {"far", far_e}}) {
+        // Allow up to one skipped frame of lag: an entity on a 4-frame
+        // stride may not have been sampled on the final frame.
+        if (std::fabs(clip_time(e) - expected) > 4.0f * dt + 1e-4f) {
+            std::fprintf(stderr, "  %s at t=%.4f, expected ~%.4f\n", name,
+                         clip_time(e), expected);
+            return fail("a throttled character drifted out of sync");
+        }
+    }
+
+    // Out of range entirely: never posed, so its clip has not advanced.
+    if (clip_time(gone_e) != 0.0f)
+        return fail("a character beyond the stop distance was still posed");
+    // But the time it missed is banked, so walking back into range resumes
+    // rather than rewinding.
+    if (world.get<ptv::CAnimator>(gone_e).lod_debt_s <= 0.0f)
+        return fail("skipped time was not banked as debt");
+
+    // Now bring it into range: the debt is paid back on the next sample.
+    world.get<ptv::CTransform>(gone_e).t.position = ptv::Vec3(0.0f, 0.0f, 1.0f);
+    ptv::tick_animators(world, dt, viewer, lod);
+    if (world.get<ptv::CAnimator>(gone_e).lod_debt_s != 0.0f)
+        return fail("debt was not cleared when the character came back");
+    if (clip_time(gone_e) <= 0.0f)
+        return fail("a character that came back into range did not resume");
+
+    // With LOD off, everything is posed every frame -- the behaviour the
+    // pose-system tests rely on.
+    ptv::World plain;
+    const auto only = plain.create_entity("only");
+    {
+        ptv::Transform t{};
+        t.position = ptv::Vec3(0.0f, 0.0f, 500.0f);
+        plain.registry().emplace<ptv::CTransform>(only, ptv::CTransform{t});
+        ptv::CSkeleton cs{};
+        cs.local_pose = skel.bind_pose;
+        cs.skeleton = skel;
+        plain.registry().emplace<ptv::CSkeleton>(only, std::move(cs));
+        ptv::CAnimator anim{};
+        anim.clips = skel.clips;
+        anim.active_clip = 0;
+        anim.joint_overridden.assign(skel.joint_count(), 0u);
+        plain.registry().emplace<ptv::CAnimator>(only, std::move(anim));
+    }
+    ptv::tick_animators(plain, dt);
+    if (plain.get<ptv::CAnimator>(static_cast<std::uint32_t>(only)).time_s
+            <= 0.0f) {
+        return fail("LOD-free tick skipped a distant character");
+    }
+
+    return ok("animation LOD: distant characters are sampled less often but "
+              "still play at the correct speed");
+}
+
 static int case_openxr() {
     XrApplicationInfo ai{};
     std::strncpy(ai.applicationName, "ptv_smoke",
@@ -1043,6 +2078,29 @@ int main(int argc, char** argv) {
     if (what == "mechanics") return case_mechanics();
     if (what == "scene") return case_scene();
     if (what == "openxr") return case_openxr();
+    if (what == "physics_capsule") return case_physics_capsule();
+    if (what == "physics_player_slide") return case_physics_player_slide();
+    if (what == "physics_overlap") return case_physics_overlap();
+    if (what == "runtime_spawn") return case_runtime_spawn();
+    if (what == "character_locomotion") return case_character_locomotion();
+    if (what == "attachment") return case_attachment();
+    if (what == "combat_factions") return case_combat_factions();
+    if (what == "nav_graph") return case_nav_graph();
+    if (what == "animation_lod") {
+        if (argc < 3) {
+            std::fprintf(stderr,
+                         "usage: ptv_smoke animation_lod <rigged.glb>\n");
+            return 2;
+        }
+        return case_animation_lod(argv[2]);
+    }
+    if (what == "clip_blend") {
+        if (argc < 3) {
+            std::fprintf(stderr, "usage: ptv_smoke clip_blend <rigged.glb>\n");
+            return 2;
+        }
+        return case_clip_blend(argv[2]);
+    }
     if (what == "skinning") {
         if (argc < 3) {
             std::fprintf(stderr, "usage: ptv_smoke skinning <rigged.glb>\n");

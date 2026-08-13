@@ -123,6 +123,24 @@ and grab can be ordinary mechanics rather than engine-core special cases:
 | `ctx.fx` | Short-lived VISUAL transform juice: recoil kick, hit flinch, impact shove. |
 | `ctx.haptics` | Controller vibration. `pulse(hand, duration_s, amplitude)`. |
 | `ctx.sockets` | Named attachment points on an asset's mesh: `socket_world(entity, "muzzle")`. |
+| `ctx.skeleton` | Pose a rigged entity: joint overrides, and clips by semantic intent. |
+| `ctx.contacts` | Who is touching whom this frame. Overlap queries, not Jolt callbacks -- see below. |
+| `ctx.spawn` | Clone a hidden scene `template` entity at runtime, and despawn it. |
+| `ctx.attach` | Parent an entity to a socket or rig joint on another (a rifle in a hand). |
+| `ctx.combat` | Health, damage, factions. Death is handled by the engine. |
+| `ctx.perception` | Nearest hostile, hostiles in range, field of view, line of sight. |
+| `ctx.nav` | `next_waypoint`, `is_reachable`, `path_distance`, ground projection. |
+
+The last six exist so that characters authored by different CodeTasks share
+one model of damage, targeting and movement. An enemy from one task has to be
+able to hurt a player set up by another, and two tasks that each invented
+their own health component could not. See [npc-and-ai.md](npc-and-ai.md).
+
+`ctx.contacts` is a narrow-phase overlap query rather than a physics contact
+callback for a specific reason: Jolt only reports contacts when at least one
+body is DYNAMIC, and the pair gameplay most wants to know about -- the player
+and an NPC -- is kinematic on both sides, because their motion is authored
+rather than simulated.
 
 Every mutating call is validated and CLAMPED inside the engine: non-finite
 values are rejected, teleport distance is capped to the scene's limit and

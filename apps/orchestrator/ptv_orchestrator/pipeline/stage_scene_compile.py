@@ -27,6 +27,7 @@ glb is never silently dropped.
 from __future__ import annotations
 
 import json
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
@@ -359,9 +360,56 @@ def _mesh_render_fields(
     animations = norm.get("animations")
     if isinstance(animations, dict) and animations:
         out["animations"] = {str(k): str(v) for k, v in animations.items()}
+        speeds = _animation_reference_speeds(
+            animations.keys(), target_scale_meters
+        )
+        if speeds:
+            out["animation_speeds"] = speeds
     sockets = _sockets_in_meters(contract, target_scale_meters)
     if sockets:
         out["sockets"] = sockets
+    return out
+
+
+# Apparent ground speed of a locomotion clip, as a multiple of the character's
+# height. A 1.8 m human walks at roughly 1.4 m/s and runs at roughly 4 m/s,
+# which is where these come from; expressing them per metre of height keeps a
+# house-sized creature and a knee-high one both looking right.
+_SPEED_PER_METER_OF_HEIGHT = {
+    "walk": 0.78,
+    "run": 2.2,
+}
+
+
+def _animation_reference_speeds(
+    intents: Iterable[str], target_scale_meters: float
+) -> dict[str, float]:
+    """How fast each locomotion clip LOOKS like it is travelling, in m/s.
+
+    Tripo retargets with ``animate_in_place=True``, so a walk clip has no root
+    motion to measure -- the feet cycle while the root stays put. Without a
+    number for the speed the animation *implies*, the runtime cannot tell
+    whether moving the character at 3 m/s matches its stride or makes it skate
+    across the floor, and foot-sliding is the single most obvious tell that a
+    generated character is fake.
+
+    So we derive it the only way available without inspecting the clip:
+    from the character's height, which the asset pipeline has already
+    normalised to ``target_scale_meters``. ``builtin.character_locomotion``
+    divides real speed by this to set the playback rate.
+
+    Only locomotion intents get an entry. An attack or death clip has no
+    meaningful ground speed and must never be rate-scaled.
+    """
+    height = float(target_scale_meters or 0.0)
+    if height <= 0.0:
+        return {}
+    out: dict[str, float] = {}
+    for intent in intents:
+        factor = _SPEED_PER_METER_OF_HEIGHT.get(str(intent))
+        if factor is None:
+            continue
+        out[str(intent)] = round(factor * height, 4)
     return out
 
 
@@ -526,6 +574,37 @@ def compile_scene_json(
                 ),
                 "mechanic_bindings": bindings,
                 "tags": list(e.tags),
+                **(
+                    {"health": e.health.model_dump(mode="json")}
+                    if e.health is not None
+                    else {}
+                ),
+                **(
+                    {"faction": e.faction.model_dump(mode="json")}
+                    if e.faction is not None
+                    else {}
+                ),
+                **(
+                    {
+                        "attached_to": {
+                            "entity_id": e.attached_to.entity_id,
+                            "anchor": e.attached_to.anchor,
+                            "position": [
+                                e.attached_to.position.x,
+                                e.attached_to.position.y,
+                                e.attached_to.position.z,
+                            ],
+                            "rotation": [
+                                e.attached_to.rotation.x,
+                                e.attached_to.rotation.y,
+                                e.attached_to.rotation.z,
+                                e.attached_to.rotation.w,
+                            ],
+                        }
+                    }
+                    if e.attached_to is not None
+                    else {}
+                ),
             }
         )
 
@@ -625,6 +704,51 @@ def compile_scene_json(
     }
 
 
+def count_animated_agents(entities: list[dict]) -> int:
+    """Entities in a compiled scene that will be posed every frame.
+
+    A skinned mesh that is not a hidden spawn template gets a skeleton at
+    load and costs CPU from the first frame. Counted separately from
+    triangles because a scene can sit comfortably inside its triangle budget
+    and still miss frame rate on thirty skeletons.
+    """
+    n = 0
+    for e in entities:
+        mesh = e.get("mesh") or {}
+        if not mesh.get("skinned"):
+            continue
+        if "template" in (e.get("tags") or []):
+            continue
+        n += 1
+    return n
+
+
+def check_animated_agent_budget(
+    entities: list[dict], performance: dict | None
+) -> str:
+    """Warn when a scene places more animated characters than it can afford.
+
+    Deliberately a warning rather than a hard failure: the honest fix is
+    fewer concurrent NPCs, which is a design decision, and the runtime
+    already refuses to SPAWN past the cap. Failing the build here would
+    reject a scene that is merely ambitious about its opening shot.
+    """
+    if not performance:
+        return ""
+    cap = int(performance.get("max_animated_agents") or 0)
+    if cap <= 0:
+        return ""
+    placed = count_animated_agents(entities)
+    if placed <= cap:
+        return ""
+    return (
+        f"{placed} animated characters placed in the scene but the "
+        f"{performance.get('tier', 'current')} budget allows {cap}; expect "
+        "frame drops. Spawn the extras from a hidden 'template' entity "
+        "instead of placing them all at load."
+    )
+
+
 def _repoint_world_meshes_to_lods(
     entities: list[dict],
     nrep: dict[str, dict[str, Any]],
@@ -684,6 +808,11 @@ def _merge_world_into_scene(
     world_lights = world_doc.get("lights") or []
     if world_lights:
         doc["lights"] = list(world_lights) + list(doc.get("lights") or [])
+    # Walkable topology the builder declared while placing the level. Without
+    # it NPCs only have local steering, which cannot route through a doorway.
+    world_nav = world_doc.get("navigation")
+    if isinstance(world_nav, dict) and world_nav.get("regions"):
+        doc["navigation"] = world_nav
     world_player = world_doc.get("player") or {}
     world_spawn = (
         world_player.get("spawn") if isinstance(world_player, dict) else None
@@ -754,6 +883,19 @@ def run(ctx: PipelineContext) -> StageResult:
         if world_doc is not None and scene_entry.id == entry_id:
             doc = _merge_world_into_scene(
                 doc, world_doc, normalization, asset_contract
+            )
+        over_budget = check_animated_agent_budget(
+            doc.get("entities") or [], doc.get("performance")
+        )
+        if over_budget:
+            ctx.emit(
+                ProjectStage.scene_compile,
+                "warning",
+                f"{scene_entry.id}: {over_budget}",
+            )
+            ctx.store.append_log(
+                ctx.project_id, "scene_compile",
+                f"{scene_entry.id}: {over_budget}",
             )
         out = builds_dir / f"{scene_entry.id}.scene.json"
         out.write_text(json.dumps(doc, indent=2, sort_keys=True), encoding="utf-8")

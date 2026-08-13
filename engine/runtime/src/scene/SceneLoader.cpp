@@ -128,6 +128,20 @@ SceneDoc LoadSceneJson(const std::string& path) {
             }
             if (!dists.empty()) sp.lod_switch_distances_m = std::move(dists);
         }
+        sp.max_animated_agents =
+            pf.value("max_animated_agents", sp.max_animated_agents);
+        auto read_float_list = [&pf](const char* key,
+                                     std::vector<float>& out) {
+            if (!pf.contains(key) || !pf[key].is_array()) return;
+            std::vector<float> vals;
+            for (const auto& v : pf[key]) {
+                if (v.is_number()) vals.push_back(v.get<float>());
+            }
+            if (!vals.empty()) out = std::move(vals);
+        };
+        read_float_list("animation_lod_distances_m",
+                        sp.animation_lod_distances_m);
+        read_float_list("ai_tick_rates_hz", sp.ai_tick_rates_hz);
         if (pf.contains("governor") && pf["governor"].is_object()) {
             const auto& g = pf["governor"];
             sp.governor_enabled = g.value("enabled", sp.governor_enabled);
@@ -161,6 +175,31 @@ SceneDoc LoadSceneJson(const std::string& path) {
             read_vec3(l.value("direction", Json::array()), Vec3(0.0f, -1.0f, 0.0f));
         ls.range = l.value("range", 0.0f);  // <= 0 -> renderer default
         d.lights.push_back(std::move(ls));
+    }
+
+    if (j.contains("navigation") && j["navigation"].is_object()) {
+        const auto& nav = j["navigation"];
+        for (const auto& r : nav.value("regions", Json::array())) {
+            if (!r.is_object()) continue;
+            NavRegionSpec ns{};
+            ns.id = r.value("id", "");
+            if (ns.id.empty()) continue;
+            ns.min = read_vec3(r.value("min", Json::array()), Vec3(0.0f));
+            ns.max = read_vec3(r.value("max", Json::array()), Vec3(0.0f));
+            ns.floor_y = r.value("floor_y", 0.0f);
+            d.nav_regions.push_back(std::move(ns));
+        }
+        for (const auto& l : nav.value("links", Json::array())) {
+            if (!l.is_object()) continue;
+            NavLinkSpec ls{};
+            ls.from = l.value("from", "");
+            ls.to = l.value("to", "");
+            if (ls.from.empty() || ls.to.empty()) continue;
+            ls.point = read_vec3(l.value("point", Json::array()), Vec3(0.0f));
+            ls.cost_multiplier = l.value("cost_multiplier", 1.0f);
+            ls.bidirectional = l.value("bidirectional", true);
+            d.nav_links.push_back(std::move(ls));
+        }
     }
 
     for (const auto& e : j.value("entities", Json::array())) {
@@ -198,6 +237,18 @@ SceneDoc LoadSceneJson(const std::string& path) {
                                          it.value().get<std::string>());
                 }
             }
+            // How fast each locomotion clip looks like it is moving, so the
+            // runtime can match playback rate to ground covered instead of
+            // letting the feet skate.
+            const auto& speeds =
+                e["mesh"].value("animation_speeds", Json::object());
+            if (speeds.is_object()) {
+                for (auto it = speeds.begin(); it != speeds.end(); ++it) {
+                    if (!it.value().is_number()) continue;
+                    m.animation_speeds.emplace(it.key(),
+                                               it.value().get<float>());
+                }
+            }
             // Named attachment points, already in metres (see MeshRef).
             const auto& sockets = e["mesh"].value("sockets", Json::object());
             if (sockets.is_object()) {
@@ -207,6 +258,32 @@ SceneDoc LoadSceneJson(const std::string& path) {
                 }
             }
             es.mesh = std::move(m);
+        }
+        if (e.contains("health") && e["health"].is_object()) {
+            HealthProps h{};
+            h.max = e["health"].value("max", 100.0f);
+            h.invuln_after_hit_s =
+                e["health"].value("invuln_after_hit_s", 0.4f);
+            es.health = h;
+        }
+        if (e.contains("faction") && e["faction"].is_object()) {
+            FactionProps f{};
+            f.id = e["faction"].value("id", "neutral");
+            for (const auto& h :
+                 e["faction"].value("hostile_to", Json::array())) {
+                if (h.is_string()) f.hostile_to.push_back(h.get<std::string>());
+            }
+            es.faction = std::move(f);
+        }
+        if (e.contains("attached_to") && e["attached_to"].is_object()) {
+            const auto& aj = e["attached_to"];
+            AttachmentRef ar{};
+            ar.entity_id = aj.value("entity_id", "");
+            ar.anchor = aj.value("anchor", "grip");
+            ar.position = read_vec3(aj.value("position", Json::array()),
+                                    Vec3(0.0f));
+            ar.rotation = read_quat(aj.value("rotation", Json::array()));
+            if (!ar.entity_id.empty()) es.attached_to = std::move(ar);
         }
         if (e.contains("primitive") && e["primitive"].is_object()) {
             const auto& pj = e["primitive"];
@@ -266,7 +343,8 @@ void ApplySceneToWorld(const SceneDoc& doc, World& world) {
                 e, CMesh{es.mesh->asset_id, es.mesh->glb_path,
                          es.mesh->target_scale_meters, es.mesh->lod_paths,
                          es.mesh->bounds_radius_m, es.mesh->sockets,
-                         es.mesh->skinned, es.mesh->animations});
+                         es.mesh->skinned, es.mesh->animations,
+                         es.mesh->animation_speeds});
         }
         if (es.primitive.has_value()) {
             world.registry().emplace<CPrimitive>(
@@ -292,9 +370,41 @@ void ApplySceneToWorld(const SceneDoc& doc, World& world) {
             }
             world.registry().emplace<CMechanicBinding>(e, std::move(mb));
         }
+        if (es.health.has_value()) {
+            CHealth h{};
+            h.max = es.health->max;
+            h.current = es.health->max;
+            h.invuln_after_hit_s = es.health->invuln_after_hit_s;
+            world.registry().emplace<CHealth>(e, h);
+        }
+        if (es.faction.has_value()) {
+            world.registry().emplace<CFaction>(
+                e, CFaction{es.faction->id, es.faction->hostile_to});
+        }
         if (!es.tags.empty()) {
             world.registry().emplace<CTag>(e, CTag{es.tags});
         }
+    }
+
+    // Attachments resolve in a second pass: a weapon may be authored before
+    // the character whose hand it belongs in, and a forward reference would
+    // otherwise silently drop.
+    for (const auto& es : doc.entities) {
+        if (!es.attached_to.has_value()) continue;
+        const auto child = world.find(es.id);
+        const auto parent = world.find(es.attached_to->entity_id);
+        if (child == entt::null) continue;
+        if (parent == entt::null) {
+            PTV_WARN("scene: entity '{}' is attached to unknown entity '{}'",
+                     es.id, es.attached_to->entity_id);
+            continue;
+        }
+        CAttachment a{};
+        a.parent = static_cast<std::uint32_t>(parent);
+        a.anchor = es.attached_to->anchor;
+        a.local_position = es.attached_to->position;
+        a.local_rotation = es.attached_to->rotation;
+        world.registry().emplace<CAttachment>(child, std::move(a));
     }
 }
 

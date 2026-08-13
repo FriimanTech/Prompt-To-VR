@@ -484,6 +484,11 @@ bool is_finite(const Quat& q) {
 constexpr float kMaxTranslatePerCall = 2.0f;    // metres
 constexpr float kMaxImpulseMagnitude = 200.0f;  // kg*m/s
 
+// How long a corpse stays when the asset has no death animation to time
+// against. Long enough to read as "that one died", short enough that a wave
+// shooter does not accumulate a field of statues.
+constexpr float kDefaultDeathLinger = 1.2f;
+
 // Visual transform "juice" bounds. A recoil kick is centimetres and degrees;
 // anything past these is a bug, and letting it through would visibly tear the
 // mesh away from its physics body.
@@ -534,6 +539,15 @@ public:
                 "locomotion: translate of {:.1f} m clamped to {:.1f} m", len,
                 kMaxTranslatePerCall);
             d *= (kMaxTranslatePerCall / len);
+        }
+        // Resolve against the world so sliding stops at walls instead of
+        // gliding through them. Teleport deliberately skips this: it already
+        // aims at a raycast landing spot, and sweeping a long arc would
+        // refuse legitimate hops over low geometry.
+        if (app_->player_entity_ != entt::null) {
+            d = app_->physics_.slide_character(
+                app_->player_capsule_center_, app_->player_capsule_height_, d,
+                static_cast<std::uint32_t>(app_->player_entity_));
         }
         app_->rig_.pos_x += d.x;
         app_->rig_.pos_y += d.y;
@@ -645,11 +659,14 @@ public:
         }
         Vec3 hit(0.0f);
         Vec3 normal(0.0f, 1.0f, 0.0f);
-        if (!app_->physics_.raycast(origin, dir, max_dist, hit, normal)) {
+        std::uint32_t entity = InputSnapshot::kInvalidEntity;
+        if (!app_->physics_.raycast(origin, dir, max_dist, hit, normal,
+                                    entity)) {
             return false;
         }
         out.point = hit;
         out.normal = normal;
+        out.entity = entity;
         out.hit = true;
         return true;
     }
@@ -685,6 +702,30 @@ public:
             imp *= (kMaxImpulseMagnitude / mag);
         }
         app_->physics_.apply_impulse(entity, imp);
+    }
+
+    Vec3 slide_move(std::uint32_t entity, const Vec3& delta) const override {
+        if (!is_finite(delta)) {
+            PTV_WARN_CLAMP_ONCE("physics: rejected non-finite slide_move");
+            return Vec3(0.0f);
+        }
+        const World& w = app_->world_;
+        if (!w.valid(entity) || !w.has<CTransform>(entity)) return delta;
+        const auto& t = w.get<CTransform>(entity).t;
+
+        // Same height rule PhysicsWorld uses to build the capsule, so the
+        // sweep shape matches the collider the entity actually has.
+        float height = std::max(0.2f, t.scale);
+        if (w.has<CMesh>(entity)) {
+            const auto& m = w.get<CMesh>(entity);
+            if (m.target_scale_meters > 1.0e-4f) {
+                height = m.target_scale_meters;
+            } else if (m.bounds_radius_m > 1.0e-4f) {
+                height = 2.0f * m.bounds_radius_m;
+            }
+        }
+        return app_->physics_.slide_character(t.position, height, delta,
+                                              entity);
     }
 
 private:
@@ -855,8 +896,620 @@ public:
                                : static_cast<std::uint32_t>(e);
     }
 
+    std::uint32_t player_entity() const override {
+        const auto e = app_->player_entity_;
+        return e == entt::null ? InputSnapshot::kInvalidEntity
+                               : static_cast<std::uint32_t>(e);
+    }
+
 private:
     Application* app_;
+};
+
+class Application::ContactsService final : public IContacts {
+public:
+    explicit ContactsService(Application* app) : app_(app) {}
+
+    bool touching(std::uint32_t a, std::uint32_t b) const override {
+        if (a == b) return false;
+        const auto& list = overlaps_for(a);
+        return std::find(list.begin(), list.end(), b) != list.end();
+    }
+
+    bool began(std::uint32_t a, std::uint32_t b) override {
+        const bool now = touching(a, b);
+        // Order-independent key so began(a,b) and began(b,a) share one edge.
+        const std::uint64_t key = (a < b)
+            ? (static_cast<std::uint64_t>(a) << 32) | b
+            : (static_cast<std::uint64_t>(b) << 32) | a;
+        auto it = pair_state_.find(key);
+        const bool before = it != pair_state_.end() && it->second;
+        pair_state_[key] = now;
+        return now && !before;
+    }
+
+    int overlapping(std::uint32_t entity, std::uint32_t* out,
+                    int max_out) const override {
+        if (out == nullptr || max_out <= 0) return 0;
+        const auto& list = overlaps_for(entity);
+        const int n = std::min<int>(max_out, static_cast<int>(list.size()));
+        for (int i = 0; i < n; ++i) out[i] = list[static_cast<size_t>(i)];
+        return n;
+    }
+
+    /** Drop the frame's memoised overlap sets. Pair edges deliberately
+     *  survive: they are what ``began`` compares against. */
+    void begin_frame() { cache_.clear(); }
+
+private:
+    /** One narrow-phase query per entity per frame, reused by every caller.
+     *  Ten enemies all asking "am I touching the player?" would otherwise be
+     *  ten separate broad-phase walks. */
+    const std::vector<std::uint32_t>& overlaps_for(std::uint32_t e) const {
+        auto it = cache_.find(e);
+        if (it != cache_.end()) return it->second;
+        auto& slot = cache_[e];
+        app_->physics_.overlapping(e, slot);
+        return slot;
+    }
+
+    Application* app_;
+    mutable std::unordered_map<std::uint32_t, std::vector<std::uint32_t>>
+        cache_{};
+    std::unordered_map<std::uint64_t, bool> pair_state_{};
+};
+
+class Application::SpawnService final : public ISpawn {
+public:
+    explicit SpawnService(Application* app) : app_(app) {}
+
+    std::uint32_t instance(std::uint32_t template_entity, const Vec3& position,
+                           const Quat& rotation) override {
+        if (!is_finite(position) || !is_finite(rotation)) {
+            PTV_WARN_CLAMP_ONCE("spawn: rejected non-finite pose");
+            return InputSnapshot::kInvalidEntity;
+        }
+        if (static_cast<int>(spawned_.size()) >= kMaxLiveSpawns) {
+            PTV_WARN_CLAMP_ONCE(
+                "spawn: {} live spawns is the cap; refusing more",
+                kMaxLiveSpawns);
+            return InputSnapshot::kInvalidEntity;
+        }
+        // Animated characters get their own, much tighter budget. Posing a
+        // skeleton is CPU work that competes with the render thread, so a
+        // wave spawner left to its own devices is the fastest way to drop a
+        // Quest below frame rate -- and it will look like a rendering
+        // problem rather than a spawning one.
+        if (app_->world_.valid(template_entity) &&
+            app_->world_.has<CSkeleton>(template_entity)) {
+            const int cap = std::max(0, app_->scene_.performance
+                                              .max_animated_agents);
+            if (live_animated() >= cap) {
+                PTV_WARN_CLAMP_ONCE(
+                    "spawn: {} animated agents is this scene's budget; "
+                    "refusing more until some die",
+                    cap);
+                return InputSnapshot::kInvalidEntity;
+            }
+        }
+        const auto created =
+            app_->clone_entity(template_entity, position, rotation);
+        if (created == entt::null) return InputSnapshot::kInvalidEntity;
+        const auto id = static_cast<std::uint32_t>(created);
+        spawned_[id] = template_entity;
+        return id;
+    }
+
+    void despawn(std::uint32_t entity) override {
+        app_->destroy_entity_runtime(entity);
+        spawned_.erase(entity);
+    }
+
+    /** Drop bookkeeping for an entity the engine destroyed on its own (a
+     *  death, say) so ``live_count`` does not keep counting corpses. */
+    void forget(std::uint32_t entity) { spawned_.erase(entity); }
+
+    int live_count(std::uint32_t template_entity) const override {
+        int n = 0;
+        for (const auto& [child, parent] : spawned_) {
+            if (parent != template_entity) continue;
+            if (!app_->world_.valid(child)) continue;
+            ++n;
+        }
+        return n;
+    }
+
+private:
+    /** How many live clones currently carry a skeleton. */
+    int live_animated() const {
+        int n = 0;
+        for (const auto& [child, parent] : spawned_) {
+            (void)parent;
+            if (!app_->world_.valid(child)) continue;
+            if (!app_->world_.has<CSkeleton>(child)) continue;
+            ++n;
+        }
+        return n;
+    }
+
+    // A runaway spawner is the classic way a generated game drops to single
+    // digit frames on a Quest. Cap it here so the worst case is "enemies stop
+    // appearing", not "the headset stutters".
+    static constexpr int kMaxLiveSpawns = 256;
+
+    Application* app_;
+    std::unordered_map<std::uint32_t, std::uint32_t> spawned_{};
+};
+
+class Application::AttachService final : public IAttach {
+public:
+    explicit AttachService(Application* app) : app_(app) {}
+
+    bool attach(std::uint32_t child, std::uint32_t parent, const char* anchor,
+                const Vec3& local_position,
+                const Quat& local_rotation) override {
+        World& w = app_->world_;
+        if (child == parent) return false;
+        if (!w.valid(child) || !w.valid(parent)) return false;
+        if (!w.has<CTransform>(child) || !w.has<CTransform>(parent)) {
+            return false;
+        }
+        if (!is_finite(local_position) || !is_finite(local_rotation)) {
+            PTV_WARN_CLAMP_ONCE("attach: rejected non-finite offset");
+            return false;
+        }
+        const std::string name = anchor == nullptr ? std::string() : anchor;
+        if (!app_->resolve_attach_anchor(parent, name).valid) {
+            PTV_WARN("attach: '{}' is neither a socket nor a joint on entity "
+                     "{}", name, parent);
+            return false;
+        }
+
+        CAttachment a{};
+        a.parent = parent;
+        a.anchor = name;
+        a.local_position = local_position;
+        a.local_rotation = glm::normalize(local_rotation);
+        w.emplace_or_replace<CAttachment>(child, std::move(a));
+
+        // The parent owns the child's pose from now on, so simulating it
+        // would just fight the attachment every frame.
+        if (app_->physics_.has_body(child)) {
+            app_->physics_.set_kinematic(child, true);
+        }
+        return true;
+    }
+
+    void detach(std::uint32_t child) override {
+        World& w = app_->world_;
+        if (!w.valid(child) || !w.has<CAttachment>(child)) return;
+        w.remove<CAttachment>(child);
+        // Hand it back to physics wherever it ended up. Grab does the same
+        // thing on release, and for the same reason.
+        if (app_->physics_.has_body(child)) {
+            app_->physics_.set_kinematic(child, false);
+        }
+    }
+
+    std::uint32_t parent_of(std::uint32_t child) const override {
+        const World& w = app_->world_;
+        if (!w.valid(child) || !w.has<CAttachment>(child)) {
+            return InputSnapshot::kInvalidEntity;
+        }
+        return w.get<CAttachment>(child).parent;
+    }
+
+private:
+    Application* app_;
+};
+
+class Application::CombatService final : public ICombat {
+public:
+    explicit CombatService(Application* app) : app_(app) {}
+
+    bool apply_damage(std::uint32_t target, float amount,
+                      std::uint32_t instigator) override {
+        (void)instigator;
+        World& w = app_->world_;
+        if (!w.valid(target) || !w.has<CHealth>(target)) return false;
+        if (!std::isfinite(amount) || amount <= 0.0f) return false;
+
+        auto& hp = w.get<CHealth>(target);
+        if (!hp.alive || hp.death_timer_s >= 0.0f) return false;
+        if (hp.invuln_s > 0.0f) return false;
+
+        hp.current = std::max(0.0f, hp.current - amount);
+        hp.invuln_s = std::max(0.0f, hp.invuln_after_hit_s);
+
+        if (hp.current <= 0.0f) {
+            app_->begin_death(target);
+        } else if (app_->mech_ctx_.skeleton != nullptr) {
+            // A hit reaction is a one-shot and reads better as an instant
+            // cut than a blend -- the point is that it is abrupt. Reached
+            // through the interface rather than the concrete service because
+            // SkeletonService is declared further down this file.
+            app_->mech_ctx_.skeleton->play_clip(target, "hurt",
+                                                /*looping=*/false, 0.0f);
+        }
+        return true;
+    }
+
+    void heal(std::uint32_t entity, float amount) override {
+        World& w = app_->world_;
+        if (!w.valid(entity) || !w.has<CHealth>(entity)) return;
+        if (!std::isfinite(amount) || amount <= 0.0f) return;
+        auto& hp = w.get<CHealth>(entity);
+        if (!hp.alive) return;
+        hp.current = std::min(hp.max, hp.current + amount);
+    }
+
+    float health(std::uint32_t entity) const override {
+        const World& w = app_->world_;
+        if (!w.valid(entity) || !w.has<CHealth>(entity)) return 0.0f;
+        return w.get<CHealth>(entity).current;
+    }
+
+    float max_health(std::uint32_t entity) const override {
+        const World& w = app_->world_;
+        if (!w.valid(entity) || !w.has<CHealth>(entity)) return 0.0f;
+        return w.get<CHealth>(entity).max;
+    }
+
+    bool is_alive(std::uint32_t entity) const override {
+        const World& w = app_->world_;
+        if (!w.valid(entity) || !w.has<CHealth>(entity)) return false;
+        const auto& hp = w.get<CHealth>(entity);
+        return hp.alive && hp.death_timer_s < 0.0f;
+    }
+
+    void kill(std::uint32_t entity) override {
+        World& w = app_->world_;
+        if (!w.valid(entity) || !w.has<CHealth>(entity)) return;
+        auto& hp = w.get<CHealth>(entity);
+        if (!hp.alive || hp.death_timer_s >= 0.0f) return;
+        hp.current = 0.0f;
+        app_->begin_death(entity);
+    }
+
+    const char* faction(std::uint32_t entity) const override {
+        const World& w = app_->world_;
+        if (!w.valid(entity) || !w.has<CFaction>(entity)) return "";
+        return w.get<CFaction>(entity).id.c_str();
+    }
+
+    bool is_hostile(std::uint32_t a, std::uint32_t b) const override {
+        if (a == b) return false;
+        const World& w = app_->world_;
+        if (!w.valid(a) || !w.valid(b)) return false;
+        if (!w.has<CFaction>(a) || !w.has<CFaction>(b)) return false;
+        return factions_hostile(w.get<CFaction>(a), w.get<CFaction>(b));
+    }
+
+private:
+    Application* app_;
+};
+
+class Application::PerceptionService final : public IPerception {
+public:
+    explicit PerceptionService(Application* app) : app_(app) {}
+
+    std::uint32_t nearest_hostile(std::uint32_t self,
+                                  float max_range) const override {
+        std::uint32_t best = InputSnapshot::kInvalidEntity;
+        float best_d2 = 0.0f;
+        each_hostile(self, max_range, [&](std::uint32_t other, float d2) {
+            if (best == InputSnapshot::kInvalidEntity || d2 < best_d2) {
+                best = other;
+                best_d2 = d2;
+            }
+        });
+        return best;
+    }
+
+    int hostiles_in_range(std::uint32_t self, float max_range,
+                          std::uint32_t* out, int max_out) const override {
+        if (out == nullptr || max_out <= 0) return 0;
+        std::vector<std::pair<float, std::uint32_t>> found;
+        each_hostile(self, max_range, [&](std::uint32_t other, float d2) {
+            found.emplace_back(d2, other);
+        });
+        std::sort(found.begin(), found.end());
+        const int n = std::min<int>(max_out, static_cast<int>(found.size()));
+        for (int i = 0; i < n; ++i) out[i] = found[static_cast<size_t>(i)].second;
+        return n;
+    }
+
+    bool can_see(std::uint32_t self, std::uint32_t target, float fov_deg,
+                 float max_range) const override {
+        const World& w = app_->world_;
+        if (!w.valid(self) || !w.valid(target)) return false;
+        if (!w.has<CTransform>(self) || !w.has<CTransform>(target)) {
+            return false;
+        }
+        const Vec3 from = eye_of(self);
+        const Vec3 to = eye_of(target);
+        Vec3 d = to - from;
+        const float dist = glm::length(d);
+        if (dist > std::max(0.0f, max_range)) return false;
+        if (dist < 1.0e-4f) return true;
+        d /= dist;
+
+        // Field of view is measured horizontally: a character that has to
+        // crane its neck to see something still counts, but one facing away
+        // does not.
+        const Quat rot = w.get<CTransform>(self).t.rotation;
+        Vec3 forward = rot * Vec3(0.0f, 0.0f, -1.0f);
+        Vec3 flat_f(forward.x, 0.0f, forward.z);
+        Vec3 flat_d(d.x, 0.0f, d.z);
+        if (glm::length(flat_f) > 1.0e-4f && glm::length(flat_d) > 1.0e-4f) {
+            const float cosang =
+                glm::dot(glm::normalize(flat_f), glm::normalize(flat_d));
+            const float half = glm::radians(std::clamp(fov_deg, 1.0f, 360.0f)) *
+                               0.5f;
+            if (cosang < std::cos(half)) return false;
+        }
+        return unobstructed(self, target, from, to);
+    }
+
+    bool line_of_sight(std::uint32_t from, std::uint32_t to) const override {
+        const World& w = app_->world_;
+        if (!w.valid(from) || !w.valid(to)) return false;
+        if (!w.has<CTransform>(from) || !w.has<CTransform>(to)) return false;
+        return unobstructed(from, to, eye_of(from), eye_of(to));
+    }
+
+private:
+    /** Roughly head height, so sight lines clear waist-high cover the way a
+     *  player's would. */
+    Vec3 eye_of(std::uint32_t entity) const {
+        const World& w = app_->world_;
+        Vec3 p = w.get<CTransform>(entity).t.position;
+        float height = w.get<CTransform>(entity).t.scale;
+        if (w.has<CMesh>(entity)) {
+            const auto& m = w.get<CMesh>(entity);
+            if (m.target_scale_meters > 1.0e-4f) height = m.target_scale_meters;
+        }
+        p.y += 0.35f * std::max(0.2f, height);
+        return p;
+    }
+
+    /** Nothing solid between the two, ignoring the endpoints themselves. */
+    bool unobstructed(std::uint32_t self, std::uint32_t target,
+                      const Vec3& from, const Vec3& to) const {
+        Vec3 d = to - from;
+        const float dist = glm::length(d);
+        if (dist < 1.0e-4f) return true;
+        d /= dist;
+
+        Vec3 hit(0.0f);
+        Vec3 normal(0.0f, 1.0f, 0.0f);
+        std::uint32_t blocker = InputSnapshot::kInvalidEntity;
+        // Start just outside the looker's own collider, or the first hit is
+        // always itself.
+        const float skin = 0.15f;
+        if (!app_->physics_.raycast(from + d * skin, d,
+                                    std::max(0.0f, dist - skin), hit, normal,
+                                    blocker)) {
+            return true;
+        }
+        return blocker == target || blocker == self ||
+               blocker == InputSnapshot::kInvalidEntity;
+    }
+
+    template <typename Fn>
+    void each_hostile(std::uint32_t self, float max_range, Fn&& fn) const {
+        const World& w = app_->world_;
+        if (!w.valid(self) || !w.has<CTransform>(self)) return;
+        if (!w.has<CFaction>(self)) return;
+        const Vec3 origin = w.get<CTransform>(self).t.position;
+        const float range = std::max(0.0f, max_range);
+        const float range2 = range * range;
+
+        auto view = app_->world_.registry().view<CFaction, CTransform>();
+        for (auto other : view) {
+            const auto id = static_cast<std::uint32_t>(other);
+            if (id == self) continue;
+            if (app_->combat_svc_ && !app_->combat_svc_->is_alive(id)) continue;
+            if (app_->combat_svc_ == nullptr ||
+                !app_->combat_svc_->is_hostile(self, id)) {
+                continue;
+            }
+            const Vec3 d = view.get<CTransform>(other).t.position - origin;
+            const float d2 = glm::dot(d, d);
+            if (d2 > range2) continue;
+            fn(id, d2);
+        }
+    }
+
+    Application* app_;
+};
+
+class Application::NavigationService final : public INavigation {
+public:
+    explicit NavigationService(Application* app) : app_(app) {}
+
+    Vec3 next_waypoint(std::uint32_t agent, const Vec3& target) override {
+        World& w = app_->world_;
+        if (!w.valid(agent) || !w.has<CTransform>(agent)) return target;
+        const Vec3 pos = w.get<CTransform>(agent).t.position;
+
+        // --- Global leg -----------------------------------------------
+        //
+        // Steering alone cannot find a doorway: it only knows what its
+        // whiskers hit this frame, so it presses against the wall beside the
+        // opening. Routing supplies the next corner; steering then handles
+        // getting there.
+        Vec3 goal = target;
+        if (!app_->nav_graph_.empty()) {
+            goal = corridor_goal(agent, pos, target);
+        }
+
+        Vec3 desired(goal.x - pos.x, 0.0f, goal.z - pos.z);
+        const float dist = glm::length(desired);
+        if (dist < 1.0e-4f) return goal;
+        desired /= dist;
+
+        // --- Local steering -------------------------------------------
+        const Vec3 steer = avoid(agent, pos, desired);
+        const float step = std::min(dist, kLookaheadMeters);
+        return project_to_ground(pos + steer * step);
+    }
+
+    bool is_reachable(const Vec3& from, const Vec3& to) const override {
+        return app_->nav_graph_.is_reachable(from, to);
+    }
+
+    bool path_distance(const Vec3& from, const Vec3& to,
+                       float& out_meters) const override {
+        if (app_->nav_graph_.empty()) {
+            // Without declared topology the honest answer is the straight
+            // line, which is what a caller comparing two targets needs.
+            const Vec3 d(to.x - from.x, 0.0f, to.z - from.z);
+            out_meters = glm::length(d);
+            return true;
+        }
+        return app_->nav_graph_.path_distance(from, to, out_meters);
+    }
+
+    Vec3 project_to_ground(const Vec3& position) const override {
+        PhysicsRayHit hit{};
+        const Vec3 from(position.x, position.y + kGroundProbeUp,
+                        position.z);
+        if (!app_->physics_svc_) return position;
+        if (!app_->physics_svc_->raycast(from, Vec3(0.0f, -1.0f, 0.0f),
+                                         kGroundProbeUp + kGroundProbeDown,
+                                         hit)) {
+            return position;
+        }
+        return Vec3(position.x, hit.point.y, position.z);
+    }
+
+    bool line_of_sight(const Vec3& from, const Vec3& to) const override {
+        if (!app_->physics_svc_) return true;
+        Vec3 d = to - from;
+        const float dist = glm::length(d);
+        if (dist < 1.0e-4f) return true;
+        d /= dist;
+        PhysicsRayHit hit{};
+        return !app_->physics_svc_->raycast(from, d, dist, hit);
+    }
+
+private:
+    // How far ahead to aim. Short enough that the returned point is always
+    // somewhere the agent can actually reach this second, long enough that
+    // the direction is stable frame to frame.
+    static constexpr float kLookaheadMeters = 1.5f;
+    static constexpr float kWhiskerMeters = 1.6f;
+    static constexpr float kGroundProbeUp = 1.5f;
+    static constexpr float kGroundProbeDown = 4.0f;
+    static constexpr float kSeparationRadius = 1.1f;
+    static constexpr float kCornerReachedMeters = 0.6f;
+
+    /** The next corner of the routed corridor, cached per agent.
+     *
+     *  Recomputed only when the destination moves appreciably or the corner
+     *  is reached. A* every frame for every NPC is exactly the cost that
+     *  makes navigation unaffordable on a Quest, and the answer barely
+     *  changes between frames. */
+    Vec3 corridor_goal(std::uint32_t agent, const Vec3& pos,
+                       const Vec3& target) {
+        auto& state = paths_[agent];
+        const Vec3 flat_target(target.x, 0.0f, target.z);
+        const bool target_moved =
+            glm::length(flat_target - state.target_xz) > kRepathTargetMeters;
+        const bool corner_reached =
+            state.has_corner &&
+            glm::length(Vec3(state.corner.x - pos.x, 0.0f,
+                             state.corner.z - pos.z)) < kCornerReachedMeters;
+
+        if (target_moved || corner_reached || !state.has_corner) {
+            std::vector<Vec3> corners;
+            if (app_->nav_graph_.find_path(pos, target, corners) &&
+                corners.size() >= 2) {
+                state.corner = corners[1];
+                state.has_corner = true;
+            } else {
+                // No route: head straight at it. Better to walk up to the
+                // nearest wall than to stand still, and the caller can ask
+                // is_reachable when it needs certainty.
+                state.corner = target;
+                state.has_corner = true;
+            }
+            state.target_xz = flat_target;
+        }
+        return state.corner;
+    }
+
+    /** Steer ``desired`` around walls and other agents. */
+    Vec3 avoid(std::uint32_t agent, const Vec3& pos, const Vec3& desired) {
+        Vec3 out = desired;
+
+        // Whiskers. Cast at chest height so a kerb does not read as a wall.
+        if (app_->physics_svc_ != nullptr) {
+            const Vec3 eye(pos.x, pos.y + 0.4f, pos.z);
+            const Vec3 left = rotate_y(desired, glm::radians(35.0f));
+            const Vec3 right = rotate_y(desired, glm::radians(-35.0f));
+
+            const float ahead = clearance(eye, desired);
+            if (ahead < kWhiskerMeters) {
+                const float cl = clearance(eye, left);
+                const float cr = clearance(eye, right);
+                // Turn toward the side with more room. Blending rather than
+                // replacing keeps the agent making progress along its
+                // original heading instead of orbiting the obstacle.
+                const Vec3 side = (cl >= cr) ? left : right;
+                const float blend =
+                    1.0f - std::clamp(ahead / kWhiskerMeters, 0.0f, 1.0f);
+                out = glm::mix(out, side, blend);
+            }
+        }
+
+        // Separation. Without it ten enemies converging on the player stack
+        // into one another and read as a single flickering mass.
+        Vec3 push(0.0f);
+        auto view = app_->world_.registry().view<CLocomotionIntent, CTransform>();
+        for (auto other : view) {
+            const auto id = static_cast<std::uint32_t>(other);
+            if (id == agent) continue;
+            Vec3 d = pos - view.get<CTransform>(other).t.position;
+            d.y = 0.0f;
+            const float dist = glm::length(d);
+            if (dist > kSeparationRadius || dist < 1.0e-4f) continue;
+            push += (d / dist) * (1.0f - dist / kSeparationRadius);
+        }
+        if (glm::length(push) > 1.0e-4f) {
+            out += glm::normalize(push) * kSeparationWeight;
+        }
+
+        const float len = glm::length(out);
+        return (len > 1.0e-4f) ? (out / len) : desired;
+    }
+
+    float clearance(const Vec3& from, const Vec3& dir) const {
+        PhysicsRayHit hit{};
+        if (!app_->physics_svc_->raycast(from, dir, kWhiskerMeters, hit)) {
+            return kWhiskerMeters;
+        }
+        return glm::length(hit.point - from);
+    }
+
+    static Vec3 rotate_y(const Vec3& v, float radians) {
+        const float c = std::cos(radians);
+        const float s = std::sin(radians);
+        return Vec3(v.x * c + v.z * s, v.y, -v.x * s + v.z * c);
+    }
+
+    static constexpr float kRepathTargetMeters = 1.0f;
+    static constexpr float kSeparationWeight = 0.8f;
+
+    struct PathState {
+        Vec3 target_xz{0.0f};
+        Vec3 corner{0.0f};
+        bool has_corner{false};
+    };
+
+    Application* app_;
+    std::unordered_map<std::uint32_t, PathState> paths_{};
 };
 
 class Application::TransformFxService final : public ITransformFx {
@@ -973,13 +1626,33 @@ public:
             const auto& mesh = w.get<CMesh>(entity);
             const auto it = mesh.sockets.find(name);
             if (it != mesh.sockets.end()) {
-                return base * it->second.matrix();
+                return base * skin_matrix_for(w, entity, name) *
+                       it->second.matrix();
             }
         }
         return base * fallback_local(w, entity);
     }
 
 private:
+    /** The skinning matrix that carries this socket, or identity.
+     *
+     *  A socket is treated exactly like a vertex rigidly bound to one joint:
+     *  ``palette[j]`` is what moves the surrounding geometry, so pushing the
+     *  socket through the same matrix keeps it welded to the limb. In the
+     *  bind pose every palette entry is the identity, so a static prop --
+     *  and a rigged character standing in bind pose -- behaves exactly as it
+     *  did before sockets learned about skeletons. */
+    static Mat4 skin_matrix_for(const World& w, std::uint32_t entity,
+                                const char* name) {
+        if (!w.has<CSkeleton>(entity)) return Mat4(1.0f);
+        const auto& sk = w.get<CSkeleton>(entity);
+        const auto it = sk.socket_joint.find(name);
+        if (it == sk.socket_joint.end() || it->second < 0) return Mat4(1.0f);
+        const auto j = static_cast<size_t>(it->second);
+        if (j >= sk.palette.size()) return Mat4(1.0f);
+        return sk.palette[j];
+    }
+
     /** A pose on the forward face of the entity's bounds.
      *
      *  Chosen over identity deliberately: a projectile from the front of the
@@ -1046,36 +1719,42 @@ public:
         anim->joint_overridden[static_cast<size_t>(joint)] = 1u;
     }
 
-    bool play_clip(std::uint32_t entity, const char* clip_name,
-                   bool looping) override {
+    bool play_clip(std::uint32_t entity, const char* clip_name, bool looping,
+                   float fade_s) override {
         if (clip_name == nullptr || !has_skeleton(entity)) return false;
         World& w = app_->world_;
         if (!w.has<CAnimator>(entity)) return false;
 
-        // Resolve a semantic intent ("walk") to the clip the asset really
-        // carries. Tripo's retargeter names the clips, so a mechanic asking
-        // for "walk" has no way to know it is called "Walk" or
-        // "preset_walk_01" in this particular GLB -- the map from
-        // asset_animation.json is what closes that gap. Falls through to an
-        // exact-name match so hand-authored assets and direct clip names
-        // still work.
-        std::string wanted = clip_name;
-        if (w.has<CMesh>(entity)) {
-            const auto& anims = w.get<CMesh>(entity).animations;
-            const auto it = anims.find(wanted);
-            if (it != anims.end()) wanted = it->second;
-        }
+        const int index = clip_index(entity, clip_name);
+        if (index < 0) return false;
 
         auto& anim = w.get<CAnimator>(entity);
-        for (size_t i = 0; i < anim.clips.size(); ++i) {
-            if (anim.clips[i].name != wanted) continue;
-            anim.active_clip = static_cast<int>(i);
-            anim.time_s = 0.0f;
+        // Re-asking for the clip that is already running is the normal case
+        // for a per-frame "keep walking", so it must NOT restart the cycle --
+        // that would freeze the character on frame zero of its walk forever.
+        if (anim.active_clip == index && anim.playing) {
             anim.looping = looping;
-            anim.playing = true;
             return true;
         }
-        return false;
+
+        const float fade = std::clamp(fade_s, 0.0f, 1.0f);
+        if (fade > 0.0f && anim.active_clip >= 0 &&
+            anim.active_clip != index) {
+            anim.prev_clip = anim.active_clip;
+            anim.prev_time_s = anim.time_s;
+            anim.blend_t = fade;
+            anim.blend_duration = fade;
+        } else {
+            anim.prev_clip = -1;
+            anim.blend_t = 0.0f;
+            anim.blend_duration = 0.0f;
+        }
+
+        anim.active_clip = index;
+        anim.time_s = 0.0f;
+        anim.looping = looping;
+        anim.playing = true;
+        return true;
     }
 
     void stop_clip(std::uint32_t entity) override {
@@ -1092,7 +1771,86 @@ public:
         w.get<CAnimator>(entity).speed = std::clamp(speed, -8.0f, 8.0f);
     }
 
+    bool has_clip(std::uint32_t entity, const char* clip_name) const override {
+        return clip_index(entity, clip_name) >= 0;
+    }
+
+    const char* current_clip(std::uint32_t entity) const override {
+        const World& w = app_->world_;
+        if (!w.valid(entity) || !w.has<CAnimator>(entity)) return "";
+        const auto& anim = w.get<CAnimator>(entity);
+        if (anim.active_clip < 0 ||
+            static_cast<size_t>(anim.active_clip) >= anim.clips.size()) {
+            return "";
+        }
+        const std::string& real = anim.clips[
+            static_cast<size_t>(anim.active_clip)].name;
+        // Report the INTENT, not Tripo's clip name: the caller asked for
+        // "walk" and comparing against "Armature|preset_walk" would never
+        // match anything they could have written.
+        if (w.has<CMesh>(entity)) {
+            for (const auto& [intent, name] : w.get<CMesh>(entity).animations) {
+                if (name == real) return intent.c_str();
+            }
+        }
+        return real.c_str();
+    }
+
+    float clip_time(std::uint32_t entity) const override {
+        const World& w = app_->world_;
+        if (!w.valid(entity) || !w.has<CAnimator>(entity)) return 0.0f;
+        return w.get<CAnimator>(entity).time_s;
+    }
+
+    float clip_duration(std::uint32_t entity) const override {
+        const World& w = app_->world_;
+        if (!w.valid(entity) || !w.has<CAnimator>(entity)) return 0.0f;
+        const auto& anim = w.get<CAnimator>(entity);
+        if (anim.active_clip < 0 ||
+            static_cast<size_t>(anim.active_clip) >= anim.clips.size()) {
+            return 0.0f;
+        }
+        return anim.clips[static_cast<size_t>(anim.active_clip)].duration;
+    }
+
+    bool clip_finished(std::uint32_t entity) const override {
+        const World& w = app_->world_;
+        if (!w.valid(entity) || !w.has<CAnimator>(entity)) return false;
+        const auto& anim = w.get<CAnimator>(entity);
+        if (anim.active_clip < 0) return false;
+        // A looping clip never finishes, and saying otherwise would make a
+        // caller waiting on a one-shot fire on the first frame.
+        if (anim.looping) return false;
+        return !anim.playing;
+    }
+
 private:
+    /** Intent (or raw clip name) -> index into ``CAnimator::clips``, or -1.
+     *
+     *  Tripo's retargeter names the clips, so a mechanic asking for "walk"
+     *  has no way to know it is called "Walk" or "preset_walk_01" in this
+     *  particular GLB -- the intent map from asset_animation.json is what
+     *  closes that gap. Falls through to an exact-name match so
+     *  hand-authored assets and direct clip names still work. */
+    int clip_index(std::uint32_t entity, const char* clip_name) const {
+        if (clip_name == nullptr) return -1;
+        const World& w = app_->world_;
+        if (!w.valid(entity) || !w.has<CAnimator>(entity)) return -1;
+
+        std::string wanted = clip_name;
+        if (w.has<CMesh>(entity)) {
+            const auto& anims = w.get<CMesh>(entity).animations;
+            const auto it = anims.find(wanted);
+            if (it != anims.end()) wanted = it->second;
+        }
+
+        const auto& anim = w.get<CAnimator>(entity);
+        for (size_t i = 0; i < anim.clips.size(); ++i) {
+            if (anim.clips[i].name == wanted) return static_cast<int>(i);
+        }
+        return -1;
+    }
+
     /** Shared guard: valid entity, real skeleton, in-range joint, and an
      *  animator to record the override flag on (created on demand so a purely
      *  procedural rig does not need one authored in the scene). */
@@ -1173,6 +1931,479 @@ void Application::create_hand_entities() {
     PTV_INFO("Rigged player hands ready ({} joints each)",
              world_.registry().get<CSkeleton>(hand_entities_[0])
                  .skeleton.joint_count());
+}
+
+void Application::create_player_body() {
+    if (player_entity_ != entt::null) return;
+
+    player_capsule_height_ = std::clamp(scene_.player_height_meters, 0.6f,
+                                        2.6f);
+
+    const auto e = world_.create_entity("__player");
+    CTransform ct{};
+    // Until the first HMD pose arrives the capsule stands on the spawn point.
+    ct.t.position = Vec3(rig_.pos_x, rig_.pos_y + 0.5f * player_capsule_height_,
+                         rig_.pos_z);
+    // No CMesh on this entity, so the capsule builder reads its height from
+    // the transform scale.
+    ct.t.scale = player_capsule_height_;
+    world_.registry().emplace<CTransform>(e, ct);
+
+    CPhysics cp{};
+    // Kinematic, not dynamic: the user's real movement drives this body, and
+    // gravity or an impulse must never shove the headset somewhere the user
+    // did not go. Kinematic still collides with everything else, which is the
+    // whole point -- an enemy can now run into the player.
+    cp.kind = "kinematic";
+    cp.mass_kg = 70.0f;
+    cp.collision_shape = "capsule";
+    cp.friction = 0.0f;
+    cp.restitution = 0.0f;
+    world_.registry().emplace<CPhysics>(e, cp);
+
+    world_.registry().emplace<CTag>(e, CTag{{"player"}});
+
+    // The player is an ordinary combatant. Without health nothing can hurt
+    // them, and without a faction an enemy cannot tell them apart from a
+    // crate -- both of which the "ducks damage the player" case needs.
+    CHealth hp{};
+    hp.current = hp.max = 100.0f;
+    world_.registry().emplace<CHealth>(e, hp);
+
+    CFaction faction{};
+    faction.id = "player";
+    faction.hostile_to = {"enemy"};
+    world_.registry().emplace<CFaction>(e, std::move(faction));
+
+    player_entity_ = e;
+    player_capsule_center_ = ct.t.position;
+    physics_.add_body_for(world_, static_cast<std::uint32_t>(e));
+    PTV_INFO("Player collision capsule ready ({:.2f} m)",
+             player_capsule_height_);
+}
+
+void Application::update_player_body(const Vec3& head_world_position,
+                                     float dt) {
+    if (player_entity_ == entt::null) return;
+
+    // Follow the headset horizontally so physically walking around the
+    // playspace moves the collider too, but take the vertical extent from the
+    // rig: the capsule represents a standing body on the floor, and ducking
+    // should not shrink the player out of the world.
+    Vec3 center(head_world_position.x,
+                rig_.pos_y + 0.5f * player_capsule_height_,
+                head_world_position.z);
+    if (!std::isfinite(center.x) || !std::isfinite(center.y) ||
+        !std::isfinite(center.z)) {
+        center = Vec3(rig_.pos_x, rig_.pos_y + 0.5f * player_capsule_height_,
+                      rig_.pos_z);
+    }
+    player_capsule_center_ = center;
+
+    auto& t = world_.registry().get<CTransform>(player_entity_).t;
+    t.position = center;
+    physics_.move_kinematic(static_cast<std::uint32_t>(player_entity_), center,
+                            Quat(1.0f, 0.0f, 0.0f, 0.0f), dt);
+}
+
+namespace {
+
+/** Attach each named socket to the joint whose bind-pose position is closest.
+ *
+ *  ``asset_contract`` derives sockets from geometry alone -- it has no idea
+ *  the mesh is rigged -- so they arrive as fixed offsets in the mesh's bind
+ *  pose. For a static prop that is the whole truth. For a character it is
+ *  only true on frame zero: an animated arm carries the muzzle with it, and a
+ *  socket that ignores the skeleton stays behind in mid-air.
+ *
+ *  Nearest-joint is the right heuristic because these sockets sit ON the
+ *  geometry they belong to -- a muzzle is at the end of a barrel that a hand
+ *  is holding, so the closest joint IS the hand. Ambiguity only arises for a
+ *  socket floating between two limbs, which the socket derivation does not
+ *  produce.
+ */
+std::unordered_map<std::string, int> bind_sockets_to_joints(
+    const std::unordered_map<std::string, Transform>& sockets,
+    const gltf_mesh_load::SkeletonData& skel) {
+    std::unordered_map<std::string, int> out;
+    const size_t joints = skel.joint_count();
+    if (sockets.empty() || joints == 0) return out;
+
+    // Bind-pose world position of every joint, in the same metres the socket
+    // transforms use. inverse_bind maps mesh space -> joint space, so its
+    // inverse puts the joint back in mesh space; unit_scale then matches the
+    // loader's rescale of the vertices.
+    std::vector<Vec3> joint_pos(joints, Vec3(0.0f));
+    for (size_t j = 0; j < joints; ++j) {
+        const Mat4 bind = glm::inverse(skel.inverse_bind[j]);
+        joint_pos[j] = Vec3(bind[3]) * skel.unit_scale;
+    }
+
+    for (const auto& [name, xform] : sockets) {
+        const Vec3 p = xform.position;
+        int best = -1;
+        float best_d2 = 0.0f;
+        for (size_t j = 0; j < joints; ++j) {
+            const Vec3 d = joint_pos[j] - p;
+            const float d2 = glm::dot(d, d);
+            if (best < 0 || d2 < best_d2) {
+                best = static_cast<int>(j);
+                best_d2 = d2;
+            }
+        }
+        if (best >= 0) out.emplace(name, best);
+    }
+    return out;
+}
+
+}  // namespace
+
+namespace {
+
+/** Loose joint-name matching for the handful of anchors generated code can
+ *  reasonably ask for without ever seeing the asset.
+ *
+ *  Tripo names the bones, and the names differ between rig models, so an
+ *  exact match on "hand_r" would fail on a rig that calls it "RightHand" or
+ *  "mixamorig:RightHand". Each alias is a set of substrings that must ALL
+ *  appear (case-insensitively) in the joint name, which is specific enough
+ *  that "hand" + "r" does not match "Forearm_L". */
+struct JointAlias {
+    const char* anchor;
+    const char* must_contain_a;
+    const char* must_contain_b;  // nullptr when only one term is needed
+};
+
+constexpr JointAlias kJointAliases[] = {
+    {"hand_r", "hand", "r"},   {"hand_l", "hand", "l"},
+    {"right_hand", "hand", "r"}, {"left_hand", "hand", "l"},
+    {"head", "head", nullptr}, {"spine", "spine", nullptr},
+    {"chest", "chest", nullptr}, {"hips", "hip", nullptr},
+    {"root", "root", nullptr},
+};
+
+std::string lower_ascii(std::string s) {
+    for (char& c : s) {
+        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    }
+    return s;
+}
+
+/** Does ``joint`` look like the side-specific bone ``alias`` is after?
+ *
+ *  The side term is matched as a standalone token ("_r", ".r", "right") so a
+ *  left-hand bone never satisfies a right-hand request. */
+bool joint_matches_side(const std::string& joint_lower, const char* side) {
+    const std::string s(side);
+    if (s == "r") {
+        return joint_lower.find("right") != std::string::npos ||
+               joint_lower.find("_r") != std::string::npos ||
+               joint_lower.find(".r") != std::string::npos ||
+               (joint_lower.size() > 1 &&
+                joint_lower.compare(joint_lower.size() - 1, 1, "r") == 0);
+    }
+    if (s == "l") {
+        return joint_lower.find("left") != std::string::npos ||
+               joint_lower.find("_l") != std::string::npos ||
+               joint_lower.find(".l") != std::string::npos ||
+               (joint_lower.size() > 1 &&
+                joint_lower.compare(joint_lower.size() - 1, 1, "l") == 0);
+    }
+    return joint_lower.find(s) != std::string::npos;
+}
+
+}  // namespace
+
+Application::AttachAnchor Application::resolve_attach_anchor(
+    std::uint32_t parent, const std::string& name) const {
+    AttachAnchor out{};
+    if (name.empty() || !world_.valid(parent)) return out;
+
+    // 1) A named socket. On a rigged parent these already ride the animated
+    //    skeleton, so this is the best answer when it exists.
+    if (world_.has<CMesh>(parent)) {
+        const auto& sockets = world_.get<CMesh>(parent).sockets;
+        if (sockets.find(name) != sockets.end()) {
+            out.valid = true;
+            out.is_socket = true;
+            return out;
+        }
+    }
+
+    if (!world_.has<CSkeleton>(parent)) return out;
+    const auto& skel = world_.get<CSkeleton>(parent).skeleton;
+
+    // 2) An exact joint name.
+    if (const auto it = skel.name_to_joint.find(name);
+        it != skel.name_to_joint.end()) {
+        out.valid = true;
+        out.joint = it->second;
+        return out;
+    }
+
+    // 3) A well-known alias, matched loosely against the rig's own names.
+    const std::string wanted = lower_ascii(name);
+    for (const auto& alias : kJointAliases) {
+        if (wanted != alias.anchor) continue;
+        for (size_t j = 0; j < skel.names.size(); ++j) {
+            const std::string joint = lower_ascii(skel.names[j]);
+            if (joint.find(alias.must_contain_a) == std::string::npos) {
+                continue;
+            }
+            if (alias.must_contain_b != nullptr &&
+                !joint_matches_side(joint, alias.must_contain_b)) {
+                continue;
+            }
+            out.valid = true;
+            out.joint = static_cast<int>(j);
+            return out;
+        }
+    }
+    return out;
+}
+
+void Application::tick_attachments(float dt) {
+    auto view = world_.registry().view<CAttachment, CTransform>();
+    for (auto child : view) {
+        const auto& att = view.get<CAttachment>(child);
+        const auto parent = att.parent;
+        if (!world_.valid(parent) || !world_.has<CTransform>(parent)) {
+            // The parent died out from under it. Leave the child where it is
+            // rather than teleporting it to the origin.
+            continue;
+        }
+
+        Mat4 anchor_world(1.0f);
+        const AttachAnchor anchor = resolve_attach_anchor(parent, att.anchor);
+        if (anchor.is_socket && sockets_svc_) {
+            anchor_world = sockets_svc_->socket_world(parent,
+                                                      att.anchor.c_str());
+        } else if (anchor.valid && anchor.joint >= 0 &&
+                   world_.has<CSkeleton>(parent)) {
+            const auto& sk = world_.get<CSkeleton>(parent);
+            const auto j = static_cast<size_t>(anchor.joint);
+            // palette[j] moves bind-pose mesh space to the posed position, so
+            // composing it with the joint's bind position lands on the joint
+            // wherever the animation has taken it.
+            Mat4 bind(1.0f);
+            if (j < sk.skeleton.inverse_bind.size()) {
+                bind = glm::inverse(sk.skeleton.inverse_bind[j]);
+                bind[3] = glm::vec4(Vec3(bind[3]) * sk.skeleton.unit_scale,
+                                    1.0f);
+            }
+            Mat4 skin(1.0f);
+            if (j < sk.palette.size()) skin = sk.palette[j];
+            anchor_world =
+                world_.get<CTransform>(parent).t.matrix() * skin * bind;
+        } else {
+            anchor_world = world_.get<CTransform>(parent).t.matrix();
+        }
+
+        const Mat4 offset =
+            glm::translate(Mat4(1.0f), att.local_position) *
+            glm::mat4_cast(att.local_rotation);
+        const Mat4 world = anchor_world * offset;
+
+        auto& t = view.get<CTransform>(child).t;
+        t.position = Vec3(world[3]);
+        t.rotation = glm::normalize(glm::quat_cast(Mat4(glm::mat3(
+            glm::normalize(Vec3(world[0])), glm::normalize(Vec3(world[1])),
+            glm::normalize(Vec3(world[2]))))));
+
+        const auto child_id = static_cast<std::uint32_t>(child);
+        if (physics_.has_body(child_id)) {
+            physics_.move_kinematic(child_id, t.position, t.rotation, dt);
+        }
+    }
+}
+
+void Application::build_nav_graph() {
+    nav_graph_.clear();
+    if (scene_.nav_regions.empty()) {
+        PTV_INFO("No navigation regions declared; NPCs use local steering");
+        return;
+    }
+
+    std::unordered_map<std::string, int> by_id;
+    for (const auto& r : scene_.nav_regions) {
+        nav::NavRegion region{};
+        region.id = r.id;
+        region.min = r.min;
+        region.max = r.max;
+        region.floor_y = r.floor_y;
+        by_id[r.id] = nav_graph_.add_region(region);
+    }
+
+    int dropped = 0;
+    for (const auto& l : scene_.nav_links) {
+        const auto from = by_id.find(l.from);
+        const auto to = by_id.find(l.to);
+        if (from == by_id.end() || to == by_id.end()) {
+            ++dropped;
+            continue;
+        }
+        nav::NavLink link{};
+        link.from = from->second;
+        link.to = to->second;
+        link.point = l.point;
+        link.cost_multiplier = l.cost_multiplier;
+        link.bidirectional = l.bidirectional;
+        nav_graph_.add_link(link);
+    }
+    if (dropped > 0) {
+        PTV_WARN("Navigation: {} link(s) referenced unknown regions", dropped);
+    }
+    PTV_INFO("Navigation graph: {} regions, {} links",
+             nav_graph_.region_count(), nav_graph_.link_count());
+}
+
+void Application::begin_death(std::uint32_t entity) {
+    if (!world_.valid(entity) || !world_.has<CHealth>(entity)) return;
+    auto& hp = world_.get<CHealth>(entity);
+    if (hp.death_timer_s >= 0.0f) return;  // already dying
+
+    hp.current = 0.0f;
+    hp.alive = false;
+
+    // Corpses must stop blocking the living. Removing the body rather than
+    // leaving it kinematic also means the player can walk over the spot,
+    // which is what they will try to do.
+    physics_.remove_body(entity);
+
+    // Stop it steering: an entity with a locomotion intent would keep
+    // walking through its own death animation.
+    if (world_.has<CLocomotionIntent>(entity)) {
+        world_.remove<CLocomotionIntent>(entity);
+    }
+
+    float linger = kDefaultDeathLinger;
+    if (skeleton_svc_ != nullptr &&
+        skeleton_svc_->play_clip(entity, "die", /*looping=*/false, 0.12f)) {
+        const float d = skeleton_svc_->clip_duration(entity);
+        if (d > 0.05f) linger = d;
+    }
+    hp.death_timer_s = linger;
+}
+
+void Application::tick_combat(float dt) {
+    if (dt <= 0.0f) return;
+    std::vector<std::uint32_t> finished;
+
+    auto view = world_.registry().view<CHealth>();
+    for (auto entity : view) {
+        auto& hp = view.get<CHealth>(entity);
+        if (hp.invuln_s > 0.0f) hp.invuln_s = std::max(0.0f, hp.invuln_s - dt);
+        if (hp.death_timer_s < 0.0f) continue;
+        hp.death_timer_s -= dt;
+        if (hp.death_timer_s <= 0.0f) {
+            finished.push_back(static_cast<std::uint32_t>(entity));
+        }
+    }
+
+    // Destroying inside the view above would invalidate it mid-iteration.
+    for (std::uint32_t e : finished) {
+        if (e == static_cast<std::uint32_t>(player_entity_)) {
+            // The player's death is a game-over decision, not the engine's.
+            // Freeze the timer and leave the entity alone; a generated
+            // mechanic reads is_alive() and runs whatever restart flow the
+            // prompt asked for.
+            if (world_.valid(e) && world_.has<CHealth>(e)) {
+                world_.get<CHealth>(e).death_timer_s = -1.0f;
+            }
+            continue;
+        }
+        destroy_entity_runtime(e);
+        if (spawn_svc_) spawn_svc_->forget(e);
+    }
+}
+
+entt::entity Application::clone_entity(std::uint32_t template_entity,
+                                       const Vec3& position,
+                                       const Quat& rotation) {
+    auto& reg = world_.registry();
+    const auto src = static_cast<entt::entity>(template_entity);
+    if (!reg.valid(src) || !reg.all_of<CTransform>(src)) {
+        PTV_WARN("spawn: template entity {} is not a valid spawnable",
+                 template_entity);
+        return entt::null;
+    }
+
+    const auto dst = world_.create_entity();
+
+    CTransform ct = reg.get<CTransform>(src);
+    ct.t.position = position;
+    ct.t.rotation = rotation;
+    reg.emplace<CTransform>(dst, ct);
+
+    // Copy every component that describes WHAT the thing is. Anything
+    // transient (CTransformOffset's spring state, grab bookkeeping) is
+    // deliberately left off so the clone starts clean.
+    if (const auto* m = reg.try_get<CMesh>(src)) reg.emplace<CMesh>(dst, *m);
+    if (const auto* p = reg.try_get<CPrimitive>(src))
+        reg.emplace<CPrimitive>(dst, *p);
+    if (const auto* im = reg.try_get<CInlineMesh>(src))
+        reg.emplace<CInlineMesh>(dst, *im);
+    if (const auto* ph = reg.try_get<CPhysics>(src))
+        reg.emplace<CPhysics>(dst, *ph);
+    if (const auto* mb = reg.try_get<CMechanicBinding>(src))
+        reg.emplace<CMechanicBinding>(dst, *mb);
+
+    // Tags come across minus "template": the clone is a real actor, and
+    // leaving the marker on would hide it from the renderer and make it
+    // spawnable from itself.
+    if (const auto* tg = reg.try_get<CTag>(src)) {
+        CTag tags{};
+        for (const auto& t : tg->tags) {
+            if (t == "template") continue;
+            tags.tags.push_back(t);
+        }
+        reg.emplace<CTag>(dst, std::move(tags));
+    }
+
+    // The rig is copied wholesale rather than reloaded: the GLB is already
+    // parsed and its geometry already resident in the renderer, keyed by
+    // path, so a clone costs a vector copy instead of a file read. Playback
+    // state is reset so the clone starts from its own idle rather than
+    // inheriting the template's clip time.
+    if (const auto* sk = reg.try_get<CSkeleton>(src)) {
+        reg.emplace<CSkeleton>(dst, *sk);
+        if (const auto* an = reg.try_get<CAnimator>(src)) {
+            CAnimator anim = *an;
+            anim.time_s = 0.0f;
+            anim.blend_t = 0.0f;
+            anim.prev_clip = -1;
+            std::fill(anim.joint_overridden.begin(),
+                      anim.joint_overridden.end(), std::uint8_t{0});
+            reg.emplace<CAnimator>(dst, std::move(anim));
+        }
+    }
+
+    attach_entity_runtime(static_cast<std::uint32_t>(dst));
+    return dst;
+}
+
+void Application::attach_entity_runtime(std::uint32_t entity) {
+    if (!world_.valid(entity)) return;
+    physics_.add_body_for(world_, entity);
+    mechanics_.attach_entity(world_, entity, mech_ctx_);
+}
+
+void Application::destroy_entity_runtime(std::uint32_t entity) {
+    if (!world_.valid(entity)) return;
+    if (entity == static_cast<std::uint32_t>(player_entity_)) {
+        PTV_WARN("spawn: refusing to despawn the player");
+        return;
+    }
+    mechanics_.detach_entity(world_, entity);
+    physics_.remove_body(entity);
+    // Drop anything still holding it, or grab would keep driving a dead
+    // entity's transform every frame.
+    for (auto& hand : hands_) {
+        if (hand.held == static_cast<entt::entity>(entity)) {
+            hand.held = entt::null;
+        }
+    }
+    world_.registry().destroy(static_cast<entt::entity>(entity));
 }
 
 void Application::attach_skeletons() {
@@ -1452,6 +2683,11 @@ int Application::run(const Config& cfg) {
             last_head_forward_xz_ = head_forward_xz;
         }
 
+        // Put the player's collider where the player actually is before any
+        // mechanic runs. Locomotion's wall sweep reads this same centre, so
+        // it must reflect this frame's head pose, not last frame's.
+        update_player_body(head_world_pos, dt);
+
         // ------------------------------------------------------------
         // Startup locomotion menu.
         //
@@ -1687,6 +2923,7 @@ int Application::run(const Config& cfg) {
         // Locomotion, grab and throw all live here.
         // ------------------------------------------------------------
         mech_draw_items_.clear();
+        if (contacts_svc_) contacts_svc_->begin_frame();
         {
             const InputSnapshot provisional = build_snapshot();
             mechanics_.update(world_, dt, provisional, mech_ctx_,
@@ -1719,6 +2956,11 @@ int Application::run(const Config& cfg) {
         physics_.step(dt);
         physics_.sync_to_world(world_);
 
+        // Bodies just moved, so the overlap sets computed during the Input
+        // phase describe where things used to be. Drop them; Simulate-phase
+        // queries recompute against settled positions.
+        if (contacts_svc_) contacts_svc_->begin_frame();
+
         mechanics_.update(world_, dt, snapshot, mech_ctx_,
                           MechanicPhase::Simulate);
 
@@ -1732,7 +2974,30 @@ int Application::run(const Config& cfg) {
         // has already written its override, so sampling clips and rebuilding
         // joint palettes here means the pose the renderer picks up below is
         // this frame's, not last frame's.
-        tick_animators(world_, dt);
+        {
+            // Distance throttling for pose evaluation. Measured from the
+            // headset, because that is what the player is looking from --
+            // an NPC 30 m away costs the same to pose as one in your face,
+            // and posing thirty of them every frame is what pushes a Quest
+            // off its frame budget long before triangles do.
+            AnimationLod lod{};
+            const auto& bands = scene_.performance.animation_lod_distances_m;
+            if (bands.size() >= 3) {
+                lod.full_rate_m = bands[0];
+                lod.half_rate_m = bands[1];
+                lod.stop_m = bands[2];
+            }
+            tick_animators(world_, dt, last_head_world_pos_, lod);
+        }
+
+        // Attachments come last, after the poses they follow exist: a rifle
+        // parented to a goblin's hand has to read the hand's ANIMATED
+        // position, not the bind pose it had at the top of the frame.
+        tick_attachments(dt);
+
+        // Age invulnerability windows and clear away anything whose death
+        // animation has finished playing.
+        tick_combat(dt);
 
         // Remember this frame's raw input for next frame's edge detection.
         prev_input_ = input;
@@ -1943,10 +3208,29 @@ int Application::run(const Config& cfg) {
             if (telemetry_accum_s_ >= 1.0f && telemetry_frames_ > 0) {
                 const auto& st = renderer_.frame_stats();
                 const float frames = static_cast<float>(telemetry_frames_);
+                // Animated agents are counted alongside the render stats
+                // because they are the other half of the frame budget: a
+                // scene can be well inside its triangle and draw-call
+                // numbers and still miss frame rate on skeletons alone, and
+                // without this line that looks like a rendering problem.
+                int skeletons = 0;
+                int posed = 0;
+                {
+                    auto sk_view = world_.registry().view<CSkeleton>();
+                    for (auto e : sk_view) {
+                        ++skeletons;
+                        const auto* a =
+                            world_.registry().try_get<CAnimator>(e);
+                        if (a != nullptr && a->active_clip >= 0 && a->playing) {
+                            ++posed;
+                        }
+                    }
+                }
                 PTV_INFO(
                     "perf: {:.1f} fps | work {:.1f} ms avg, {:.1f} ms worst | "
                     "draw {} of {} (cull frustum {} dist {}) | tris {} | "
                     "meshes {} resident ({} tris), {} streaming | "
+                    "rigs {} ({} animating, budget {}) | "
                     "lod_bias {:.1f} cull {:.0f}m ffr {}",
                     frames / telemetry_accum_s_,
                     (telemetry_work_accum_s_ * 1000.0f) / frames,
@@ -1954,7 +3238,9 @@ int Application::run(const Config& cfg) {
                     st.entities_considered, st.culled_frustum,
                     st.culled_distance, st.visible_triangles,
                     st.resident_meshes, st.resident_triangles,
-                    st.streaming_pending, renderer_.lod_bias(),
+                    st.streaming_pending, skeletons, posed,
+                    scene_.performance.max_animated_agents,
+                    renderer_.lod_bias(),
                     renderer_.cull_distance(), xr_.foveation_level());
                 telemetry_accum_s_ = 0.0f;
                 telemetry_work_accum_s_ = 0.0f;
@@ -2053,6 +3339,7 @@ bool Application::initialize(const Config& cfg) {
         ApplySceneToWorld(scene_, world_);
         resolve_project_mesh_paths(world_, scene_path_);
         physics_.rebuild_from_world(world_);
+        build_nav_graph();
 
         locomotion_menu_enabled_ = scene_.locomotion_menu_enabled;
         slide_max_speed_mps_ = scene_.slide_max_speed_mps;
@@ -2097,6 +3384,12 @@ bool Application::initialize(const Config& cfg) {
         PTV_WARN("No scene.json provided. The engine will run idle.");
     }
 
+    // The player needs a body before any mechanic can attach, because
+    // locomotion sweeps against it and gameplay code looks the user up by
+    // the "player" tag. Created after the scene so it picks up the authored
+    // height and spawn point.
+    create_player_body();
+
     // Cache the renderer environment (sky/sun/ambient/fog/point lights) from
     // the loaded scene so the renderer honors what the world-gen agent
     // authored. Safe to call whether or not a scene was loaded.
@@ -2106,6 +3399,12 @@ bool Application::initialize(const Config& cfg) {
     // Must precede attach_bindings: on_attach receives the context.
     locomotion_svc_ = std::make_unique<LocomotionService>(this);
     physics_svc_ = std::make_unique<PhysicsAccessService>(this);
+    contacts_svc_ = std::make_unique<ContactsService>(this);
+    spawn_svc_ = std::make_unique<SpawnService>(this);
+    attach_svc_ = std::make_unique<AttachService>(this);
+    combat_svc_ = std::make_unique<CombatService>(this);
+    perception_svc_ = std::make_unique<PerceptionService>(this);
+    nav_svc_ = std::make_unique<NavigationService>(this);
     draw_svc_ = std::make_unique<DebugDrawService>(this);
     hands_svc_ = std::make_unique<HandsService>(this);
     fx_svc_ = std::make_unique<TransformFxService>(this);
@@ -2114,6 +3413,12 @@ bool Application::initialize(const Config& cfg) {
     skeleton_svc_ = std::make_unique<SkeletonService>(this);
     mech_ctx_.locomotion = locomotion_svc_.get();
     mech_ctx_.physics = physics_svc_.get();
+    mech_ctx_.contacts = contacts_svc_.get();
+    mech_ctx_.spawn = spawn_svc_.get();
+    mech_ctx_.attach = attach_svc_.get();
+    mech_ctx_.combat = combat_svc_.get();
+    mech_ctx_.perception = perception_svc_.get();
+    mech_ctx_.nav = nav_svc_.get();
     mech_ctx_.draw = draw_svc_.get();
     mech_ctx_.hands = hands_svc_.get();
     mech_ctx_.fx = fx_svc_.get();

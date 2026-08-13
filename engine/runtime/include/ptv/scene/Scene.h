@@ -52,6 +52,11 @@ struct MeshRef {
      * as ``sockets``: ask by a name fixed in advance, let per-asset data
      * supply the specifics. */
     std::unordered_map<std::string, std::string> animations;
+    /** Locomotion intent -> the ground speed, in m/s, the clip looks like it
+     * is travelling at. Derived by the scene compiler from the character's
+     * height, because a clip retargeted with ``animate_in_place`` has no root
+     * motion to measure. Used to match playback rate to distance covered. */
+    std::unordered_map<std::string, float> animation_speeds;
 };
 
 // Procedural primitive authored by the world-generation stage.
@@ -77,6 +82,41 @@ struct PhysicsProps {
     float friction{0.5f};
 };
 
+/** Walkable topology declared by the world builder, straight from
+ *  ``world.scene.json``. Ids are resolved into graph indices at load. */
+struct NavRegionSpec {
+    std::string id;
+    Vec3 min{0.0f};
+    Vec3 max{0.0f};
+    float floor_y{0.0f};
+};
+
+struct NavLinkSpec {
+    std::string from;
+    std::string to;
+    Vec3 point{0.0f};
+    float cost_multiplier{1.0f};
+    bool bidirectional{true};
+};
+
+struct HealthProps {
+    float max{100.0f};
+    float invuln_after_hit_s{0.4f};
+};
+
+struct FactionProps {
+    std::string id{"neutral"};
+    std::vector<std::string> hostile_to;
+};
+
+/** Authored parenting: this entity rides a point on another one. */
+struct AttachmentRef {
+    std::string entity_id;
+    std::string anchor{"grip"};
+    Vec3 position{0.0f};
+    Quat rotation{1.0f, 0.0f, 0.0f, 0.0f};
+};
+
 struct MechanicBinding {
     std::string id;                 // "builtin.grab" or "generated.<id>"
     std::string builtin_id;         // when present
@@ -93,6 +133,9 @@ struct EntitySpec {
     std::optional<PhysicsProps> physics;
     std::vector<MechanicBinding> bindings;
     std::vector<std::string> tags;
+    std::optional<HealthProps> health;
+    std::optional<FactionProps> faction;
+    std::optional<AttachmentRef> attached_to;
 };
 
 struct LightSpec {
@@ -159,6 +202,19 @@ struct ScenePerformance {
     std::vector<float> lod_switch_distances_m{12.0f, 30.0f, 65.0f};
     bool evict_when_over_budget{false};
 
+    // --- Animated agents ---
+    //
+    // Posing skeletons and running behaviours is CPU work that competes with
+    // the render thread, so characters get their own budget: a scene can be
+    // well inside its triangle budget and still miss frame rate because
+    // thirty skeletons are being evaluated every frame.
+    /** Ceiling on simultaneously animated characters. */
+    int max_animated_agents{12};
+    /** [full rate, half rate, stop] distances for pose evaluation. */
+    std::vector<float> animation_lod_distances_m{8.0f, 15.0f, 40.0f};
+    /** Behaviour update rate at those same three bands, in Hz. */
+    std::vector<float> ai_tick_rates_hz{30.0f, 10.0f, 3.0f};
+
     // --- Adaptive governor bounds ---
     bool governor_enabled{true};
     float governor_max_lod_bias{2.0f};
@@ -201,6 +257,10 @@ struct SceneDoc {
     ScenePerformance performance{};
     std::vector<LightSpec> lights;
     std::vector<EntitySpec> entities;
+    /** Empty when the world builder declared no topology, in which case
+     *  navigation degrades to local steering. */
+    std::vector<NavRegionSpec> nav_regions;
+    std::vector<NavLinkSpec> nav_links;
 };
 
 SceneDoc LoadSceneJson(const std::string& path);

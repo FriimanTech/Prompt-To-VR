@@ -220,6 +220,45 @@ _BUILTINS: tuple[CatalogEntry, ...] = (
         },
         inputs=("both triggers", "both grips", "trigger/thumbrest touch"),
     ),
+    CatalogEntry(
+        id="builtin.character_locomotion",
+        summary=(
+            "Moves an NPC and keeps its animation in agreement. Bind it to "
+            "every character that moves; AI code then only writes a desired "
+            "velocity into CLocomotionIntent and this does the rest: sweeps "
+            "the body so it cannot walk through walls, snaps it to the "
+            "floor, turns it to face travel, picks idle/walk/run from the "
+            "speed it ACHIEVED, and scales clip playback so the stride "
+            "matches the ground covered (which is what stops the feet "
+            "skating). Set 'animated': false and the same mechanic slides an "
+            "un-animated model instead -- that is the correct answer when a "
+            "prompt explicitly asks for no character animation, and it needs "
+            "no separate mechanic. NEVER generate a mechanic that plays "
+            "locomotion clips or moves a character by writing CTransform; "
+            "it will fight this one and get the foot-sliding wrong."
+        ),
+        category="npc",
+        params={
+            "walk_speed_mps": "float, default 1.4",
+            "run_speed_mps": "float, default 4.0",
+            "turn_rate_deg_s": "float, default 540",
+            "animated": (
+                "bool, default true. false = move the model with no clips "
+                "(the 'ducks just slide' case)"
+            ),
+            "ground_snap": "bool, default true",
+            "reference_walk_mps": (
+                "float, default 0 = derive from the character's height. Only "
+                "set this when a clip's authored stride is unusual."
+            ),
+            "reference_run_mps": "float, default 0 = derive from height",
+        },
+        inputs=("CLocomotionIntent written by AI code",),
+        comfort_notes=(
+            "Not player-facing. Animated characters are the most expensive "
+            "thing on a Quest 3, so respect the NpcPlan's max_concurrent."
+        ),
+    ),
 )
 
 

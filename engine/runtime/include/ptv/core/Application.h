@@ -10,6 +10,7 @@
 #include "ptv/ecs/World.h"
 #include "ptv/math/Math.h"
 #include "ptv/mechanics/MechanicRegistry.h"
+#include "ptv/nav/NavGraph.h"
 #include "ptv/physics/PhysicsWorld.h"
 #if !defined(__ANDROID__)
 // GLFW mirror window is desktop-only. On Quest (NativeActivity) there is no
@@ -60,6 +61,12 @@ private:
     // can reach the rig / physics / draw state without exposing any of it.
     class LocomotionService;
     class PhysicsAccessService;
+    class ContactsService;
+    class SpawnService;
+    class AttachService;
+    class CombatService;
+    class PerceptionService;
+    class NavigationService;
     class DebugDrawService;
     class HandsService;
     class TransformFxService;
@@ -68,6 +75,12 @@ private:
     class SkeletonService;
     friend class LocomotionService;
     friend class PhysicsAccessService;
+    friend class ContactsService;
+    friend class SpawnService;
+    friend class AttachService;
+    friend class CombatService;
+    friend class PerceptionService;
+    friend class NavigationService;
     friend class DebugDrawService;
     friend class HandsService;
     friend class TransformFxService;
@@ -101,6 +114,62 @@ private:
     // Guarantee that every locomotion style the runtime menu can select has
     // a mechanic attached, adding only the ones the scene left out.
     void ensure_player_locomotion_bindings();
+
+    /** Create the ECS entity that gives the player a body in the world.
+     *
+     *  The player used to be nothing but ``rig_``, a bare transform, which
+     *  meant they walked through walls and, worse, nothing could collide
+     *  WITH them -- an enemy that runs at the user simply passed through.
+     *  Making the player an ordinary kinematic capsule entity means contacts,
+     *  damage and factions all treat them like any other actor. */
+    void create_player_body();
+
+    /** Keep the player capsule under the headset and at rig height. */
+    void update_player_body(const Vec3& head_world_position, float dt);
+
+    /** Duplicate a scene-authored template entity at a new pose.
+     *
+     *  Backs ``ISpawn::instance``. Copies the components that describe what
+     *  the thing IS (mesh, collider, rig, tags, bindings) and then registers
+     *  the clone with physics and the mechanic host. */
+    entt::entity clone_entity(std::uint32_t template_entity,
+                              const Vec3& position, const Quat& rotation);
+
+    /** Give an entity that appeared after scene load its physics body and
+     *  its mechanics. Both used to happen once, at startup only. */
+    void attach_entity_runtime(std::uint32_t entity);
+
+    /** Tear down and destroy a runtime entity. */
+    void destroy_entity_runtime(std::uint32_t entity);
+
+    /** Where an attachment anchor resolves to on a parent entity. */
+    struct AttachAnchor {
+        bool valid{false};
+        /** True when the anchor is a named socket rather than a raw joint. */
+        bool is_socket{false};
+        int joint{-1};
+    };
+
+    /** Resolve an anchor name to a socket or a rig joint on ``parent``. */
+    AttachAnchor resolve_attach_anchor(std::uint32_t parent,
+                                       const std::string& name) const;
+
+    /** Drive every attached entity from its parent's anchor.
+     *
+     *  Runs AFTER the pose system so a child follows the parent's animated
+     *  joint, not its bind pose. */
+    void tick_attachments(float dt);
+
+    /** Turn the scene's declared nav regions/links into a routable graph. */
+    void build_nav_graph();
+
+    /** Start an entity dying: play its death clip, stop it colliding, and
+     *  schedule its removal for when the animation ends. */
+    void begin_death(std::uint32_t entity);
+
+    /** Age invulnerability windows and death timers, and remove entities
+     *  whose death animation has finished. */
+    void tick_combat(float dt);
 
     // ------------------------------------------------------------------
     // Player rig: the virtual transform of the stage origin in world
@@ -190,12 +259,24 @@ private:
     bool renderer_ready_{false};
     World world_{};
     PhysicsWorld physics_{};
+    /** Walkable topology declared by the world builder. Empty when the level
+     *  did not declare any, in which case navigation is steering-only. */
+    nav::NavGraph nav_graph_{};
     MechanicHost mechanics_{};
     SceneDoc scene_{};
     std::string scene_path_{};
     Renderer::RenderEnv render_env_{};
     bool running_{false};
     PlayerRig rig_{};
+    // The player's collision capsule, or entt::null before it is created.
+    // Tagged "player" so gameplay code can find the user the same way it
+    // finds anything else.
+    entt::entity player_entity_{entt::null};
+    // Where that capsule is this frame (centre, world space). Cached because
+    // locomotion resolves its sweep against it during the Input phase, before
+    // the body itself has been moved.
+    Vec3 player_capsule_center_{0.0f};
+    float player_capsule_height_{1.7f};
     std::array<HandGrab, 2> hands_{};
     // The player's rigged hand entities, or entt::null when the generated
     // hand mesh was not found and the procedural block hands are drawn
@@ -256,6 +337,12 @@ private:
     // them. Created in initialize(), valid for the lifetime of the scene.
     std::unique_ptr<LocomotionService> locomotion_svc_;
     std::unique_ptr<PhysicsAccessService> physics_svc_;
+    std::unique_ptr<ContactsService> contacts_svc_;
+    std::unique_ptr<SpawnService> spawn_svc_;
+    std::unique_ptr<AttachService> attach_svc_;
+    std::unique_ptr<CombatService> combat_svc_;
+    std::unique_ptr<PerceptionService> perception_svc_;
+    std::unique_ptr<NavigationService> nav_svc_;
     std::unique_ptr<DebugDrawService> draw_svc_;
     std::unique_ptr<HandsService> hands_svc_;
     std::unique_ptr<TransformFxService> fx_svc_;

@@ -68,8 +68,32 @@ public:
                 MechanicContext& ctx, MechanicPhase phase);
     void detach_all(World& world);
 
+    /** Attach the bindings of ONE entity that appeared after the scene load.
+     *
+     *  ``attach_bindings`` runs once at startup, so an entity spawned during
+     *  play had a mesh and a body but none of its mechanics ever ticked --
+     *  a spawned enemy just stood there. Safe to call on an entity with no
+     *  ``CMechanicBinding``; it simply does nothing. */
+    void attach_entity(World& world, std::uint32_t entity,
+                       MechanicContext& ctx);
+
+    /** Detach and destroy everything attached to one entity. Shared
+     *  player-scoped instances survive; the entity is just dropped from
+     *  their attachment list. */
+    void detach_entity(World& world, std::uint32_t entity);
+
 private:
+    /** Attach one entity's bindings without touching ``player_scoped_``
+     *  bookkeeping beyond adding to it. */
+    void attach_one(World& world, std::uint32_t entity, MechanicContext& ctx);
+    /** Recompute ``player_scoped_`` after ``instances_`` is reordered. */
+    void reindex_player_scoped();
+
     std::vector<std::pair<std::uint32_t, MechanicInstance>> instances_;
+    /** Player-scoped mechanic id -> index into ``instances_``. Persisted
+     *  across calls so an entity spawned mid-game joins the existing shared
+     *  instance instead of starting a second copy of, say, grab. */
+    std::unordered_map<std::string, std::size_t> player_scoped_;
 };
 
 }  // namespace ptv

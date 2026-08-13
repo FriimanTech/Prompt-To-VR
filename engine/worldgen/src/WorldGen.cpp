@@ -207,12 +207,42 @@ public:
         doc_["entities"].push_back(std::move(e));
     }
 
+    void nav_region(const NavRegionDesc& d) override {
+        if (d.id.empty()) return;
+        nav_regions_.push_back(nlohmann::json{
+            {"id", d.id},
+            {"min", vec3_json(d.min)},
+            {"max", vec3_json(d.max)},
+            {"floor_y", d.floor_y},
+        });
+    }
+
+    void nav_link(const NavLinkDesc& d) override {
+        if (d.from_id.empty() || d.to_id.empty()) return;
+        nav_links_.push_back(nlohmann::json{
+            {"from", d.from_id},
+            {"to", d.to_id},
+            {"point", vec3_json(d.point)},
+            {"cost_multiplier", d.cost_multiplier},
+            {"bidirectional", d.bidirectional},
+        });
+    }
+
     std::uint64_t seed() const override { return seed_; }
 
     nlohmann::json finish() {
         // Guarantee a floor exists so the player never falls through.
         if (!has_ground_) {
             ground(GroundDesc{});
+        }
+        // Omit the block entirely when nothing was declared: an empty
+        // navigation graph and no navigation graph mean different things to
+        // the runtime, and only the latter should fall back to steering.
+        if (!nav_regions_.empty()) {
+            doc_["navigation"] = nlohmann::json{
+                {"regions", nav_regions_},
+                {"links", nav_links_},
+            };
         }
         return doc_;
     }
@@ -231,6 +261,8 @@ private:
     std::uint64_t seed_;
     nlohmann::json asset_map_;
     nlohmann::json doc_;
+    std::vector<nlohmann::json> nav_regions_;
+    std::vector<nlohmann::json> nav_links_;
     int entity_count_{0};
     int light_count_{0};
     bool has_ground_{false};

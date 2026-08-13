@@ -77,9 +77,13 @@ def run_with_planner(
             session_id=f"ptv-mechanic-plan-{ctx.project_id}",
         )
 
+    npc_plan = ctx.npc_plan or ctx.store.load_npc_plan(ctx.project_id)
     inp = MechanicPlanAgentInput(
         build_spec_json=build_spec.model_dump_json(indent=2),
         asset_manifest_json=manifest.model_dump_json(indent=2),
+        npc_plan_json=(
+            npc_plan.model_dump_json(indent=2) if npc_plan.npcs else ""
+        ),
         catalog_text=catalog_text,
         editable_builtins_note=editable_builtins_note(),
         extra_instructions=[

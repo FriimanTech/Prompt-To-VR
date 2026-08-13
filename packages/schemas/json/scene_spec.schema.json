@@ -1,8 +1,76 @@
 {
   "$defs": {
+    "AttachmentRef": {
+      "additionalProperties": false,
+      "description": "Ride on a point of another entity instead of standing on your own.\n\nThis is how a separately-generated weapon ends up in a separately-\ngenerated character's hand. Tripo sometimes returns \"goblin holding a\nrifle\" as one mesh and sometimes returns two, and only the second case\nneeds this -- but it is common enough that a scene with no way to express\nit cannot build half the games it is asked for.",
+      "properties": {
+        "anchor": {
+          "default": "grip",
+          "description": "Socket or rig joint on the parent to follow. Named sockets ('muzzle', 'grip') win; otherwise the runtime matches a joint, including loose aliases like 'hand_r' / 'hand_l' / 'head' that work regardless of what Tripo named the bones.",
+          "maxLength": 64,
+          "title": "Anchor",
+          "type": "string"
+        },
+        "entity_id": {
+          "description": "The entity to ride on, by scene entity id.",
+          "pattern": "^[a-z0-9][a-z0-9_.\\-]{0,63}$",
+          "title": "Entity Id",
+          "type": "string"
+        },
+        "position": {
+          "$ref": "#/$defs/Vec3",
+          "description": "Offset from the anchor, in the anchor's space (metres)."
+        },
+        "rotation": {
+          "$ref": "#/$defs/QuatXYZW",
+          "description": "Rotation relative to the anchor."
+        }
+      },
+      "required": [
+        "entity_id"
+      ],
+      "title": "AttachmentRef",
+      "type": "object"
+    },
     "EntitySpec": {
       "additionalProperties": false,
       "properties": {
+        "attached_to": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AttachmentRef"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Parent this entity to a point on another one. Its transform is then driven by the parent every frame, so the authored 'transform' above is only its pose before the first update."
+        },
+        "faction": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FactionProps"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Which side this entity is on. Required for anything that selects targets or can be targeted."
+        },
+        "health": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/HealthProps"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Give this entity hit points. Required for anything that can be killed or can take damage."
+        },
         "id": {
           "description": "Snake-case identifier, max 64 chars.",
           "pattern": "^[a-z0-9][a-z0-9_.\\-]{0,63}$",
@@ -60,6 +128,51 @@
         "name"
       ],
       "title": "EntitySpec",
+      "type": "object"
+    },
+    "FactionProps": {
+      "additionalProperties": false,
+      "description": "Which side an entity fights for.\n\nNeeded so enemies engage the player's allied NPCs and not only the\nplayer. Use short stable ids: 'player', 'enemy', 'ally', 'wildlife'.",
+      "properties": {
+        "hostile_to": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 8,
+          "title": "Hostile To",
+          "type": "array"
+        },
+        "id": {
+          "default": "neutral",
+          "maxLength": 32,
+          "title": "Id",
+          "type": "string"
+        }
+      },
+      "title": "FactionProps",
+      "type": "object"
+    },
+    "HealthProps": {
+      "additionalProperties": false,
+      "description": "Hit points for anything that can be damaged, including the player.",
+      "properties": {
+        "invuln_after_hit_s": {
+          "default": 0.4,
+          "description": "Invulnerability window after each hit. Contact damage is tested every frame, so without one a single touch empties a health bar in a few frames.",
+          "maximum": 10.0,
+          "minimum": 0.0,
+          "title": "Invuln After Hit S",
+          "type": "number"
+        },
+        "max": {
+          "default": 100.0,
+          "exclusiveMinimum": 0.0,
+          "maximum": 100000.0,
+          "title": "Max",
+          "type": "number"
+        }
+      },
+      "title": "HealthProps",
       "type": "object"
     },
     "LightSpec": {

@@ -145,6 +145,43 @@ struct MeshDesc {
 // Anchor a pipeline-generated prop/character GLB (resolved by asset_id at
 // host run time from the asset map). Optional -- the environment itself is
 // pure procedural C++; this is only for placing existing 3D objects.
+/** A rectangle of walkable floor, declared as you build it.
+ *
+ * NPCs need a model of where they can walk and how those places connect.
+ * The usual way to get one is to voxelise the finished level (Recast), but
+ * that reconstructs something you already know: you are the one placing this
+ * room and that doorway. Declaring it directly is cheaper, exact, and cannot
+ * disagree with your intent.
+ *
+ * Cover the floor the player and NPCs are meant to use. Overlap at doorways
+ * is fine and helpful. A region is a flat rectangle, so a sloped or stepped
+ * area becomes several regions linked together.
+ *
+ * Declare nothing and NPCs fall back to local steering: fine in an open
+ * arena, useless for getting through a door. */
+struct NavRegionDesc {
+    std::string id;
+    /** Opposite corners of the footprint, in metres. Y is ignored. */
+    Vec3 min{};
+    Vec3 max{};
+    /** Height of the floor in this region. */
+    float floor_y{0.0f};
+};
+
+/** A way through between two regions: a doorway, a gap, the top of a ramp. */
+struct NavLinkDesc {
+    std::string from_id;
+    std::string to_id;
+    /** Where to cross. Put it IN the opening -- this is the point NPCs aim
+     *  at, and it is what makes them walk through a door instead of into the
+     *  wall beside it. */
+    Vec3 point{};
+    /** Above 1.0 makes the route less attractive, so a long way round can be
+     *  preferred over a ladder. */
+    float cost_multiplier{1.0f};
+    bool bidirectional{true};
+};
+
 struct ObjectPlacement {
     std::string asset_id;
     Transform transform{};
@@ -170,6 +207,12 @@ public:
 
     // Optional: place an existing generated object (prop/character) GLB.
     virtual void place_object(const ObjectPlacement& desc) = 0;
+
+    // Navigation. Declare the walkable floor and the openings between the
+    // parts of it, so NPCs can route through doorways and around walls
+    // rather than only reacting to whatever is directly in front of them.
+    virtual void nav_region(const NavRegionDesc& desc) = 0;
+    virtual void nav_link(const NavLinkDesc& desc) = 0;
 
     // A deterministic per-world seed (set by the host). Use it for any
     // pseudo-random variation so results are reproducible.

@@ -1,0 +1,322 @@
+{
+  "$defs": {
+    "AnimationFallback": {
+      "description": "What to do when Tripo has no animation for something the NPC must do.\n\nThe gameplay capability is never blocked on the animation. An NPC that\nshould fly still flies; the only question is whether it looks animated\nwhile doing so.",
+      "enum": [
+        "nearest_preset",
+        "procedural_cpp",
+        "none"
+      ],
+      "title": "AnimationFallback",
+      "type": "string"
+    },
+    "AnimationIntent": {
+      "description": "Semantic animations an asset can be given, independent of rig type.\n\nDeliberately NOT raw Tripo preset ids. Which presets exist depends on the\nrig type and rig model, neither of which is known until the free\nrig-check runs -- long after the manifest is written. The animation stage\nmaps these onto concrete presets once it knows the rig, and silently has\nfewer options for a creature (a quadruped rig ships exactly one\nlocomotion preset) than for a humanoid.",
+      "enum": [
+        "idle",
+        "walk",
+        "run",
+        "attack",
+        "shoot",
+        "hurt",
+        "die",
+        "jump",
+        "turn",
+        "climb",
+        "dance",
+        "wave",
+        "sit"
+      ],
+      "title": "AnimationIntent",
+      "type": "string"
+    },
+    "MovementStyle": {
+      "description": "How the character gets around, which decides whether it is rigged.",
+      "enum": [
+        "animated_locomotion",
+        "slide_no_animation",
+        "stationary",
+        "flying"
+      ],
+      "title": "MovementStyle",
+      "type": "string"
+    },
+    "NpcBehavior": {
+      "description": "A capability this character needs. Combine as many as the prompt implies.\n\nThese are what the code-generation agent turns into C++. Each one is a\nthing the character DOES, not a state machine -- how they interleave is\nthe generated mechanic's business.",
+      "enum": [
+        "idle",
+        "patrol",
+        "chase",
+        "flee",
+        "ranged_attack",
+        "melee_attack",
+        "contact_damage",
+        "take_cover",
+        "reposition",
+        "follow_leader",
+        "guard_point",
+        "react_to_damage"
+      ],
+      "title": "NpcBehavior",
+      "type": "string"
+    },
+    "NpcCombat": {
+      "additionalProperties": false,
+      "properties": {
+        "attack_cooldown_s": {
+          "default": 1.5,
+          "maximum": 120.0,
+          "minimum": 0.0,
+          "title": "Attack Cooldown S",
+          "type": "number"
+        },
+        "attack_range_m": {
+          "default": 2.0,
+          "maximum": 500.0,
+          "minimum": 0.0,
+          "title": "Attack Range M",
+          "type": "number"
+        },
+        "damage": {
+          "default": 10.0,
+          "maximum": 10000.0,
+          "minimum": 0.0,
+          "title": "Damage",
+          "type": "number"
+        },
+        "max_health": {
+          "default": 100.0,
+          "exclusiveMinimum": 0.0,
+          "maximum": 100000.0,
+          "title": "Max Health",
+          "type": "number"
+        },
+        "projectile_asset_id": {
+          "anyOf": [
+            {
+              "description": "Snake-case identifier, max 64 chars.",
+              "pattern": "^[a-z0-9][a-z0-9_.\\-]{0,63}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Projectile Asset Id"
+        }
+      },
+      "title": "NpcCombat",
+      "type": "object"
+    },
+    "NpcLocomotion": {
+      "additionalProperties": false,
+      "properties": {
+        "leash_radius_m": {
+          "default": 0.0,
+          "maximum": 1000.0,
+          "minimum": 0.0,
+          "title": "Leash Radius M",
+          "type": "number"
+        },
+        "run_speed_mps": {
+          "default": 4.0,
+          "exclusiveMinimum": 0.0,
+          "maximum": 60.0,
+          "title": "Run Speed Mps",
+          "type": "number"
+        },
+        "turn_rate_deg_s": {
+          "default": 540.0,
+          "exclusiveMinimum": 0.0,
+          "maximum": 3600.0,
+          "title": "Turn Rate Deg S",
+          "type": "number"
+        },
+        "walk_speed_mps": {
+          "default": 1.4,
+          "exclusiveMinimum": 0.0,
+          "maximum": 30.0,
+          "title": "Walk Speed Mps",
+          "type": "number"
+        }
+      },
+      "title": "NpcLocomotion",
+      "type": "object"
+    },
+    "NpcPerception": {
+      "additionalProperties": false,
+      "properties": {
+        "fov_degrees": {
+          "default": 120.0,
+          "exclusiveMinimum": 0.0,
+          "maximum": 360.0,
+          "title": "Fov Degrees",
+          "type": "number"
+        },
+        "hearing_range_m": {
+          "default": 12.0,
+          "maximum": 500.0,
+          "minimum": 0.0,
+          "title": "Hearing Range M",
+          "type": "number"
+        },
+        "sight_range_m": {
+          "default": 25.0,
+          "maximum": 500.0,
+          "minimum": 0.0,
+          "title": "Sight Range M",
+          "type": "number"
+        }
+      },
+      "title": "NpcPerception",
+      "type": "object"
+    },
+    "NpcRole": {
+      "description": "What this character is to the player.",
+      "enum": [
+        "enemy",
+        "ally",
+        "neutral",
+        "critter",
+        "boss"
+      ],
+      "title": "NpcRole",
+      "type": "string"
+    },
+    "NpcSpawn": {
+      "additionalProperties": false,
+      "properties": {
+        "initial_count": {
+          "default": 1,
+          "maximum": 200,
+          "minimum": 0,
+          "title": "Initial Count",
+          "type": "integer"
+        },
+        "max_concurrent": {
+          "default": 8,
+          "maximum": 200,
+          "minimum": 0,
+          "title": "Max Concurrent",
+          "type": "integer"
+        },
+        "waves": {
+          "default": false,
+          "title": "Waves",
+          "type": "boolean"
+        }
+      },
+      "title": "NpcSpawn",
+      "type": "object"
+    },
+    "NpcSpec": {
+      "additionalProperties": false,
+      "description": "One character type, keyed to the asset it is built from.",
+      "properties": {
+        "animation_fallback": {
+          "$ref": "#/$defs/AnimationFallback",
+          "default": "nearest_preset"
+        },
+        "animation_intents": {
+          "description": "Clips to retarget onto this character, in priority order. Each one is billed separately, so ask for what the behaviors above actually use and nothing else. MUST be empty when movement_style is 'slide_no_animation' or when the asset is not a whole creature.",
+          "items": {
+            "$ref": "#/$defs/AnimationIntent"
+          },
+          "maxItems": 5,
+          "title": "Animation Intents",
+          "type": "array"
+        },
+        "asset_id": {
+          "description": "The AssetManifest item this NPC uses.",
+          "pattern": "^[a-z0-9][a-z0-9_.\\-]{0,63}$",
+          "title": "Asset Id",
+          "type": "string"
+        },
+        "behaviors": {
+          "items": {
+            "$ref": "#/$defs/NpcBehavior"
+          },
+          "maxItems": 12,
+          "title": "Behaviors",
+          "type": "array"
+        },
+        "combat": {
+          "$ref": "#/$defs/NpcCombat"
+        },
+        "faction": {
+          "default": "neutral",
+          "maxLength": 32,
+          "title": "Faction",
+          "type": "string"
+        },
+        "hostile_to": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 8,
+          "title": "Hostile To",
+          "type": "array"
+        },
+        "locomotion": {
+          "$ref": "#/$defs/NpcLocomotion"
+        },
+        "movement_style": {
+          "$ref": "#/$defs/MovementStyle",
+          "default": "animated_locomotion"
+        },
+        "notes": {
+          "default": "",
+          "description": "Anything the prompt said about this character that the fields above cannot express, written for the code-generation agent.",
+          "maxLength": 2000,
+          "title": "Notes",
+          "type": "string"
+        },
+        "perception": {
+          "$ref": "#/$defs/NpcPerception"
+        },
+        "role": {
+          "$ref": "#/$defs/NpcRole"
+        },
+        "spawn": {
+          "$ref": "#/$defs/NpcSpawn"
+        }
+      },
+      "required": [
+        "asset_id",
+        "role"
+      ],
+      "title": "NpcSpec",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "faction_notes": {
+      "default": "",
+      "maxLength": 2000,
+      "title": "Faction Notes",
+      "type": "string"
+    },
+    "npcs": {
+      "description": "One entry per character type. Empty is a valid, complete answer for a game with no NPCs.",
+      "items": {
+        "$ref": "#/$defs/NpcSpec"
+      },
+      "maxItems": 32,
+      "title": "Npcs",
+      "type": "array"
+    },
+    "prompt_id": {
+      "description": "Snake-case identifier, max 64 chars.",
+      "pattern": "^[a-z0-9][a-z0-9_.\\-]{0,63}$",
+      "title": "Prompt Id",
+      "type": "string"
+    }
+  },
+  "required": [
+    "prompt_id"
+  ],
+  "title": "NpcPlan",
+  "type": "object"
+}

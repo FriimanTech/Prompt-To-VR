@@ -39,6 +39,17 @@ orchestrator and a reusable Vulkan + OpenXR engine core.
    automatically — generated code must never re-implement finger curl, and
    must never couple a weapon to the hand (both read the same
    `input.hands[h].trigger` and stay in sync on their own).
+   NPC movement is likewise owned by `builtin.character_locomotion`:
+   generated AI writes a desired velocity into `CLocomotionIntent` and the
+   built-in moves the body, turns it, picks idle/walk/run from the achieved
+   speed and scales clip playback so the stride matches the ground covered.
+   Generated code must NEVER move a character by writing `CTransform` or
+   play its locomotion clips — a second writer gets the foot-sliding wrong.
+   Health, factions, damage, death, perception, navigation, attachment and
+   runtime spawning are engine services (`ctx.combat`, `ctx.perception`,
+   `ctx.nav`, `ctx.attach`, `ctx.spawn`, `ctx.contacts`), not per-game
+   inventions: an enemy from one CodeTask has to be able to hurt a player
+   set up by another. See `docs/npc-and-ai.md`.
 6. Generated C++ (`.cpp`, `.h`, `.hpp`) is confined to
    `engine/generated/{mechanics,ai,dialogue,world}/`. It MUST NOT modify the
    renderer, XR session loop, platform layer, memory core, or base ECS.
@@ -55,7 +66,11 @@ orchestrator and a reusable Vulkan + OpenXR engine core.
    surface has a tighter whitelist (only `ptv/api/IWorldBuilder.h` + std +
    glm) and is compiled + run OFFLINE in the `ptv_worldgen` host (no
    Vulkan/OpenXR/Jolt/renderer/ECS linked), emitting `scene.json`. The
-   environment is NOT a Tripo GLB.
+   environment is NOT a Tripo GLB. The world builder also DECLARES the
+   walkable space it creates via `nav_region` / `nav_link`; NPC routing
+   reads that instead of reconstructing topology the author already knew,
+   and a declaration that contradicts the geometry fails the stage. See
+   `docs/navigation.md`.
 7. Use Claude for the hardest gameplay planning and hardest C++ generation
    (`claude-opus-4-7`). Use `claude-sonnet-4-6` for lighter work. If Claude
    is unavailable (missing key or API error) the pipeline transparently
@@ -84,8 +99,8 @@ orchestrator and a reusable Vulkan + OpenXR engine core.
   generated `IWorldBuilder` code and emits `scene.json`. Links no engine core.
 - `engine/tools` – scene compiler, GLB validator, bounds checker.
 - `packages/schemas` – Pydantic v2 models + JSON Schemas (single source of
-  truth for BuildSpec, AssetManifest, MechanicPlan, SceneSpec, CodeTask,
-  ProjectState, ArtifactMetadata, AcceptanceTestPlan).
+  truth for BuildSpec, AssetManifest, NpcPlan, MechanicPlan, SceneSpec,
+  CodeTask, ProjectState, ArtifactMetadata, AcceptanceTestPlan).
 - `packages/provider-clients` – Anthropic, Google GenAI, Tripo wrappers.
 - `projects/<project_id>/` – per-project local artifact workspace.
 - `docs/` – user-facing docs. Must stay current.
@@ -97,7 +112,19 @@ orchestrator and a reusable Vulkan + OpenXR engine core.
 1. Prompt → **BuildSpec** (Claude Opus, structured output).
 2. BuildSpec → **AssetManifest** (Claude Sonnet, structured output). Only
    OBJECTS (characters, props, fx, ui) — the environment is not a GLB.
-3. AssetManifest + BuildSpec → **MechanicPlan** (OpenAI Agents SDK agent,
+2b. Prompt + BuildSpec + AssetManifest → **NpcPlan** (`npc_plan`, OpenAI
+   Agents SDK agent, `gpt-5.5`, no tools). Decides per character: role,
+   faction and who it fights, `movement_style`, behaviours, and which
+   animation intents those behaviours actually use. Runs BEFORE rigging
+   because "does this thing need animation at all" is the most expensive
+   question in the pipeline (~30 credits per rig, ~20 per clip) and only
+   the prompt can answer it — "the ducks should just slide" means
+   `slide_no_animation` and no rig. The stage RECONCILES the manifest with
+   its own decision (clearing `rigged`/`animations`), so there is one
+   source of truth rather than two that drift. Also feeds `mechanic_plan`,
+   `scene_spec` and codegen so all three describe the same game. A game
+   with no characters emits an empty plan and makes no agent call.
+3. AssetManifest + BuildSpec + NpcPlan → **MechanicPlan** (OpenAI Agents SDK agent,
    `gpt-5.5`, no tools). Each mechanic is classified `builtin`,
    `builtin+config`, `builtin+config_code_edit` (copy a built-in's source and
    edit it into a NEW generated mechanic — never replaces the built-in), or
@@ -175,7 +202,11 @@ orchestrator and a reusable Vulkan + OpenXR engine core.
    `gpt-5.5` @ reasoning `xhigh`, `WebSearchTool`) writes `IWorldBuilder` C++
    in `engine/generated/world/<project_id>/`, compiled + run offline in
    `ptv_worldgen` under a compile-and-repair loop → `world.scene.json`
-   (deterministic fallback world if the budget is exhausted).
+   (deterministic fallback world if the budget is exhausted). The builder
+   also declares the walkable space via `nav_region` / `nav_link`, which a
+   deterministic validator checks against itself (links naming real
+   regions, crossing points inside the rooms they join, spawn inside a
+   region, every region reachable) before the world is accepted.
 8c. **Asset optimization** (`asset_optimization`): derives a device
    `PerformanceProfile` (tier + triangle/draw-call budgets) from
    `target_device` and how much GLB content the project has, allocates a
@@ -186,6 +217,10 @@ orchestrator and a reusable Vulkan + OpenXR engine core.
    makes any non-trivial project runnable. There is **no cap on asset count** —
    more content just means a smaller per-asset budget (never below a quality
    floor) plus more aggressive runtime culling/LOD. See `docs/rendering.md`.
+   Animated characters get a SEPARATE budget (`max_animated_agents`,
+   `animation_lod_distances_m`, `ai_tick_rates_hz`): skinning and AI are CPU
+   work that competes with the render thread, so a scene can sit inside its
+   triangle budget and still miss frame rate on skeletons alone.
    **Rigged assets** take a skin-preserving path: animation clips are copied
    through verbatim (they target nodes, so decimation cannot invalidate
    them — but the writer has to actually emit them, and for a while it did

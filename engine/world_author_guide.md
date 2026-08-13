@@ -89,8 +89,30 @@ Core (implemented by the host):
   be empty (computed for you). `collision: Mesh` makes it solid.
 - `w.place_object(ObjectPlacement{asset_id, transform, tags})` - OPTIONAL: anchor
   an existing pipeline-generated prop/character GLB by its asset_id.
+- `w.nav_region(NavRegionDesc{id, min, max, floor_y})` - a rectangle of floor
+  NPCs may walk on. One per room / corridor / courtyard / street; overlap at
+  openings is fine; a ramp or staircase is several regions, one per landing.
+- `w.nav_link(NavLinkDesc{from_id, to_id, point, cost_multiplier?,
+  bidirectional?})` - a way through between two regions. Put `point` IN the
+  opening (the middle of the doorway), because that is the spot NPCs aim at.
 - `w.seed()` - a deterministic per-world seed; use it for any randomness so runs
   are reproducible.
+
+### Why navigation is your job
+
+You are the only one who knows this level's layout, because you just built it.
+NPCs cannot infer it from geometry, and without a declaration they fall back to
+local obstacle avoidance: they feel their way around whatever is directly in
+front of them. That is enough for one open arena and useless anywhere with
+rooms -- an enemy chasing the player into a building will press against the
+wall beside the door and never find the opening.
+
+Declaring it is cheap. A single open arena is one `nav_region` and no links. A
+two-room building is two regions and one link at the doorway. The build FAILS
+if a link names a region that does not exist, if a link's `point` is outside
+both regions it joins, if the player spawn is not inside a region, or if any
+region is unreachable from the spawn -- all of which produce a level that looks
+right and has NPCs standing still in it.
 
 Header-only convenience builders (in `ptv::world::helpers`, all built on the core
 API - use them or ignore them): `building_grid`, `wall_shell`, `path`,
@@ -166,6 +188,9 @@ crypt can be dim, but the player must still be able to see and traverse it.
    interesting.
 5. Give walls / buildings / obstacles real collision; leave open, walkable floor
    where the player should move.
+5b. Declare that walkable floor with `nav_region(...)`, and every opening
+   between parts of it with `nav_link(...)`. One region and no links is the
+   right answer for a single open arena.
 6. Human scale (player ~1.7 m): room ~6-12 m, plaza ~20-40 m, city block
    ~30-60 m.
 7. Real density and composition, not a few boxes: use procedural loops, noise,

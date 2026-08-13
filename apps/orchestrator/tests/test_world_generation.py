@@ -144,3 +144,105 @@ def test_merge_world_into_scene():
     assert merged["player"]["spawn"]["position"] == [0, 0, 2]
     # World lights precede scene lights.
     assert [l["id"] for l in merged["lights"]] == ["sun", "scene_light"]
+
+
+# ---------------------------------------------------------------------------
+# Navigation the world builder declares as it builds
+# ---------------------------------------------------------------------------
+
+
+def _two_room_world(**overrides):
+    doc = {
+        "entities": [{"id": "env_0", "tags": ["ground"]}],
+        "player": {"spawn": {"position": [-5, 0, 0]}},
+        "navigation": {
+            "regions": [
+                {"id": "a", "min": [-10, 0, -5], "max": [-1, 0, 5],
+                 "floor_y": 0},
+                {"id": "b", "min": [1, 0, -5], "max": [10, 0, 5],
+                 "floor_y": 0},
+            ],
+            "links": [{"from": "a", "to": "b", "point": [0, 0, 0]}],
+        },
+    }
+    doc.update(overrides)
+    return doc
+
+
+def test_navigation_block_reaches_the_compiled_scene():
+    merged = _merge_world_into_scene({"entities": []}, _two_room_world())
+    assert len(merged["navigation"]["regions"]) == 2
+
+
+def test_a_world_with_no_navigation_is_still_valid():
+    """An open arena needs no declared topology; NPCs steer locally. Treating
+    absence as an error would fail every simple level."""
+    from ptv_orchestrator.pipeline.stage_world_generation import (
+        _validate_navigation,
+    )
+
+    assert _validate_navigation({"entities": []}) == []
+    assert _validate_navigation({"navigation": {"regions": []}}) == []
+
+
+def test_navigation_validator_catches_the_mistakes_that_ship_silently():
+    """Each of these produces a level that looks correct and has NPCs
+    standing still in it, so they must fail the build rather than warn."""
+    from ptv_orchestrator.pipeline.stage_world_generation import (
+        _validate_navigation,
+    )
+
+    assert _validate_navigation(_two_room_world()) == []
+
+    # A typo'd region id in a link.
+    bad = _two_room_world()
+    bad["navigation"]["links"] = [{"from": "a", "to": "hall", "point": [0, 0, 0]}]
+    assert any("unknown region" in p for p in _validate_navigation(bad))
+
+    # A doorway coordinate that touches neither room: reads fine in JSON,
+    # sends every NPC into a wall.
+    stray = _two_room_world()
+    stray["navigation"]["links"] = [
+        {"from": "a", "to": "b", "point": [400, 0, 400]}
+    ]
+    assert any("outside both regions" in p for p in _validate_navigation(stray))
+
+    # A room nobody can walk to.
+    stranded = _two_room_world()
+    stranded["navigation"]["links"] = []
+    assert any("no route from the spawn" in p
+               for p in _validate_navigation(stranded))
+
+    # The player starts off the walkable set entirely.
+    outside = _two_room_world(player={"spawn": {"position": [900, 0, 900]}})
+    assert any("spawn is not inside" in p for p in _validate_navigation(outside))
+
+    # A region too small to stand in is a units mistake, not a design choice.
+    tiny = _two_room_world()
+    tiny["navigation"]["regions"][1] = {
+        "id": "b", "min": [1, 0, 0], "max": [1.1, 0, 0.1], "floor_y": 0,
+    }
+    assert any("too small" in p for p in _validate_navigation(tiny))
+
+
+def test_world_scene_validation_rejects_a_broken_nav_graph(tmp_path: Path):
+    import json as _json
+
+    from ptv_orchestrator.pipeline.stage_world_generation import (
+        _validate_world_scene,
+    )
+
+    good = tmp_path / "good.json"
+    good.write_text(_json.dumps(_two_room_world()), encoding="utf-8")
+    ok, note = _validate_world_scene(good)
+    assert ok, note
+    assert "2 nav regions" in note
+
+    broken = _two_room_world()
+    broken["navigation"]["links"] = []
+    bad = tmp_path / "bad.json"
+    bad.write_text(_json.dumps(broken), encoding="utf-8")
+    ok, reason = _validate_world_scene(bad)
+    assert not ok
+    # The message goes straight back to the agent, so it has to name the fix.
+    assert "navigation" in reason and "no route" in reason

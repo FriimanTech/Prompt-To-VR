@@ -50,6 +50,10 @@ if(Python3_Interpreter_FOUND)
            COMMAND ptv_smoke skinning_math "${PTV_RIGGED_FIXTURE}")
   add_test(NAME ptv_smoke_pose_system
            COMMAND ptv_smoke pose_system "${PTV_RIGGED_FIXTURE}")
+  add_test(NAME ptv_smoke_clip_blend
+           COMMAND ptv_smoke clip_blend "${PTV_RIGGED_FIXTURE}")
+  add_test(NAME ptv_smoke_animation_lod
+           COMMAND ptv_smoke animation_lod "${PTV_RIGGED_FIXTURE}")
   # Needs a real device; passes with an informational note when none exists.
   add_test(NAME ptv_smoke_skinning_gpu
            COMMAND ptv_smoke skinning_gpu "${PTV_RIGGED_FIXTURE}")
@@ -109,3 +113,13 @@ endif()
 # other parses an inline scene -- so they run even without Python.
 add_test(NAME ptv_smoke_grab_socket COMMAND ptv_smoke grab_socket)
 add_test(NAME ptv_smoke_clip_contract COMMAND ptv_smoke clip_contract)
+add_test(NAME ptv_smoke_physics_capsule COMMAND ptv_smoke physics_capsule)
+add_test(NAME ptv_smoke_physics_player_slide
+         COMMAND ptv_smoke physics_player_slide)
+add_test(NAME ptv_smoke_physics_overlap COMMAND ptv_smoke physics_overlap)
+add_test(NAME ptv_smoke_runtime_spawn COMMAND ptv_smoke runtime_spawn)
+add_test(NAME ptv_smoke_character_locomotion
+         COMMAND ptv_smoke character_locomotion)
+add_test(NAME ptv_smoke_attachment COMMAND ptv_smoke attachment)
+add_test(NAME ptv_smoke_combat_factions COMMAND ptv_smoke combat_factions)
+add_test(NAME ptv_smoke_nav_graph COMMAND ptv_smoke nav_graph)

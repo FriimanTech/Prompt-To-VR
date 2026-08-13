@@ -16,6 +16,9 @@ class ProjectStage(str, Enum):
     created = "created"
     build_spec = "build_spec"
     asset_manifest = "asset_manifest"
+    # Reads the prompt for what every NPC is supposed to DO, before rigging
+    # spends credits on animating something the game wants to slide.
+    npc_plan = "npc_plan"
     mechanic_plan = "mechanic_plan"
     scene_spec = "scene_spec"
     reference_images = "reference_images"

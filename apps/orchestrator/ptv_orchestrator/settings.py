@@ -131,6 +131,16 @@ class Settings(BaseSettings):
     # Turn budget for the single planning run.
     mechanic_plan_agent_max_turns: int = Field(default=40, ge=4, le=200)
 
+    # --- NPC plan stage (what every character is supposed to do) ---------
+    # Runs before rigging, because "does this character need animation at
+    # all" is the most expensive question in the pipeline: a rig is ~30
+    # credits and each clip another ~20. Also feeds the mechanic planner,
+    # the scene composer and codegen so all three agree on which characters
+    # are combatants and what they can do.
+    npc_plan_model: str = "gpt-5.5"
+    npc_plan_reasoning_effort: str = "high"
+    npc_plan_agent_max_turns: int = Field(default=30, ge=4, le=200)
+
     # --- World-generation stage (agentic VR environment) -----------------
     # A single "world architect" agent (OpenAI Agents SDK) authors ALL the
     # C++ for the VR environment, bounded to the IWorldBuilder surface and

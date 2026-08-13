@@ -34,6 +34,37 @@ namespace ptv {
  * is what makes a purely procedurally-posed rig work. */
 void tick_animators(World& world, float dt);
 
+/** Distance bands controlling how often a character's pose is recomputed.
+ *
+ * Posing a skeleton and rebuilding its palette is per-joint CPU work that
+ * competes with the render thread, and a 65-joint character costs the same
+ * whether it fills the view or is a speck on the horizon. Meta's own guidance
+ * puts a Quest 3 "busy simulation" -- their term for an app with many
+ * animated NPCs -- at 200-300 draw calls, and calls out animation and
+ * skinning as work that delays the render thread. So distant characters are
+ * sampled less often.
+ *
+ * Crucially the clip still advances by the FULL elapsed time when it is
+ * sampled, so a distant character walks at the correct speed; only the
+ * smoothness drops, which is what nobody can see at 20 metres. */
+struct AnimationLod {
+    /** Nearer than this: every frame. */
+    float full_rate_m{8.0f};
+    /** Nearer than this: every other frame. Beyond: every fourth. */
+    float half_rate_m{15.0f};
+    /** Beyond this: not posed at all. The mesh holds its last pose. */
+    float stop_m{40.0f};
+    /** Set false to pose everything every frame (tests, tiny scenes). */
+    bool enabled{true};
+};
+
+/** Pose evaluation with distance-based throttling.
+ *
+ * ``viewer`` is the headset position. Entities without a ``CTransform``
+ * cannot be measured and are always posed at full rate. */
+void tick_animators(World& world, float dt, const Vec3& viewer,
+                    const AnimationLod& lod);
+
 /** Sample one clip into ``out_pose`` at ``time_s``.
  *
  * Exposed separately from the tick so tests can evaluate a clip at an exact
