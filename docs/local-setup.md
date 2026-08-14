@@ -21,8 +21,9 @@ C++ toolchain.
    $env:VCPKG_ROOT = "C:\src\vcpkg"   # add to system env vars permanently
    ```
 
-5. **Python 3.11+** — `python.org` or the Microsoft Store build works.
-   (This repo was smoke-tested on Python 3.13.)
+5. **uv** — install with `winget install --id=astral-sh.uv -e`, then open a
+   new PowerShell so `uv` is on PATH. uv downloads a managed CPython 3.13
+   for this repo; you do not need a global Python install.
 6. **Node.js 20+** and npm.
 7. **Meta Quest Link** desktop app. Connect the Quest 3 by Link cable (or
    enable Air Link) and — once connected — open *Settings → Beta* and click
@@ -39,12 +40,16 @@ copy .env.example .env
 
 ## Python side
 
+From the repo root:
+
 ```powershell
-cd apps\orchestrator
-py -m venv .venv
-.venv\Scripts\Activate.ps1
-pip install -e ..\..\packages\schemas -e ..\..\packages\provider-clients -e .
+uv python install 3.13
+uv venv .\vrvenv --python 3.13
+.\vrvenv\Scripts\Activate.ps1
+uv pip install -e .\packages\schemas -e .\packages\provider-clients -e ".\apps\orchestrator[dev]"
 ```
+
+`vrvenv` is pinned to uv’s managed 3.13, not whatever Python is on PATH.
 
 ## Web side
 
@@ -73,7 +78,7 @@ GLFW / Jolt / EnTT / VMA / ImGui / TinyGLTF / spdlog through vcpkg. Expect
 
 ```powershell
 # In one terminal
-.\apps\orchestrator\.venv\Scripts\Activate.ps1
+.\vrvenv\Scripts\Activate.ps1
 uvicorn ptv_orchestrator.main:app --host 127.0.0.1 --port 8787 --reload
 
 # In another terminal

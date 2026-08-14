@@ -57,19 +57,18 @@ data-driven via `SceneSpec.mechanic_bindings`.
 ## Minimal first-run (once prerequisites are installed and keys filled in)
 
 ```powershell
-# 1. Install Python deps
-cd apps\orchestrator
-py -3.11 -m venv .venv
-.venv\Scripts\Activate.ps1
-pip install -e ..\..\packages\schemas -e ..\..\packages\provider-clients -e .
+# 1. Install Python deps (from repo root; uv manages CPython 3.13)
+uv python install 3.13
+uv venv .\vrvenv --python 3.13
+.\vrvenv\Scripts\Activate.ps1
+uv pip install -e .\packages\schemas -e .\packages\provider-clients -e ".\apps\orchestrator[dev]"
 
 # 2. Install web deps
-cd ..\web
+cd apps\web
 npm install
 
-# 3. Start the orchestrator
-cd ..\orchestrator
-.venv\Scripts\Activate.ps1
+# 3. Start the orchestrator (repo root, vrvenv already active)
+cd ..\..
 uvicorn ptv_orchestrator.main:app --host 127.0.0.1 --port 8787 --reload
 
 # 4. In another shell, start the web control panel
@@ -106,7 +105,7 @@ your machine.
 | **CMake ≥ 4.2** | VS 2026 generator support | `winget install Kitware.CMake` or use the one shipped with VS 2026 |
 | **Vulkan SDK 1.4.341.x** (Windows x64) from LunarG | Vulkan headers, validation layers, `glslc` shader compiler | Sets `VULKAN_SDK` env var automatically |
 | **vcpkg** (checkout anywhere, e.g. `C:\src\vcpkg`) | C++ dependency manifest mode | Set `VCPKG_ROOT=C:\src\vcpkg` in `.env` and run `bootstrap-vcpkg.bat` once |
-| **Python 3.11+** | Orchestrator + schemas + provider clients | Any 3.11 / 3.12 works |
+| **uv** (`winget install --id=astral-sh.uv -e`) | Orchestrator + schemas + provider clients | uv installs a managed CPython 3.13; no global Python required |
 | **Node.js 20+** and **npm** | Vite frontend | Ship with Windows installer |
 | **Meta Quest Link** desktop app | Routes Quest 3 as a PC VR headset and registers the Oculus OpenXR runtime | Enable "Developer Runtime Features" under Beta |
 | **Oculus Quest 3** connected by Link cable or Air Link, with Meta Quest Link active | PC VR headset | Set the Oculus OpenXR runtime as the active one in the Meta Quest Link app |
@@ -161,11 +160,11 @@ filled:
 # One-time: bootstrap vcpkg
 & "$env:VCPKG_ROOT\bootstrap-vcpkg.bat"
 
-# Backend
-cd apps\orchestrator
-py -3.11 -m venv .venv
-.venv\Scripts\Activate.ps1
-pip install -e ..\..\packages\schemas -e ..\..\packages\provider-clients -e .
+# Backend (from repo root)
+uv python install 3.13
+uv venv .\vrvenv --python 3.13
+.\vrvenv\Scripts\Activate.ps1
+uv pip install -e .\packages\schemas -e .\packages\provider-clients -e ".\apps\orchestrator[dev]"
 uvicorn ptv_orchestrator.main:app --host 127.0.0.1 --port 8787 --reload
 
 # (new terminal) Frontend

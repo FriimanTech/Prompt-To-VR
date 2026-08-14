@@ -28,8 +28,7 @@ On success:
 1. Start the orchestrator:
 
    ```powershell
-   cd apps\orchestrator
-   .venv\Scripts\Activate.ps1
+   .\vrvenv\Scripts\Activate.ps1
    uvicorn ptv_orchestrator.main:app --host 127.0.0.1 --port 8787 --reload
    ```
 
