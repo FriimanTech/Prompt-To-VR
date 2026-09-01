@@ -1,0 +1,156 @@
+> **Shared content:** Identical to [PC_VR_Stages/15_scene_compile](../../PC_VR_Stages/15_scene_compile/README.md). Update both copies when this stage changes.
+
+# Stage 15: Scene Compile
+
+> **Pipeline position:** after `asset_optimization` → before device build (stage 16)  
+> **Target:** shared (PC VR and Quest)  
+> **Primary code:** [`apps/orchestrator/ptv_orchestrator/pipeline/stage_scene_compile.py`](../../../../apps/orchestrator/ptv_orchestrator/pipeline/stage_scene_compile.py)  
+> **Primary artifacts:** `projects/<project_id>/scene.json`, `builds/scene/<scene_id>.scene.json`
+
+## Main stage summary
+
+### What this stage is
+
+The **scene compile stage** is the deterministic merge step: it combines the C++ **world** layer (`world.scene.json`), gameplay **SceneSpec** entities, optimized **GLB metadata**, **mechanic bindings**, and **socket contracts** into the final runtime `scene.json` the engine loads.
+
+No AI runs here — pure Python logic with hard validation failures.
+
+### Why it exists
+
+Upstream stages produce partial artifacts optimized for planning or tooling. The runtime needs one coherent JSON document: meshes with LOD paths, animations map, sockets in metres, navigation graph, performance limits, and entity mechanics list.
+
+This stage is also the **socket validator**: it is the only place that sees both codegen `required_sockets` and asset-derived sockets, so mismatches fail loudly with all violations listed.
+
+### Inputs (what enters)
+
+| Input | Location |
+|-------|----------|
+| BuildSpec | `build_spec.json` |
+| AssetManifest | `asset_manifest.json` |
+| MechanicPlan | `mechanic_plan.json` |
+| Scene specs | `scene_spec.<scene_id>.json` |
+| Normalization | `asset_normalization.json` (LODs, bounds, skinned) |
+| Asset contract | `asset_contract.json` |
+| World | `world.scene.json` (entry scene) |
+
+### Outputs (what it produces)
+
+| Output | Location |
+|--------|----------|
+| Per-scene JSON | `builds/scene/<scene_id>.scene.json` |
+| Canonical scene | `scene.json` (entry point) |
+| State pointer | `ProjectState.latest_scene_json` |
+
+### Where output goes next
+
+- **`cmake_build`** — `PTV_SCENE_JSON` points at `scene.json`
+- **`quest_build`** — copies `scene.json` + LOD GLBs into APK assets
+- **Runtime** — `SceneLoader` reads JSON into ECS
+
+### Key concepts and terms
+
+- **Deterministic merge** — Same inputs always produce same output; no LLM.
+- **World + gameplay layers** — `_merge_world_into_scene()` adds environment under gameplay entities.
+- **Asset safety-net** — `_default_entity_for_asset()` spawns manifest assets the SceneSpec agent forgot.
+- **SocketContractError** — Hard fail if a mechanic requires `"muzzle"` but contract lacks it.
+- **Performance block** — `max_animated_agents`, LOD distances, AI tick rates forwarded to runtime.
+
+### End-to-end flow (plain language)
+
+1. For each scene in BuildSpec, load SceneSpec + world (entry scene only).
+2. `compile_scene_json()` merges entities, mechanics, meshes, sockets, navigation.
+3. Repoint world prop meshes to optimized LOD paths.
+4. Validate required sockets; warn on animated agent budget.
+5. Write `scene.json` files.
+
+---
+
+## Detailed stage deep dive
+
+### Pure deterministic merge — no LLM
+
+`compile_scene_json()` is a testable function merging upstream JSON into runtime scene format.
+
+### `run()` sequence
+
+1. Load build_spec, manifest, mechanic_plan, normalization, contract, optional `world.scene.json`
+2. Determine entry scene id from BuildSpec
+3. For each scene with `scene_spec.<id>.json`:
+   - **`compile_scene_json()`** — entities, mechanics, mesh refs, bindings
+   - If entry scene: **`_merge_world_into_scene()`** — sky, ground, lights, spawn, navigation block from world
+   - **`_repoint_world_meshes_to_lods()`** — world props use optimized LOD paths
+   - **`check_animated_agent_budget()`** — warn if over `max_animated_agents`
+   - Write `builds/scene/<id>.scene.json`
+4. Copy entry scene → top-level `scene.json`; set `state.latest_scene_json`
+
+### Key merge behaviors
+
+| Function | Role |
+|----------|------|
+| `_default_entity_for_asset()` | Safety-net: manifest asset missing from SceneSpec → auto entity by category |
+| `_mesh_render_fields()` | Attach `lod_paths`, `skinned`, `animations`, `animation_speeds` |
+| `_sockets_in_meters()` | Scale unit-space contract by `target_scale_meters` |
+| `_check_required_sockets()` | Read codegen sidecars `required_sockets` vs contract — **SocketContractError** lists ALL violations |
+| Materialize bindings | Copy mechanic_plan controller bindings + params into scene entities |
+
+### Socket validator (hard fail)
+
+Only stage seeing both codegen requirements AND asset_contract. Mismatch fails loudly before build.
+
+### Animated agent budget
+
+Warning only — does not fail stage. Over-cap scenes may miss frame rate on Quest.
+
+### Artifacts
+
+Writes `builds/scene/*.scene.json`, canonical `scene.json` — consumed by cmake_build / quest_build and runtime SceneLoader.
+
+### SSE
+
+`warning` (animated budget), `succeeded`
+
+### `_check_required_sockets()` algorithm
+
+For each entity with a bound mechanic that has a `code_task`:
+
+1. Load `required_sockets[]` from mechanic's `.codetask.json` sidecar (written at codegen)
+2. Load derived socket names from `asset_contract.json` for entity's mesh asset
+3. For each required name not in contract → append violation string
+4. After all entities scanned, if any violations → raise `SocketContractError` with **full list**
+
+This is the only pipeline point that sees both halves of the socket contract.
+
+### Asset safety-net (`_default_entity_for_asset`)
+
+If SceneSpec LLM forgot a manifest asset, compile injects a default entity:
+
+| Category | Default behavior |
+|----------|------------------|
+| environment | Static world mesh at origin |
+| character | NPC capsule; role from style_notes heuristics (enemy/player_avatar/npc) |
+| prop | Grabbable if style_notes match grab keywords, else static dressing |
+| fx | Non-physics impostor near spawn |
+| ui | HUD panel in front of spawn |
+
+Uses golden-angle xz spread (`137.508°`) so multiple forgotten props do not stack at one point.
+
+### `_merge_world_into_scene()` details
+
+Entry-point scene only:
+
+- Prepends world entities (sky, ground, static geometry) from `world.scene.json`
+- Copies `navigation` block `{ regions, links }` for runtime NavGraph
+- Applies `_repoint_world_meshes_to_lods()` so world props use `_lod0.glb` paths from optimization
+- Gameplay entities from SceneSpec remain authoritative for id conflicts on gameplay layer
+
+---
+
+## Extend this folder
+
+- `artifacts.md` — scene.json top-level blocks
+- `failure-modes.md` — socket validation messages
+
+## See also
+
+- [`docs/architecture.md`](../../../architecture.md) — data flow + socket contract
+- Stage 16 PC [`16_cmake_build`](../16_cmake_build/README.md) / Quest [`16_quest_build`](../../Quest_Stages/16_quest_build/README.md)
