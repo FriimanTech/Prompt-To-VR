@@ -22,13 +22,12 @@
                                     v
                      +-------------------------------+
                      | Engine runtime (C++/Vulkan/XR) |
-                     | ptv_starter_room.exe           |
-                     | ptv_<project>.exe              |
+                     | ptv_starter_room.exe (PC VR)   |
+                     | ptv_<project>.exe / Quest APK  |
                      +-------------------------------+
                                     |
                                     v
-                        Meta Quest Link (OpenXR)
-                        Quest 3 as PC VR HMD
+                        Meta Quest 3 (Link or standalone APK)
 ```
 
 ## Why this split?
@@ -58,21 +57,38 @@ flowchart TD
   BuildSpec --> SceneSpec
   AssetManifest --> SceneSpec
   NpcPlan --> SceneSpec
-  NpcPlan --> CppGen
   SceneSpec --> Refs[images/*/ref_NN.png]
   Refs --> Tripo[assets/*/model.glb]
-  Tripo --> Normalize[asset_normalization.json]
+  Tripo --> Rigging[asset_rigging]
+  Rigging --> Animation[asset_animation]
+  Animation --> Normalize[asset_normalization.json]
+  NpcPlan --> Rigging
   Normalize --> Contract["asset_contract: derive sockets"]
-  Contract --> Optimize["asset_optimization: decimate + LOD chain"]
   Contract --> CppGen
   MechanicPlan --> CppGen["engine/generated/<kind>/<project_id>/*.cpp"]
-  SceneSpec --> SceneCompile[scene.json]
+  BuildSpec --> WorldGen
+  AssetManifest --> WorldGen
+  CppGen --> WorldGen[world_generation → world.scene.json]
+  WorldGen --> Optimize["asset_optimization: decimate + LOD chain"]
+  Normalize --> Optimize
+  Contract --> Optimize
+  WorldGen --> SceneCompile[scene.json]
   Optimize --> SceneCompile
   Contract --> SceneCompile
-  SceneCompile --> CMake[builds/cmake-*/*.exe]
+  MechanicPlan --> SceneCompile
+  SceneSpec --> SceneCompile
+  SceneCompile --> BuildTail{target_device}
+  BuildTail -->|pcvr| CMake[cmake_build → .exe]
+  BuildTail -->|quest| QuestApk[quest_build → APK]
   CppGen --> CMake
-  CMake --> Launch[exe launch via OpenXR]
+  CppGen --> QuestApk
+  CMake --> Promote[engine_promotion]
+  QuestApk --> Promote
+  CMake --> Launch[OpenXR via Quest Link]
+  QuestApk --> AdbLaunch[adb install + NativeActivity]
 ```
+
+**Stage-by-stage docs:** [`All_Stages_Docs/README.md`](All_Stages_Docs/README.md)
 
 ## Engine subsystems
 

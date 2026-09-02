@@ -98,9 +98,8 @@ All_Stages_Docs/
 | Engine catalog growth | [`docs/engine-growth.md`](../engine-growth.md) |
 | Quest packaging | [`docs/quest-build.md`](../quest-build.md) |
 | Build and launch (PC) | [`docs/build-and-run.md`](../build-and-run.md) |
+| Overview (pipeline summary) | [`docs/overview.md`](../overview.md) |
 | Runtime subsystems | [`docs/runtime-subsystems.md`](../runtime-subsystems.md) |
-
-**Note:** [`docs/overview.md`](../overview.md) pipeline summary is partially stale (missing npc_plan, rigging, animation). Prefer this **All_Stages_Docs** tree for stage-by-stage accuracy.
 
 ## Source of truth in code
 

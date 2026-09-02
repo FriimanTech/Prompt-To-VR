@@ -1,8 +1,8 @@
 # Prompt-To-Native-VR
 
 Local-first system that turns a detailed text prompt for a VR game into a
-**native C++ Vulkan + OpenXR executable** you can launch on Meta Quest 3 via
-Quest Link (PC VR).
+**native C++ Vulkan + OpenXR executable** (PC VR over Quest Link) or a
+**standalone Quest 3 APK** (local sideload via `adb`).
 
 The repo is a monorepo:
 
@@ -10,49 +10,65 @@ The repo is a monorepo:
 - `apps/orchestrator` — FastAPI backend that runs the generation pipeline.
 - `engine/runtime` — hand-authored reusable VR engine (Vulkan + OpenXR + EnTT
   + Jolt).
-- `engine/generated/{mechanics,ai,dialogue}` — the only place LLM-produced C++
-  is allowed.
-- `engine/tools` — scene compiler, GLB validator, generated-code bounds check.
+- `engine/generated/{mechanics,ai,dialogue,world}` — the only place LLM-produced
+  C++ is allowed (`world/` = offline VR environment builders).
+- `engine/worldgen` — offline `ptv_worldgen` host for generated world builders.
+- `engine/android` — Gradle template the Quest build stage instantiates per project.
+- `engine/tools` — scene compiler, GLB validator, socket derivation, bounds check.
 - `packages/schemas` — strict Pydantic + JSON schemas used across the pipeline.
 - `packages/provider-clients` — Anthropic, Google GenAI, Tripo clients.
 - `samples/starter-room` — hand-authored demo scene that boots without calling
   any LLM.
 - `projects/` — per-project local artifact workspace (created by the orchestrator).
-- `docs/` — end-user documentation and troubleshooting.
+- `docs/` — end-user documentation; **`docs/All_Stages_Docs/`** has per-stage
+  relearning guides (Summary + deep dive for all 17 stages).
 
 ## Quick links
 
+- [`docs/All_Stages_Docs/README.md`](docs/All_Stages_Docs/README.md) — **stage-by-stage pipeline docs**
 - [`docs/overview.md`](docs/overview.md)
 - [`docs/architecture.md`](docs/architecture.md)
 - [`docs/local-setup.md`](docs/local-setup.md)
 - [`docs/build-and-run.md`](docs/build-and-run.md)
+- [`docs/quest-build.md`](docs/quest-build.md)
 - [`docs/provider-setup.md`](docs/provider-setup.md)
 - [`docs/prompt-schema.md`](docs/prompt-schema.md)
+- [`docs/world-generation.md`](docs/world-generation.md)
+- [`docs/npc-and-ai.md`](docs/npc-and-ai.md)
 - [`docs/runtime-subsystems.md`](docs/runtime-subsystems.md)
 - [`docs/project-layout.md`](docs/project-layout.md)
 - [`docs/troubleshooting.md`](docs/troubleshooting.md)
 
-## High-level flow
+## High-level flow (17 stages)
+
+Shared stages **1–15** are identical for `pcvr` and `quest`. Only **stage 16**
+branches on `BuildSpec.target_device` (PC VR vs Quest toggle in New Project).
 
 ```
 prompt
-  → BuildSpec
-  → AssetManifest
-  → MechanicPlan
-  → SceneSpec
-  → reference images (Imagen / Gemini)
-  → Tripo image-to-3D (textured, PBR)
-  → asset normalization
-  → generated C++ gameplay modules (Claude)
-  → deterministic scene compiler
-  → CMake configure + build (Visual Studio 18 2026)
-  → launch native .exe via OpenXR
+  →  1. BuildSpec (Claude Opus)
+  →  2. AssetManifest (Claude Sonnet)     # objects only; environment is C++
+  →  3. NPC plan (OpenAI gpt-5.5)
+  →  4. MechanicPlan (OpenAI gpt-5.5)
+  →  5. SceneSpec (OpenAI gpt-5.5, per scene)
+  →  6. Reference images (Gemini)
+  →  7. Tripo image-to-3D (textured + PBR)
+  →  8. Auto-rigging (Tripo)
+  →  9. Animation retarget (Tripo)
+  → 10. Asset normalization
+  → 11. Asset contract (deterministic sockets)
+  → 12. C++ code generation (OpenAI Agents + compile-verify)
+  → 13. World generation (C++ environment → world.scene.json)
+  → 14. Asset optimization (LOD decimation)
+  → 15. Scene compile (merge world + gameplay → scene.json)
+  → 16. pcvr: cmake_build (.exe)  |  quest: quest_build (APK)
+  → 17. Engine promotion (reuse catalog)
 ```
 
 The engine core is hand-authored and reusable. Generation only produces assets,
-scene data, and bounded gameplay modules. Built-in VR mechanics (teleport,
-grab, throw, trigger zones, etc.) are reused whenever possible and are
-data-driven via `SceneSpec.mechanic_bindings`.
+scene data, bounded gameplay modules, and offline world builders. Built-in VR
+mechanics (teleport, slide, snap turn, grab, throw, character locomotion, etc.)
+are reused whenever possible and are data-driven via `SceneSpec.mechanic_bindings`.
 
 ## Minimal first-run (once prerequisites are installed and keys filled in)
 
@@ -83,11 +99,12 @@ cmake --build --preset vs2026-x64-release
 ```
 
 When the starter-room sample is built, the web panel's "Launch sample" button
-(or running `build\Release\ptv_starter_room.exe` directly while Meta Quest Link
-is active) boots a native XR session.
+(or running `ptv_starter_room.exe` directly while Meta Quest Link is active)
+boots a native XR session on PC VR.
 
 See [`docs/local-setup.md`](docs/local-setup.md) for the full checklist,
-[`docs/build-and-run.md`](docs/build-and-run.md) for Quest Link details, and
+[`docs/build-and-run.md`](docs/build-and-run.md) for PC VR launch,
+[`docs/quest-build.md`](docs/quest-build.md) for the Quest APK path, and
 [`docs/provider-setup.md`](docs/provider-setup.md) for API keys.
 
 ---
@@ -109,6 +126,7 @@ your machine.
 | **Node.js 20+** and **npm** | Vite frontend | Ship with Windows installer |
 | **Meta Quest Link** desktop app | Routes Quest 3 as a PC VR headset and registers the Oculus OpenXR runtime | Enable "Developer Runtime Features" under Beta |
 | **Oculus Quest 3** connected by Link cable or Air Link, with Meta Quest Link active | PC VR headset | Set the Oculus OpenXR runtime as the active one in the Meta Quest Link app |
+| **Android Studio SDK/NDK + adb** (Quest target only) | Builds and sideloads standalone APKs | See [`docs/quest-build.md`](docs/quest-build.md) |
 
 Optional: install **Git** if you don't already have it.
 
@@ -116,10 +134,10 @@ Optional: install **Git** if you don't already have it.
 
 | Provider | Used for | Required? | Where to get a key |
 |---|---|---|---|
-| Anthropic | BuildSpec / MechanicPlan / SceneSpec / C++ generation | Yes | <https://console.anthropic.com> → *API Keys* |
-| OpenAI (ChatGPT) | Automatic fallback for every Claude call when Claude is unavailable | Optional (recommended) | <https://platform.openai.com/api-keys> |
-| Google AI Studio | Imagen + Gemini image generation (reference images) | Yes | <https://aistudio.google.com/app/apikey> |
-| Tripo | Image-to-3D (textured / PBR) | Yes | <https://developers.tripo3d.ai> |
+| Anthropic | BuildSpec + AssetManifest (Claude structured JSON) | Yes | <https://console.anthropic.com> → *API Keys* |
+| OpenAI | NPC plan, MechanicPlan, SceneSpec, code generation, world generation (Agents SDK); also automatic fallback when Claude is unavailable | Yes (recommended even if Claude is primary) | <https://platform.openai.com/api-keys> |
+| Google AI Studio | Gemini reference images | Yes | <https://aistudio.google.com/app/apikey> |
+| Tripo | Image-to-3D, rigging, animation retarget | Yes | <https://developers.tripo3d.ai> |
 
 ## 3. Environment variables to fill
 
@@ -127,7 +145,7 @@ Copy `.env.example` to `.env` at the repo root and fill in at least:
 
 ```
 ANTHROPIC_API_KEY=sk-ant-...
-OPENAI_API_KEY=sk-...            # optional ChatGPT fallback for Claude
+OPENAI_API_KEY=sk-...            # required for planning/codegen/world stages
 GOOGLE_API_KEY=...
 TRIPO_API_KEY=...
 VCPKG_ROOT=C:\src\vcpkg
@@ -138,10 +156,10 @@ orchestrator port from its own `apps/web/.env`.
 
 ## 4. Things that are scaffolded but blocked on your action
 
-- **Running the full generation pipeline** requires all three API keys. Without
-  them you can still build and launch the hand-authored `starter-room` sample
-  end-to-end, which validates Vulkan + OpenXR + mechanics without spending
-  credits.
+- **Running the full generation pipeline** requires Anthropic, OpenAI, Google,
+  and Tripo keys. Without them you can still build and launch the hand-authored
+  `starter-room` sample end-to-end, which validates Vulkan + OpenXR + mechanics
+  without spending credits.
 - **First-time vcpkg install** will download and build Vulkan/OpenXR/Jolt/etc.
   Expect 10–30 minutes on the first `cmake --preset`. Subsequent builds are
   cached.
@@ -150,6 +168,8 @@ orchestrator port from its own `apps/web/.env`.
   OpenXR runtime*.
 - **Shader compilation** relies on `glslc` from the Vulkan SDK being on
   `PATH`. The Vulkan SDK installer adds it automatically.
+- **Quest standalone builds** need `ANDROID_HOME`, `ANDROID_NDK_HOME`, `JAVA_HOME`,
+  and `adb` on PATH — see [`docs/quest-build.md`](docs/quest-build.md).
 
 ## 5. Exact commands to run the first example
 
@@ -183,5 +203,6 @@ cmake --build --preset vs2026-x64-release
 ```
 
 Then in the web panel click **New Project**, paste a detailed VR game prompt,
-and watch the pipeline run. You can also press **Launch starter sample** on the
-home page to verify the engine without invoking providers.
+choose **PC VR** or **Quest**, and watch the pipeline run. You can also press
+**Launch starter sample** on the home page to verify the engine without
+invoking providers.

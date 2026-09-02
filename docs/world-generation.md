@@ -9,18 +9,20 @@ Tripo still generates the discrete **objects** the player interacts with
 ## Pipeline
 
 ```
-build_spec -> asset_manifest (no environment GLB) -> mechanic_plan -> scene_spec
-  -> reference_images -> tripo_models -> asset_normalization
+build_spec -> asset_manifest -> npc_plan -> mechanic_plan -> scene_spec
+  -> reference_images -> tripo_models -> asset_rigging -> asset_animation
+  -> asset_normalization -> asset_contract
   -> code_generation (mechanics DAG)
   -> world_generation (this stage)
   -> asset_optimization (decimation + LOD chain)
-  -> scene_compile (merge world + gameplay) -> cmake_build -> engine_promotion
+  -> scene_compile (merge world + gameplay)
+  -> cmake_build | quest_build -> engine_promotion
 ```
 
 `world_generation` (`apps/orchestrator/ptv_orchestrator/pipeline/stage_world_generation.py`):
 
 1. Builds the **world architect** agent (`world_agent.py`) via the OpenAI Agents
-   SDK: model `world_model` (default `gpt-5.6-sol`), `ModelSettings(reasoning=
+   SDK: model `world_model` (default `gpt-5.5`), `ModelSettings(reasoning=
    Reasoning(effort=world_reasoning_effort))` (default `high`), `WebSearchTool`
    enabled, a persistent `Session`, and `max_turns = world_agent_max_turns`.
 2. Hands it `engine/world_author_guide.md` (the "understand the engine" input),
@@ -143,7 +145,7 @@ Source: `engine/worldgen/samples/starter_city.cpp`.
 
 `apps/orchestrator/ptv_orchestrator/settings.py`:
 
-- `world_model` (default `gpt-5.6-sol`)
+- `world_model` (default `gpt-5.5`)
 - `world_reasoning_effort` (default `high`; one of none|minimal|low|medium|high|xhigh;
   keep at `high`/`xhigh` — `medium` risks first-try compile failures in the generated C++)
 - `world_max_repair_rounds` (default 6)

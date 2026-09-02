@@ -26,14 +26,15 @@ Prompt-To-VR/
 │       │   ├── settings.py   # .env loader
 │       │   ├── storage.py    # filesystem project store
 │       │   ├── events.py     # in-memory SSE bus
+│       │   ├── engine_catalog.py
 │       │   ├── api/          # FastAPI routes + launcher
-│       │   ├── build/        # CMake runner
+│       │   ├── build/        # CMake + Quest Gradle runners
 │       │   └── pipeline/     # one module per stage
 │       └── tests/
 │
 ├── packages/
 │   ├── schemas/              # Pydantic v2 + exported JSON Schemas
-│   │   ├── ptv_schemas/      # models (BuildSpec, AssetManifest, …)
+│   │   ├── ptv_schemas/      # models (BuildSpec, AssetManifest, NpcPlan, …)
 │   │   ├── json/             # exported schema files (generated)
 │   │   └── tests/
 │   │
@@ -48,18 +49,22 @@ Prompt-To-VR/
 │   ├── runtime/              # hand-authored C++ VR engine
 │   │   ├── include/ptv/      # public headers
 │   │   ├── src/              # subsystems: core, platform, render, xr, ecs,
-│   │   │                     # scene, physics, input, interaction, audio,
+│   │   │                     # scene, physics, nav, input, interaction,
 │   │   │                     # save, debug, mechanics
 │   │   │   └── mechanics/builtin/<mechanic>/   # one module per built-in
-│   │   │                     # (teleport, slide, snap_turn, grab, throw)
 │   │   ├── shaders/          # .vert/.frag, compiled to SPIR-V via glslc
 │   │   └── tests/            # CTest smoke targets
 │   │
-│   ├── tools/                # glb_validate, check_generated_bounds.py
+│   ├── worldgen/             # offline ptv_worldgen host (no Vulkan/XR/ECS)
+│   ├── android/              # Quest APK Gradle template (@PTV_*@ tokens)
+│   ├── promoted/             # registry.json (engine_promotion stage)
+│   ├── tools/                # scene compiler, glb_validate, ptv_glb_sockets,
+│   │                         # ptv_glb_optimize, check_generated_bounds.py
 │   └── generated/            # THE ONLY PLACE LLM C++ LIVES
 │       ├── mechanics/        # IMechanic modules
 │       ├── ai/               # IBehaviour modules
-│       └── dialogue/         # IDialogueHook modules
+│       ├── dialogue/         # IDialogueHook modules
+│       └── world/            # IWorldBuilder modules (offline worldgen only)
 │
 ├── samples/
 │   └── starter-room/         # hand-authored scene + .exe
@@ -73,26 +78,47 @@ Prompt-To-VR/
 │       ├── project_state.json
 │       ├── build_spec.json
 │       ├── asset_manifest.json
+│       ├── npc_plan.json
 │       ├── mechanic_plan.json
 │       ├── scene_spec.<scene_id>.json
 │       ├── scene_spec.json
+│       ├── asset_rig.json
+│       ├── asset_animation.json
 │       ├── asset_normalization.json
+│       ├── asset_contract.json
+│       ├── codegen_board.json
+│       ├── world.scene.json
 │       ├── scene.json
 │       ├── images/<asset_id>/*.png
-│       ├── assets/<asset_id>/*.glb          # raw Tripo source (kept, not shipped)
-│       ├── assets/<asset_id>/<id>_lod0..3.glb  # decimated LOD chain (shipped)
-│       ├── assets/<asset_id>/<id>_lod.json  # decimation stamp (idempotency)
+│       ├── assets/<asset_id>/
+│       │   ├── model.glb                 # raw Tripo source (kept, not shipped)
+│       │   ├── model_rigged.glb          # after asset_rigging
+│       │   ├── model_animated.glb        # after asset_animation
+│       │   ├── tripo_task.json
+│       │   ├── <id>_lod0..3.glb          # decimated LOD chain (shipped)
+│       │   └── <id>_lod.json             # decimation stamp (idempotency)
 │       ├── logs/*.log
-│       └── builds/cmake-<timestamp>/
+│       ├── builds/cmake-current/         # PC VR exe (symlink-like stamp)
+│       └── builds/quest/                 # Quest Gradle tree + APK output
 │
 └── docs/
+    ├── All_Stages_Docs/      # per-stage relearning (17 stages × PC + Quest)
     ├── overview.md
     ├── architecture.md
     ├── local-setup.md
     ├── build-and-run.md
+    ├── quest-build.md
+    ├── world-generation.md
+    ├── npc-and-ai.md
+    ├── navigation.md
+    ├── rendering.md
+    ├── codegen-agents.md
+    ├── engine-growth.md
     ├── provider-setup.md
     ├── prompt-schema.md
     ├── runtime-subsystems.md
     ├── project-layout.md       (this file)
     └── troubleshooting.md
 ```
+
+Stage-by-stage documentation: [`All_Stages_Docs/README.md`](All_Stages_Docs/README.md).

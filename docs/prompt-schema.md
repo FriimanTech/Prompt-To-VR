@@ -27,15 +27,26 @@ A concrete example prompt lives in the `NewProjectPage` sample text.
 
 | Schema | File | Produced by |
 |---|---|---|
-| `BuildSpec` | `build_spec.json` | Claude Opus |
-| `AssetManifest` | `asset_manifest.json` | Claude Sonnet |
-| `MechanicPlan` | `mechanic_plan.json` | Claude Opus |
-| `SceneSpec` | `scene_spec.<scene_id>.json`, `scene_spec.json` | Claude Opus (per scene) |
-| `CodeTask` (embedded in MechanicPlan) | emitted as `*.codetask.json` next to generated `*.cpp` | Claude Opus |
+| `BuildSpec` | `build_spec.json` | Claude Opus (via `LlmClient`; OpenAI fallback) |
+| `AssetManifest` | `asset_manifest.json` | Claude Sonnet (via `LlmClient`; OpenAI fallback) |
+| `NpcPlan` | `npc_plan.json` | OpenAI Agents SDK `gpt-5.5` (no tools); reconciles manifest |
+| `MechanicPlan` | `mechanic_plan.json` | OpenAI Agents SDK `gpt-5.5` (no tools) |
+| `SceneSpec` | `scene_spec.<scene_id>.json`, `scene_spec.json` | OpenAI Agents SDK `gpt-5.5` (per scene) |
+| `CodeTask` (embedded in MechanicPlan) | `*.codetask.json` beside generated `*.cpp` | MechanicPlan stage (executed by codegen agents) |
+| Rigging record | `asset_rig.json`, `model_rigged.glb` | Tripo `asset_rigging` stage |
+| Animation record | `asset_animation.json`, `model_animated.glb` | Tripo `asset_animation` stage |
+| Normalization stamp | `asset_normalization.json` | Orchestrator (`asset_normalization`, deterministic) |
+| Socket contract | `asset_contract.json` | Orchestrator (`asset_contract`, deterministic) |
+| Codegen ledger | `codegen_board.json` | Orchestrator (`code_generation`) |
+| World scene | `world.scene.json` | Offline `ptv_worldgen` (world architect agent) |
+| Compiled scene | `scene.json` | Orchestrator (`scene_compile`, deterministic) |
 | `PerformanceProfile` | `performance` block in `scene.json` (+ `__performance__` in `asset_normalization.json`) | Orchestrator (`asset_optimization`, deterministic) |
 | `ProjectState` | `project_state.json` | Orchestrator (bookkeeping) |
 | `ArtifactMetadata` | returned from `/api/projects/<id>/artifacts` | Orchestrator |
 | `AcceptanceTestPlan` | `acceptance_test_plan.json` | (optional) Claude Sonnet |
+
+See [`All_Stages_Docs/README.md`](All_Stages_Docs/README.md) for the full
+17-stage artifact flow.
 
 ## Stage caps (updated for full VR-game generation)
 

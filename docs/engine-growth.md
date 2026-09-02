@@ -25,7 +25,8 @@ and the promotion stage.
                                               engine/generated/<kind>/<pid>/*.cpp
                                                             |
                                               +-------------v-------------+
-                                              | cmake_build (must succeed) |
+                                              | cmake_build OR quest_build |
+                                              | (must succeed)             |
                                               +-------------+-------------+
                                                             |
                                                             v
@@ -72,7 +73,7 @@ shared engine vs. how much was newly generated.
 
 ### 3. Promotion (`stage_engine_promotion.py`)
 
-After `cmake_build` succeeds, the promotion stage walks
+After `cmake_build` or `quest_build` succeeds, the promotion stage walks
 `engine/generated/{mechanics,ai,dialogue}/<project_id>/` and indexes
 every successfully-compiled `.cpp` (paired with its `.codetask.json`
 sidecar) into a single registry file:
@@ -104,8 +105,9 @@ Here is what the system does, step by step:
    Mechanics list calls out four ideas: walking, hover, flight,
    first-person Superman embodiment.
 
-2. **Reference images + Tripo3D** generate a city environment GLB and a
-   Superman GLB.
+2. **Reference images + Tripo3D** generate object GLBs (characters, props).
+   The **city environment** is authored later by the world-generation stage
+   (`IWorldBuilder` C++ → `world.scene.json`), not as a Tripo GLB.
 
 3. **Mechanic plan stage** sees the catalog text. It classifies:
 
@@ -127,8 +129,9 @@ Here is what the system does, step by step:
    `engine/generated/mechanics/<pid>/superman_flight.cpp`, both
    subclassing `IMechanic` from the public engine surface only.
 
-5. **Scene-compile + cmake_build** stages compile the runtime + the new
-   mechanics and link `ptv_runtime` + `ptv_<game>` together.
+5. **World generation** writes procedural city geometry into
+   `world.scene.json`. **Scene-compile + cmake_build** (or `quest_build`)
+   compile the runtime + new mechanics and link the launcher.
 
 6. **Engine-promotion stage** sees the two new sidecars
    (`superman_hover_toggle.codetask.json`,
@@ -173,7 +176,7 @@ first game paid for.
   default, not which ones exist.
 
 * Promotion is conservative: it only registers mechanics whose
-  `cmake_build` succeeded. Broken builds never pollute the catalog.
+  `cmake_build` or `quest_build` succeeded. Broken builds never pollute the catalog.
 
 * The catalog is observable: `GET /api/engine/catalog` returns the
   exact JSON the planner is reasoning over.

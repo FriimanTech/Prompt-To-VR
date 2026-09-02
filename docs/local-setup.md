@@ -34,8 +34,8 @@ C++ toolchain.
 ```powershell
 cd C:\Users\micha\Documents\Prompt-To-VR
 copy .env.example .env
-# then open .env in an editor and fill in ANTHROPIC_API_KEY, GOOGLE_API_KEY,
-# TRIPO_API_KEY, and VCPKG_ROOT.
+# then open .env in an editor and fill in ANTHROPIC_API_KEY, OPENAI_API_KEY,
+# GOOGLE_API_KEY, TRIPO_API_KEY, and VCPKG_ROOT.
 ```
 
 ## Python side
@@ -94,5 +94,6 @@ cmake --build --preset vs2026-x64-release
 .\build\vs2026-x64\samples\starter-room\Release\ptv_starter_room.exe
 ```
 
-See [`build-and-run.md`](build-and-run.md) for the full launch procedure and
-[`troubleshooting.md`](troubleshooting.md) for common failures.
+See [`build-and-run.md`](build-and-run.md) for the full launch procedure,
+[`All_Stages_Docs/README.md`](All_Stages_Docs/README.md) for the pipeline
+stages, and [`troubleshooting.md`](troubleshooting.md) for common failures.

@@ -1,5 +1,8 @@
 # Build and run
 
+For the full 17-stage pipeline (including Quest APK builds), see
+[`All_Stages_Docs/README.md`](All_Stages_Docs/README.md).
+
 ## The hand-authored sample (no API keys required)
 
 ```powershell
@@ -53,6 +56,16 @@ On success:
    shown in the Quest Link *recents* list comes from the OpenXR application
    name, which the runtime sets from the scene's `title` at launch — so the
    headset shows the project's title regardless of the exe filename.
+
+## Quest standalone (APK)
+
+When `BuildSpec.target_device` is `quest`, stage 16 runs `quest_build` instead
+of `cmake_build`. The web panel's **Launch latest build** uses `adb install -r`
+and starts the NativeActivity on a connected Quest 3.
+
+Prerequisites: Android SDK/NDK, `adb`, and a USB-connected headset. See
+[`quest-build.md`](quest-build.md) for the full toolchain checklist, APK
+packaging details, and on-device validation ladder.
 
 ## CMake from the IDE
 

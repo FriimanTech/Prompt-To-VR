@@ -7,21 +7,22 @@ The three providers used by the pipeline.
 - Get an API key at <https://console.anthropic.com> → *API Keys*.
 - Paste into `.env` as `ANTHROPIC_API_KEY`.
 - Default models (configurable in `.env`):
-  - `CLAUDE_HARD_MODEL=claude-opus-4-7` (hardest planning + hardest C++ gen).
-  - `CLAUDE_LIGHT_MODEL=claude-sonnet-4-6` (routine transforms).
+  - `CLAUDE_HARD_MODEL=claude-opus-4-7` (BuildSpec).
+  - `CLAUDE_LIGHT_MODEL=claude-sonnet-4-6` (AssetManifest).
 - Structured outputs are GA on the Claude API. The wrapper passes the schema
   via `output_config.format = {"type": "json_schema", "schema": ...}`. No
   beta headers are required.
 
-## OpenAI / ChatGPT (automatic fallback)
+## OpenAI / ChatGPT (planning + codegen + fallback)
 
-- Optional. Only needed if you want the pipeline to keep working when Claude
+- **Required** for NPC plan, MechanicPlan, SceneSpec, code generation, and world
+  generation (OpenAI Agents SDK). Also used as an automatic fallback when Claude
   is unavailable (no key, rate-limited, transient API error, etc.).
 - Get an API key at <https://platform.openai.com/api-keys>.
 - Paste into `.env` as `OPENAI_API_KEY`.
 - Default models (configurable in `.env`):
-  - `OPENAI_HARD_MODEL=gpt-5` (hard planning + C++ generation).
-  - `OPENAI_LIGHT_MODEL=gpt-5-mini` (routine transforms).
+  - `OPENAI_HARD_MODEL=gpt-5` (codegen agents + Claude fallback for hard JSON).
+  - `OPENAI_LIGHT_MODEL=gpt-5-mini` (Claude fallback for light JSON).
   - If you have Responses-API access to the newest coding model, set
     `OPENAI_HARD_MODEL=gpt-5.3-codex` (verify availability first; Responses
     API rollout was still in progress at the time of writing).
@@ -216,11 +217,16 @@ Pills are red with ✗ if a key is missing.
 |---|---|---|---|
 | BuildSpec | Anthropic `claude-opus-4-7` | OpenAI `gpt-5` | JSON schema |
 | AssetManifest | Anthropic `claude-sonnet-4-6` | OpenAI `gpt-5-mini` | JSON schema |
+| NPC plan | OpenAI Agents SDK `gpt-5.5` (no tools) | — (OpenAI-only) | JSON schema |
 | MechanicPlan | OpenAI Agents SDK `gpt-5.5` (no tools) | — (OpenAI-only) | JSON schema |
 | SceneSpec (per scene) | OpenAI Agents SDK `gpt-5.5` (no tools) + validate-and-repair | — (OpenAI-only) | JSON schema |
 | Reference image | Google `gemini-3.1-flash-image` | — | — |
 | Image-to-3D | Tripo (default latest, configurable) | — | textured + PBR |
-| C++ module | Anthropic `claude-opus-4-7` | OpenAI `gpt-5` | free-form, guarded by boundaries |
+| Auto-rigging | Tripo rig-check + rig | — | — |
+| Animation retarget | Tripo retarget | — | — |
+| C++ modules (code_generation) | OpenAI Agents SDK `openai_hard_model` (default `gpt-5`) + `WebSearchTool` | — (OpenAI-only) | free-form, guarded by boundaries |
+| World generation | OpenAI Agents SDK `world_model` (default `gpt-5.5`) + `WebSearchTool` | — (OpenAI-only) | C++ source, compile-verify |
+| Engine promotion | — (deterministic index) | — | — |
 
 The orchestrator never sends binary assets back to a provider; images go
 Gemini → disk → Tripo, and C++ generation is prompt-only.

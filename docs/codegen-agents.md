@@ -1,10 +1,12 @@
-# Multi-agent code generation (Stage 8)
+# Multi-agent code generation (Stage 12)
 
 This document describes how the Code Generation stage of the
 Prompt-To-Native-VR orchestrator produces native C++ mechanics from a
 `MechanicPlan`. It is the authoritative reference for the per-project
 ledger, the OpenAI Agents SDK driver, the multi-file write contract,
 and the four-step CodeTask agent process.
+
+Per-stage summary: [`All_Stages_Docs/PC_VR_Stages/12_code_generation/README.md`](All_Stages_Docs/PC_VR_Stages/12_code_generation/README.md).
 
 The stage lives in
 [`apps/orchestrator/ptv_orchestrator/pipeline/stage_code_generation.py`](../apps/orchestrator/ptv_orchestrator/pipeline/stage_code_generation.py)
@@ -21,8 +23,8 @@ and is supported by:
 ## High-level architecture
 
 ```text
-Stage 7  ┃ scene_compile / scene_spec*.json on disk
-Stage 8  ┃ THIS STAGE
+Stage 11  ┃ asset_contract.json on disk
+Stage 12  ┃ THIS STAGE (code_generation)
          │
          │ 1. Load MechanicPlan + every scene_spec*.json + BuildSpec
          │ 2. CodegenBoard.load_or_init(project_dir, plan, max_agents=N)
@@ -38,7 +40,8 @@ Stage 8  ┃ THIS STAGE
          │      f. board.mark_done(...) OR board.mark_failed(...)
          │      g. goto a
          │ 4. Stage result: produced paths, board counts, sidecars
-Stage 9  ┃ scene_compile → CMake build
+Stage 13  ┃ world_generation
+Stage 15  ┃ scene_compile → cmake_build | quest_build
 ```
 
 Workers are pull-based: there is **no** static "worker-0 owns tasks
