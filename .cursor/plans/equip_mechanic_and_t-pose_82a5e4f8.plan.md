@@ -1,57 +1,66 @@
 ---
 name: Equip mechanic and T-pose
-overview: Replace the hard-coded hide_head assumption with a prompt-driven player perspective and avatar system, build a full equip AND unequip system on an engine-owned equip service, turn world generation into N parallel environments with runtime transitions and persistence (which is what actually produces the nested interior of an NPC's head), then make the Gemini reference-image stage emit T-pose art for NPCs and player avatars only.
+overview: Replace the hard-coded hide_head assumption with a prompt-driven player perspective and avatar system, build a full equip AND unequip system on an engine-owned equip service, turn world generation into N parallel environments that declare stable ids, interactive affordances and initial state (unlocking runtime transitions, gated navigation, and automatic state persistence with no save code in any mechanic), then make the Gemini reference-image stage emit T-pose art for NPCs and player avatars only.
 todos:
   - id: a-foundations
     content: "Phase A: ISkeleton joint_world/joint_parent/joint_for_slot/joint_subtree plus the BodySlots taxonomy (Mixamo + Tripo + loose aliases), and reuse the table in hand_pose instead of its hard-coded mixamorig prefix"
-    status: pending
+    status: completed
   - id: b1-perspective-schema
     content: "Phase B1: add PlayerPerspective (first_person_avatar, inside_head_free_look, inside_head_npc_host, inside_head_piloted) and PlayerAvatarSpec (coverage, head_visibility, leg_animation, needs_mirror) to BuildSpec, with prompt inference rules; default to a full body WITH a head and hide it at runtime"
-    status: pending
+    status: completed
   - id: b2-self-view-head
     content: "Phase B2: per-draw-copy head suppression via CSelfViewHide plus a head-chopped palette for the player's own view, keeping the unmodified palette for mirrors, with a runtime toggle and head-slot equipped items included"
-    status: pending
+    status: completed
   - id: b3-mirror
     content: "Phase B3: builtin.mirror_surface using stencil-masked mirrored geometry (no render-to-texture), avatar-only reflected draw set, front-face cull variant, one active mirror, perf telemetry"
-    status: pending
+    status: completed
   - id: b4-avatar-body
     content: "Phase B4: rewrite builtin.avatar_body with coverage/head_visibility/leg_animation params, eye-level camera placement, two-bone analytic arm IK (pole hint, 170 degree clamp, no wrist clamping), and legs via a LocomotionClipSelector shared with character_locomotion"
-    status: pending
+    status: completed
   - id: c1-equip-semantics
     content: "Phase C1: replace the overloaded lock param with passive_grab_protection, removable, and re_equippable, the last two runtime-mutable"
-    status: pending
+    status: completed
   - id: c2-equip-service
     content: "Phase C2: IEquip service plus CEquipSlots/CEquipped components, custom scene-declared slots, and slots owned by already-equipped items (mask on tank, goggles on helmet)"
-    status: pending
+    status: completed
   - id: c3-equip-mechanic
     content: "Phase C3: builtin.equip with independent equip_on/unequip_on (grab_pull default), free-hand and other-hand rules, exclusive slots with on_replace disposition, groups, requires, snap radius, and span fit via mount_base/mount_tip"
-    status: pending
+    status: completed
   - id: c4-ui-panel
     content: "Phase C4: builtin.ui_panel plus pointer, generalized from the existing hard-coded locomotion menu, so menu-driven equip/unequip (selected vs equipped, Equip/Unequip buttons) is generated code over IEquip"
     status: pending
-  - id: d2-env-schema
-    content: "Phase D2: extend SceneEntry with environment_mode (exclusive/nested), kind (standalone/hub/mission/chapter/interior), host + fit_to_host_extent_m, authoring_scale, links (SceneLink), needs_unique_environment, plus BUILD_SPEC_SYSTEM inference rules"
+  - id: d3-pipeline-reorder
+    content: "Phase D3: move world_generation before code_generation in orchestrator.py, update AGENTS.md and docs/overview.md, and give CODEGEN_SYSTEM each scene's interactive registry as context"
     status: pending
-  - id: d3-worldbuilder-api
-    content: "Phase D3: add spawn_point() and portal() to WorldContext/IWorldBuilder, serialize both in WorldGen.cpp, and document them in world_author_guide.md"
+  - id: d4-env-schema
+    content: "Phase D4: extend SceneEntry with environment_mode, kind, host + fit_to_host_extent_m, authoring_scale, links (SceneLink), needs_unique_environment + reuse_environment_from; add BuildSpec.interaction_rules; update BUILD_SPEC_SYSTEM inference rules"
+    status: completed
+  - id: d5-worldbuilder-api
+    content: "Phase D5: add spawn_point(), portal() and interactive() plus StateValue to WorldContext; add interactive fields to PrimitiveDesc/MeshDesc/ObjectPlacement; replace positional env_N ids with stable author-derived unique ids; add nav gated_by; serialize all of it in WorldGen.cpp and document in world_author_guide.md"
+    status: completed
+  - id: d7-parallel-worlds
+    content: "Phase D7: rework stage_world_generation into a ThreadPoolExecutor worker pool mirroring scene_spec - per-environment session id, directory, builder id, namespace, build tree, repair budget and fallback; add world_max_parallel_workers, world_max_environments, world_max_interactives_per_env; rewrite WORLD_BUILDER_SYSTEM with the affordance vocabulary, stable-id contract, declare-only-stateful rule and foliage prohibition"
     status: pending
-  - id: d5-parallel-worlds
-    content: "Phase D5: rework stage_world_generation into a ThreadPoolExecutor worker pool mirroring scene_spec - per-environment session id, directory engine/generated/world/<project>/<env>/, builder id, namespace, build tree, repair budget and fallback; add world_max_parallel_workers and world_max_environments"
+  - id: d8-env-validation
+    content: "Phase D8: per-environment nav validation plus global checks - links name real scenes, portal spawns exist, spawns inside nav regions, graph connected, nested extent fits host, no cross-environment nav links, unique ids, geometry required on interactives, gated_by resolves, reuse_environment_from resolves, interactive cap, and unexplained cross-environment divergence"
     status: pending
-  - id: d6-env-validation
-    content: "Phase D6: keep per-environment nav validation, forbid cross-environment nav links, and add global checks (links name real scenes, portal target spawns exist, spawns inside nav regions, graph connected from entry, nested extent fits its host)"
+  - id: d9-compile-and-binder
+    content: "Phase D9: scene compile merges world.<scene_id>.scene.json per scene, records builder_id provenance, and runs the deterministic affordance-to-mechanic binder uniformly across all environments with interaction_rules overrides; enable evict_when_over_budget for multi-environment projects"
     status: pending
-  - id: d7-compile-per-env
-    content: "Phase D7: scene compile merges world.<scene_id>.scene.json per scene instead of only the entry scene, emits portals/spawn points/scene graph, and enables evict_when_over_budget for multi-environment projects"
+  - id: d10-runtime-transitions
+    content: "Phase D10: IEnvironment service - exclusive transition (fade, detach, destroy non-persistent, dedupe preserved entities, rebuild physics + nav, re-attach, re-bind skeletons, restore registry and deltas, spawn at named point, stream, fade in), nested load under an environment root attached to a host anchor, skeleton-before-mesh eviction ordering"
     status: pending
-  - id: d8-runtime-transitions
-    content: "Phase D8: IEnvironment service - exclusive transition (fade, detach, destroy non-persistent, rebuild physics + nav, re-attach, re-bind skeletons, spawn at named point, stream, fade in), nested load under an environment root attached to a host anchor, and skeleton-before-mesh eviction ordering"
+  - id: d11-interactive-persistence
+    content: "Phase D11: IInteractive registry with automatic pristine-vs-current delta persistence; finish SaveSystem::load_world and re-key save_world on stable string ids with delta-only storage; add IPersistence (global + per-scene) for abstract game facts; atomic versioned JSON storage, no SQLite"
+    status: in_progress
+  - id: d12-affordance-builtins
+    content: "Phase D12: implement builtin.door, builtin.switchable, builtin.container, builtin.mover, builtin.breakable, builtin.harvestable plus the movable transform-persistence path; multi-affordance composites; kinematic colliders driven via move_kinematic; catalog and MECHANIC_PLAN_SYSTEM entries"
     status: pending
-  - id: d9-persistence
-    content: "Phase D9: finish SaveSystem::load_world and add an IPersistence service (per-scene + global key-value) plus a persistent entity tag so loadout, outfit, story items and world flags survive transitions"
+  - id: d13-affordance-cues
+    content: "Phase D13: registry-driven affordance cue on hover replacing the ad-hoc grabbable tint, respecting interaction_allowed and sharing one candidate query with the interaction; add a spatial index to that query; keep the ground material check and do not refactor renderer tag handling"
     status: pending
-  - id: d10-quest-packaging
-    content: "Phase D10: package every builds/scene/*.scene.json plus the scene graph into the Quest APK, keeping scene.json as the entry point"
+  - id: d14-quest-packaging
+    content: "Phase D14: package every builds/scene/*.scene.json plus the scene graph into the Quest APK, keeping scene.json as the entry point"
     status: pending
   - id: e1-reference-frame
     content: "Phase E1: PlayerRig reference frame (parent entity + anchor joint) and player scale on ILocomotion, which also enables vehicles, elevators and moving platforms"
@@ -61,10 +70,10 @@ todos:
     status: pending
   - id: f1-pose-coverage
     content: "Phase F1: ReferenceImageRequest.pose and .coverage plus AssetItem.character_role (none/npc/player_avatar - no interior role), with deterministic reconciliation from character_role and npc_plan.json so prop-ducks stay natural"
-    status: pending
+    status: completed
   - id: f2-pose-prompt
     content: "Phase F2: pose and coverage clauses in _compose_prompt with matching negatives, and pose-aware ASSET_MANIFEST_SYSTEM reference-image rules"
-    status: pending
+    status: completed
   - id: x-catalog-docs
     content: "Cross-cutting: catalog entries for all five new builtins, synced BUILTIN_MECHANIC_IDS and builtin_source map, mount socket derivation, mechanic/scene prompt updates, and docs including a new player-avatar-and-perspective.md"
     status: pending
@@ -90,7 +99,7 @@ flowchart TD
   A["A. Engine foundations: joint reads + body slot taxonomy"] --> B["B. Perspective + avatar body (cases 1, 5, 6)"]
   A --> C["C. Equip AND unequip system"]
   B --> C
-  D["D. Multi-environment world generation + runtime switching"] --> E["E. Miniature player inside a head (cases 2, 3, 4)"]
+  D["D. Multi-environment world generation, affordances, interaction, persistence"] --> E["E. Miniature player inside a head (cases 2, 3, 4)"]
   B --> E
   C --> F["F. Reference images: T-pose and coverage"]
   D --> F
@@ -339,28 +348,81 @@ The fix is isolation by construction, not coordination:
 - **Mandatory per-environment namespace** (`namespace ptv_world_<env_id> { ... }`), enforced by the same bounds validator that already rejects bad includes.
 - **Per-environment build directory** and its own `ptv_worldgen` binary, selected by a new `PTV_WORLD_ENV_ID` cache variable that narrows the glob to one subdirectory. This is affordable precisely because the host links almost nothing — only `nlohmann_json` plus optional `glm`, with no Vulkan, OpenXR, Jolt, renderer or ECS — so a configure-and-build is cheap and N of them in parallel are cheap.
 
-**Will parallel generation corrupt the nav-space declarations?** No, and the reason is structural. `nav_region` / `nav_link` are declared inside a builder and serialized into that builder's own document, and `_validate_navigation` already runs per document. Each nav graph is self-contained, so one agent cannot reach into another's. The genuine hazard is different: a link that names a region in *another* environment. That is not a nav link at all — it is a transition between environments — so the validator gains a rule that nav links may only reference regions declared in the same environment, and transitions use the portal API in D3.
+**Will parallel generation corrupt the nav-space declarations?** No, and the reason is structural. `nav_region` / `nav_link` are declared inside a builder and serialized into that builder's own document, and `_validate_navigation` already runs per document. Each nav graph is self-contained, so one agent cannot reach into another's. The genuine hazard is different: a link that names a region in *another* environment. That is not a nav link at all — it is a transition between environments — so the validator gains a rule that nav links may only reference regions declared in the same environment, and transitions use the portal API in D5.
 
 **Is it a problem if the interior is generated before the main world?** No, because there is no data dependency between builders — each writes its own document. What the interior does need is knowledge of its *contract* (that it is nested inside a head, and how much room it has). That is a contract problem, not an ordering problem.
 
-**How do the agents collaborate correctly?** They do not talk to each other. Every environment's brief is computed **deterministically before any agent starts**, so each agent has everything it needs up front and the results cannot disagree. This is the same principle `AGENTS.md` already applies to parallel code generation, where "no agent-to-agent chat exists; the board is the single source of truth". Cross-environment consistency is then checked deterministically after the fact (D6), never negotiated.
+**How do the agents collaborate correctly?** They do not talk to each other. Every environment's brief is computed **deterministically before any agent starts**, so each agent has everything it needs up front and the results cannot disagree. This is the same principle `AGENTS.md` already applies to parallel code generation, where "no agent-to-agent chat exists; the board is the single source of truth". Cross-environment consistency is then checked deterministically after the fact (D8), never negotiated.
 
-## D2. Environments in the schema
+## D2. What already works today, and the four precise gaps
+
+Before designing anything, one finding reframes the whole problem: **generated mechanics can already reach world-generated geometry, through tags.**
+
+`builtin.grab` does not use bindings. It scans:
+
+```42:52:engine/runtime/src/mechanics/builtin/grab/GrabMechanic.cpp
+/** Nearest entity tagged "grabbable" within ``max_dist`` of ``pos``. */
+std::uint32_t find_grabbable(World& world, const Vec3& pos, float max_dist) {
+    auto view = world.registry().view<const CTransform, const CTag>();
+    for (auto e : view) {
+        const auto& tags = view.get<const CTag>(e).tags;
+        ...
+            if (t == "grabbable") {
+```
+
+`SceneLoader` turns JSON `tags` into `CTag` (and already parses per-entity `mechanic_bindings`), and every world-generated entity already carries a `tags` array:
+
+```251:257:engine/worldgen/src/WorldGen.cpp
+    nlohmann::json base_entity(const std::string& name,
+                               const std::vector<std::string>& tags) {
+        nlohmann::json e{
+            {"id", "env_" + std::to_string(entity_count_++)},
+            {"name", name},
+            {"tags", tags},
+        };
+```
+
+The ground already ships `{"ground", "teleport_target"}`, which both teleport and the renderer read. So a world builder writing `p.tags = {"grabbable"}` produces an object the player can pick up **with no engine change at all**. The seam exists; it is simply undocumented and unused — `WORLD_BUILDER_SYSTEM` never mentions `grabbable`.
+
+**But tags do not attach mechanics, and that distinction decides the whole design.** There are two different mechanisms:
+
+- **Player-scoped searching mechanics.** `builtin.grab` is bound once to the player and *discovers* candidates by tag. Its own `on_attach` even adds the tag to whatever it is bound to, deliberately unifying the two notions: "Previously the engine had two disagreeing notions -- a CGrabbable component that nothing read, and a 'grabbable' tag that the search actually used. Unify on the tag." Nothing is attached to the box.
+- **Entity-scoped mechanics.** `builtin.throw`, `builtin.recoil`, and every affordance built-in added in D12 must be **bound to the specific entity**, because each instance needs its own parameters — *this* door's hinge point, axis and 0-110 degree limit; *this* light's initial state. A tag is a bare string and cannot carry a hinge axis.
+
+So the four gaps are narrow and precise:
+
+1. **Entity ids are positional.** `"env_" + entity_count_++` means inserting one `spawn_primitive` call shifts every later id. Any persistence key built on those silently points at the wrong object after a regeneration. This is the highest-severity item in the phase and everything else depends on fixing it.
+2. **No state is declared.** Nothing in `WorldContext` expresses open/closed/on/off, so navigation cannot gate on a door and persistence has no pristine baseline to diff against.
+3. **No interaction parameters and no way to emit bindings.** `WorldContext` can emit tags but not `mechanic_bindings`, even though `SceneLoader` already parses them.
+4. **Ordering.** World generation runs after code generation, so generated mechanics cannot reference environment ids that do not exist yet.
+
+## D3. Pipeline order: world generation moves before code generation
+
+World generation consumes the BuildSpec, the engine guide and the object asset ids. It does **not** consume code-generation output, so nothing blocks the reorder, and the benefit is large: the codegen agents get the real environment — actual ids, actual layout, actual affordance registry — instead of a promise about it. It also moves an expensive stage earlier, so its failures surface sooner.
+
+New order for the affected span: `asset_contract` -> **`world_generation`** -> `code_generation` -> `asset_optimization` -> `scene_compile`. Update the stage list in [orchestrator.py](apps/orchestrator/ptv_orchestrator/pipeline/orchestrator.py) and the pipeline order documented in `AGENTS.md` and [docs/overview.md](docs/overview.md).
+
+`CODEGEN_SYSTEM` then gains the environment as context: the interactive registry for every scene, so a generated mechanic can name a real `door_bedroom_1` instead of inventing an identifier and hoping.
+
+## D4. Environments in the schema
 
 `BuildSpec.scenes` already allows up to 50 entries with an `entry_point` flag, and `scene_spec` already fans them out in parallel. That is the right rail to ride rather than inventing a parallel artifact, so extend `SceneEntry` in [packages/schemas/ptv_schemas/build_spec.py](packages/schemas/ptv_schemas/build_spec.py) and re-export `build_spec.schema.json`:
 
 - `environment_mode`: `exclusive` (default) | `nested`
 - `kind`: `standalone` | `hub` | `mission` | `chapter` | `interior`
 - `host`: nested only — the host `asset_id` or entity plus an anchor slot (`head`), and `fit_to_host_extent_m`
-- `authoring_scale`: what scale the agent should author at (see D4)
+- `authoring_scale`: what scale the agent should author at (see D6)
 - `links`: `List[SceneLink]` — `{ to_scene, kind: menu_select | trigger_volume | portal | vehicle | story_next, spawn_point_id, return_spawn_point_id }`
 - `needs_unique_environment`: bool, default true — lets several scenes share one generated environment instead of paying for a duplicate
+- `reuse_environment_from`: `<scene_id>` — required when `needs_unique_environment` is false. Without it that flag is ambiguous: it says a scene borrows an environment but never which one.
+
+Also add `interaction_rules` to `BuildSpec`: per-scene allow/deny overrides keyed by affordance kind or tag, e.g. deny `harvestable` in `hub`. This is the mechanism for prompt-specified divergence, and D9 explains why it belongs in the schema rather than in an agent's judgement.
 
 This single addition covers every shape in the review file: a star graph for the hub examples (shooter base, carrier, apartment, classroom, fire station, museum, garage, town, spacecraft, lobby, chamber, training center, theme park), a linear chain for Example 8's Motel → Hospital → Laboratory, an arbitrary graph for Example 16's teleport device, and `nested` for the head interior and Example 14's spacecraft computer core. Nothing hard-codes three maps; the list is however long the prompt implies, capped by `world_max_environments`.
 
 `BUILD_SPEC_SYSTEM` gains the inference rules: separate named locations the player travels between become separate scenes; a persistent location the player keeps returning to is `kind: hub`; "trapped inside the head of" is a `nested` scene hosted on that character.
 
-## D3. `IWorldBuilder` additions
+## D5. `IWorldBuilder` additions
 
 An environment that is one of many needs to declare its exits, which the current interface cannot express. Add to `WorldContext` in [engine/runtime/include/ptv/api/IWorldBuilder.h](engine/runtime/include/ptv/api/IWorldBuilder.h):
 
@@ -386,9 +448,59 @@ virtual void portal(const PortalDesc& desc) = 0;
 
 Named spawn points are what make Examples 6 and 15 work — returning from a historical exhibit or a theme-park attraction has to put the player back at the door they entered, not at the world origin. `portal` is what the world author places (the gate, the doorway, the fire truck) and the engine wires to a transition; a mission selected from a menu instead uses a `menu_select` link and needs no portal geometry.
 
-`WorldGen.cpp` serializes both into the emitted document, and `world_author_guide.md` documents them.
+### Stable entity ids
 
-## D4. The nested interior, authored sanely
+`base_entity` must stop numbering positionally. The `id` becomes the author-supplied `name`, slugified, with a deterministic suffix only when a name repeats (`wall`, `wall_2`, `wall_3`). Anything declared interactive must carry an explicit unique `id` and the validator rejects duplicates outright, because that string is the persistence key for the life of the project. Positional `env_N` ids are what make persistence silently wrong after any regeneration, so this is a prerequisite for D11, not a nicety.
+
+### Declared state and interaction
+
+State is declared separately from identity. Encoding it in the name (`door_closed_1`) is the wrong shape: the name is the persistence key, so an opened `door_closed_1` becomes a key that contradicts reality; it forces string-parsing to recover state; and it cannot express a door at 45 degrees, a dimmer at 60 percent, or an elevator that is simultaneously on floor 1, doors closed, and idle. [World_State_Examples.md](Helper_Folder/GLB_Edditing_Updates/NPC/Plan%20Redesign/World_Gen_Update/D9_and_more_update/World_State_Examples.md) already separates the two everywhere it writes `window_1: closed` or `conveyor_1: running`; this makes that separation formal.
+
+```cpp
+// bool | number | named enum | vector -- a traffic light is enumerated, a
+// door is continuous, an elevator is a named position.
+struct StateValue {
+    enum class Type : std::uint8_t { Bool, Number, Name, Vector };
+    Type type{Type::Bool};
+    bool b{false};
+    float number{0.0f};
+    std::string name;   // "closed", "green", "floor_3"
+    Vec3 vector{};
+};
+
+struct InteractiveDesc {
+    std::string id;    // stable, unique, author-chosen -- the persistence key
+    std::string kind;  // door | switchable | container | mover | breakable
+                       // | harvestable | movable
+    std::vector<std::pair<std::string, StateValue>> initial_state;
+
+    // Kind-specific parameters; only the relevant ones are read.
+    Vec3 hinge_point{};
+    Vec3 hinge_axis{0.0f, 1.0f, 0.0f};
+    float min_angle_deg{0.0f};
+    float max_angle_deg{90.0f};
+    Vec3 slide_axis{};
+    float slide_distance_m{0.0f};
+    std::vector<std::string> positions;  // mover: "floor_1", "floor_2"
+    std::string yields_asset_id;         // harvestable: what one pick spawns
+    bool locked{false};                  // a modifier, not a kind
+    std::vector<std::string> tags;
+};
+
+virtual void interactive(const InteractiveDesc& desc) = 0;
+```
+
+`locked` is deliberately a modifier rather than a kind, because `restricted_gate: closed + locked` is one gate in two states — the same shape as `removable` in Phase C.
+
+`PrimitiveDesc`, `MeshDesc` and `ObjectPlacement` each gain an optional `interactive` field carrying the same descriptor, so an affordance attaches to geometry the world builder authored **or** to a Tripo GLB it placed. Affordances are declared independently of who produced the geometry, which is what keeps the answer from being either/or: procedural C++ is right for doors, drawers, switches and gates (a hinge is a pivot, an axis and two limits — Meta's own SDK models a door as a constrained rotate transformer with min/max), while Tripo remains right for hero props inspected up close.
+
+`WorldGen.cpp` serializes spawn points, portals and interactives into the emitted document, and `world_author_guide.md` documents all three.
+
+### Navigation that respects state
+
+`NavLinkDesc` gains `gated_by` (an interactive id) plus the state that permits passage, so a closed door actually blocks routing instead of nav asserting an unconditional crossing. `INavigation` re-evaluates gated links when the registry reports a state change, which is what stops an NPC from walking through a door the player just shut.
+
+## D6. The nested interior, authored sanely
 
 A real skull is about 22 cm across. Asking an agent to author a walkable level inside a 0.22 m box would produce garbage geometry and unusable nav regions.
 
@@ -396,7 +508,7 @@ So a nested environment is **authored at human scale** — the interior of a hea
 
 The eye apertures need no rendering feature: because the interior is real geometry sitting inside the host's head in the same world, looking through a hole in the shell shows the actual outside environment with correct parallax, for zero extra cost. This is the same reasoning that ruled out render-to-texture for the mirror in B3.
 
-## D5. The stage: parallel world architects
+## D7. The stage: parallel world architects
 
 Rework [stage_world_generation.py](apps/orchestrator/ptv_orchestrator/pipeline/stage_world_generation.py) from one architect to a worker pool, mirroring the pattern `scene_spec` already proves:
 
@@ -416,9 +528,19 @@ Per environment: its own `WorldArchitect` with a unique `session_id=f"ptv-world-
 
 New settings in [settings.py](apps/orchestrator/ptv_orchestrator/settings.py) alongside the existing `world_*` block: `world_max_parallel_workers` (default 3, ge 1 le 16, matching `scene_spec_max_parallel_workers`) and `world_max_environments` (default 12, ge 1 le 50) as a cost guard, since each environment is an `xhigh`-reasoning agent with web search and a compile loop.
 
-`WORLD_BUILDER_SYSTEM` gains the per-environment brief: which environment this is, its `kind`, its links and the spawn points it must declare, its host and extent when nested, and an explicit instruction that it authors **only** this environment and must not reference another environment's regions.
+### System prompt changes
 
-## D6. Deterministic cross-environment validation
+`WORLD_BUILDER_SYSTEM` needs substantial additions, since the architect is now responsible for far more than geometry:
+
+- **Per-environment brief**: which environment this is, its `kind`, its links and the spawn points it must declare, its host and extent when nested, and an explicit instruction that it authors **only** this environment and must never reference another environment's regions.
+- **Stable naming contract**: every entity gets a meaningful `name`; anything interactive gets an explicit unique `id`, and that id is permanent because saves are keyed on it.
+- **The affordance vocabulary**: the seven kinds from D12 with their parameters, plus the tag vocabulary the engine already reads (`grabbable`, `ground`, `teleport_target`, `trigger`) — none of which the prompt mentions today, which is why the existing seam has gone unused.
+- **What to declare and what not to.** Declare state only for objects whose configuration can change or that gameplay can touch. Static scenery stays plain geometry. This is the rule [World_State_Examples.md](Helper_Folder/GLB_Edditing_Updates/NPC/Plan%20Redesign/World_Gen_Update/D9_and_more_update/World_State_Examples.md) already states — "not verbose descriptions of every static chair, but objects whose initial configuration can matter" — and it is what keeps the declaration count sane against a `world_max_interactives_per_env` cap (default 512) and Meta's Quest 3 budget of 200-300 draw calls in a busy scene.
+- **Never declare thousands of small interactives.** Dense per-instance foliage is measurably fatal: a VR vegetation study recorded under 10 FPS on both Quest 2 and Quest 3 for roughly 2,025 individually placed plants at 45 cm spacing. A grass field is batched visual geometry plus **one** `harvestable` region whose `yields_asset_id` spawns a single blade when picked.
+- **Every interactive must have real geometry**, so nothing lands in the renderer's placeholder-cube path.
+- **Declare `gated_by` on any nav link a door, gate, bridge or blockage controls.**
+
+## D8. Deterministic cross-environment validation
 
 Per environment, the existing checks stay as they are (ground present, spawn present, entity cap, nav regions sane, links crossing real openings, every region reachable from spawn). New global checks run after all environments finish, because they are the ones no single agent can see:
 
@@ -429,9 +551,18 @@ Per environment, the existing checks stay as they are (ground present, spawn pre
 - a `nested` environment's authored extent fits its `fit_to_host_extent_m` after scaling, and its host exists
 - nav links never cross environments
 
+Plus the rules the interactive registry makes possible, all of which fail loudly:
+
+- **entity ids are unique within an environment**, and every interactive id is explicitly authored rather than derived positionally
+- **every declared interactive has real geometry** (a primitive, an inline mesh, or a placed GLB). Without this a door with an affordance and no mesh silently renders as a small grey placeholder cube and ships that way
+- **every `gated_by` names a real interactive**, and the permitting state is one the declared `kind` can actually reach
+- **`reuse_environment_from` names a real sibling** whenever `needs_unique_environment` is false
+- **interactive counts stay under the per-environment cap**
+- **no unexplained divergence**: if the same affordance kind is bound differently across two environments in the same project without an `interaction_rules` entry authorizing it, the stage reports it. This is the deterministic guard for the cross-environment consistency requirement — grass that is grabbable in the hub cannot silently stop being grabbable in a mission
+
 Each failure is attributed to the environment that caused it and fed back to that environment's own agent session.
 
-## D7. Scene compile: one environment per scene
+## D9. Scene compile: one environment per scene, plus the affordance binder
 
 [stage_scene_compile.py](apps/orchestrator/ptv_orchestrator/pipeline/stage_scene_compile.py) currently merges the single world into the entry scene only:
 
@@ -442,9 +573,19 @@ Each failure is attributed to the environment that caused it and fed back to tha
             )
 ```
 
-That becomes a per-scene lookup of `world.<scene_id>.scene.json`, so every scene gets its own environment merged in, with `needs_unique_environment: false` scenes reusing a sibling's document. Portals, spawn points and the scene graph are emitted into each compiled document, and the canonical `scene.json` remains the entry point so nothing about launching changes.
+That becomes a per-scene lookup of `world.<scene_id>.scene.json`, so every scene gets its own environment merged in, with `needs_unique_environment: false` scenes reusing the document named by `reuse_environment_from`. Portals, spawn points, interactives and the scene graph are emitted into each compiled document, and the canonical `scene.json` remains the entry point so nothing about launching changes.
 
-## D8. Runtime environment switching
+The merge must also stop discarding provenance. Today it copies entities, sky, lights and spawn but drops `builder_id`, so a compiled scene has no record of where its environment came from. With N environments that is the difference between debugging and guessing, so every compiled scene records the builder id and the source world document.
+
+### The affordance binder — deterministic, not another agent
+
+An affordance declaration is turned into a real `mechanic_bindings` entry by a **deterministic table** in scene compile: `kind: door` binds `builtin.door` with that instance's hinge point, axis and limits; `kind: switchable` binds `builtin.switchable` with its state list; `harvestable` binds `builtin.harvestable` with its `yields_asset_id`; `movable` needs no binding at all, only the tag `builtin.grab` already reads.
+
+This is deliberately not a fourth LLM stage. A `world_and_mechanics_configuration` agent reading every environment and every mechanic would be the single most likely source of exactly the inconsistency the review file warns about — wiring grass in the hub and forgetting it in the mission. Uniform application of one table cannot forget, so **cross-environment consistency becomes a property of the algorithm rather than of agent diligence.**
+
+Intentional divergence comes from `interaction_rules` in the BuildSpec, applied as overrides by the same binder. The hub-forbids-grass case is one row: the player performs the identical grab gesture in both environments, and the policy decides whether it succeeds — which is precisely how the review file frames it. Anything the policy denies is also suppressed from the affordance cue in D13, because advertising an interaction that will be refused is worse than showing no cue at all.
+
+## D10. Runtime environment switching
 
 This is the largest engine addition in the phase, because the runtime loads one scene once and never lets go of it. `resolve_scene_path` runs in `initialize`, `ApplySceneToWorld` only ever adds entities, and `mechanics_.detach_all` exists solely on the shutdown path.
 
@@ -462,7 +603,9 @@ public:
 };
 ```
 
-An exclusive transition performs, in order: fade to black, `detach_all` mechanics for the outgoing environment, destroy its entities while preserving anything tagged `persistent` (the player, its avatar, equipped items), release its physics bodies, load the target document, apply it, rebuild physics and the nav graph, re-attach mechanic bindings, re-bind skeletons, place the player at the named spawn, stream the new meshes, then fade in. Fading is not cosmetic — an instant world swap in VR is disorienting, and the fade also hides the streaming window.
+An exclusive transition performs, in order: fade to black, `detach_all` mechanics for the outgoing environment, destroy its entities while preserving anything tagged `persistent` (the player, its avatar, equipped items), release its physics bodies, load the target document, apply it, rebuild physics and the nav graph, re-attach mechanic bindings, re-bind skeletons, restore the interactive registry and persisted deltas, place the player at the named spawn, stream the new meshes, then fade in. Fading is not cosmetic — an instant world swap in VR is disorienting, and the fade also hides the streaming window.
+
+**Dedupe rule.** A preserved entity must suppress the target document's own copy of the same id, with the preserved instance winning. Without this rule you walk into the hospital carrying your flashlight and find a second flashlight spawned from the hospital's scene. `ApplySceneToWorld` only ever adds entities today, so this check has to be explicit rather than assumed.
 
 Two existing details become load-bearing and need attention:
 - `ScenePerformance::evict_when_over_budget` defaults to **false** today, and environment meshes must be evictable for a transition to reclaim memory. The scene compiler turns it on for multi-environment projects.
@@ -470,17 +613,112 @@ Two existing details become load-bearing and need attention:
 
 A nested load is much cheaper and never unloads its host: it applies the target document under an **environment root entity** whose transform is attached to the host's anchor joint, so the whole interior inherits the host's motion through the existing `CAttachment` chain. Giving every loaded environment a root entity — identity for exclusive, host-attached for nested — is what keeps the two modes on one code path.
 
-## D9. State that survives a transition
+## D11. Interactive state, and what survives a transition
 
-Almost every example in the review file requires it: loadout and outfit carried into a mission, a flashlight carried between horror chapters, a temple door that stays open, a generator that stays on, puzzle doors that show completion, museum and theme-park return points, educational progress.
+Almost every example in the review files requires this: loadout and outfit carried into a mission, a flashlight carried between horror chapters, a temple door that stays open, a generator that stays on, puzzle doors that show completion, museum and theme-park return points, educational progress.
 
-`SaveSystem`'s existing design is already the right shape — it deliberately does not persist ECS layout, and instead reloads the scene and overlays per-entity state — but `load_world` is a no-op stub. Complete it, and add an `IPersistence` service with a per-scene key-value store plus a global one, so generated code can write `door_sealed = false` for `ancient_temple` and read it back on return. Entities tagged `persistent` survive transitions outright; everything else is rebuilt from the document plus the overlay.
+### One registry, not save code in every mechanic
 
-## D10. Quest packaging
+The tempting design — each mechanic writes its own save calls — is wrong. It would mean eleven built-ins plus every generated mechanic inventing a key format, and any mechanic that forgot would silently lose state.
+
+Instead the engine owns an interactive-state registry, and mechanics mutate state **through** it:
+
+```cpp
+class IInteractive {
+public:
+    virtual bool exists(const char* id) const = 0;
+    virtual std::uint32_t entity_of(const char* id) const = 0;
+    virtual const char* id_of(std::uint32_t entity) const = 0;
+    virtual const char* kind_of(const char* id) const = 0;
+    virtual StateValue get_state(const char* id, const char* key) const = 0;
+    virtual void set_state(const char* id, const char* key,
+                           const StateValue& value) = 0;
+    virtual bool is_locked(const char* id) const = 0;
+    virtual void set_locked(const char* id, bool locked) = 0;
+    virtual bool interaction_allowed(const char* id) const = 0;
+    virtual int find_by_kind(const char* kind, const char** out,
+                             int max_out) const = 0;
+};
+```
+
+Persistence is then automatic, because the registry holds both the pristine declared value from the world document and the current one. The door mechanic calls `ctx.interactive->set_state(id, "angle", 45.0f)` and never touches a save file; at a transition the registry diffs against pristine and writes only the delta. `interaction_allowed` is where the `interaction_rules` policy lands, so a policy-denied object refuses interaction and suppresses its cue through one shared check.
+
+Answering the review file's question directly: **no, the existing built-ins do not each get save code.** They get one service call that already implies persistence.
+
+### Transform state, and what `SaveSystem` already does
+
+The glass-bottle case (grab moves an object and the new position must persist) is the same principle on a different channel. An object declared `movable` has its transform diffed against the pristine document value and persisted when it differs beyond an epsilon. `builtin.grab` needs no save code whatsoever.
+
+`SaveSystem::save_world` is already most of the way there — it walks every `CTransform` and writes position, rotation and scale. Two things are wrong with it: it keys on the raw entt entity id, which is not stable across a reload, and it stores everything rather than deltas. Fix the key to the stable string id from D5, add the diff, and complete the `load_world` stub, whose "reload the scene, then overlay" design is already correct:
+
+```10:16:engine/runtime/include/ptv/save/SaveSystem.h
+/** Minimal save / load facade.
+ *
+ * Built-in mechanics register entries into the returned JSON object in
+ * ``save_world`` and read them back in ``load_world``. We intentionally do
+ * not persist the ECS layout; instead we rely on the scene being reloaded
+ * from ``scene.json`` and then overlaying any persisted per-entity state.
+ */
+```
+
+### Abstract game facts
+
+`IPersistence` provides a global key-value store plus a per-scene one for facts that are not the state of any object: `mission_complete`, `score`, `chapter_2_complete`, which exhibit the player entered from. These are the **only** persistence calls generated code writes by hand, and they need no naming contract with world generation because there is no object to name. Generated mechanics persist entity state exactly as built-ins do — through the registry — so nothing distinguishes them at that seam.
+
+### Storage
+
+JSON, not SQLite. The engine already links `nlohmann_json` and `SaveSystem` already reads and writes JSON; SQLite would add a vcpkg dependency and an NDK build surface on the Quest APK path for no benefit at this volume (hundreds of small keys written at transitions and checkpoints, not thousands of writes per second). One versioned file per project in the app's writable data directory, written atomically via temp-file-plus-rename so a crash mid-save cannot corrupt it. `IPersistence` hides the backing store, so replacing it later stays contained.
+
+## D12. The affordance built-ins
+
+Seven kinds cover all 28 examples in [World_State_Examples.md](Helper_Folder/GLB_Edditing_Updates/NPC/Plan%20Redesign/World_Gen_Update/D9_and_more_update/World_State_Examples.md), each a normal `IMechanic` bound per entity by the D9 binder and mutating state through `IInteractive`:
+
+- **`builtin.door`** — hinged or sliding, grabbed by the handle and driven continuously between `min_angle_deg` and `max_angle_deg`. Covers doors, gates, windows, garage doors and trapdoors. Meta's SDK models exactly this as a constrained rotate transformer about a pivot with min/max limits, so the parameter set is the established one rather than an invention.
+- **`builtin.switchable`** — enumerated states. Lights, switches, faucets, televisions, fireplaces, steam vents, conveyors, and traffic lights (which is why states are enumerated rather than boolean).
+- **`builtin.container`** — drawers, cabinets and chests: a slide or hinge, plus a distinction between the container's own state and whether its contents are still present.
+- **`builtin.mover`** — named positions. Elevators (`floor_1`), drawbridges, barrier arms, retractable stairs, folding bunks, curtains and blinds, and stored versus deployed ladders.
+- **`builtin.breakable`** — `intact` to `destroyed`, for glass, destructible walls and rock blockages. Pairs with `gated_by` so destroying a blockage opens a route.
+- **`builtin.harvestable`** — a region that yields an instance on grab, spawned through the existing `ctx.spawn` template-clone path. This is the Quest-safe answer to grass, flowers, rubble, coins and berries, and the only viable one given the foliage measurements in D7.
+- **`movable`** — not a mechanic at all, just a declaration that an object's transform should persist. `builtin.grab` already handles the interaction by tag.
+
+Composite objects carry several affordances at once: the review file's car is a `door` plus a `switchable` engine plus `movable`, which Meta's SDK also supports since "you can have multiple Interactables for a given object."
+
+Interactive geometry with collision is created as a **kinematic** body and driven with `move_kinematic`, exactly as `builtin.grab` drives held objects. A door whose visual mesh swings while its collider stays put would block nothing and read as broken.
+
+Each is added to `engine_catalog.py`, `BUILTIN_MECHANIC_IDS` and `_MODULE_FOR_ID`, so the planner can reference them and a `builtin+config_code_edit` task can copy one.
+
+## D13. Affordance cues and the interaction candidate query
+
+Players need to know what is interactable. Meta's interaction lifecycle makes this explicit — Hover fires before Select precisely so an application can communicate interactability — and the engine currently has only an ad-hoc tint:
+
+```1984:1987:engine/runtime/src/render/Renderer.cpp
+                            if (tag == "grabbable") {
+                                // Slight pop so prop grabs read in VR.
+                                it.color = Vec4{1.05f, 1.02f, 0.98f, 1.0f};
+                                break;
+                            }
+```
+
+Replace that single case with a cue driven by the interactive registry on hover, so it scales to all seven affordance kinds automatically. Two constraints make it correct rather than decorative:
+
+- **The cue and the interaction must share one candidate query.** If the highlight runs its own proximity test while `find_grabbable` runs another, they drift and objects glow that cannot be touched.
+- **The cue respects `interaction_allowed`**, so a policy-denied object stays dark. Advertising an interaction the policy will refuse is worse than showing no cue.
+
+Deliberately **not** in scope: a general refactor of the renderer's tag handling. The `ground` / `teleport_target` check selects the grid material and belongs where it is, and the tag-sized debug cubes only run for entities with no geometry at all — which the D8 validator now forbids for interactives. Adding affordances requires no other renderer change.
+
+Finally, the candidate query itself needs work. `find_grabbable` is a linear scan over every tagged entity, per hand, per frame, and environments that now declare hundreds of interactives make that a real cost while also feeding the cue. Give it a spatial index (or at minimum a bounded candidate set) and have both interaction and cue read from it.
+
+## D14. Quest packaging
 
 [stage_quest_build.py](apps/orchestrator/ptv_orchestrator/pipeline/stage_quest_build.py) packages a single `scene.json` (it already copies every project GLB). It must package every `builds/scene/*.scene.json` plus the scene graph, because transitions now happen inside one process on the headset. `AndroidMain.cpp` keeps loading `scene.json` as the entry point.
 
-**Verify D:** Python tests for parallel world workers producing N distinct `world.<env_id>.scene.json` files with distinct builder ids and directories, per-environment failure isolation (one bad environment falls back without harming the others), the namespace and per-environment include bounds, and every global validation rule including a portal pointing at a missing spawn and a nav link crossing environments. C++ `smoke.cpp` cases for a full exclusive transition (entities replaced, `persistent` entities preserved, physics and nav rebuilt, mechanics re-attached), nested load under a host anchor with the interior inheriting host motion, mesh eviction ordering with a rigged mesh present, and persistence overlay after reload. Then `cmake --build`, `ctest`, `pytest`.
+**Verify D:**
+
+Python tests: parallel world workers producing N distinct `world.<env_id>.scene.json` files with distinct builder ids and directories; per-environment failure isolation (one bad environment falls back without harming the others); the namespace and per-environment include bounds; stable-id generation and duplicate-id rejection; every global validation rule, including a portal pointing at a missing spawn, a nav link crossing environments, a `gated_by` naming a missing interactive, an interactive with no geometry, `reuse_environment_from` naming a missing sibling, and an over-cap interactive count; the affordance binder producing **identical** bindings for equivalent objects in two different environments; an `interaction_rules` override suppressing one of them; the unexplained-divergence report firing when an override is absent; `builder_id` provenance landing in every compiled scene; and the reordered stage list.
+
+C++ `smoke.cpp` cases: a full exclusive transition (entities replaced, `persistent` entities preserved, physics and nav rebuilt, mechanics re-attached); the dedupe rule suppressing a duplicate of a preserved entity; nested load under a host anchor with the interior inheriting host motion; mesh eviction ordering with a rigged mesh present; registry restore and delta persistence round-trip across a transition; a door changing state re-gating a nav link so a route closes and reopens; each affordance built-in reaching its declared states; a kinematic door collider actually blocking movement; the harvestable region spawning exactly one instance per pick; the affordance cue staying dark on a policy-blocked object; and the cue and interaction agreeing on the same candidate.
+
+Then `cmake --build --preset vs2026-x64-release`, `ctest --preset vs2026-x64-release`, and `pytest`.
 
 ---
 
@@ -505,7 +743,7 @@ This is deliberately generic rather than head-specific: a rig parented to a movi
 
 ## E2. `builtin.head_interior`
 
-Bound to the host entity (the player's own avatar or an NPC), it asks `ctx.environment->load_nested(...)` for the interior scene authored in Phase D, anchored to the host's `head` joint, and sets the player's reference frame and scale to match. Two routing params cover the three cases:
+Bound to the host entity (the player's own avatar or an NPC), it asks `ctx.environment->load_nested(...)` for the interior scene authored in Phase D, anchored to the host's `head` joint, and sets the player's reference frame and scale to match. Its params must **name the interior's scene id explicitly** — the `world.<scene_id>` convention cannot be inferred here, because a nested interior does not merge into a scene of its own; it is loaded at runtime against a host. Two routing params cover the three cases:
 
 - `head_tracking`: `decoupled` (cases 2 and 3 — physical head rotation looks around the skull and never rotates the host) or `drives_host_head` (case 4 — HMD rotation drives the host's neck/head joints).
 - `control_routing`: `host_locomotion` (case 2 — sticks move and turn the host), `self_locomotion` (case 3 — sticks move the miniature player inside the head while the NPC lives its own life), or `host_piloted` (case 4 — sticks drive the host's locomotion and snap/smooth turning).
@@ -571,10 +809,18 @@ Also update the reference-image rules in `ASSET_MANIFEST_SYSTEM` ([prompts.py](a
 
 Done incrementally at the end of each phase, not saved up:
 
-- **Catalog and planner.** Add `builtin.avatar_body`, `builtin.mirror_surface`, `builtin.equip`, `builtin.ui_panel`, `builtin.head_interior` and `builtin.environment_portal` to `_BUILTINS` in [engine_catalog.py](apps/orchestrator/ptv_orchestrator/engine_catalog.py) with full param docs; sync the stale `BUILTIN_MECHANIC_IDS` in [mechanic_plan.py](packages/schemas/ptv_schemas/mechanic_plan.py) (also missing `builtin.character_locomotion` today); add each to `_MODULE_FOR_ID` in [builtin_source.py](apps/orchestrator/ptv_orchestrator/pipeline/builtin_source.py). `builtin.environment_portal` is the small input-driven mechanic that turns a declared portal or a menu selection into `ctx.environment->transition(...)`, so hub-and-spoke games need no generated code for travel at all.
+- **Catalog and planner.** Add `builtin.avatar_body`, `builtin.mirror_surface`, `builtin.equip`, `builtin.ui_panel`, `builtin.head_interior`, `builtin.environment_portal`, and the six affordance built-ins (`builtin.door`, `builtin.switchable`, `builtin.container`, `builtin.mover`, `builtin.breakable`, `builtin.harvestable`) to `_BUILTINS` in [engine_catalog.py](apps/orchestrator/ptv_orchestrator/engine_catalog.py) with full param docs; sync the stale `BUILTIN_MECHANIC_IDS` in [mechanic_plan.py](packages/schemas/ptv_schemas/mechanic_plan.py) (also missing `builtin.character_locomotion` today); add each to `_MODULE_FOR_ID` in [builtin_source.py](apps/orchestrator/ptv_orchestrator/pipeline/builtin_source.py). `builtin.environment_portal` is the small input-driven mechanic that turns a declared portal or a menu selection into `ctx.environment->transition(...)`, so hub-and-spoke games need no generated code for travel at all.
 - **Mount sockets.** Extend `ptv_glb_sockets` (already principal-axis PCA plus mass asymmetry) to derive `mount_base`/`mount_tip` in unit space so the span fit survives the LOD chain. Teach `ASSET_MANIFEST_SYSTEM` to add those `socket_hints` for wearables, and fail loudly at scene compile when an equip binding sets `coverage_*` but the asset has no mount sockets, reusing the `SocketContractError` pattern in `_check_required_sockets`.
-- **Prompts.** `MECHANIC_PLAN_SYSTEM` gains equip guidance (glove = `slots`; gauntlet = `coverage_start`/`coverage_end`; equip-only and unequip-only games are `equip_on`/`unequip_on`, still `builtin+config`, not `generate`) and perspective guidance. `SCENE_SPEC_SYSTEM` wires equip onto wearables, `avatar_body` onto the `player_avatar` entity, `mirror_surface` onto mirrors, `head_interior` onto the host, and `environment_portal` onto portal volumes and mission-select panels. `WORLD_BUILDER_SYSTEM` gains the per-environment brief described in D5.
-- **Docs.** [docs/input-and-bindings.md](docs/input-and-bindings.md) gains equip/unequip (including the default gesture), avatar body, and ui_panel sections in the existing per-mechanic format. New `docs/player-avatar-and-perspective.md` covers the six cases, the self-view/mirror split, and the mirror budget. New `docs/environments.md` covers the multi-environment model: scene kinds, exclusive versus nested, portals and named spawn points, parallel world architects and their isolation rules, the cross-environment validation rules, runtime transitions, and persistence. [docs/world-generation.md](docs/world-generation.md) is rewritten from one world per project to N. [docs/navigation.md](docs/navigation.md) states that nav graphs are per environment and that crossing environments is a portal, not a link. [docs/npc-and-ai.md](docs/npc-and-ai.md) reconciles its "Equipping: two shapes" section with `IEquip`. [docs/codegen-agents.md](docs/codegen-agents.md) loses its "Equip on body slots | Stub" row. [docs/rendering.md](docs/rendering.md) documents the mirror, self-view suppression, and the eviction-ordering rule for transitions. [docs/quest-build.md](docs/quest-build.md) documents packaging every scene. [docs/prompt-schema.md](docs/prompt-schema.md) gets the new schema fields and a corrected builtin id list.
+- **Prompts.** `MECHANIC_PLAN_SYSTEM` gains equip guidance (glove = `slots`; gauntlet = `coverage_start`/`coverage_end`; equip-only and unequip-only games are `equip_on`/`unequip_on`, still `builtin+config`, not `generate`) and perspective guidance. `SCENE_SPEC_SYSTEM` wires equip onto wearables, `avatar_body` onto the `player_avatar` entity, `mirror_surface` onto mirrors, `head_interior` onto the host (naming the interior scene id), and `environment_portal` onto portal volumes and mission-select panels.
+
+  **Agent system prompts that change in this update**, all in [prompts.py](apps/orchestrator/ptv_orchestrator/pipeline/prompts.py):
+  - `WORLD_BUILDER_SYSTEM` — the largest change. Per-environment brief, stable-id contract, the affordance vocabulary and its parameters, the engine's existing gameplay tag vocabulary, the declare-only-what-is-stateful rule and its cap, the no-thousands-of-interactives rule, geometry required on interactives, and `gated_by` on controlled nav links. Detailed in D7.
+  - `BUILD_SPEC_SYSTEM` — scene decomposition into environments, `kind`/`environment_mode`/`links`/`reuse_environment_from`, plus `interaction_rules` for prompt-specified per-scene interaction differences, and the player perspective and avatar fields from B1.
+  - `CODEGEN_SYSTEM` — now runs after world generation, so it receives each scene's interactive registry and must address real declared ids instead of inventing them; plus the rule that entity state is mutated through `ctx.interactive` and abstract game facts through `ctx.persistence`, never by hand-rolled save code.
+  - `MECHANIC_PLAN_SYSTEM` — the six affordance built-ins as reuse targets, so an "openable door" resolves to `builtin.door` with config rather than a generated mechanic.
+  - `SCENE_SPEC_SYSTEM` — as above.
+  - `NPC_PLAN_SYSTEM` — unchanged, but worth re-reading against gated nav so patrol routes are not planned through doors that start closed.
+- **Docs.** [docs/input-and-bindings.md](docs/input-and-bindings.md) gains equip/unequip (including the default gesture), avatar body, ui_panel, and the six affordance built-ins in the existing per-mechanic format. New `docs/player-avatar-and-perspective.md` covers the six cases, the self-view/mirror split, and the mirror budget. New `docs/environments.md` covers the multi-environment model: scene kinds, exclusive versus nested, portals and named spawn points, parallel world architects and their isolation rules, the cross-environment validation rules, runtime transitions, and persistence. New `docs/environment-interaction.md` covers the affordance model end to end: stable ids, declared state and the variant type, the affordance kinds, the deterministic binder, `interaction_rules` policy, affordance cues, gated navigation, and how state persists without any mechanic writing save code. [docs/world-generation.md](docs/world-generation.md) is rewritten from one world per project to N and gains the interactive-declaration contract. [docs/navigation.md](docs/navigation.md) states that nav graphs are per environment, that crossing environments is a portal rather than a link, and that links can be gated by interactive state. [docs/npc-and-ai.md](docs/npc-and-ai.md) reconciles its "Equipping: two shapes" section with `IEquip`. [docs/codegen-agents.md](docs/codegen-agents.md) loses its "Equip on body slots | Stub" row and documents the environment context codegen now receives. [docs/rendering.md](docs/rendering.md) documents the mirror, self-view suppression, the eviction-ordering rule for transitions, and the affordance cue. [docs/quest-build.md](docs/quest-build.md) documents packaging every scene. [docs/prompt-schema.md](docs/prompt-schema.md) gets the new schema fields and a corrected builtin id list. `AGENTS.md` and [docs/overview.md](docs/overview.md) get the reordered pipeline.
 
 ---
 
@@ -588,3 +834,6 @@ Done incrementally at the end of each phase, not saved up:
 - No hard-coded environment count: the number of environments comes from the prompt, capped only by `world_max_environments`. Nothing in the design assumes three maps, a hub, or even a fixed topology — star, chain and arbitrary graph are all just `SceneLink` rows.
 - Environments stay isolated by construction rather than by convention: separate directories, separate builder ids, separate namespaces, separate build trees, separate repair budgets, and nav graphs that cannot reference each other. Parallel architects never negotiate; they read one deterministic brief and are checked deterministically afterwards.
 - Quest memory is respected: exclusive environments are never co-resident, `evict_when_over_budget` is switched on for multi-environment projects, skeletons are dropped before their meshes, and nested interiors are bounded by `fit_to_host_extent_m` so the only co-resident pair is one large environment plus one small one.
+- Quest frame budget is respected in the interaction layer too: interactive declarations are capped per environment, dense per-instance foliage is refused in favour of harvestable regions (Meta's own figures put a busy Quest 3 scene at 200-300 draw calls, and measured VR foliage tests fall under 10 FPS at ~2,000 plant instances), and the interaction candidate query gains a spatial index rather than staying a per-hand linear scan.
+- No mechanic writes persistence code. Entity state flows through `IInteractive` and abstract facts through `IPersistence`, so a built-in and a generated mechanic are indistinguishable at that seam and neither can forget to save.
+- Consistency across environments is structural, not aspirational: one deterministic binder applied uniformly means equivalent objects behave the same everywhere, and divergence requires an explicit `interaction_rules` entry that a validator checks for.
