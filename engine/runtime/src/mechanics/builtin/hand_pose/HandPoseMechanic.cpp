@@ -38,6 +38,7 @@
 #include <glm/gtc/quaternion.hpp>
 
 #include "../BuiltinMechanicBase.h"
+#include "ptv/api/BodySlots.h"
 #include "ptv/core/Logger.h"
 
 namespace ptv {
@@ -177,10 +178,16 @@ private:
             if (e == InputSnapshot::kInvalidEntity) continue;
             for (int f = 0; f < kFingerCount; ++f) {
                 for (int s = 0; s < kSegmentsPerFinger; ++s) {
-                    const std::string name = std::string(kBonePrefix) +
-                                             kFingerNames[static_cast<size_t>(f)] +
-                                             "_0" + std::to_string(s + 1);
-                    const int j = ctx.skeleton->joint_index(e, name.c_str());
+                    // Resolve through the canonical slot vocabulary rather
+                    // than the engine hand fixture's own bone names. Both
+                    // resolve the fixture identically, but the slot table
+                    // also covers Mixamo, Tripo, Unity and Unreal naming, so
+                    // this same mechanic now poses the fingers of a generated
+                    // full-body avatar instead of silently doing nothing.
+                    const std::string slot = body_finger_slot(
+                        kFingerNames[static_cast<size_t>(f)], s + 1, h);
+                    const int j =
+                        ctx.skeleton->joint_for_slot(e, slot.c_str());
                     joints_[static_cast<size_t>(h)][static_cast<size_t>(f)]
                            [static_cast<size_t>(s)] = j;
                     if (j >= 0) ++found;
@@ -191,7 +198,8 @@ private:
         if (resolved_ && found == 0) {
             PTV_WARN(
                 "builtin.hand_pose found no finger joints; the hand asset's "
-                "bones are not named '{}<finger>_0N'",
+                "bones match none of the known finger naming conventions "
+                "(expected something like '{}index_01' or 'RightHandIndex1')",
                 kBonePrefix);
         }
     }

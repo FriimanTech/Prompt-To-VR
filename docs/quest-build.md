@@ -47,7 +47,11 @@ adds `xrInitializeLoaderKHR` + `XR_KHR_android_create_instance`.
 
 `engine/android/` is a Gradle template the `quest_build` stage instantiates
 into `projects/<id>/builds/quest/`, substituting `@PTV_*@` tokens and copying
-`scene.json` + GLBs + compiled `.spv` shaders into `app/src/main/assets/`. The
+`scene.json`, **every `scene.*.json` sibling**, GLBs and compiled `.spv` shaders
+into `app/src/main/assets/`. The siblings matter for a multi-scene game: a portal
+resolves through the scene index, whose paths are relative to `scene.json`, so
+packaging only the entry point leaves an APK that runs and looks right until the
+player walks into the first doorway. The
 native `.so` (`libptv_quest.so`) is built by
 `app/src/main/cpp/CMakeLists.txt` (NDK), linking the shared engine runtime +
 this project's generated mechanics + the Khronos OpenXR Android loader.

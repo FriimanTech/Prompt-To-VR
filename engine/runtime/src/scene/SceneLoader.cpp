@@ -21,6 +21,31 @@ Quat read_quat(const Json& v) {
                 v[2].get<float>());  // glm::quat(w, x, y, z)
 }
 
+/** Parse a tagged state value: ``{"type": "...", "value": ...}``.
+ *
+ *  The type tag is not redundant. An enumerated position called "3" and the
+ *  number 3 are different states, and a reader that guessed from the JSON
+ *  type alone would silently conflate them. */
+bool read_interactive_value(const Json& j, InteractiveValue* out) {
+    if (out == nullptr || !j.is_object()) return false;
+    const std::string type = j.value("type", std::string());
+    if (!j.contains("value")) return false;
+    const auto& v = j["value"];
+    if (type == "bool" && v.is_boolean()) {
+        *out = InteractiveValue::of(v.get<bool>());
+    } else if (type == "number" && v.is_number()) {
+        *out = InteractiveValue::of(v.get<float>());
+    } else if (type == "name" && v.is_string()) {
+        *out = InteractiveValue::named(v.get<std::string>());
+    } else if (type == "vector") {
+        if (!v.is_array() || v.size() < 3) return false;
+        *out = InteractiveValue::of(read_vec3(v, Vec3(0.0f)));
+    } else {
+        return false;
+    }
+    return true;
+}
+
 Transform read_transform(const Json& v) {
     Transform t{};
     if (!v.is_object()) return t;
@@ -202,6 +227,89 @@ SceneDoc LoadSceneJson(const std::string& path) {
         }
     }
 
+    for (const auto& i : j.value("interactives", Json::array())) {
+        if (!i.is_object()) continue;
+        InteractiveSpec is{};
+        is.id = i.value("id", "");
+        // An interactive with no id is unusable: the id IS its persistence
+        // key, so state written against an empty one would collide with
+        // every other unnamed object.
+        if (is.id.empty()) continue;
+        is.kind = i.value("kind", "");
+        is.locked = i.value("locked", false);
+        for (const auto& t : i.value("tags", Json::array())) {
+            if (t.is_string()) is.tags.push_back(t.get<std::string>());
+        }
+        if (i.contains("initial_state") && i["initial_state"].is_object()) {
+            for (const auto& [key, value] : i["initial_state"].items()) {
+                InteractiveValue parsed{};
+                if (read_interactive_value(value, &parsed)) {
+                    is.initial_state[key] = parsed;
+                }
+            }
+        }
+        is.hinge_point =
+            read_vec3(i.value("hinge_point", Json::array()), Vec3(0.0f));
+        is.hinge_axis = read_vec3(i.value("hinge_axis", Json::array()),
+                                  Vec3(0.0f, 1.0f, 0.0f));
+        is.min_angle_deg = i.value("min_angle_deg", 0.0f);
+        is.max_angle_deg = i.value("max_angle_deg", 90.0f);
+        is.slide_axis =
+            read_vec3(i.value("slide_axis", Json::array()), Vec3(0.0f));
+        is.slide_distance_m = i.value("slide_distance_m", 0.0f);
+        for (const auto& p : i.value("positions", Json::array())) {
+            if (p.is_string()) is.positions.push_back(p.get<std::string>());
+        }
+        is.yields_asset_id = i.value("yields_asset_id", "");
+        d.interactives.push_back(std::move(is));
+    }
+
+    for (const auto& sp : j.value("spawn_points", Json::array())) {
+        if (!sp.is_object()) continue;
+        SpawnPointSpec s{};
+        s.id = sp.value("id", "");
+        // An unnamed arrival point cannot be arrived AT -- a portal names the
+        // spawn it targets, so a blank id is unreachable by construction.
+        if (s.id.empty()) continue;
+        s.position = read_vec3(sp.value("position", Json::array()), Vec3(0.0f));
+        s.facing = read_vec3(sp.value("facing", Json::array()),
+                             Vec3(0.0f, 0.0f, -1.0f));
+        d.spawn_points.push_back(std::move(s));
+    }
+
+    for (const auto& p : j.value("portals", Json::array())) {
+        if (!p.is_object()) continue;
+        PortalSpec ps{};
+        ps.id = p.value("id", "");
+        ps.to_scene = p.value("to_scene", "");
+        // A portal with no destination is scenery. Dropping it here rather
+        // than at the point of use means the frame loop never has to test for
+        // it, and the load says once that it was ignored.
+        if (ps.id.empty() || ps.to_scene.empty()) {
+            PTV_WARN("scene: portal '{}' has no destination; ignoring",
+                     ps.id.empty() ? "(unnamed)" : ps.id);
+            continue;
+        }
+        ps.target_spawn_id = p.value("target_spawn_id", "");
+        if (ps.target_spawn_id.empty()) {
+            ps.target_spawn_id = p.value("spawn_point_id", "");
+        }
+        ps.position = read_vec3(p.value("position", Json::array()), Vec3(0.0f));
+        ps.size = read_vec3(p.value("size", Json::array()),
+                            Vec3(1.0f, 2.0f, 0.5f));
+        ps.requires_interaction = p.value("requires_interaction", true);
+        d.portals.push_back(std::move(ps));
+    }
+
+    const auto& index = j.value("scene_index", Json::object());
+    if (index.is_object()) {
+        for (auto it = index.begin(); it != index.end(); ++it) {
+            if (it.value().is_string()) {
+                d.scene_index.emplace(it.key(), it.value().get<std::string>());
+            }
+        }
+    }
+
     for (const auto& e : j.value("entities", Json::array())) {
         EntitySpec es{};
         es.id = e.value("id", "");
@@ -334,10 +442,39 @@ SceneDoc LoadSceneJson(const std::string& path) {
     return d;
 }
 
-void ApplySceneToWorld(const SceneDoc& doc, World& world) {
+void ApplySceneToWorld(const SceneDoc& doc, World& world,
+                       const SceneNesting* nesting) {
+    // Ids are namespaced and transforms re-based when nesting. Both are
+    // resolved through these two lambdas so every id lookup later in the
+    // function (attachments, interactives, nav) goes through the same mapping
+    // -- an entity created under a prefix but referenced without one would
+    // resolve to nothing, silently.
+    auto scoped = [&nesting](const std::string& id) {
+        if (nesting == nullptr || nesting->id_prefix.empty() || id.empty()) {
+            return id;
+        }
+        return nesting->id_prefix + "/" + id;
+    };
+    auto placed = [&nesting](const Transform& t) {
+        if (nesting == nullptr) return t;
+        const Mat4 world_m = nesting->mount * t.matrix();
+        Transform out = t;
+        out.position = Vec3(world_m[3]);
+        out.rotation = glm::normalize(glm::quat_cast(Mat4(glm::mat3(
+            glm::normalize(Vec3(world_m[0])), glm::normalize(Vec3(world_m[1])),
+            glm::normalize(Vec3(world_m[2]))))));
+        // Scale is carried on the Transform, not left in the matrix: the
+        // attachment system that moves the interior each frame rewrites
+        // position and rotation but never scale, so anything left in the
+        // matrix would be lost on the first frame.
+        out.scale = t.scale * nesting->scale;
+        return out;
+    };
+
     for (const auto& es : doc.entities) {
-        auto e = world.create_entity(es.id);
-        world.registry().emplace<CTransform>(e, CTransform{es.transform});
+        auto e = world.create_entity(scoped(es.id));
+        world.registry().emplace<CTransform>(e,
+                                             CTransform{placed(es.transform)});
         if (es.mesh.has_value()) {
             world.registry().emplace<CMesh>(
                 e, CMesh{es.mesh->asset_id, es.mesh->glb_path,
@@ -384,6 +521,14 @@ void ApplySceneToWorld(const SceneDoc& doc, World& world) {
         if (!es.tags.empty()) {
             world.registry().emplace<CTag>(e, CTag{es.tags});
         }
+        // AFTER the authored tags, and appending rather than replacing: the
+        // authored path emplaces a fresh CTag, so adding the nesting tag
+        // first would silently lose it on every entity that has tags of its
+        // own -- which is most of them.
+        if (nesting != nullptr && !nesting->tag.empty()) {
+            world.registry().get_or_emplace<CTag>(e).tags.push_back(
+                nesting->tag);
+        }
     }
 
     // Attachments resolve in a second pass: a weapon may be authored before
@@ -391,8 +536,10 @@ void ApplySceneToWorld(const SceneDoc& doc, World& world) {
     // otherwise silently drop.
     for (const auto& es : doc.entities) {
         if (!es.attached_to.has_value()) continue;
-        const auto child = world.find(es.id);
-        const auto parent = world.find(es.attached_to->entity_id);
+        const auto child = world.find(scoped(es.id));
+        // Both sides are scoped: an attachment inside a nested interior names
+        // its parent by the id the AUTHOR wrote, which is unprefixed.
+        const auto parent = world.find(scoped(es.attached_to->entity_id));
         if (child == entt::null) continue;
         if (parent == entt::null) {
             PTV_WARN("scene: entity '{}' is attached to unknown entity '{}'",
@@ -405,6 +552,60 @@ void ApplySceneToWorld(const SceneDoc& doc, World& world) {
         a.local_position = es.attached_to->position;
         a.local_rotation = es.attached_to->rotation;
         world.registry().emplace<CAttachment>(child, std::move(a));
+    }
+
+    // Bind declared state onto the geometry it describes, matching by id.
+    // ``pristine`` is seeded from the same values and never written again:
+    // everything that survives a transition is the difference between the
+    // two, which is what keeps saves small and keeps the document
+    // authoritative for everything nobody touched.
+    for (const auto& is : doc.interactives) {
+        const auto e = world.find(scoped(is.id));
+        if (e == entt::null) {
+            PTV_WARN(
+                "scene: interactive '{}' has no entity with that id; its "
+                "state will not be tracked",
+                is.id);
+            continue;
+        }
+        // A "movable" affordance is not a mechanic at all, just a statement
+        // that this object's transform should persist. Capture the baseline
+        // now, while it is still exactly where the document put it.
+        if (is.kind == "movable" && world.registry().all_of<CTransform>(e)) {
+            world.registry().emplace_or_replace<CMovable>(
+                e, CMovable{world.registry().get<CTransform>(e).t});
+        }
+
+        CInteractive ci{};
+        // The scoped id, because this IS the persistence key: two nested
+        // interiors that both declare a "front_door" must save separately.
+        ci.id = scoped(is.id);
+        ci.kind = is.kind;
+        ci.state = is.initial_state;
+        ci.pristine = is.initial_state;
+        ci.locked = is.locked;
+        ci.hinge_point = is.hinge_point;
+        ci.hinge_axis = is.hinge_axis;
+        ci.min_angle_deg = is.min_angle_deg;
+        ci.max_angle_deg = is.max_angle_deg;
+        ci.slide_axis = is.slide_axis;
+        ci.slide_distance_m = is.slide_distance_m;
+        ci.positions = is.positions;
+        ci.yields_asset_id = is.yields_asset_id;
+        world.registry().emplace_or_replace<CInteractive>(e, std::move(ci));
+
+        // Declared tags join the entity's own, so an affordance the world
+        // author put on the interactive record still reaches the mechanics
+        // that search by tag.
+        if (!is.tags.empty()) {
+            auto& tag = world.registry().get_or_emplace<CTag>(e);
+            for (const auto& t : is.tags) {
+                if (std::find(tag.tags.begin(), tag.tags.end(), t) ==
+                    tag.tags.end()) {
+                    tag.tags.push_back(t);
+                }
+            }
+        }
     }
 }
 

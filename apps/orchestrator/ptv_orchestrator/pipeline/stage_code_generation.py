@@ -408,6 +408,86 @@ class _StaticContext:
     # which faction it damages.
     npc_plan_json: str = ""
 
+    # What the world architects actually declared, per environment: the
+    # interactive ids, their kinds and state keys, the spawn points and the
+    # portals. This is why world_generation now runs BEFORE this stage.
+    #
+    # A mechanic that opens a door, waits on a lever, or teleports the player
+    # has to name the thing it acts on, and those names are invented by the
+    # world architect at generation time. Without this the agent could only
+    # guess -- and a guessed id resolves to nothing, silently, at runtime.
+    world_context_json: str = ""
+
+
+def _load_world_context(ctx: PipelineContext) -> str:
+    """Summarize every generated environment's declared vocabulary.
+
+    Deliberately a summary, not the whole document: a world is tens of
+    thousands of primitives, of which only the declared interactives, spawn
+    points and portals are addressable by name from gameplay code.
+    """
+
+    project_dir = ctx.store.dir_for(ctx.project_id)
+    envs: list[dict[str, Any]] = []
+
+    for path in sorted(project_dir.glob("world*.scene.json")):
+        try:
+            doc = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(doc, dict):
+            continue
+
+        # ``world.<scene_id>.scene.json`` -> scene_id; ``world.scene.json``
+        # is the single-environment layout and has no scene in its name.
+        stem = path.name[len("world") : -len(".scene.json")].strip(".")
+
+        interactives = []
+        for item in doc.get("interactives") or []:
+            if not isinstance(item, dict):
+                continue
+            interactives.append(
+                {
+                    "id": item.get("id", ""),
+                    "kind": item.get("kind", ""),
+                    # State KEYS matter more than their values here: the agent
+                    # needs to know a door is read with "open", not "is_open".
+                    "state_keys": sorted((item.get("initial_state") or {}).keys()),
+                    "locked": bool(item.get("locked", False)),
+                }
+            )
+
+        envs.append(
+            {
+                "scene_id": stem or "(single environment)",
+                "builder_id": doc.get("environment_builder_id", ""),
+                "interactives": interactives,
+                "spawn_points": sorted(
+                    sp.get("id", "")
+                    for sp in (doc.get("spawn_points") or [])
+                    if isinstance(sp, dict)
+                ),
+                "portals": [
+                    {
+                        "id": p.get("id", ""),
+                        "to_scene": p.get("to_scene", ""),
+                        "spawn_point_id": p.get("spawn_point_id", ""),
+                    }
+                    for p in (doc.get("portals") or [])
+                    if isinstance(p, dict)
+                ],
+                "nav_regions": sorted(
+                    r.get("id", "")
+                    for r in (doc.get("nav_regions") or [])
+                    if isinstance(r, dict)
+                ),
+            }
+        )
+
+    if not envs:
+        return ""
+    return json.dumps(envs, indent=2, sort_keys=True)
+
 
 def _load_static_context(ctx: PipelineContext) -> _StaticContext:
     """Load BuildSpec + every scene_spec*.json on disk. Missing files
@@ -466,6 +546,7 @@ def _load_static_context(ctx: PipelineContext) -> _StaticContext:
         scene_files=scene_files,
         sockets_by_asset=sockets_by_asset,
         npc_plan_json=npc_plan_json,
+        world_context_json=_load_world_context(ctx),
     )
 
 
@@ -628,6 +709,7 @@ class _StageRuntime:
             scene_context_json=scene_ctx_json,
             build_spec_excerpt=bs_excerpt,
             npc_plan_json=self.static.npc_plan_json,
+            world_context_json=self.static.world_context_json,
             instructions=CODE_TASK_SYSTEM,
             base_source_block=base_source_block,
             repair_context=repair_context,

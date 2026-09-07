@@ -149,6 +149,58 @@ primitive's `size` and driving color through the per-item tint. `box`/unknown
 still uses the cube. These match the collision shapes built in `PhysicsWorld`, so
 what you see is what you can stand on.
 
+## Gameplay tags are data, not renderer code
+
+Which tags the renderer reacts to lives in one table,
+`engine/runtime/src/render/VisualTagTable.h/.cpp`. `build_items_from_world`
+resolves an entity's tags **once** per frame into a `TagVisuals`, and the mesh,
+primitive and placeholder paths all read that.
+
+These decisions used to be string comparisons scattered through four places in
+the draw loop — a `template` check near the top, an `enemy`/`grabbable` tint
+further down, a `ground` test in the primitive path, and another
+`ground`/`grabbable`/`trigger` test in the placeholder path. Adding one
+affordance meant finding all four, and one WAS missed: a declared door had a row
+in the scene document and a mechanic to drive it, but no row here, so it drew as
+an orange grab-cube. Adding an affordance is now a row, and
+`ptv_smoke_visual_tags` asserts every affordance kind has one.
+
+Each row carries roles, and a tag may have several:
+
+| Role | Effect |
+| --- | --- |
+| `kAlwaysHidden` | Never drawn (`template`: construct prefabs parked at a staging coordinate for runtime spawning). |
+| `kHiddenWhenMeshless` | Drawn only with a real mesh (`player_system`, `tutorial`, `checkpoint`, `spawn_point`). Marker entities have a transform and nothing to look at; without this they fell through to the procedural cube path and littered the world with debug cubes on top of the real environment. |
+| `kGround` | Oversized with the grid material, so the play-area edge never shows in the headset. |
+| `kMeshTint` | A resting tint on a real mesh. |
+| `kPlaceholder` | A distinct size and colour when the entity has no mesh yet. |
+
+Row order is priority: `ground` sits above the affordances so a floor also
+tagged `grabbable` still draws as a floor.
+
+## Affordance cues (`CHighlight`)
+
+"You can act on this, right now" is published by gameplay and only *drawn* by
+the renderer. The affordance built-ins write `CHighlight { intensity, color }`
+every frame; `build_items_from_world` blends it into whatever tint the entity
+already has via `apply_highlight` — a multiply, so a cue reads as "lit up"
+against the object's own look rather than flattening every highlighted object to
+one colour.
+
+The renderer does not decide whether something is actionable. That depends on
+reach, on whether the object is locked, and on per-scene interaction policy, all
+of which the affordance built-ins already evaluate in order to decide whether to
+respond. Recomputing it here would be a second source of truth, and the two
+would drift: an object would glow while its mechanic refused to act on it.
+Advertising an interaction that will be refused is worse than showing no cue at
+all, so the mechanic that will refuse is the one that owns the cue.
+
+`publish_cue` in `AffordanceCommon.h` fades over ~120 ms each way rather than
+switching, because a hand drifting along the edge of reach would otherwise
+flicker the cue every frame — which in a headset reads as a rendering fault, not
+as feedback. The component is only added once something is actually near, so an
+untouched world pays nothing per entity.
+
 ## Performance budget
 
 Targeted at a **smooth 72–90 Hz**, on Quest 3 standalone as well as over Quest

@@ -159,6 +159,20 @@ class Settings(BaseSettings):
     # Turn budget for one Agents SDK run (the agent loop). Generous so the
     # architect can iterate over each part; not unlimited to bound cost.
     world_agent_max_turns: int = Field(default=80, ge=4, le=1000)
+    # How many environments are generated at once. Mirrors
+    # ``scene_spec_max_parallel_workers``, and for the same reason: each
+    # environment is an independent agent session with its own compile loop,
+    # so they parallelize cleanly. Each one costs a full xhigh-reasoning run
+    # with web search, which is why this is not unbounded.
+    world_max_parallel_workers: int = Field(default=3, ge=1, le=16)
+    # Hard ceiling on environments per project. A prompt describing a hub plus
+    # a dozen missions is legitimate; one describing fifty is a cost accident.
+    world_max_environments: int = Field(default=12, ge=1, le=50)
+    # Ceiling on declared interactives in one environment. Each costs runtime
+    # bookkeeping, and Meta puts a busy Quest 3 scene at roughly 200-300 draw
+    # calls, so an agent declaring thousands is a performance bug the stage
+    # should catch rather than ship.
+    world_max_interactives_per_env: int = Field(default=512, ge=1, le=4096)
 
     # --- SceneSpec stage (Stage 4, agentic) -----------------------------
     # SceneSpec composes one scene per ``BuildSpec.scenes`` entry via an

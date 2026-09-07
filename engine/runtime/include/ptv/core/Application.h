@@ -73,6 +73,11 @@ private:
     class HapticsService;
     class SocketsService;
     class SkeletonService;
+    class EquipService;
+    class InteractiveService;
+    class PersistenceService;
+    class TransitionService;
+    class UiService;
     friend class LocomotionService;
     friend class PhysicsAccessService;
     friend class ContactsService;
@@ -87,6 +92,11 @@ private:
     friend class HapticsService;
     friend class SocketsService;
     friend class SkeletonService;
+    friend class EquipService;
+    friend class InteractiveService;
+    friend class PersistenceService;
+    friend class TransitionService;
+    friend class UiService;
 
     bool initialize(const Config& cfg);
     void shutdown();
@@ -163,6 +173,134 @@ private:
     /** Turn the scene's declared nav regions/links into a routable graph. */
     void build_nav_graph();
 
+    // ------------------------------------------------------------------
+    // Scene transitions
+    // ------------------------------------------------------------------
+
+    /** Note that a transition is wanted. Does NOT perform it.
+     *
+     *  Callers reach this from inside a mechanic tick, which is inside a loop
+     *  over the entities a transition would destroy. Doing the swap there
+     *  invalidates the iterator the caller is holding, so the request is
+     *  recorded and honoured at a frame boundary instead. */
+    bool request_scene_transition(const std::string& scene_id,
+                                  const std::string& spawn_point_id);
+
+    /** Perform a requested transition, if there is one. Called once per frame
+     *  from outside every entity loop. */
+    void apply_pending_transition();
+
+    /** Watch for the player standing in a portal volume, and act on it.
+     *
+     *  A portal that ``requires_interaction`` waits for a deliberate squeeze
+     *  while inside; one that does not fires on entry. Defaulting to requiring
+     *  the squeeze is the conservative choice: walking through a doorway you
+     *  did not mean to take, and losing the room you were in, is worse than
+     *  having to ask. */
+    void tick_portals(const InputSnapshot& input);
+
+    /** Swap the world over to ``path``, arriving at ``spawn_point_id``.
+     *
+     *  Saves the outgoing scene's deltas first and overlays the incoming
+     *  scene's on the way in, so a place remembers what the player did to it.
+     *  Everything derived from the scene -- physics bodies, the nav graph, the
+     *  player body, mechanic instances, the render environment -- is rebuilt,
+     *  because all of it describes the scene being replaced. */
+    bool load_scene_at(const std::string& path,
+                       const std::string& spawn_point_id);
+
+    /** Put the rig on a named spawn point, or on the scene's default. */
+    void place_player_at_spawn(const std::string& spawn_point_id);
+
+    /** Fold another scene into this one, mounted on ``host``'s ``anchor`` and
+     *  shrunk so its longest horizontal extent fits ``fit_extent_m``.
+     *
+     *  Unlike a transition, the outer world stays loaded and keeps running --
+     *  that is the whole point. A skull interior travels with the character
+     *  whose head it is in while that character walks around living its own
+     *  life, and the player inside it is unaware of any of that because both
+     *  they and the interior hang off the same anchor.
+     *
+     *  Authored at HUMAN scale and shrunk here, never authored small: a level
+     *  laid out inside a 22 cm box produces geometry and nav regions too
+     *  degenerate to walk on. Returns false if the scene is unknown or already
+     *  loaded. */
+    bool load_nested_scene(const std::string& scene_id, std::uint32_t host,
+                           const std::string& anchor, float fit_extent_m);
+
+    /** Remove a nested scene and everything in it. */
+    bool unload_nested_scene(const std::string& scene_id);
+
+    bool nested_scene_loaded(const std::string& scene_id) const;
+
+    /** The mount matrix for a nested scene: anchor world pose times fit
+     *  scale. Recomputed rather than stored, so it follows the animated
+     *  joint. */
+    Mat4 nested_mount_matrix(std::uint32_t host, const std::string& anchor,
+                             float scale) const;
+
+    /** Where this scene's save deltas live. Per scene, so a temple's puzzle
+     *  state cannot collide with a laboratory's. */
+    std::string save_path_for_scene(const std::string& scene_id) const;
+
+    // ------------------------------------------------------------------
+    // Player reference frame
+    // ------------------------------------------------------------------
+
+    /** Stage-to-world for the player, including any parent frame and scale.
+     *
+     *  The single place the rig becomes a world transform. Every consumer --
+     *  head pose, hand poses, eye views, locomotion sweeps -- goes through
+     *  this, because a second composition would drift from the first and the
+     *  player's hands would stop matching their eyes. */
+    Mat4 rig_world_matrix() const;
+
+    /** World transform of the rig's parent frame, or identity.
+     *
+     *  Yaw-flattened: a boat that pitches on a wave must not pitch the
+     *  player's horizon with it. Tilting the player's frame is the single
+     *  most reliable way to make someone sick in VR, so the frame carries
+     *  position and heading only -- the parent's roll and pitch are visible
+     *  in the world around the player, which is where they belong. */
+    Mat4 rig_parent_matrix() const;
+
+    /** True while the rig is parented to something. */
+    bool has_reference_frame() const;
+
+    /** Attach the rig to ``entity``'s ``anchor``, preserving where the player
+     *  currently is: the local offset is recomputed so they do not teleport
+     *  at the moment of boarding. */
+    void set_reference_frame(std::uint32_t entity, const std::string& anchor);
+
+    /** Detach, leaving the player exactly where they are in world space. */
+    void clear_reference_frame();
+
+    /** Resize the player. Clamped to a sane range; see ``kMinPlayerScale``. */
+    void set_player_scale(float scale);
+
+    /** The player's stage origin in WORLD space.
+     *
+     *  ``rig_.pos_*`` is expressed in the reference frame, so it is only the
+     *  same thing while the player is unparented. Everything outside the rig
+     *  -- physics sweeps, teleport targets, gameplay asking "where is the
+     *  player" -- speaks world space, so the conversion happens here rather
+     *  than at each of those call sites. */
+    Vec3 rig_world_position() const;
+    float rig_world_yaw() const;
+
+    /** Move the player to a WORLD position / heading, storing the equivalent
+     *  frame-local values. */
+    void set_rig_world_position(const Vec3& world);
+    void set_rig_world_yaw(float yaw_rad);
+
+    /** Rotate a WORLD direction into the reference frame.
+     *
+     *  A slide direction derived from where the player is looking is a world
+     *  vector; adding it straight to a frame-local position would drift the
+     *  moment the frame was rotated -- walking forward on a turning vehicle
+     *  would curve. */
+    Vec3 world_vector_to_frame(const Vec3& world_dir) const;
+
     /** Start an entity dying: play its death clip, stop it colliding, and
      *  schedule its removal for when the animation ends. */
     void begin_death(std::uint32_t entity);
@@ -177,12 +315,45 @@ private:
     // physical head/hand poses from OpenXR are then composed through it.
     // ------------------------------------------------------------------
     struct PlayerRig {
+        // Position and yaw are expressed in the REFERENCE FRAME below, which
+        // is world space unless a parent has been set.
         float pos_x{0.0f};
         float pos_y{0.0f};
         float pos_z{0.0f};
-        float yaw_rad{0.0f};  // rotation around world Y
+        float yaw_rad{0.0f};  // rotation around the frame's Y
         // NOTE: the snap-turn cooldown used to live here. It now belongs to
         // the builtin.locomotion.snap_turn mechanic, which owns that state.
+
+        // ----------------------------------------------------------------
+        // Reference frame: what the rig's coordinates are relative to.
+        //
+        // World space is the special case where there is no parent. Once
+        // there is one, everything the player does is expressed inside it,
+        // and the parent's own motion carries them along for free -- WITHOUT
+        // the player's local position drifting, which is the property that
+        // matters. Standing still on a moving platform means the stick
+        // input is zero and you still arrive somewhere else.
+        //
+        // Deliberately generic rather than built for one feature. A rig
+        // parented to a moving anchor is how vehicles, elevators, boats,
+        // lifts and moving platforms all work, and it is also how a
+        // miniature player rides inside an NPC's head while that NPC walks
+        // around living its own life. Solving it once as a reference frame
+        // is why none of those need engine changes of their own.
+        // ----------------------------------------------------------------
+        entt::entity parent{entt::null};
+        /** Joint or socket on the parent to follow, or empty for the
+         *  parent's own transform. */
+        std::string parent_anchor;
+
+        /** How big the player is relative to the world.
+         *
+         *  1.0 is life size. 0.02 is a two-centimetre passenger inside a
+         *  skull. Scaling the RIG rather than the world is the only version
+         *  that works: the world is what physics, navigation and every
+         *  authored dimension agree on, and rescaling it would invalidate
+         *  all of them at once. */
+        float scale{1.0f};
     };
 
     // Per-hand grab state tracked across frames so we can detect edge
@@ -265,6 +436,33 @@ private:
     MechanicHost mechanics_{};
     SceneDoc scene_{};
     std::string scene_path_{};
+    /** A transition asked for but not yet performed. Held rather than acted on
+     *  because the request arrives from inside a loop over the very entities a
+     *  transition destroys. */
+    struct PendingTransition {
+        bool active{false};
+        std::string scene_id;
+        std::string spawn_point_id;
+    };
+    PendingTransition pending_transition_{};
+    /** Scenes folded into this one, by scene id.
+     *
+     *  Tracked so a mechanic can ask whether an interior is already there
+     *  (attaching twice would stack two skulls' worth of geometry) and so
+     *  unloading can find every entity that belongs to it. */
+    struct NestedScene {
+        std::string scene_id;
+        std::uint32_t host{0xFFFFFFFFu};
+        std::string anchor;
+        float scale{1.0f};
+        std::string tag;
+    };
+    std::vector<NestedScene> nested_scenes_{};
+    /** Portals the player is currently standing in, by id. Tracked so an
+     *  interaction-gated portal knows the squeeze happened INSIDE it, and so
+     *  an entry-triggered one fires on the frame the player arrives rather
+     *  than every frame they remain. */
+    std::vector<std::string> portals_occupied_{};
     Renderer::RenderEnv render_env_{};
     bool running_{false};
     PlayerRig rig_{};
@@ -349,6 +547,11 @@ private:
     std::unique_ptr<HapticsService> haptics_svc_;
     std::unique_ptr<SocketsService> sockets_svc_;
     std::unique_ptr<SkeletonService> skeleton_svc_;
+    std::unique_ptr<EquipService> equip_svc_;
+    std::unique_ptr<InteractiveService> interactive_svc_;
+    std::unique_ptr<PersistenceService> persistence_svc_;
+    std::unique_ptr<TransitionService> transition_svc_;
+    std::unique_ptr<UiService> ui_svc_;
     MechanicContext mech_ctx_{};
     // Monotonic seconds since the loop started; the haptics rate limiter
     // needs a clock that does not depend on wall-clock formatting.

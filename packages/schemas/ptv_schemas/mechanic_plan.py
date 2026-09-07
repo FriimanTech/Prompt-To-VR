@@ -83,6 +83,18 @@ BUILTIN_MECHANIC_IDS = {
     "builtin.throw",
     "builtin.recoil",
     "builtin.hand_pose",
+    "builtin.character_locomotion",
+    "builtin.avatar_body",
+    "builtin.mirror_surface",
+    "builtin.equip",
+    "builtin.ui_panel",
+    "builtin.head_interior",
+    "builtin.door",
+    "builtin.switchable",
+    "builtin.container",
+    "builtin.mover",
+    "builtin.breakable",
+    "builtin.harvestable",
 }
 
 

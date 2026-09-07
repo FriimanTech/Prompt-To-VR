@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <cstdint>
 
+#include "ptv/api/InteractiveState.h"
 #include "ptv/math/Math.h"
 
 namespace ptv {
@@ -102,6 +103,50 @@ public:
     /** Scene-authored comfort tunables, so a mechanic can default to what the
      *  scene asked for instead of hard-coding its own numbers. */
     virtual const LocomotionTunables& tunables() const = 0;
+
+    // ------------------------------------------------------------------
+    // Reference frame: what the player's coordinates are relative to.
+    //
+    // World space is the special case where there is no parent. Once there
+    // is one, the parent's motion carries the player along WITHOUT their
+    // local position drifting -- which is the property that matters.
+    // Standing still on a moving platform means zero stick input and still
+    // arriving somewhere else.
+    //
+    // One generic feature rather than several specific ones: vehicles,
+    // elevators, boats, lifts, moving platforms, and a miniature player
+    // riding inside an NPC's head are all the same problem, so none of them
+    // needs engine code of its own.
+    // ------------------------------------------------------------------
+
+    /** Attach the player to ``entity``'s ``anchor`` (a body slot or socket
+     *  name; empty means the entity's own transform).
+     *
+     *  Naming a joint matters for anything animated: a passenger inside a
+     *  head must ride the ANIMATED skull, not the entity's root transform,
+     *  which for a walking character sits at its feet and does not turn with
+     *  the neck.
+     *
+     *  Boarding does not move the player -- their local offset is recomputed
+     *  so they stay exactly where they were. */
+    virtual void set_reference_frame(std::uint32_t entity,
+                                     const char* anchor) = 0;
+
+    /** Detach, leaving the player where they are in world space. */
+    virtual void clear_reference_frame() = 0;
+
+    /** The entity the player is riding, or ``0xFFFFFFFF``. */
+    virtual std::uint32_t reference_frame() const = 0;
+
+    /** Resize the player. 1.0 is life size; 0.02 is a two-centimetre
+     *  passenger inside a skull. Clamped to a usable range.
+     *
+     *  The RIG scales, never the world: the world is what physics,
+     *  navigation and every authored dimension agree on, and rescaling it
+     *  would invalidate all of them at once. Clip planes, the player's
+     *  capsule and their tracked motion all follow this. */
+    virtual void set_player_scale(float scale) = 0;
+    virtual float player_scale() const = 0;
 };
 
 /** Result of :meth:`IPhysicsAccess::raycast`.
@@ -648,6 +693,46 @@ public:
     /** Number of joints, or 0. */
     virtual int joint_count(std::uint32_t entity) const = 0;
 
+    /** Index of the joint occupying a canonical body slot, or -1.
+     *
+     *  This is the resolver every mechanic should use instead of guessing at
+     *  joint names, because there is no single naming convention: this
+     *  pipeline alone emits Tripo-spec names for characters and a
+     *  ``mixamorig:`` contract for the engine's hand fixture, and imported
+     *  assets add Mixamo proper, Unity Humanoid and Unreal on top. The slot
+     *  vocabulary and its per-convention candidate lists live in
+     *  ``ptv/api/BodySlots.h``.
+     *
+     *  Resolve once in ``on_attach`` and cache the index. */
+    virtual int joint_for_slot(std::uint32_t entity,
+                               const char* slot) const = 0;
+
+    /** Parent of ``joint``, or -1 for a root joint (and for a bad index).
+     *
+     *  Needed to decide which end of a span is the parent-most: a gauntlet
+     *  covering fingertip-to-elbow has to attach to the elbow, because that
+     *  is the joint the rest of the span hangs off. */
+    virtual int joint_parent(std::uint32_t entity, int joint) const = 0;
+
+    /** World matrix of ``joint`` this frame, or identity when unavailable.
+     *
+     *  Reading a joint's pose is what makes a fitted attachment possible at
+     *  all: the length from a fingertip to an elbow is not a constant, it is
+     *  a property of the rig plus its current pose, so it has to be measured
+     *  rather than assumed. Includes the entity's own transform, so the
+     *  result is directly comparable with ``ISockets::socket_world``. */
+    virtual Mat4 joint_world(std::uint32_t entity, int joint) const = 0;
+
+    /** Write every joint in ``root``'s subtree (including ``root``) into
+     *  ``out``, returning how many were written.
+     *
+     *  Exists so a caller can act on a whole limb or a whole head in one go
+     *  -- suppressing the avatar's head in first person has to take the jaw,
+     *  eyes and hair with it, not just the head joint, or the player sees
+     *  their own hair from the inside. */
+    virtual int joint_subtree(std::uint32_t entity, int root, int* out,
+                              int max_out) const = 0;
+
     /** Override one joint's local rotation for this frame. */
     virtual void set_joint_rotation(std::uint32_t entity, int joint,
                                     const Quat& rotation) = 0;
@@ -697,6 +782,317 @@ public:
 };
 
 /**
+ * Declared world state, and the only correct way to change it.
+ *
+ * The tempting alternative -- every mechanic writing its own save calls --
+ * is wrong. It would mean a dozen built-ins plus every generated mechanic
+ * inventing a key format, and any mechanic that forgot would silently lose
+ * state with nothing reporting a problem.
+ *
+ * So state is mutated THROUGH this service, and persistence falls out for
+ * free: the registry holds both the pristine value the world document
+ * declared and the current one, so what needs saving is simply the
+ * difference. A door mechanic calls ``set_state(id, "angle", 45.0f)`` and
+ * never touches a save file.
+ *
+ * ``interaction_allowed`` is the shared gate for per-scene interaction
+ * policy, so an object a policy forbids both refuses the action and stops
+ * advertising itself -- advertising an interaction that will be refused is
+ * worse than showing no cue at all.
+ */
+class IInteractive {
+public:
+    virtual ~IInteractive() = default;
+
+    virtual bool exists(const char* id) const = 0;
+
+    /** Entity carrying ``id``, or ``0xFFFFFFFF``. */
+    virtual std::uint32_t entity_of(const char* id) const = 0;
+
+    /** Declared id of ``entity``, or "". */
+    virtual const char* id_of(std::uint32_t entity) const = 0;
+
+    /** Declared kind ("door", "switchable", ...), or "". */
+    virtual const char* kind_of(const char* id) const = 0;
+
+    /** Current value of one state key. A missing key returns a default
+     *  (false) value rather than failing, so a mechanic reading a key its
+     *  world did not declare degrades instead of crashing. */
+    virtual InteractiveValue get_state(const char* id,
+                                       const char* key) const = 0;
+
+    /** Change one state key. This is the call that makes the change
+     *  persistent; there is no separate save step. */
+    virtual void set_state(const char* id, const char* key,
+                           const InteractiveValue& value) = 0;
+
+    /** True when ``key`` has diverged from the value the world document
+     *  declared. Exposed because gameplay sometimes wants to know that
+     *  something has been touched at all. */
+    virtual bool is_changed(const char* id, const char* key) const = 0;
+
+    virtual bool is_locked(const char* id) const = 0;
+    virtual void set_locked(const char* id, bool locked) = 0;
+
+    /** Whether interaction with this object is permitted right now. */
+    virtual bool interaction_allowed(const char* id) const = 0;
+    virtual void set_interaction_allowed(const char* id, bool allowed) = 0;
+
+    /** Write the ids of every interactive of ``kind`` into ``out``,
+     *  returning how many were written. A generated mechanic uses this to
+     *  find "every light in the building" without hard-coding ids. */
+    virtual int find_by_kind(const char* kind, const char** out,
+                             int max_out) const = 0;
+};
+
+/**
+ * Facts that are not the state of any object.
+ *
+ * ``mission_complete``, ``score``, ``chapter_2_complete``, which exhibit the
+ * player entered through. These have no entity, so they need no naming
+ * contract with world generation and no ordering dependency on it -- which
+ * is exactly why they are the ONLY persistence calls generated code should
+ * be writing by hand. Anything attached to an object goes through
+ * ``IInteractive`` instead.
+ *
+ * Two scopes because both are needed: a per-scene store keeps a temple's
+ * puzzle state from colliding with a laboratory's, while the global store is
+ * what carries progress across a transition.
+ */
+class IPersistence {
+public:
+    virtual ~IPersistence() = default;
+
+    virtual void set_flag(const char* key, bool value) = 0;
+    virtual bool flag(const char* key, bool fallback = false) const = 0;
+    virtual void set_number(const char* key, float value) = 0;
+    virtual float number(const char* key, float fallback = 0.0f) const = 0;
+    virtual void set_text(const char* key, const char* value) = 0;
+    virtual const char* text(const char* key,
+                             const char* fallback = "") const = 0;
+
+    /** Same four, scoped to one scene id. */
+    virtual void set_scene_flag(const char* scene, const char* key,
+                                bool value) = 0;
+    virtual bool scene_flag(const char* scene, const char* key,
+                            bool fallback = false) const = 0;
+    virtual void set_scene_number(const char* scene, const char* key,
+                                  float value) = 0;
+    virtual float scene_number(const char* scene, const char* key,
+                               float fallback = 0.0f) const = 0;
+
+    virtual bool has(const char* key) const = 0;
+    virtual void clear(const char* key) = 0;
+};
+
+/** One row a caller wants shown. Mirrors ``UiRow`` without dragging the ECS
+ *  header into the generated-code surface. */
+struct UiRowDesc {
+    const char* id{""};
+    const char* label{""};
+    std::uint32_t thumbnail{0xFFFFFFFFu};
+    bool enabled{true};
+    bool selected{false};
+    bool marked{false};
+};
+
+/** A click, as read back by the caller. */
+struct UiClick {
+    const char* panel_id{""};
+    const char* row_id{""};
+    int row_index{-1};
+    int hand{-1};
+};
+
+/**
+ * Virtual panels.
+ *
+ * Exists because four of the equip scenarios want a menu -- see what is worn,
+ * pick something, press Unequip -- and generated code had no way to build one.
+ * The engine already proved the pattern with the locomotion menu, but that was
+ * hard-coded in the application layer: fixed pages, two pads, its own edge
+ * detection, its own debounce, its own comfort-anchored placement. Every
+ * generated menu would have reimplemented all of it, differently.
+ *
+ * So the engine owns the mechanics of a panel -- where it sits, which row the
+ * pointer is on, what counts as a click -- and the caller owns only what the
+ * rows MEAN. A wardrobe becomes: list what ``IEquip`` says is worn, and on a
+ * click, call ``unequip``.
+ *
+ * Rows are addressed by id rather than index, because an inventory that
+ * reorders itself between frames would otherwise deliver a click for the wrong
+ * item.
+ */
+class IUi {
+public:
+    virtual ~IUi() = default;
+
+    /** Does a panel with this id exist in the scene? */
+    virtual bool panel_exists(const char* panel_id) const = 0;
+
+    virtual void open(const char* panel_id) = 0;
+    virtual void close(const char* panel_id) = 0;
+    virtual bool is_open(const char* panel_id) const = 0;
+
+    /** Replace a panel's rows.
+     *
+     *  Whole-list replacement rather than incremental edits: the caller
+     *  already knows the full truth every frame (what is equipped, what is in
+     *  the bag), and a diffing API would only add a way for the panel to
+     *  disagree with it. Preserves highlight by row id across the swap, so
+     *  rebuilding every frame does not fight the pointer. */
+    virtual void set_rows(const char* panel_id, const UiRowDesc* rows,
+                          int count) = 0;
+
+    /** Read the oldest unread click, or false when there is none.
+     *
+     *  A queue rather than a callback because a mechanic's tick is the only
+     *  place it is safe to act, and clicks are detected during input
+     *  processing. Poll in a loop: two rows can be clicked in one frame with
+     *  two hands. */
+    virtual bool poll_click(const char* panel_id, UiClick* out) = 0;
+
+    /** Which row the pointer is on, or -1. Lets a caller preview a selection
+     *  without waiting for the click. */
+    virtual int highlighted_row(const char* panel_id) const = 0;
+};
+
+/**
+ * Going somewhere else.
+ *
+ * A transition is not something a mechanic may simply DO. Swapping the world
+ * means destroying entities, and a mechanic is being ticked from inside a loop
+ * over those entities -- tearing the scene down there invalidates the iterator
+ * the caller is holding. So this only ever REQUESTS, and the engine performs
+ * the swap at a frame boundary where nothing is mid-iteration.
+ *
+ * Requesting is enough for every caller that needs it: a portal volume the
+ * player walks into, a menu selecting a mission, a generated mechanic ending a
+ * chapter. Where the player lands is named rather than positional, because the
+ * right place to stand depends on where they came from -- returning to a hub
+ * from a mission belongs at that mission's door, not at the hub's front gate.
+ */
+class ISceneTransition {
+public:
+    virtual ~ISceneTransition() = default;
+
+    /** Ask to move to ``scene_id``, arriving at ``spawn_point_id``.
+     *
+     *  Returns false when the target is not in this project's scene index,
+     *  which is a build-time mistake worth reporting rather than a runtime
+     *  condition to handle: the compiler wrote that index from the same
+     *  BuildSpec the portal came from. An empty ``spawn_point_id`` means the
+     *  target scene's own default spawn.
+     *
+     *  Only the FIRST request in a frame is honoured; later ones are ignored
+     *  rather than queued, so two portals touched in the same frame cannot
+     *  chain the player through two loads. */
+    virtual bool go_to(const char* scene_id, const char* spawn_point_id) = 0;
+
+    /** The scene the player is in now. */
+    virtual const char* current_scene() const = 0;
+
+    /** Is ``scene_id`` reachable at all? Lets a menu grey out an entry
+     *  instead of offering a transition that will be refused. */
+    virtual bool scene_exists(const char* scene_id) const = 0;
+
+    /** Is a transition already pending this frame? */
+    virtual bool transition_pending() const = 0;
+
+    /** Fold another scene INSIDE this one, mounted on ``host``'s ``anchor``
+     *  and shrunk so its longest horizontal extent fits ``fit_extent_m``.
+     *
+     *  Not a transition: the outer world stays loaded and keeps running,
+     *  which is the entire point. A skull interior travels with the character
+     *  whose head it is in while that character walks around living its own
+     *  life, and the player inside is unaware of any of it because they and
+     *  the interior hang off the same anchor.
+     *
+     *  The interior is authored at HUMAN scale and shrunk here, never
+     *  authored small: a level laid out inside a 22 cm box produces geometry
+     *  and nav regions too degenerate to walk on.
+     *
+     *  Safe to call from a mechanic tick -- unlike a transition, nothing
+     *  existing is destroyed, so no iterator is invalidated. */
+    virtual bool load_nested(const char* scene_id, std::uint32_t host,
+                             const char* anchor, float fit_extent_m) = 0;
+
+    virtual bool unload_nested(const char* scene_id) = 0;
+    virtual bool nested_loaded(const char* scene_id) const = 0;
+};
+
+/**
+ * Wearing things.
+ *
+ * An engine service rather than state private to one mechanic, because equip
+ * is driven from too many places for a tag to be enough: a hand releasing an
+ * object, a menu button, sitting down in a seat, touching a pickup, or a
+ * thirty-second timer expiring. All of those need to ask what is currently
+ * worn and change it, and a mechanic that kept the answer to itself would
+ * force every other caller to reimplement the bookkeeping.
+ *
+ * It is also what makes persistence automatic. Loadout and outfit survive an
+ * environment transition because this service records them, not because each
+ * mechanic remembered to write a save file.
+ *
+ * Works on any entity with slots, not just the player, so a goblin wearing a
+ * rifle is the same code path.
+ */
+class IEquip {
+public:
+    virtual ~IEquip() = default;
+
+    /** Put ``item`` on ``wearer`` at ``slot``.
+     *
+     *  Fails when the slot does not exist, the item's tags are not accepted
+     *  there, or the item is no longer re-equippable. Equipping into an
+     *  occupied EXCLUSIVE slot unequips the incumbent first; what happens to
+     *  that displaced item is the caller's policy, not this service's. */
+    virtual bool equip(std::uint32_t item, std::uint32_t wearer,
+                       const char* slot) = 0;
+
+    /** Take ``item`` off. Fails when it is not equipped or not currently
+     *  removable. Restores physics, so it drops where it was. */
+    virtual bool unequip(std::uint32_t item) = 0;
+
+    /** Slot ``item`` occupies, or "" when it is not equipped. */
+    virtual const char* slot_of(std::uint32_t item) const = 0;
+
+    /** What is worn in ``slot``, or ``0xFFFFFFFF``. */
+    virtual std::uint32_t equipped_at(std::uint32_t wearer,
+                                      const char* slot) const = 0;
+
+    /** Write everything ``wearer`` has equipped into ``out``, returning how
+     *  many were written. This is what a wardrobe menu iterates. */
+    virtual int equipped_items(std::uint32_t wearer, std::uint32_t* out,
+                               int max_out) const = 0;
+
+    /** Does ``wearer`` offer this slot at all? */
+    virtual bool slot_exists(std::uint32_t wearer,
+                             const char* slot) const = 0;
+
+    /** Allow or forbid intentional removal of an already-equipped item.
+     *
+     *  Deliberately runtime-mutable and deliberately NOT permanent: a helmet
+     *  is fixed in flight and free on the ground, goggles are fixed mid-
+     *  experiment, and cursed armour becomes removable once the quest that
+     *  breaks the curse completes -- all on the same item instance. */
+    virtual void set_removable(std::uint32_t item, bool removable) = 0;
+
+    /** Allow or forbid this instance being equipped again in future. A
+     *  sterile glove that has been taken off is contaminated. */
+    virtual void set_equippable(std::uint32_t item, bool equippable) = 0;
+
+    virtual bool is_removable(std::uint32_t item) const = 0;
+
+    /** Nudge an equipped item's pose without unequipping it, e.g. swinging
+     *  night-vision goggles between raised and lowered. Prevents generated
+     *  code from writing CTransform on something an attachment owns. */
+    virtual void set_offset(std::uint32_t item, const Vec3& position,
+                            const Quat& rotation) = 0;
+};
+
+/**
  * Bundle of engine services passed to every mechanic call.
  *
  * Pointers are owned by the engine and remain valid for the lifetime of the
@@ -718,6 +1114,11 @@ struct MechanicContext {
     IHaptics* haptics{nullptr};
     ISockets* sockets{nullptr};
     ISkeleton* skeleton{nullptr};
+    IEquip* equip{nullptr};
+    IInteractive* interactive{nullptr};
+    IPersistence* persistence{nullptr};
+    ISceneTransition* transition{nullptr};
+    IUi* ui{nullptr};
 };
 
 }  // namespace ptv

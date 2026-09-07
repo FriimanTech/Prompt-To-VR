@@ -36,6 +36,13 @@ _MODULE_FOR_ID = {
     "builtin.grab": "grab",
     "builtin.throw": "throw",
     "builtin.recoil": "recoil",
+    "builtin.hand_pose": "hand_pose",
+    "builtin.character_locomotion": "character_locomotion",
+    "builtin.avatar_body": "avatar_body",
+    "builtin.mirror_surface": "mirror_surface",
+    "builtin.equip": "equip",
+    "builtin.ui_panel": "ui_panel",
+    "builtin.head_interior": "head_interior",
 }
 
 # Small headers shared across modules. Injected alongside a module's own files

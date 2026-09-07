@@ -28,7 +28,7 @@ todos:
     status: completed
   - id: c4-ui-panel
     content: "Phase C4: builtin.ui_panel plus pointer, generalized from the existing hard-coded locomotion menu, so menu-driven equip/unequip (selected vs equipped, Equip/Unequip buttons) is generated code over IEquip"
-    status: pending
+    status: completed
   - id: d3-pipeline-reorder
     content: "Phase D3: move world_generation before code_generation in orchestrator.py, update AGENTS.md and docs/overview.md, and give CODEGEN_SYSTEM each scene's interactive registry as context"
     status: pending
@@ -40,22 +40,22 @@ todos:
     status: completed
   - id: d7-parallel-worlds
     content: "Phase D7: rework stage_world_generation into a ThreadPoolExecutor worker pool mirroring scene_spec - per-environment session id, directory, builder id, namespace, build tree, repair budget and fallback; add world_max_parallel_workers, world_max_environments, world_max_interactives_per_env; rewrite WORLD_BUILDER_SYSTEM with the affordance vocabulary, stable-id contract, declare-only-stateful rule and foliage prohibition"
-    status: pending
+    status: completed
   - id: d8-env-validation
     content: "Phase D8: per-environment nav validation plus global checks - links name real scenes, portal spawns exist, spawns inside nav regions, graph connected, nested extent fits host, no cross-environment nav links, unique ids, geometry required on interactives, gated_by resolves, reuse_environment_from resolves, interactive cap, and unexplained cross-environment divergence"
-    status: pending
+    status: completed
   - id: d9-compile-and-binder
     content: "Phase D9: scene compile merges world.<scene_id>.scene.json per scene, records builder_id provenance, and runs the deterministic affordance-to-mechanic binder uniformly across all environments with interaction_rules overrides; enable evict_when_over_budget for multi-environment projects"
-    status: pending
+    status: completed
   - id: d10-runtime-transitions
     content: "Phase D10: IEnvironment service - exclusive transition (fade, detach, destroy non-persistent, dedupe preserved entities, rebuild physics + nav, re-attach, re-bind skeletons, restore registry and deltas, spawn at named point, stream, fade in), nested load under an environment root attached to a host anchor, skeleton-before-mesh eviction ordering"
     status: pending
   - id: d11-interactive-persistence
     content: "Phase D11: IInteractive registry with automatic pristine-vs-current delta persistence; finish SaveSystem::load_world and re-key save_world on stable string ids with delta-only storage; add IPersistence (global + per-scene) for abstract game facts; atomic versioned JSON storage, no SQLite"
-    status: in_progress
+    status: completed
   - id: d12-affordance-builtins
     content: "Phase D12: implement builtin.door, builtin.switchable, builtin.container, builtin.mover, builtin.breakable, builtin.harvestable plus the movable transform-persistence path; multi-affordance composites; kinematic colliders driven via move_kinematic; catalog and MECHANIC_PLAN_SYSTEM entries"
-    status: pending
+    status: completed
   - id: d13-affordance-cues
     content: "Phase D13: registry-driven affordance cue on hover replacing the ad-hoc grabbable tint, respecting interaction_allowed and sharing one candidate query with the interaction; add a spatial index to that query; keep the ground material check and do not refactor renderer tag handling"
     status: pending
@@ -67,7 +67,7 @@ todos:
     status: pending
   - id: e2-head-interior
     content: "Phase E2: builtin.head_interior calling load_nested for the Phase D interior scene, with head_tracking (decoupled vs drives_host_head) and control_routing (host_locomotion, self_locomotion, host_piloted)"
-    status: pending
+    status: completed
   - id: f1-pose-coverage
     content: "Phase F1: ReferenceImageRequest.pose and .coverage plus AssetItem.character_role (none/npc/player_avatar - no interior role), with deterministic reconciliation from character_role and npc_plan.json so prop-ducks stay natural"
     status: completed

@@ -61,6 +61,10 @@ public:
         // referenced mesh slot must have been created as skinned.
         int joint_base{-1};
         int joint_count{0};
+        // True for a mirror reflection: same mesh and same joint palette,
+        // model matrix premultiplied by the plane reflection. Selects the
+        // front-face-culling pipeline so the reflection is not inside-out.
+        bool mirrored{false};
     };
 
     struct EyeTarget {
@@ -151,6 +155,10 @@ public:
         std::uint32_t resident_meshes{0};
         std::uint32_t resident_triangles{0};
         std::uint32_t streaming_pending{0};
+        /** Entities drawn a second time as a mirror reflection. Reported so
+         *  a mirror cannot silently eat the frame budget: this is the classic
+         *  mobile-VR trap, and the number has to be measured, not assumed. */
+        std::uint32_t mirror_reflections{0};
     };
 
     /** Install the scene's device budget (LOD distances, cull distance,
@@ -231,6 +239,10 @@ private:
     bool create_pipeline();
     bool create_skinned_pipeline();
     bool create_sky_pipeline();
+    /** Append reflected copies of the avatar (and anything tagged) for the
+     *  nearest active mirror. Called at the end of build_items_from_world. */
+    void append_mirror_reflections(World& world, std::vector<DrawItem>& out,
+                                   const ViewInfo& view);
     bool ensure_joint_buffer(std::uint32_t matrix_capacity);
     bool create_cube_mesh();
     bool create_primitive_meshes();
@@ -333,6 +345,10 @@ private:
     VkPipelineLayout pipeline_layout_{VK_NULL_HANDLE};
     VkPipeline pipeline_{VK_NULL_HANDLE};
     VkPipeline skinned_pipeline_{VK_NULL_HANDLE};
+    // Front-face-culling twins used for mirror reflections, which are
+    // improper transforms and therefore arrive wound the other way.
+    VkPipeline pipeline_mirror_{VK_NULL_HANDLE};
+    VkPipeline skinned_pipeline_mirror_{VK_NULL_HANDLE};
 
     // Fullscreen gradient-sky pass (drawn before geometry each eye).
     VkPipelineLayout sky_pipeline_layout_{VK_NULL_HANDLE};
@@ -411,6 +427,10 @@ private:
     // Per-entity LOD hysteresis: remembers the level chosen last frame so a
     // mesh sitting exactly on a switch distance does not flicker between LODs.
     std::unordered_map<std::uint32_t, int> entity_lod_;
+    // Which mesh slot each entity resolved to THIS frame. Lets the mirror
+    // pass reuse the LOD the main pass already picked, and skip anything not
+    // yet streamed in, without re-deriving any paths.
+    std::unordered_map<std::uint32_t, int> frame_entity_slot_;
 
     // --- Streaming worker ---------------------------------------------------
     std::thread stream_thread_;

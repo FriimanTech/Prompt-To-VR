@@ -18,6 +18,8 @@
 #include "ptv/render/GltfMeshLoad.h"
 #include "ptv/render/VulkanContext.h"
 
+#include "VisualTagTable.h"
+
 namespace ptv {
 
 namespace {
@@ -660,8 +662,27 @@ bool Renderer::create_pipeline() {
     gpci.layout = pipeline_layout_;
     gpci.renderPass = render_pass_;
     gpci.subpass = 0;
-    return vkCreateGraphicsPipelines(vk_->device(), VK_NULL_HANDLE, 1, &gpci,
-                                     nullptr, &pipeline_) == VK_SUCCESS;
+
+    // A mirrored variant, identical but for the cull mode. Reflecting an
+    // object across a plane is an improper transform, so its triangles come
+    // out wound the other way; drawing them with the usual back-face culling
+    // would show the inside of the avatar. Two pipelines is the portable
+    // answer -- dynamic cull state needs an extension we would then have to
+    // gate on, and Quest driver support for it varies.
+    VkPipelineRasterizationStateCreateInfo rs_mirror = rs;
+    rs_mirror.cullMode = VK_CULL_MODE_FRONT_BIT;
+    VkGraphicsPipelineCreateInfo gpci_mirror = gpci;
+    gpci_mirror.pRasterizationState = &rs_mirror;
+
+    const VkGraphicsPipelineCreateInfo infos[2]{gpci, gpci_mirror};
+    VkPipeline out[2]{VK_NULL_HANDLE, VK_NULL_HANDLE};
+    if (vkCreateGraphicsPipelines(vk_->device(), VK_NULL_HANDLE, 2, infos,
+                                  nullptr, out) != VK_SUCCESS) {
+        return false;
+    }
+    pipeline_ = out[0];
+    pipeline_mirror_ = out[1];
+    return true;
 }
 
 bool Renderer::create_skinned_pipeline() {
@@ -781,8 +802,22 @@ bool Renderer::create_skinned_pipeline() {
     gpci.layout = pipeline_layout_;
     gpci.renderPass = render_pass_;
     gpci.subpass = 0;
-    return vkCreateGraphicsPipelines(vk_->device(), VK_NULL_HANDLE, 1, &gpci,
-                                     nullptr, &skinned_pipeline_) == VK_SUCCESS;
+
+    // Mirrored variant, same reasoning as the static pipeline above.
+    VkPipelineRasterizationStateCreateInfo rs_mirror = rs;
+    rs_mirror.cullMode = VK_CULL_MODE_FRONT_BIT;
+    VkGraphicsPipelineCreateInfo gpci_mirror = gpci;
+    gpci_mirror.pRasterizationState = &rs_mirror;
+
+    const VkGraphicsPipelineCreateInfo infos[2]{gpci, gpci_mirror};
+    VkPipeline out[2]{VK_NULL_HANDLE, VK_NULL_HANDLE};
+    if (vkCreateGraphicsPipelines(vk_->device(), VK_NULL_HANDLE, 2, infos,
+                                  nullptr, out) != VK_SUCCESS) {
+        return false;
+    }
+    skinned_pipeline_ = out[0];
+    skinned_pipeline_mirror_ = out[1];
+    return true;
 }
 
 bool Renderer::create_sky_pipeline() {
@@ -1518,7 +1553,10 @@ void Renderer::draw_frame(const std::array<EyeTarget, 2>& eyes,
                                  it.joint_count > 0;
             if (gm && gm->skinned && !skinned) continue;
 
-            VkPipeline want = skinned ? skinned_pipeline_ : pipeline_;
+            VkPipeline want =
+                it.mirrored ? (skinned ? skinned_pipeline_mirror_
+                                       : pipeline_mirror_)
+                            : (skinned ? skinned_pipeline_ : pipeline_);
             if (want != bound) {
                 vkCmdBindPipeline(cmd_, VK_PIPELINE_BIND_POINT_GRAPHICS, want);
                 bound = want;
@@ -1745,6 +1783,27 @@ int Renderer::ensure_inline_mesh(std::uint32_t key,
 
 namespace {
 
+/** Blend a hover cue into a resting tint.
+ *
+ *  A multiply rather than a replace, so the cue reads as "lit up" against
+ *  whatever the object already looks like instead of flattening every
+ *  highlighted object to the same colour. Clamped because the shader treats
+ *  colour as a tint on the source material and pushing far past 1 blows out
+ *  texture detail -- exactly the detail that tells the player WHAT they are
+ *  about to interact with. */
+Vec4 apply_highlight(const Vec4& base, float intensity, const Vec4& cue) {
+    if (intensity <= 0.0f) return base;
+    const float t = std::clamp(intensity, 0.0f, 1.0f);
+    Vec4 out = base;
+    out.x = std::clamp(base.x * (1.0f + t * (cue.x - 1.0f) + t * 0.25f),
+                       0.0f, 1.6f);
+    out.y = std::clamp(base.y * (1.0f + t * (cue.y - 1.0f) + t * 0.25f),
+                       0.0f, 1.6f);
+    out.z = std::clamp(base.z * (1.0f + t * (cue.z - 1.0f) + t * 0.25f),
+                       0.0f, 1.6f);
+    return out;
+}
+
 /** Six frustum planes (x,y,z = normal, w = distance) from a view-projection.
  *  Gribb/Hartmann plane extraction; normals point INTO the frustum. */
 struct Frustum {
@@ -1800,6 +1859,7 @@ void Renderer::build_items_from_world(World& world, std::vector<DrawItem>& out,
     out.clear();
     stats_ = FrameStats{};
     stats_.resident_triangles = resident_triangles_;
+    frame_entity_slot_.clear();
     // Palettes are rebuilt from scratch every frame alongside the draw list;
     // a stale base index from last frame would point a skinned mesh at
     // another entity's joints.
@@ -1828,25 +1888,36 @@ void Renderer::build_items_from_world(World& world, std::vector<DrawItem>& out,
         // room" debug cubes *on top of* the real Tripo environment. Template
         // meshes (construct prefabs parked at a far staging coordinate) are
         // also hidden so only runtime-spawned copies draw.
+        //
+        // Resolved ONCE here, from the table in VisualTagTable.h, and reused
+        // by the mesh, primitive and placeholder paths below. They each used
+        // to re-test their own string literals, which is how a declared door
+        // ended up drawing as an orange grab-cube: the door row existed in one
+        // path and not the others.
+        render_tags::TagVisuals visuals{};
         if (world.registry().all_of<CTag>(entity)) {
-            const auto& tags = world.registry().get<CTag>(entity).tags;
-            auto has_tag = [&](const char* t) {
-                for (const auto& s : tags) {
-                    if (s == t) return true;
-                }
-                return false;
-            };
-            if (has_tag("template")) {
+            visuals = render_tags::resolve(
+                world.registry().get<CTag>(entity).tags);
+            if (visuals.always_hidden) {
                 continue;
             }
             const bool meshless =
                 !world.registry().all_of<CMesh>(entity) ||
                 world.registry().get<CMesh>(entity).glb_path.empty();
-            if (meshless &&
-                (has_tag("player_system") || has_tag("tutorial") ||
-                 has_tag("checkpoint"))) {
+            if (meshless && visuals.hidden_when_meshless) {
                 continue;
             }
+        }
+
+        // The hover cue, published by whichever affordance built-in owns this
+        // object. The renderer never decides whether something is actionable;
+        // it only draws the answer.
+        float highlight = 0.0f;
+        Vec4 highlight_color{1.0f, 0.92f, 0.62f, 1.0f};
+        if (world.registry().all_of<CHighlight>(entity)) {
+            const auto& hl = world.registry().get<CHighlight>(entity);
+            highlight = std::clamp(hl.intensity, 0.0f, 1.0f);
+            highlight_color = hl.color;
         }
 
         if (world.registry().all_of<CMesh>(entity)) {
@@ -1944,6 +2015,12 @@ void Renderer::build_items_from_world(World& world, std::vector<DrawItem>& out,
                 }
                 if (slot >= 0) {
                     entity_lod_[static_cast<std::uint32_t>(entity)] = desired;
+                    // Remember which slot this entity resolved to, so the
+                    // mirror pass can reuse it instead of re-deriving the LOD
+                    // path (and so it silently skips anything not yet
+                    // streamed in).
+                    frame_entity_slot_[static_cast<std::uint32_t>(entity)] =
+                        slot;
                     DrawItem it{};
                     it.model = model;
                     it.mesh_slot = slot;
@@ -1954,40 +2031,30 @@ void Renderer::build_items_from_world(World& world, std::vector<DrawItem>& out,
                     // serves whichever level got picked above.
                     if (skel && !skel->palette.empty() &&
                         gltf_meshes_[static_cast<size_t>(slot)].skinned) {
+                        // This list is the PLAYER'S OWN view, so an avatar
+                        // carrying a self-view suppression gets the collapsed
+                        // palette here. The full one stays untouched for any
+                        // other view of the same entity (a mirror), which is
+                        // why there are two rather than one edited in place.
+                        const auto& palette =
+                            skel->palette_self_view.size() ==
+                                    skel->palette.size()
+                                ? skel->palette_self_view
+                                : skel->palette;
                         it.joint_base = push_joint_palette(
-                            skel->palette.data(),
-                            static_cast<int>(skel->palette.size()));
-                        it.joint_count =
-                            static_cast<int>(skel->palette.size());
+                            palette.data(),
+                            static_cast<int>(palette.size()));
+                        it.joint_count = static_cast<int>(palette.size());
                     }
                     // GLB primitives carry their own per-vertex baseColor
                     // (see GltfMeshLoad). Use a near-white tint so the
                     // material color drives the look; we only nudge the
                     // tint for category cues and never crush the source.
-                    it.color = Vec4{1.0f, 1.0f, 1.0f, 1.0f};
-                    if (world.registry().all_of<CTag>(entity)) {
-                        const auto& tags = world.registry().get<CTag>(entity).tags;
-                        for (const auto& tag : tags) {
-                            if (tag == "environment" ||
-                                tag == "hover_allowed") {
-                                // Cool, very subtle so skybox / terrain
-                                // baseColor still reads.
-                                it.color = Vec4{0.96f, 0.98f, 1.05f, 1.0f};
-                                break;
-                            }
-                            if (tag == "enemy") {
-                                // Warm rim cue without overpowering the
-                                // source palette.
-                                it.color = Vec4{1.05f, 0.95f, 0.92f, 1.0f};
-                                break;
-                            }
-                            if (tag == "grabbable") {
-                                // Slight pop so prop grabs read in VR.
-                                it.color = Vec4{1.05f, 1.02f, 0.98f, 1.0f};
-                                break;
-                            }
-                        }
-                    }
+                    it.color = visuals.has_mesh_tint
+                                   ? visuals.mesh_tint
+                                   : Vec4{1.0f, 1.0f, 1.0f, 1.0f};
+                    it.color = apply_highlight(it.color, highlight,
+                                               highlight_color);
                     out.push_back(it);
                     ++stats_.drawn;
                     stats_.visible_triangles +=
@@ -2004,21 +2071,14 @@ void Renderer::build_items_from_world(World& world, std::vector<DrawItem>& out,
         // --- Procedural primitive from the world-generation stage ----------
         if (world.registry().all_of<CPrimitive>(entity)) {
             const auto& prim = world.registry().get<CPrimitive>(entity);
-            bool is_ground = false;
-            if (world.registry().all_of<CTag>(entity)) {
-                for (const auto& s : world.registry().get<CTag>(entity).tags) {
-                    if (s == "ground" || s == "teleport_target") {
-                        is_ground = true;
-                        break;
-                    }
-                }
-            }
             DrawItem it{};
             Mat4 s = glm::scale(Mat4(1.0f),
                                 Vec3(prim.size.x, prim.size.y, prim.size.z));
             it.model = entity_model * s;
-            it.color = Vec4{prim.color.x, prim.color.y, prim.color.z, 1.0f};
-            it.material_id = is_ground ? 1.0f : 0.0f;
+            it.color = apply_highlight(
+                Vec4{prim.color.x, prim.color.y, prim.color.z, 1.0f},
+                highlight, highlight_color);
+            it.material_id = visuals.is_ground ? 1.0f : 0.0f;
             // Select the matching unit mesh by kind (all authored at unit
             // extent so the scale-by-size path above is identical to the box).
             // "box"/unknown falls back to the cube (mesh_slot = -1). These
@@ -2073,45 +2133,138 @@ void Renderer::build_items_from_world(World& world, std::vector<DrawItem>& out,
         it.model = entity_model;
         it.mesh_slot = -1;
 
-        // Size + color hints by tag.
-        float xz_scale = 0.3f;
-        float y_scale = 0.3f;
-        Vec4 color{0.78f, 0.78f, 0.82f, 1.0f};
-        float material_id = 0.0f;
-        if (world.registry().all_of<CTag>(entity)) {
-            const auto& tags = world.registry().get<CTag>(entity).tags;
-            for (const auto& tag : tags) {
-                if (tag == "ground" || tag == "teleport_target") {
-                    // Push the floor well past the play area so the edge
-                    // never shows in the headset. The fragment shader draws
-                    // a fading grid inside the render-distance horizon.
-                    xz_scale = 30.0f;
-                    y_scale = 0.05f;
-                    color = Vec4{0.22f, 0.24f, 0.27f, 1.0f};
-                    material_id = 1.0f;
-                } else if (tag == "grabbable") {
-                    xz_scale = y_scale = 0.18f;
-                    color = Vec4{0.95f, 0.55f, 0.22f, 1.0f};
-                } else if (tag == "trigger") {
-                    xz_scale = y_scale = 0.20f;
-                    color = Vec4{0.30f, 0.75f, 0.98f, 1.0f};
-                }
-            }
-        }
+        // Size + colour come from the same table as everything else, so a
+        // newly declared affordance gets its own placeholder appearance
+        // without a renderer edit. A floor is oversized here so its edge never
+        // shows in the headset; the fragment shader fades a grid inside the
+        // render-distance horizon.
         // Bake a non-uniform scale into the model matrix without touching
         // the Transform's stored scale (which is uniform).
-        Mat4 s = glm::scale(Mat4(1.0f), Vec3(xz_scale, y_scale, xz_scale));
+        Mat4 s = glm::scale(
+            Mat4(1.0f), Vec3(visuals.placeholder_xz_scale,
+                             visuals.placeholder_y_scale,
+                             visuals.placeholder_xz_scale));
         it.model = it.model * s;
-        it.color = color;
-        it.material_id = material_id;
+        it.color = apply_highlight(visuals.placeholder_color, highlight,
+                                   highlight_color);
+        it.material_id = visuals.placeholder_material_id;
         out.push_back(it);
         ++stats_.drawn;
         stats_.visible_triangles += cube_index_count_ / 3;
     }
 
+    append_mirror_reflections(world, out, view_info);
+
     stats_.resident_meshes =
         static_cast<std::uint32_t>(gltf_path_to_slot_.size());
     stats_.resident_triangles = resident_triangles_;
+}
+
+void Renderer::append_mirror_reflections(World& world,
+                                         std::vector<DrawItem>& out,
+                                         const ViewInfo& view) {
+    stats_.mirror_reflections = 0;
+    auto mirrors = world.registry().view<const CMirrorSurface,
+                                         const CTransform>();
+
+    // One mirror at a time. Reflecting several would multiply the reflected
+    // draw calls, which is the classic mobile-VR trap this design exists to
+    // avoid.
+    const CMirrorSurface* chosen = nullptr;
+    Vec3 plane_point{0.0f};
+    float best = std::numeric_limits<float>::max();
+    for (auto e : mirrors) {
+        const auto& m = mirrors.get<const CMirrorSurface>(e);
+        if (!m.active) continue;
+        const Vec3 p = mirrors.get<const CTransform>(e).t.position;
+        const float d = view.valid ? glm::length(view.camera_pos - p) : 0.0f;
+        if (d > m.max_distance_m || d >= best) continue;
+        best = d;
+        chosen = &m;
+        plane_point = p;
+    }
+    if (chosen == nullptr) return;
+
+    const float nl = glm::length(chosen->normal);
+    if (nl < 1.0e-4f) return;
+    const Vec3 n = chosen->normal / nl;
+
+    // Householder reflection about the plane through plane_point with normal
+    // n. Column-major, so the translation term lands in the last column.
+    const float d_plane = -glm::dot(n, plane_point);
+    Mat4 reflect(1.0f);
+    reflect[0][0] = 1.0f - 2.0f * n.x * n.x;
+    reflect[1][0] = -2.0f * n.x * n.y;
+    reflect[2][0] = -2.0f * n.x * n.z;
+    reflect[3][0] = -2.0f * n.x * d_plane;
+    reflect[0][1] = -2.0f * n.y * n.x;
+    reflect[1][1] = 1.0f - 2.0f * n.y * n.y;
+    reflect[2][1] = -2.0f * n.y * n.z;
+    reflect[3][1] = -2.0f * n.y * d_plane;
+    reflect[0][2] = -2.0f * n.z * n.x;
+    reflect[1][2] = -2.0f * n.z * n.y;
+    reflect[2][2] = 1.0f - 2.0f * n.z * n.z;
+    reflect[3][2] = -2.0f * n.z * d_plane;
+
+    auto reflected_wanted = [&](entt::entity e) {
+        if (!world.registry().all_of<CTag>(e)) return false;
+        for (const auto& t : world.registry().get<CTag>(e).tags) {
+            if (t == "player_avatar" || t == "mirror_visible") return true;
+            for (const auto& want : chosen->reflect_tags) {
+                if (t == want) return true;
+            }
+        }
+        return false;
+    };
+
+    int emitted = 0;
+    auto candidates = world.registry().view<const CTransform, const CMesh>();
+    for (auto e : candidates) {
+        if (emitted >= chosen->max_reflected) break;
+        if (!reflected_wanted(e)) continue;
+
+        const auto slot_it =
+            frame_entity_slot_.find(static_cast<std::uint32_t>(e));
+        if (slot_it == frame_entity_slot_.end()) continue;
+        const int slot = slot_it->second;
+        if (slot < 0 || static_cast<size_t>(slot) >= gltf_meshes_.size()) {
+            continue;
+        }
+        auto& gm = gltf_meshes_[static_cast<size_t>(slot)];
+        if (gm.vb == VK_NULL_HANDLE) continue;
+        gm.last_used_frame = frame_index_;
+
+        DrawItem it{};
+        it.model = reflect * entity_visual_matrix(
+                                 world, static_cast<std::uint32_t>(e),
+                                 world.registry().get<CTransform>(e).t);
+        it.mesh_slot = slot;
+        it.mirrored = true;
+        it.color = Vec4{1.0f, 1.0f, 1.0f, 1.0f};
+
+        // The FULL palette, deliberately. The self-view copy above may have
+        // the head collapsed so the camera is not inside the skull; the
+        // reflection has to show a complete avatar, which is the entire
+        // reason two palettes exist.
+        if (gm.skinned && world.registry().all_of<CSkeleton>(e)) {
+            const auto& sk = world.registry().get<CSkeleton>(e);
+            if (!sk.palette.empty()) {
+                it.joint_base = push_joint_palette(
+                    sk.palette.data(), static_cast<int>(sk.palette.size()));
+                it.joint_count = static_cast<int>(sk.palette.size());
+            } else {
+                continue;
+            }
+        } else if (gm.skinned) {
+            continue;
+        }
+
+        out.push_back(it);
+        ++emitted;
+        ++stats_.drawn;
+        stats_.visible_triangles += gm.triangle_count;
+    }
+    stats_.mirror_reflections = static_cast<std::uint32_t>(emitted);
 }
 
 void Renderer::shutdown() {
@@ -2190,6 +2343,14 @@ void Renderer::shutdown() {
     if (render_pass_) vkDestroyRenderPass(vk_->device(), render_pass_, nullptr);
     pipeline_ = VK_NULL_HANDLE;
     skinned_pipeline_ = VK_NULL_HANDLE;
+    if (pipeline_mirror_ != VK_NULL_HANDLE) {
+        vkDestroyPipeline(vk_->device(), pipeline_mirror_, nullptr);
+        pipeline_mirror_ = VK_NULL_HANDLE;
+    }
+    if (skinned_pipeline_mirror_ != VK_NULL_HANDLE) {
+        vkDestroyPipeline(vk_->device(), skinned_pipeline_mirror_, nullptr);
+        skinned_pipeline_mirror_ = VK_NULL_HANDLE;
+    }
     pipeline_layout_ = VK_NULL_HANDLE;
     vs_ = fs_ = skinned_vs_ = VK_NULL_HANDLE;
     render_pass_ = VK_NULL_HANDLE;

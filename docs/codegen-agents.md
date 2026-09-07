@@ -24,9 +24,11 @@ and is supported by:
 
 ```text
 Stage 11  ┃ asset_contract.json on disk
-Stage 12  ┃ THIS STAGE (code_generation)
+Stage 12  ┃ world_generation → world.<scene_id>.scene.json per environment
+Stage 13  ┃ THIS STAGE (code_generation)
          │
          │ 1. Load MechanicPlan + every scene_spec*.json + BuildSpec
+         │    + every world.*.scene.json (the declared environment ids)
          │ 2. CodegenBoard.load_or_init(project_dir, plan, max_agents=N)
          │      • One row per generate-class CodeTask
          │      • status = "pending" if depends_on == []  else "blocked"
@@ -40,9 +42,27 @@ Stage 12  ┃ THIS STAGE (code_generation)
          │      f. board.mark_done(...) OR board.mark_failed(...)
          │      g. goto a
          │ 4. Stage result: produced paths, board counts, sidecars
-Stage 13  ┃ world_generation
+Stage 14  ┃ asset_optimization
 Stage 15  ┃ scene_compile → cmake_build | quest_build
 ```
+
+`world_generation` runs **before** this stage. Gameplay code acts on the
+environments: a mechanic that opens a door or waits on a lever has to name the
+thing it acts on, and those names are invented by the world architects at
+generation time. Writing C++ first meant guessing them — and a guessed id is not
+a compile error, it resolves to nothing at runtime and the mechanic silently
+does nothing.
+
+So every agent's brief carries a **GENERATED ENVIRONMENTS** block
+(`_load_world_context`) listing, per environment, the interactive ids with their
+kinds and **state keys**, the spawn points, the portals and the nav regions. The
+keys matter as much as the ids: an agent that assumes `is_open` instead of `open`
+writes a read that always returns the default. The block also states the two
+ownership rules that follow from it — read and change object state through
+`ctx.interactive` and never by writing `CTransform` (the affordance built-in owns
+that motion, and a second writer fights it every frame); and use
+`ctx.persistence` only for facts belonging to no object, because object state
+already persists on its own.
 
 Workers are pull-based: there is **no** static "worker-0 owns tasks
 0..3" partition. Three workers compete for the next eligible

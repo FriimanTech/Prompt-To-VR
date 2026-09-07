@@ -8,6 +8,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include "ptv/api/InteractiveState.h"
 #include "ptv/math/Math.h"
 #include "ptv/render/GltfSkinnedLoad.h"
 
@@ -32,6 +33,30 @@ public:
     entt::entity find(const std::string& id) const {
         auto it = id_to_entity_.find(id);
         return it == id_to_entity_.end() ? entt::null : it->second;
+    }
+
+    /** The scene id of ``e``, or nullptr for an entity created without one.
+     *
+     *  Needed by anything that has to write a durable reference to an
+     *  entity. The raw entt handle is NOT durable: handles are reassigned on
+     *  every load, so a save keyed on them restores the wrong objects. */
+    const std::string* id_of(entt::entity e) const {
+        for (const auto& [id, entity] : id_to_entity_) {
+            if (entity == e) return &id;
+        }
+        return nullptr;
+    }
+
+    /** Empty the world completely, for a scene swap.
+     *
+     *  The id map MUST go with the entities. entt reuses handles, so a name
+     *  left over from the outgoing scene would resolve to whatever entity
+     *  happens to take that handle in the new one -- and it would resolve
+     *  successfully, which is the dangerous part: a lookup for "front_door"
+     *  would silently return a lamp. */
+    void clear() {
+        registry_.clear();
+        id_to_entity_.clear();
     }
 
     float delta_time() const { return dt_; }
@@ -184,6 +209,300 @@ struct CSkeleton {
      *  the same palette entry the surrounding vertices use, so it tracks the
      *  limb exactly as the geometry does. */
     std::unordered_map<std::string, int> socket_joint;
+    /** Second palette for the player's OWN view, or empty when unused.
+     *
+     *  Built only for entities carrying ``CSelfViewHide``. Two palettes exist
+     *  because head visibility is a per-view decision: the camera sits at the
+     *  avatar's eyes, so the head must not render in the player's own view,
+     *  but it must still render in a mirror -- and deleting it once would
+     *  make the reflection headless. This is the same approach the VRM
+     *  specification calls ``thirdPersonOnly`` and VRChat calls Head Chop:
+     *  render the avatar differently per view rather than removing geometry
+     *  globally. */
+    std::vector<Mat4> palette_self_view;
+};
+
+/** Joints to collapse in the player's own view only.
+ *
+ * Holds a whole subtree rather than a single joint because hiding a head
+ * means hiding the jaw, eyes and hair with it -- suppress only the head joint
+ * and the player sees their own hair from the inside.
+ *
+ * ``scale`` is what makes the toggle case work: a runtime control animating
+ * it between 0 and 1 shows or hides the head without rebuilding anything,
+ * mirroring VRChat's global scale factor. */
+struct CSelfViewHide {
+    std::vector<int> joints;
+    /** 0 collapses the subtree to a point; 1 leaves it fully visible. */
+    float scale{0.0f};
+};
+
+/** Declared, changeable state on a world object.
+ *
+ * Attached by the scene loader from the ``interactives`` block the world
+ * builder emitted. Its presence is what turns a box in a doorway into a door
+ * the engine understands: nothing else tells navigation that the crossing is
+ * conditional, or tells persistence what "unchanged" looks like.
+ *
+ * ``pristine`` is the load-time value and is never written again. Everything
+/** One selectable line on a virtual panel. */
+struct UiRow {
+    /** Human-readable, and deliberately NOT drawn: the engine has no in-world
+     *  text rendering. Kept because it is what logs, tests and any future text
+     *  pass need, and because a row with no name is unreviewable. */
+    std::string label;
+    /** Stable identifier the caller matches events against. Using this rather
+     *  than the row INDEX is what lets a panel be rebuilt -- an inventory that
+     *  reorders itself would otherwise deliver a click for the wrong item. */
+    std::string id;
+    /** An entity whose mesh is shown on the row, or kInvalidUiEntity.
+     *
+     *  For a wardrobe this is the actual item, which beats a text label in VR:
+     *  the player recognises the gauntlet by looking at it. */
+    std::uint32_t thumbnail{0xFFFFFFFFu};
+    /** Greyed out and unclickable. A helmet that cannot be removed in flight
+     *  still LISTS -- hiding it would leave the player hunting for something
+     *  they can see on their own body. */
+    bool enabled{true};
+    /** The caller's current choice. */
+    bool selected{false};
+    /** A persistent property of the thing, not of the interaction: "equipped"
+     *  in a wardrobe, "owned" in a shop. Distinct from ``selected``, which is
+     *  what the pointer is on right now -- the two have to be separable or a
+     *  wardrobe cannot show you inspecting one item while wearing another. */
+    bool marked{false};
+};
+
+/** A click the panel recorded, waiting to be read. */
+struct UiEvent {
+    std::string panel_id;
+    std::string row_id;
+    int row_index{-1};
+    /** Which hand clicked, for haptics or handedness-aware logic. */
+    int hand{-1};
+};
+
+/**
+ * A world-anchored virtual panel.
+ *
+ * Generalized out of the locomotion menu, which proved the pattern but was
+ * hard-coded in the application layer: fixed pages, two pads, and its own
+ * copies of edge detection and debounce. Any generated menu -- a wardrobe, a
+ * mission select, a shop -- needed all of that again from scratch, over a
+ * MechanicContext that offered only debug draw and raycasts.
+ *
+ * Rows carry no positions. The panel lays them out, because a caller that
+ * placed its own rows would have to re-place them every time the list changed
+ * length, and would have no way to keep two panels comfortable at once.
+ */
+struct CUiPanel {
+    /** Addressed by generated code through ``IUi``. */
+    std::string id;
+    std::vector<UiRow> rows;
+
+    bool open{false};
+
+    /** Placed once when opened, then left alone. Re-anchoring on every change
+     *  would jerk the panel around mid-decision, which is exactly when the
+     *  player is reading it. */
+    Vec3 anchor{0.0f, 1.55f, -1.2f};
+    float yaw_rad{0.0f};
+    bool anchor_set{false};
+
+    /** Meta's "Head -> Comfort" guidance: primary UI about 1.5 m forward and
+     *  slightly below eye level, so the natural line of sight rests on it
+     *  without neck strain. At 1.5 m, 10 degrees below the horizon is ~0.20 m. */
+    float distance_m{1.5f};
+    float below_eye_m{0.20f};
+
+    float row_height_m{0.12f};
+    float width_m{0.42f};
+    /** How close a pointer ray must pass to a row's centre to select it. */
+    float hit_radius_m{0.09f};
+
+    /** -1 = either hand may point. Pinning it matters for a panel meant to be
+     *  held in one hand and operated with the other. */
+    int pointer_hand{-1};
+
+    // --- Runtime, owned by the mechanic ---
+    int highlighted{-1};
+    int active_hand{-1};
+    /** Debounce, so opening the panel with a trigger pull does not immediately
+     *  spend that same pull on whatever row happens to be under the ray.
+     *
+     *  Note there is no ``prev_trigger`` here: ``InputSnapshot::HandState``
+     *  already carries last frame's value, and a second copy of the same fact
+     *  would drift the moment one was updated on a frame the other skipped. */
+    float click_cooldown_s{0.35f};
+    /** Clicks not yet read. Bounded: an unread queue is a caller bug, and
+     *  growing without limit would turn it into a leak. */
+    std::vector<UiEvent> events;
+};
+
+/**
+ * "You can act on this, right now" -- published by gameplay, drawn by the
+ * renderer.
+ *
+ * The split matters. Whether an object is actionable depends on reach, on
+ * whether it is locked, and on per-scene interaction policy, and the
+ * affordance built-ins already evaluate all three every frame in order to
+ * decide whether to respond. If the renderer recomputed it there would be two
+ * answers to one question, and they would drift: an object would glow while
+ * its mechanic refused to act on it. Advertising an interaction that will be
+ * refused is worse than showing no cue at all, so the mechanic that will
+ * refuse is the one that owns the cue.
+ *
+ * Written every frame and decayed rather than cleared, so a cue fades instead
+ * of popping when a hand drifts past the edge of reach.
+ */
+struct CHighlight {
+    /** 0 = no cue, 1 = fully highlighted. */
+    float intensity = 0.0f;
+    /** Rim colour. Defaults to a neutral warm highlight. */
+    Vec4 color{1.0f, 0.92f, 0.62f, 1.0f};
+};
+
+/** Declared world state: what an object IS, and what about it can change.
+ *
+ * ``pristine`` is the value the world document declared. Everything about it
+ * that survives a transition is derived by comparing ``state`` against it, so
+ * a world reloads from its unchanged document plus a small set of deltas --
+ * and no mechanic has to remember to write a save file. */
+struct CInteractive {
+    /** Stable, author-chosen, unique. The persistence key. */
+    std::string id;
+    /** "door", "switchable", "container", "mover", "breakable",
+     *  "harvestable", "movable". */
+    std::string kind;
+    /** Current state, keyed by name ("open", "angle", "floor"). */
+    std::unordered_map<std::string, InteractiveValue> state;
+    /** The same map as it was at load. Never mutated. */
+    std::unordered_map<std::string, InteractiveValue> pristine;
+    /** A modifier, not a kind: a gate can be closed AND locked. */
+    bool locked{false};
+    /** False makes the object refuse interaction and suppresses its
+     *  affordance cue. This is where a per-scene interaction policy lands --
+     *  "players cannot pick grass in the hub" -- so one shared check governs
+     *  both whether an action succeeds and whether it is advertised. */
+    bool interaction_allowed{true};
+
+    // --- Kind parameters, as declared. --------------------------------
+    Vec3 hinge_point{0.0f, 0.0f, 0.0f};
+    Vec3 hinge_axis{0.0f, 1.0f, 0.0f};
+    float min_angle_deg{0.0f};
+    float max_angle_deg{90.0f};
+    Vec3 slide_axis{0.0f, 0.0f, 0.0f};
+    float slide_distance_m{0.0f};
+    std::vector<std::string> positions;
+    std::string yields_asset_id;
+};
+
+/** An object whose POSITION should survive a transition.
+ *
+ * The other half of persistence. A door records a discrete state change; a
+ * bottle the player moved from the floor to a bed records a transform. Both
+ * are diffed against a load-time baseline, so neither ``builtin.grab`` nor
+ * any other mechanic needs save code -- moving the object IS the save.
+ *
+ * ``pristine`` is where the scene document put it, captured once at load. */
+struct CMovable {
+    Transform pristine{};
+};
+
+/** One place something can be equipped on a wearer.
+ *
+ * Anatomy alone cannot express what games actually ask for -- "sword sheath
+ * on the left hip", "hammer loop on the tool belt", "night-vision mount on
+ * the helmet" -- so a slot is a named point defined either relative to a
+ * canonical body slot or relative to a socket on ANOTHER equipped item. The
+ * second case is what makes a breathing mask connect to a back-mounted
+ * oxygen tank: because attachments already chain, the geometry follows for
+ * free. */
+struct EquipSlot {
+    /** Slot name games refer to, e.g. "hand_r", "sword_sheath_l". */
+    std::string name;
+    /** Canonical body slot on the wearer (see ptv/api/BodySlots.h). Empty
+     *  when this slot is hosted by another equipped item instead. */
+    std::string body_slot;
+    /** Item currently hosting this slot, and the socket on it. Both empty for
+     *  an ordinary body slot. */
+    std::string host_item_slot;
+    std::string host_socket;
+    Vec3 local_position{0.0f, 0.0f, 0.0f};
+    Quat local_rotation{1.0f, 0.0f, 0.0f, 0.0f};
+    /** How close a released object has to be to snap in, in metres. 0 means
+     *  proximity is not required (menu- or script-driven equipping). */
+    float snap_radius_m{0.0f};
+    /** Only one item at a time. Equipping into an occupied exclusive slot
+     *  replaces the incumbent rather than stacking two objects in one place. */
+    bool exclusive{true};
+    /** Item tags this slot accepts. Empty accepts anything, which is how a
+     *  sword is stopped from equipping to the helmet slot just because it
+     *  brushed the player's head. */
+    std::vector<std::string> accepts_tags;
+};
+
+/** The slots a wearer offers. Present on the player's avatar and on any NPC
+ *  that can carry equipment. */
+struct CEquipSlots {
+    std::vector<EquipSlot> slots;
+};
+
+/** State of one equipped item.
+ *
+ * The three flags were deliberately split out of a single "locked" idea,
+ * which conflated two unrelated questions and left equipped items with no
+ * way to come off at all. */
+struct CEquipped {
+    std::uint32_t wearer{0xFFFFFFFFu};
+    std::string slot;
+    /** Brushing a hand past this must not detach it. Governs ACCIDENTAL
+     *  removal only; it never blocks a deliberate pull. */
+    bool passive_grab_protection{true};
+    /** Whether intentional removal is allowed RIGHT NOW. Runtime-mutable,
+     *  because games turn it off while flying, mid-experiment, outside an
+     *  airlock, or while a curse holds -- and back on afterwards, on the same
+     *  item instance. */
+    bool removable{true};
+    /** Whether this specific instance may ever be equipped again. Runtime-
+     *  mutable: a sterile glove that has been removed is contaminated. */
+    bool re_equippable{true};
+    /** Outfit-set id, so one button can equip or remove several coordinated
+     *  pieces while leaving unrelated accessories alone. */
+    std::string group;
+    /** Trim applied on top of the slot's own offset. Lets an item change
+     *  pose without being unequipped -- goggles raised versus lowered. */
+    Vec3 offset{0.0f, 0.0f, 0.0f};
+    Quat offset_rotation{1.0f, 0.0f, 0.0f, 0.0f};
+};
+
+/** A planar mirror. Written by ``builtin.mirror_surface``, read by the
+ *  renderer.
+ *
+ * Implemented as reflected geometry drawn straight into the output buffer
+ * rather than a render-to-texture pass. On the tile-based GPU in a Quest an
+ * offscreen target forces a GMEM round-trip to system memory and back, and
+ * bandwidth is the bottleneck; Meta's own mobile-VR guidance says the
+ * simplest mirror is a reflected copy of the geometry, and drawing geometry
+ * twice is comparatively cheap there.
+ *
+ * The reflected set is deliberately tiny -- the avatar, what it is wearing,
+ * and anything explicitly tagged -- because published Quest 3 measurements
+ * put a full-scene stereo mirror at roughly 2.5-3.5 ms of frame time. */
+struct CMirrorSurface {
+    /** Plane normal in world space, pointing at the viewer. */
+    Vec3 normal{0.0f, 0.0f, 1.0f};
+    /** Reflect only while the viewer is within this range. One mirror is
+     *  active at a time; the rest cost nothing. */
+    float max_distance_m{6.0f};
+    /** Tags whose entities appear in the reflection, in addition to the
+     *  player's avatar and anything attached to it. */
+    std::vector<std::string> reflect_tags;
+    /** Hard cap on reflected entities, so a badly configured tag cannot
+     *  quietly double the frame's draw calls. */
+    int max_reflected{24};
+    /** Set by the mechanic: only the nearest eligible mirror reflects. */
+    bool active{false};
 };
 
 /** Clip playback plus per-joint procedural override for a ``CSkeleton``.

@@ -75,10 +75,12 @@
 #include <glm/gtc/quaternion.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 
+#include "ptv/api/BodySlots.h"
 #include "ptv/core/Logger.h"
 #include "ptv/ecs/Skeleton.h"
 #include "ptv/ecs/TransformOffset.h"
 #include "ptv/platform/AssetSource.h"
+#include "ptv/save/SaveSystem.h"
 #include "ptv/scene/SceneLoader.h"
 
 // Where the generated hand meshes live. CMake supplies an absolute build path
@@ -523,9 +525,11 @@ public:
     explicit LocomotionService(Application* app) : app_(app) {}
 
     Vec3 position() const override {
-        return Vec3(app_->rig_.pos_x, app_->rig_.pos_y, app_->rig_.pos_z);
+        // World, not frame-local: the two are the same only while the player
+        // is unparented, and every caller of this speaks world space.
+        return app_->rig_world_position();
     }
-    float yaw_radians() const override { return app_->rig_.yaw_rad; }
+    float yaw_radians() const override { return app_->rig_world_yaw(); }
 
     void translate(const Vec3& delta) override {
         if (!is_finite(delta)) {
@@ -549,9 +553,13 @@ public:
                 app_->player_capsule_center_, app_->player_capsule_height_, d,
                 static_cast<std::uint32_t>(app_->player_entity_));
         }
-        app_->rig_.pos_x += d.x;
-        app_->rig_.pos_y += d.y;
-        app_->rig_.pos_z += d.z;
+        // The resolved delta is a world vector; the rig stores frame-local
+        // coordinates. Without this rotation, walking forward on a turning
+        // vehicle would curve.
+        const Vec3 local = app_->world_vector_to_frame(d);
+        app_->rig_.pos_x += local.x;
+        app_->rig_.pos_y += local.y;
+        app_->rig_.pos_z += local.z;
     }
 
     void rotate_yaw(float radians) override {
@@ -570,8 +578,10 @@ public:
             return;
         }
         Vec3 dst = target;
-        // Cap horizontal distance to what the scene allows.
-        const Vec3 here(app_->rig_.pos_x, app_->rig_.pos_y, app_->rig_.pos_z);
+        // Cap horizontal distance to what the scene allows. Both the target
+        // and the comparison are in WORLD space -- a teleport aims at a
+        // raycast landing spot, which physics reported in world.
+        const Vec3 here = app_->rig_world_position();
         Vec3 flat(dst.x - here.x, 0.0f, dst.z - here.z);
         const float dist = glm::length(flat);
         const float max_d = std::max(0.1f, app_->teleport_max_horizontal_m_);
@@ -587,9 +597,7 @@ public:
         if (dst.y < app_->teleport_floor_y_) {
             dst.y = app_->teleport_floor_y_;
         }
-        app_->rig_.pos_x = dst.x;
-        app_->rig_.pos_y = dst.y;
-        app_->rig_.pos_z = dst.z;
+        app_->set_rig_world_position(dst);
     }
 
     // NOTE: must be fully qualified. Inside a nested class of Application,
@@ -641,6 +649,31 @@ public:
         tunables_.snap_turn_cooldown_s = app_->snap_turn_cooldown_s_;
         return tunables_;
     }
+
+    void set_reference_frame(std::uint32_t entity,
+                             const char* anchor) override {
+        app_->set_reference_frame(entity,
+                                  anchor == nullptr ? "" : std::string(anchor));
+    }
+
+    void clear_reference_frame() override { app_->clear_reference_frame(); }
+
+    std::uint32_t reference_frame() const override {
+        return app_->has_reference_frame()
+                   ? static_cast<std::uint32_t>(app_->rig_.parent)
+                   : InputSnapshot::kInvalidEntity;
+    }
+
+    void set_player_scale(float scale) override {
+        if (!std::isfinite(scale) || scale <= 0.0f) {
+            PTV_WARN("set_player_scale: rejecting non-finite/non-positive {}",
+                     scale);
+            return;
+        }
+        app_->set_player_scale(scale);
+    }
+
+    float player_scale() const override { return app_->rig_.scale; }
 
 private:
     Application* app_;
@@ -823,6 +856,14 @@ void Application::ensure_player_locomotion_bindings() {
         // nothing when the rigged hand asset is absent -- the mechanic sees
         // no hand entity and returns immediately.
         "builtin.hand_pose",
+        // Same argument again for the player's BODY. When a scene places an
+        // entity tagged "player_avatar", posing it is engine furniture: the
+        // camera sits at its eyes and its head has to be suppressed in the
+        // player's own view, and a generated scene forgetting to ask would
+        // leave the player staring at the inside of their own skull. Costs
+        // nothing when no avatar entity exists -- the mechanic finds none and
+        // returns immediately.
+        "builtin.avatar_body",
     };
     // Aliases the hand-authored sample uses for the same mechanics.
     auto satisfies = [](const std::string& bound, const char* required) {
@@ -1100,6 +1141,697 @@ public:
     }
 
 private:
+    Application* app_;
+};
+
+class Application::InteractiveService final : public IInteractive {
+public:
+    explicit InteractiveService(Application* app) : app_(app) {}
+
+    bool exists(const char* id) const override {
+        return find(id) != nullptr;
+    }
+
+    std::uint32_t entity_of(const char* id) const override {
+        if (id == nullptr) return InputSnapshot::kInvalidEntity;
+        auto view = app_->world_.registry().view<const CInteractive>();
+        for (auto e : view) {
+            if (view.get<const CInteractive>(e).id == id) {
+                return static_cast<std::uint32_t>(e);
+            }
+        }
+        return InputSnapshot::kInvalidEntity;
+    }
+
+    const char* id_of(std::uint32_t entity) const override {
+        const World& w = app_->world_;
+        const auto e = static_cast<entt::entity>(entity);
+        if (!w.valid(entity) || !w.registry().all_of<CInteractive>(e)) {
+            return "";
+        }
+        return w.registry().get<CInteractive>(e).id.c_str();
+    }
+
+    const char* kind_of(const char* id) const override {
+        const CInteractive* it = find(id);
+        return it == nullptr ? "" : it->kind.c_str();
+    }
+
+    InteractiveValue get_state(const char* id,
+                               const char* key) const override {
+        const CInteractive* it = find(id);
+        if (it == nullptr || key == nullptr) return InteractiveValue{};
+        const auto found = it->state.find(key);
+        // A missing key degrades to a default rather than failing: a mechanic
+        // reading state its world did not declare should do nothing, not
+        // crash the frame.
+        return found == it->state.end() ? InteractiveValue{} : found->second;
+    }
+
+    void set_state(const char* id, const char* key,
+                   const InteractiveValue& value) override {
+        CInteractive* it = find_mutable(id);
+        if (it == nullptr || key == nullptr) return;
+        it->state[key] = value;
+        // Nothing else to do: persistence is derived by diffing against
+        // ``pristine`` at save time, so the mechanic that called this has
+        // already finished its part.
+    }
+
+    bool is_changed(const char* id, const char* key) const override {
+        const CInteractive* it = find(id);
+        if (it == nullptr || key == nullptr) return false;
+        const auto cur = it->state.find(key);
+        const auto was = it->pristine.find(key);
+        if (cur == it->state.end()) return false;
+        if (was == it->pristine.end()) return true;  // key appeared at runtime
+        return cur->second != was->second;
+    }
+
+    bool is_locked(const char* id) const override {
+        const CInteractive* it = find(id);
+        return it != nullptr && it->locked;
+    }
+
+    void set_locked(const char* id, bool locked) override {
+        if (CInteractive* it = find_mutable(id)) it->locked = locked;
+    }
+
+    bool interaction_allowed(const char* id) const override {
+        const CInteractive* it = find(id);
+        // Unknown ids are permitted: the gate exists to express a DENIAL a
+        // policy stated, not to make everything opt-in.
+        return it == nullptr || it->interaction_allowed;
+    }
+
+    void set_interaction_allowed(const char* id, bool allowed) override {
+        if (CInteractive* it = find_mutable(id)) {
+            it->interaction_allowed = allowed;
+        }
+    }
+
+    int find_by_kind(const char* kind, const char** out,
+                     int max_out) const override {
+        if (kind == nullptr || out == nullptr || max_out <= 0) return 0;
+        int n = 0;
+        auto view = app_->world_.registry().view<const CInteractive>();
+        for (auto e : view) {
+            if (n >= max_out) break;
+            const auto& ci = view.get<const CInteractive>(e);
+            if (ci.kind != kind) continue;
+            out[n++] = ci.id.c_str();
+        }
+        return n;
+    }
+
+    /** Every id whose state has diverged from the document, with the deltas.
+     *  Used by the save path; not part of the public interface because
+     *  gameplay has no reason to serialize anything itself. */
+    nlohmann::json changed_state() const {
+        nlohmann::json out = nlohmann::json::object();
+        auto view = app_->world_.registry().view<const CInteractive>();
+        for (auto e : view) {
+            const auto& ci = view.get<const CInteractive>(e);
+            nlohmann::json deltas = nlohmann::json::object();
+            for (const auto& [key, value] : ci.state) {
+                const auto was = ci.pristine.find(key);
+                if (was != ci.pristine.end() && was->second == value) continue;
+                deltas[key] = to_json(value);
+            }
+            if (ci.locked) deltas["__locked"] = true;
+            if (!deltas.empty()) out[ci.id] = std::move(deltas);
+        }
+        return out;
+    }
+
+    /** Re-apply saved deltas after a scene has been rebuilt from its
+     *  document. The document is authoritative for everything else. */
+    void apply_state(const nlohmann::json& saved) {
+        if (!saved.is_object()) return;
+        for (const auto& [id, deltas] : saved.items()) {
+            CInteractive* it = find_mutable(id.c_str());
+            if (it == nullptr || !deltas.is_object()) continue;
+            for (const auto& [key, value] : deltas.items()) {
+                if (key == "__locked") {
+                    it->locked = value.is_boolean() ? value.get<bool>() : false;
+                    continue;
+                }
+                InteractiveValue parsed{};
+                if (!from_json(value, &parsed)) continue;
+                it->state[key] = parsed;
+            }
+        }
+    }
+
+    static nlohmann::json to_json(const InteractiveValue& v) {
+        switch (v.type) {
+            case InteractiveValue::Type::Bool:
+                return nlohmann::json{{"type", "bool"}, {"value", v.b}};
+            case InteractiveValue::Type::Number:
+                return nlohmann::json{{"type", "number"}, {"value", v.number}};
+            case InteractiveValue::Type::Name:
+                return nlohmann::json{{"type", "name"}, {"value", v.name}};
+            case InteractiveValue::Type::Vector:
+            default:
+                return nlohmann::json{
+                    {"type", "vector"},
+                    {"value", nlohmann::json::array({v.vector.x, v.vector.y,
+                                                     v.vector.z})}};
+        }
+    }
+
+    static bool from_json(const nlohmann::json& j, InteractiveValue* out) {
+        if (out == nullptr || !j.is_object() || !j.contains("type")) {
+            return false;
+        }
+        const std::string type = j.value("type", std::string());
+        if (type == "bool") {
+            *out = InteractiveValue::of(j.value("value", false));
+        } else if (type == "number") {
+            *out = InteractiveValue::of(j.value("value", 0.0f));
+        } else if (type == "name") {
+            *out = InteractiveValue::named(j.value("value", std::string()));
+        } else if (type == "vector") {
+            const auto& a = j["value"];
+            if (!a.is_array() || a.size() != 3) return false;
+            *out = InteractiveValue::of(Vec3(a[0].get<float>(),
+                                             a[1].get<float>(),
+                                             a[2].get<float>()));
+        } else {
+            return false;
+        }
+        return true;
+    }
+
+private:
+    const CInteractive* find(const char* id) const {
+        if (id == nullptr || *id == '\0') return nullptr;
+        auto view = app_->world_.registry().view<const CInteractive>();
+        for (auto e : view) {
+            const auto& ci = view.get<const CInteractive>(e);
+            if (ci.id == id) return &ci;
+        }
+        return nullptr;
+    }
+
+    CInteractive* find_mutable(const char* id) {
+        if (id == nullptr || *id == '\0') return nullptr;
+        auto view = app_->world_.registry().view<CInteractive>();
+        for (auto e : view) {
+            auto& ci = view.get<CInteractive>(e);
+            if (ci.id == id) return &ci;
+        }
+        return nullptr;
+    }
+
+    Application* app_;
+};
+
+class Application::UiService final : public IUi {
+public:
+    explicit UiService(Application* app) : app_(app) {}
+
+    bool panel_exists(const char* panel_id) const override {
+        return find(panel_id) != nullptr;
+    }
+
+    void open(const char* panel_id) override {
+        if (CUiPanel* p = find(panel_id)) {
+            if (!p->open) {
+                p->open = true;
+                // Re-anchor on open, and debounce: the trigger pull that
+                // opened the panel must not also select whatever row happens
+                // to be under the ray.
+                p->anchor_set = false;
+                p->click_cooldown_s = 0.35f;
+            }
+        }
+    }
+
+    void close(const char* panel_id) override {
+        if (CUiPanel* p = find(panel_id)) {
+            p->open = false;
+            p->highlighted = -1;
+            p->active_hand = -1;
+            // Unread clicks belong to a panel that is no longer shown; keeping
+            // them would fire an action after the player dismissed the menu.
+            p->events.clear();
+        }
+    }
+
+    bool is_open(const char* panel_id) const override {
+        const CUiPanel* p = find(panel_id);
+        return p != nullptr && p->open;
+    }
+
+    void set_rows(const char* panel_id, const UiRowDesc* rows,
+                  int count) override {
+        CUiPanel* p = find(panel_id);
+        if (p == nullptr || rows == nullptr || count < 0) return;
+
+        // Remember the highlight BY ID, not by index. A caller rebuilding the
+        // list every frame (which is the simplest correct thing for it to do)
+        // would otherwise reset or misplace the pointer on every rebuild.
+        std::string highlighted_id;
+        if (p->highlighted >= 0 &&
+            p->highlighted < static_cast<int>(p->rows.size())) {
+            highlighted_id = p->rows[static_cast<std::size_t>(p->highlighted)].id;
+        }
+
+        p->rows.clear();
+        p->rows.reserve(static_cast<std::size_t>(count));
+        for (int i = 0; i < count; ++i) {
+            UiRow row{};
+            row.id = rows[i].id == nullptr ? "" : rows[i].id;
+            row.label = rows[i].label == nullptr ? row.id : rows[i].label;
+            row.thumbnail = rows[i].thumbnail;
+            row.enabled = rows[i].enabled;
+            row.selected = rows[i].selected;
+            row.marked = rows[i].marked;
+            p->rows.push_back(std::move(row));
+        }
+
+        p->highlighted = -1;
+        if (!highlighted_id.empty()) {
+            for (std::size_t i = 0; i < p->rows.size(); ++i) {
+                if (p->rows[i].id == highlighted_id && p->rows[i].enabled) {
+                    p->highlighted = static_cast<int>(i);
+                    break;
+                }
+            }
+        }
+        if (p->highlighted < 0) p->active_hand = -1;
+    }
+
+    bool poll_click(const char* panel_id, UiClick* out) override {
+        CUiPanel* p = find(panel_id);
+        if (p == nullptr || p->events.empty()) return false;
+        // Oldest first: clicks are an ordered sequence of player intent, and
+        // acting on the newest first would reorder what they did.
+        event_scratch_ = p->events.front();
+        p->events.erase(p->events.begin());
+        if (out != nullptr) {
+            out->panel_id = event_scratch_.panel_id.c_str();
+            out->row_id = event_scratch_.row_id.c_str();
+            out->row_index = event_scratch_.row_index;
+            out->hand = event_scratch_.hand;
+        }
+        return true;
+    }
+
+    int highlighted_row(const char* panel_id) const override {
+        const CUiPanel* p = find(panel_id);
+        return p == nullptr ? -1 : p->highlighted;
+    }
+
+private:
+    CUiPanel* find(const char* panel_id) {
+        return const_cast<CUiPanel*>(
+            static_cast<const UiService*>(this)->find(panel_id));
+    }
+
+    const CUiPanel* find(const char* panel_id) const {
+        if (panel_id == nullptr || *panel_id == '\0') return nullptr;
+        auto view = app_->world_.registry().view<CUiPanel>();
+        for (auto entity : view) {
+            const auto& panel = view.get<CUiPanel>(entity);
+            if (panel.id == panel_id) return &panel;
+        }
+        return nullptr;
+    }
+
+    Application* app_;
+    /** Backs the ``const char*`` fields handed out by ``poll_click``: they must
+     *  outlive the call, and the event they came from has been dequeued. */
+    UiEvent event_scratch_{};
+};
+
+class Application::TransitionService final : public ISceneTransition {
+public:
+    explicit TransitionService(Application* app) : app_(app) {}
+
+    bool go_to(const char* scene_id, const char* spawn_point_id) override {
+        if (scene_id == nullptr || *scene_id == '\0') return false;
+        return app_->request_scene_transition(
+            scene_id, spawn_point_id == nullptr ? "" : spawn_point_id);
+    }
+
+    const char* current_scene() const override {
+        return app_->scene_.scene_id.c_str();
+    }
+
+    bool scene_exists(const char* scene_id) const override {
+        if (scene_id == nullptr) return false;
+        return app_->scene_.scene_index.count(scene_id) != 0;
+    }
+
+    bool transition_pending() const override {
+        return app_->pending_transition_.active;
+    }
+
+    bool load_nested(const char* scene_id, std::uint32_t host,
+                     const char* anchor, float fit_extent_m) override {
+        if (scene_id == nullptr) return false;
+        return app_->load_nested_scene(scene_id, host,
+                                       anchor == nullptr ? "" : anchor,
+                                       fit_extent_m);
+    }
+
+    bool unload_nested(const char* scene_id) override {
+        return scene_id != nullptr && app_->unload_nested_scene(scene_id);
+    }
+
+    bool nested_loaded(const char* scene_id) const override {
+        return scene_id != nullptr && app_->nested_scene_loaded(scene_id);
+    }
+
+private:
+    Application* app_;
+};
+
+class Application::PersistenceService final : public IPersistence {
+public:
+    explicit PersistenceService(Application* app) : app_(app) { (void)app_; }
+
+    void set_flag(const char* key, bool value) override {
+        if (key != nullptr) flags_[key] = value;
+    }
+    bool flag(const char* key, bool fallback) const override {
+        if (key == nullptr) return fallback;
+        const auto it = flags_.find(key);
+        return it == flags_.end() ? fallback : it->second;
+    }
+    void set_number(const char* key, float value) override {
+        if (key != nullptr) numbers_[key] = value;
+    }
+    float number(const char* key, float fallback) const override {
+        if (key == nullptr) return fallback;
+        const auto it = numbers_.find(key);
+        return it == numbers_.end() ? fallback : it->second;
+    }
+    void set_text(const char* key, const char* value) override {
+        if (key != nullptr) texts_[key] = value == nullptr ? "" : value;
+    }
+    const char* text(const char* key, const char* fallback) const override {
+        if (key == nullptr) return fallback;
+        const auto it = texts_.find(key);
+        return it == texts_.end() ? fallback : it->second.c_str();
+    }
+
+    void set_scene_flag(const char* scene, const char* key,
+                        bool value) override {
+        set_flag(scoped(scene, key).c_str(), value);
+    }
+    bool scene_flag(const char* scene, const char* key,
+                    bool fallback) const override {
+        return flag(scoped(scene, key).c_str(), fallback);
+    }
+    void set_scene_number(const char* scene, const char* key,
+                          float value) override {
+        set_number(scoped(scene, key).c_str(), value);
+    }
+    float scene_number(const char* scene, const char* key,
+                       float fallback) const override {
+        return number(scoped(scene, key).c_str(), fallback);
+    }
+
+    bool has(const char* key) const override {
+        if (key == nullptr) return false;
+        return flags_.count(key) != 0 || numbers_.count(key) != 0 ||
+               texts_.count(key) != 0;
+    }
+    void clear(const char* key) override {
+        if (key == nullptr) return;
+        flags_.erase(key);
+        numbers_.erase(key);
+        texts_.erase(key);
+    }
+
+    nlohmann::json to_json() const {
+        return nlohmann::json{
+            {"flags", flags_},
+            {"numbers", numbers_},
+            {"texts", texts_},
+        };
+    }
+
+    void from_json(const nlohmann::json& j) {
+        if (!j.is_object()) return;
+        flags_.clear();
+        numbers_.clear();
+        texts_.clear();
+        if (j.contains("flags") && j["flags"].is_object()) {
+            flags_ = j["flags"].get<std::unordered_map<std::string, bool>>();
+        }
+        if (j.contains("numbers") && j["numbers"].is_object()) {
+            numbers_ =
+                j["numbers"].get<std::unordered_map<std::string, float>>();
+        }
+        if (j.contains("texts") && j["texts"].is_object()) {
+            texts_ =
+                j["texts"]
+                    .get<std::unordered_map<std::string, std::string>>();
+        }
+    }
+
+private:
+    /** ``scene/key``. Keeps a temple's puzzle state from colliding with a
+     *  laboratory's when both call a key "door_sealed". */
+    static std::string scoped(const char* scene, const char* key) {
+        const std::string s = scene == nullptr ? "" : scene;
+        const std::string k = key == nullptr ? "" : key;
+        return s + "/" + k;
+    }
+
+    Application* app_;
+    std::unordered_map<std::string, bool> flags_;
+    std::unordered_map<std::string, float> numbers_;
+    std::unordered_map<std::string, std::string> texts_;
+};
+
+class Application::EquipService final : public IEquip {
+public:
+    explicit EquipService(Application* app) : app_(app) {}
+
+    bool equip(std::uint32_t item, std::uint32_t wearer,
+               const char* slot) override {
+        World& w = app_->world_;
+        if (slot == nullptr || !w.valid(item) || !w.valid(wearer)) return false;
+        const EquipSlot* def = find_slot(wearer, slot);
+        if (def == nullptr) {
+            PTV_WARN("equip: '{}' is not a slot on entity {}", slot, wearer);
+            return false;
+        }
+        if (!accepts(*def, item)) {
+            PTV_WARN("equip: entity {} is not accepted in slot '{}'", item,
+                     slot);
+            return false;
+        }
+        // A per-instance refusal, which is how a contaminated glove stays
+        // out of a sterile slot even though its TYPE still fits.
+        const auto ie = static_cast<entt::entity>(item);
+        if (w.registry().all_of<CEquipped>(ie) &&
+            !w.registry().get<CEquipped>(ie).re_equippable) {
+            return false;
+        }
+
+        // Exclusive slots replace rather than stack. What happens to the
+        // displaced item is the caller's policy: this service only guarantees
+        // the slot ends up holding one thing.
+        if (def->exclusive) {
+            const std::uint32_t incumbent = equipped_at(wearer, slot);
+            if (incumbent != InputSnapshot::kInvalidEntity &&
+                incumbent != item) {
+                unequip_internal(incumbent, /*force=*/true);
+            }
+        }
+
+        // The slot's anchor is either a body slot on the wearer or a socket
+        // on another equipped item. In the nested case the parent is that
+        // item, so CAttachment chains and the geometry follows both hops.
+        std::uint32_t parent = wearer;
+        std::string anchor = def->body_slot;
+        if (!def->host_item_slot.empty()) {
+            const std::uint32_t host =
+                equipped_at(wearer, def->host_item_slot.c_str());
+            if (host == InputSnapshot::kInvalidEntity) {
+                PTV_WARN("equip: slot '{}' needs '{}' equipped first", slot,
+                         def->host_item_slot);
+                return false;
+            }
+            parent = host;
+            anchor = def->host_socket;
+        }
+        if (anchor.empty()) anchor = slot;
+
+        if (app_->attach_svc_ == nullptr) return false;
+        if (!app_->attach_svc_->attach(item, parent, anchor.c_str(),
+                                       def->local_position,
+                                       def->local_rotation)) {
+            return false;
+        }
+
+        auto& eq = w.registry().get_or_emplace<CEquipped>(ie);
+        eq.wearer = wearer;
+        eq.slot = slot;
+        eq.offset = Vec3(0.0f);
+        eq.offset_rotation = Quat(1.0f, 0.0f, 0.0f, 0.0f);
+        // Tag it so grab can recognise an equipped object without needing to
+        // know anything about equipping.
+        auto& tag = w.registry().get_or_emplace<CTag>(ie);
+        if (std::find(tag.tags.begin(), tag.tags.end(), "equipped") ==
+            tag.tags.end()) {
+            tag.tags.push_back("equipped");
+        }
+        return true;
+    }
+
+    bool unequip(std::uint32_t item) override {
+        return unequip_internal(item, /*force=*/false);
+    }
+
+    const char* slot_of(std::uint32_t item) const override {
+        const World& w = app_->world_;
+        const auto ie = static_cast<entt::entity>(item);
+        if (!w.valid(item) || !w.registry().all_of<CEquipped>(ie)) return "";
+        return w.registry().get<CEquipped>(ie).slot.c_str();
+    }
+
+    std::uint32_t equipped_at(std::uint32_t wearer,
+                              const char* slot) const override {
+        if (slot == nullptr) return InputSnapshot::kInvalidEntity;
+        const World& w = app_->world_;
+        auto view = w.registry().view<const CEquipped>();
+        for (auto e : view) {
+            const auto& eq = view.get<const CEquipped>(e);
+            if (eq.wearer == wearer && eq.slot == slot) {
+                return static_cast<std::uint32_t>(e);
+            }
+        }
+        return InputSnapshot::kInvalidEntity;
+    }
+
+    int equipped_items(std::uint32_t wearer, std::uint32_t* out,
+                       int max_out) const override {
+        if (out == nullptr || max_out <= 0) return 0;
+        int n = 0;
+        auto view = app_->world_.registry().view<const CEquipped>();
+        for (auto e : view) {
+            if (n >= max_out) break;
+            if (view.get<const CEquipped>(e).wearer != wearer) continue;
+            out[n++] = static_cast<std::uint32_t>(e);
+        }
+        return n;
+    }
+
+    bool slot_exists(std::uint32_t wearer, const char* slot) const override {
+        return slot != nullptr && find_slot(wearer, slot) != nullptr;
+    }
+
+    void set_removable(std::uint32_t item, bool removable) override {
+        if (auto* eq = equipped_state(item)) eq->removable = removable;
+    }
+
+    void set_equippable(std::uint32_t item, bool equippable) override {
+        World& w = app_->world_;
+        if (!w.valid(item)) return;
+        // Reachable on an item that is NOT currently equipped, which is the
+        // point: a glove is marked contaminated after being taken off.
+        auto& eq = w.registry().get_or_emplace<CEquipped>(
+            static_cast<entt::entity>(item));
+        eq.re_equippable = equippable;
+    }
+
+    bool is_removable(std::uint32_t item) const override {
+        const World& w = app_->world_;
+        const auto ie = static_cast<entt::entity>(item);
+        if (!w.valid(item) || !w.registry().all_of<CEquipped>(ie)) return false;
+        const auto& eq = w.registry().get<CEquipped>(ie);
+        return eq.wearer != InputSnapshot::kInvalidEntity && eq.removable;
+    }
+
+    void set_offset(std::uint32_t item, const Vec3& position,
+                    const Quat& rotation) override {
+        auto* eq = equipped_state(item);
+        if (eq == nullptr) return;
+        eq->offset = position;
+        eq->offset_rotation = glm::normalize(rotation);
+        // Push it straight onto the attachment so the change is visible this
+        // frame without waiting for a re-equip.
+        World& w = app_->world_;
+        const auto ie = static_cast<entt::entity>(item);
+        if (!w.registry().all_of<CAttachment>(ie)) return;
+        const EquipSlot* def = find_slot(eq->wearer, eq->slot.c_str());
+        auto& att = w.registry().get<CAttachment>(ie);
+        const Vec3 base = def ? def->local_position : Vec3(0.0f);
+        const Quat base_rot = def ? def->local_rotation
+                                  : Quat(1.0f, 0.0f, 0.0f, 0.0f);
+        att.local_position = base + position;
+        att.local_rotation = glm::normalize(base_rot * eq->offset_rotation);
+    }
+
+private:
+    bool unequip_internal(std::uint32_t item, bool force) {
+        World& w = app_->world_;
+        const auto ie = static_cast<entt::entity>(item);
+        if (!w.valid(item) || !w.registry().all_of<CEquipped>(ie)) return false;
+        auto& eq = w.registry().get<CEquipped>(ie);
+        if (eq.wearer == InputSnapshot::kInvalidEntity) return false;
+        // ``removable`` gates deliberate removal only. ``force`` is for the
+        // engine's own replacement path, which must not be blocked by a
+        // gameplay rule about the player's hands.
+        if (!force && !eq.removable) return false;
+
+        if (app_->attach_svc_ != nullptr) app_->attach_svc_->detach(item);
+
+        eq.wearer = InputSnapshot::kInvalidEntity;
+        eq.slot.clear();
+        if (w.registry().all_of<CTag>(ie)) {
+            auto& tags = w.registry().get<CTag>(ie).tags;
+            tags.erase(std::remove(tags.begin(), tags.end(), "equipped"),
+                       tags.end());
+        }
+        return true;
+    }
+
+    CEquipped* equipped_state(std::uint32_t item) {
+        World& w = app_->world_;
+        const auto ie = static_cast<entt::entity>(item);
+        if (!w.valid(item) || !w.registry().all_of<CEquipped>(ie)) {
+            return nullptr;
+        }
+        return &w.registry().get<CEquipped>(ie);
+    }
+
+    const EquipSlot* find_slot(std::uint32_t wearer, const char* slot) const {
+        const World& w = app_->world_;
+        const auto we = static_cast<entt::entity>(wearer);
+        if (!w.valid(wearer) || !w.registry().all_of<CEquipSlots>(we)) {
+            return nullptr;
+        }
+        for (const auto& s : w.registry().get<CEquipSlots>(we).slots) {
+            if (s.name == slot) return &s;
+        }
+        return nullptr;
+    }
+
+    /** Tag gate. An empty accept list means "anything", which keeps the
+     *  freedom-first default: an object declared equippable with no further
+     *  configuration goes anywhere on the body. */
+    bool accepts(const EquipSlot& def, std::uint32_t item) const {
+        if (def.accepts_tags.empty()) return true;
+        const World& w = app_->world_;
+        const auto ie = static_cast<entt::entity>(item);
+        if (!w.registry().all_of<CTag>(ie)) return false;
+        const auto& tags = w.registry().get<CTag>(ie).tags;
+        for (const auto& want : def.accepts_tags) {
+            if (std::find(tags.begin(), tags.end(), want) != tags.end()) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     Application* app_;
 };
 
@@ -1697,6 +2429,81 @@ public:
             app_->world_.get<CSkeleton>(entity).skeleton.joint_count());
     }
 
+    int joint_for_slot(std::uint32_t entity, const char* slot) const override {
+        if (slot == nullptr || !has_skeleton(entity)) return -1;
+        const auto& candidates = body_slot_candidates(slot);
+        if (candidates.empty()) return -1;
+        const auto& sk = app_->world_.get<CSkeleton>(entity).skeleton;
+
+        // Candidates are stored normalized, so the rig's names have to be
+        // normalized too. Build that map once per skeleton rather than per
+        // lookup: a full-body rig is ~65 joints and equip resolves several
+        // slots at attach time.
+        const auto& lookup = normalized_names_for(sk);
+        for (const auto& candidate : candidates) {
+            const auto it = lookup.find(candidate);
+            if (it != lookup.end()) return it->second;
+        }
+        return -1;
+    }
+
+    int joint_parent(std::uint32_t entity, int joint) const override {
+        if (!has_skeleton(entity)) return -1;
+        const auto& sk = app_->world_.get<CSkeleton>(entity).skeleton;
+        if (joint < 0 || static_cast<size_t>(joint) >= sk.parents.size()) {
+            return -1;
+        }
+        return sk.parents[static_cast<size_t>(joint)];
+    }
+
+    Mat4 joint_world(std::uint32_t entity, int joint) const override {
+        const World& w = app_->world_;
+        if (!has_skeleton(entity) || !w.has<CTransform>(entity)) {
+            return Mat4(1.0f);
+        }
+        const auto& skc = w.get<CSkeleton>(entity);
+        const auto& sk = skc.skeleton;
+        if (joint < 0 || static_cast<size_t>(joint) >= sk.inverse_bind.size() ||
+            static_cast<size_t>(joint) >= skc.palette.size()) {
+            return Mat4(1.0f);
+        }
+        // palette[j] == jointWorld[j] * inverseBind[j], so undoing the
+        // inverse bind recovers the joint's own matrix -- including the
+        // unit_scale conjugation build_joint_palette folded in, which is why
+        // this is read back out of the palette instead of recomputed from
+        // local_pose. In bind pose the palette is identity and this returns
+        // the bind world matrix, as it should.
+        const Mat4 local = skc.palette[static_cast<size_t>(joint)] *
+                           glm::inverse(sk.inverse_bind[
+                               static_cast<size_t>(joint)]);
+        return w.get<CTransform>(entity).t.matrix() * local;
+    }
+
+    int joint_subtree(std::uint32_t entity, int root, int* out,
+                      int max_out) const override {
+        if (out == nullptr || max_out <= 0 || !has_skeleton(entity)) return 0;
+        const auto& sk = app_->world_.get<CSkeleton>(entity).skeleton;
+        const int count = static_cast<int>(sk.parents.size());
+        if (root < 0 || root >= count) return 0;
+
+        int written = 0;
+        out[written++] = root;
+        // ``order`` is parent-first, so one forward pass is enough: a joint's
+        // parent has already been accepted or rejected by the time it is
+        // visited. No recursion, no second pass.
+        for (const int j : sk.order) {
+            if (j == root || j < 0 || j >= count) continue;
+            const int parent = sk.parents[static_cast<size_t>(j)];
+            if (parent < 0) continue;
+            const bool parent_in =
+                std::find(out, out + written, parent) != out + written;
+            if (!parent_in) continue;
+            if (written >= max_out) break;
+            out[written++] = j;
+        }
+        return written;
+    }
+
     void set_joint_rotation(std::uint32_t entity, int joint,
                             const Quat& rotation) override {
         CSkeleton* sk = nullptr;
@@ -1872,7 +2679,40 @@ private:
         return true;
     }
 
+    /** Normalized joint name -> index for one skeleton, built once.
+     *
+     *  Keyed on the SkeletonData address because a rig's names never change
+     *  after load, and the alternative -- normalizing 65 joint names on every
+     *  slot lookup -- turns attach-time resolution into needless string
+     *  churn. Cleared when a scene unloads via ``forget_name_caches``. */
+    const std::unordered_map<std::string, int>& normalized_names_for(
+        const gltf_mesh_load::SkeletonData& sk) const {
+        const auto* key = &sk;
+        const auto cached = name_cache_.find(key);
+        if (cached != name_cache_.end()) return cached->second;
+
+        std::unordered_map<std::string, int> built;
+        built.reserve(sk.names.size());
+        for (size_t i = 0; i < sk.names.size(); ++i) {
+            std::string n = normalize_joint_name(sk.names[i]);
+            if (n.empty()) continue;
+            // First joint wins: rigs occasionally carry a duplicate name and
+            // the earlier one is the one the skin actually references.
+            built.emplace(std::move(n), static_cast<int>(i));
+        }
+        return name_cache_.emplace(key, std::move(built)).first->second;
+    }
+
+public:
+    /** Drop cached name maps. Called on scene teardown so a reloaded scene
+     *  cannot resolve slots against a freed skeleton's names. */
+    void forget_name_caches() { name_cache_.clear(); }
+
+private:
     Application* app_;
+    mutable std::unordered_map<const gltf_mesh_load::SkeletonData*,
+                               std::unordered_map<std::string, int>>
+        name_cache_;
 };
 
 void Application::create_hand_entities() {
@@ -1942,8 +2782,14 @@ void Application::create_player_body() {
     const auto e = world_.create_entity("__player");
     CTransform ct{};
     // Until the first HMD pose arrives the capsule stands on the spawn point.
-    ct.t.position = Vec3(rig_.pos_x, rig_.pos_y + 0.5f * player_capsule_height_,
-                         rig_.pos_z);
+    // World space, via rig_world_position: the rig's own coordinates are
+    // frame-local, and a body placed with those while the player is riding
+    // something would collide against the wrong part of the world.
+    {
+        const Vec3 base = rig_world_position();
+        ct.t.position =
+            Vec3(base.x, base.y + 0.5f * player_capsule_height_, base.z);
+    }
     // No CMesh on this entity, so the capsule builder reads its height from
     // the transform scale.
     ct.t.scale = player_capsule_height_;
@@ -1990,13 +2836,16 @@ void Application::update_player_body(const Vec3& head_world_position,
     // playspace moves the collider too, but take the vertical extent from the
     // rig: the capsule represents a standing body on the floor, and ducking
     // should not shrink the player out of the world.
+    // The floor level comes from the rig, in WORLD space -- the rig's own
+    // coordinates are relative to whatever the player is riding.
+    const Vec3 rig_world = rig_world_position();
     Vec3 center(head_world_position.x,
-                rig_.pos_y + 0.5f * player_capsule_height_,
+                rig_world.y + 0.5f * player_capsule_height_,
                 head_world_position.z);
     if (!std::isfinite(center.x) || !std::isfinite(center.y) ||
         !std::isfinite(center.z)) {
-        center = Vec3(rig_.pos_x, rig_.pos_y + 0.5f * player_capsule_height_,
-                      rig_.pos_z);
+        center = Vec3(rig_world.x, rig_world.y + 0.5f * player_capsule_height_,
+                      rig_world.z);
     }
     player_capsule_center_ = center;
 
@@ -2141,7 +2990,24 @@ Application::AttachAnchor Application::resolve_attach_anchor(
         return out;
     }
 
-    // 3) A well-known alias, matched loosely against the rig's own names.
+    // 3) A canonical body slot. Added so "forearm_r" or "index_1_l" works as
+    //    an attach anchor directly, which is what lets equip name a place on
+    //    a body without first translating it into whatever the rig happened
+    //    to call that bone. Covers Mixamo, Tripo, Unity and Unreal naming in
+    //    one lookup; see ptv/api/BodySlots.h.
+    if (const auto& candidates = body_slot_candidates(name);
+        !candidates.empty()) {
+        for (const auto& candidate : candidates) {
+            for (size_t j = 0; j < skel.names.size(); ++j) {
+                if (normalize_joint_name(skel.names[j]) != candidate) continue;
+                out.valid = true;
+                out.joint = static_cast<int>(j);
+                return out;
+            }
+        }
+    }
+
+    // 4) A well-known alias, matched loosely against the rig's own names.
     const std::string wanted = lower_ascii(name);
     for (const auto& alias : kJointAliases) {
         if (wanted != alias.anchor) continue;
@@ -2215,6 +3081,632 @@ void Application::tick_attachments(float dt) {
             physics_.move_kinematic(child_id, t.position, t.rotation, dt);
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Player reference frame and scale
+// ---------------------------------------------------------------------------
+
+namespace {
+
+/** Scale bounds.
+ *
+ *  The lower bound is not arbitrary: below roughly a centimetre the player's
+ *  interpupillary distance shrinks past what the stereo pair can resolve
+ *  meaningfully, and the near plane (which scales with them) collapses toward
+ *  zero and wrecks depth precision. The upper bound keeps a giant's near plane
+ *  from clipping through everything within arm's reach. */
+constexpr float kMinPlayerScale = 0.01f;
+constexpr float kMaxPlayerScale = 100.0f;
+
+/** Yaw of a world matrix, discarding pitch and roll.
+ *
+ *  Must be the exact inverse of ``glm::rotate(m, yaw, +Y)``, because the rig
+ *  composes with that and this decomposes it: any mismatch makes boarding a
+ *  moving frame spin the player. With forward at -Z, ``R_y(t)*(0,0,-1)`` is
+ *  ``(-sin t, 0, -cos t)``, so recovering ``t`` needs BOTH components
+ *  negated -- ``atan2(-fwd.x, -fwd.z)``, matching the derivation documented
+ *  on the locomotion menu's anchor. */
+float matrix_yaw(const Mat4& m) {
+    const Vec3 fwd = Vec3(m * Vec4(0.0f, 0.0f, -1.0f, 0.0f));
+    const Vec3 flat(fwd.x, 0.0f, fwd.z);
+    if (glm::length(flat) < 1e-5f) return 0.0f;
+    return std::atan2(-flat.x, -flat.z);
+}
+
+/** Rig yaw that makes the player face ``facing``.
+ *
+ *  Both spawn paths used to write ``atan2(f.x, -f.z)``, which is the heading
+ *  NEGATED: it agrees with the correct value only when ``f.x`` is zero, so a
+ *  spawn facing straight down -Z looked right and every other facing put the
+ *  player in mirrored orientation. That went unnoticed while the only spawn
+ *  was a scene's default; named portal spawn points, which routinely face
+ *  sideways, make it the common case. */
+float yaw_for_facing(const Vec3& facing) {
+    return std::atan2(-facing.x, -facing.z);
+}
+
+}  // namespace
+
+Mat4 Application::rig_parent_matrix() const {
+    if (rig_.parent == entt::null ||
+        !world_.registry().valid(rig_.parent)) {
+        return Mat4(1.0f);
+    }
+
+    Mat4 anchor(1.0f);
+    bool have_anchor = false;
+
+    // An anchor names a joint or socket, so a passenger inside a head rides
+    // the ANIMATED skull rather than the entity's root transform -- which for
+    // a walking character is down at its feet and does not turn with the neck.
+    if (!rig_.parent_anchor.empty()) {
+        const auto self = static_cast<std::uint32_t>(rig_.parent);
+        if (skeleton_svc_ != nullptr) {
+            const int joint = skeleton_svc_->joint_for_slot(
+                self, rig_.parent_anchor.c_str());
+            if (joint >= 0) {
+                anchor = skeleton_svc_->joint_world(self, joint);
+                have_anchor = true;
+            }
+        }
+        // Sockets are the fallback, so an anchor can also be a derived
+        // attachment point ("cockpit", "grip") on an unrigged vehicle.
+        if (!have_anchor && sockets_svc_ != nullptr &&
+            sockets_svc_->has_socket(self, rig_.parent_anchor.c_str())) {
+            anchor =
+                sockets_svc_->socket_world(self, rig_.parent_anchor.c_str());
+            have_anchor = true;
+        }
+    }
+
+    if (!have_anchor) {
+        if (!world_.registry().all_of<CTransform>(rig_.parent)) {
+            return Mat4(1.0f);
+        }
+        const auto& t = world_.registry().get<CTransform>(rig_.parent).t;
+        anchor = glm::translate(Mat4(1.0f), t.position) *
+                 glm::mat4_cast(t.rotation);
+    }
+
+    // Position plus heading only. See the header: inheriting a parent's pitch
+    // or roll tilts the player's horizon, which is the most reliable way to
+    // make someone sick in VR.
+    return glm::rotate(glm::translate(Mat4(1.0f), mat_translation(anchor)),
+                       matrix_yaw(anchor), Vec3(0.0f, 1.0f, 0.0f));
+}
+
+Mat4 Application::rig_world_matrix() const {
+    // parent -> local offset -> scale. Scale is innermost so it shrinks the
+    // player's own body and their tracked motion, NOT their offset within the
+    // frame: a passenger two metres along a deck is two metres along it
+    // whatever size they are.
+    const Mat4 local = rig_world_from_stage(rig_.pos_x, rig_.pos_y, rig_.pos_z,
+                                            rig_.yaw_rad);
+    Mat4 m = rig_parent_matrix() * local;
+    if (rig_.scale != 1.0f) {
+        m = glm::scale(m, Vec3(rig_.scale));
+    }
+    return m;
+}
+
+Vec3 Application::rig_world_position() const {
+    const Vec3 local(rig_.pos_x, rig_.pos_y, rig_.pos_z);
+    if (!has_reference_frame()) return local;
+    return Vec3(rig_parent_matrix() * Vec4(local, 1.0f));
+}
+
+float Application::rig_world_yaw() const {
+    if (!has_reference_frame()) return rig_.yaw_rad;
+    return rig_.yaw_rad + matrix_yaw(rig_parent_matrix());
+}
+
+void Application::set_rig_world_position(const Vec3& world) {
+    Vec3 local = world;
+    if (has_reference_frame()) {
+        local = Vec3(glm::inverse(rig_parent_matrix()) * Vec4(world, 1.0f));
+    }
+    rig_.pos_x = local.x;
+    rig_.pos_y = local.y;
+    rig_.pos_z = local.z;
+}
+
+void Application::set_rig_world_yaw(float yaw_rad) {
+    rig_.yaw_rad = has_reference_frame()
+                       ? yaw_rad - matrix_yaw(rig_parent_matrix())
+                       : yaw_rad;
+}
+
+Vec3 Application::world_vector_to_frame(const Vec3& world_dir) const {
+    if (!has_reference_frame()) return world_dir;
+    // Rotation only: a direction has no origin to translate.
+    const float yaw = matrix_yaw(rig_parent_matrix());
+    return glm::angleAxis(-yaw, Vec3(0.0f, 1.0f, 0.0f)) * world_dir;
+}
+
+bool Application::has_reference_frame() const {
+    return rig_.parent != entt::null && world_.registry().valid(rig_.parent);
+}
+
+void Application::set_reference_frame(std::uint32_t entity,
+                                      const std::string& anchor) {
+    const auto e = static_cast<entt::entity>(entity);
+    if (!world_.registry().valid(e)) {
+        PTV_WARN("reference frame: entity {} is not valid", entity);
+        return;
+    }
+
+    // Where the player is in the WORLD right now, before anything changes.
+    // Boarding must not move them: a player who steps onto a lift and is
+    // instantly somewhere else has been teleported by a bookkeeping detail.
+    const Vec3 world_pos(rig_.pos_x, rig_.pos_y, rig_.pos_z);
+    const Mat4 before = rig_parent_matrix();
+    const Vec3 keep = Vec3(before * Vec4(world_pos, 1.0f));
+    const float keep_yaw = rig_.yaw_rad + matrix_yaw(before);
+
+    rig_.parent = e;
+    rig_.parent_anchor = anchor;
+
+    // Re-express that same world pose inside the new frame.
+    const Mat4 after = rig_parent_matrix();
+    const Vec3 local = Vec3(glm::inverse(after) * Vec4(keep, 1.0f));
+    rig_.pos_x = local.x;
+    rig_.pos_y = local.y;
+    rig_.pos_z = local.z;
+    rig_.yaw_rad = keep_yaw - matrix_yaw(after);
+
+    PTV_INFO("Player reference frame -> entity {} anchor '{}'", entity,
+             anchor.empty() ? "(root)" : anchor.c_str());
+}
+
+void Application::clear_reference_frame() {
+    if (rig_.parent == entt::null) return;
+
+    // Same argument in reverse: disembarking leaves the player standing where
+    // they were, not back at the frame's old origin.
+    const Mat4 before = rig_parent_matrix();
+    const Vec3 world =
+        Vec3(before * Vec4(rig_.pos_x, rig_.pos_y, rig_.pos_z, 1.0f));
+    const float world_yaw = rig_.yaw_rad + matrix_yaw(before);
+
+    rig_.parent = entt::null;
+    rig_.parent_anchor.clear();
+    rig_.pos_x = world.x;
+    rig_.pos_y = world.y;
+    rig_.pos_z = world.z;
+    rig_.yaw_rad = world_yaw;
+
+    PTV_INFO("Player reference frame cleared at ({:.2f}, {:.2f}, {:.2f})",
+             world.x, world.y, world.z);
+}
+
+void Application::set_player_scale(float scale) {
+    const float clamped = std::clamp(scale, kMinPlayerScale, kMaxPlayerScale);
+    if (clamped != scale) {
+        PTV_WARN("Player scale {:.4f} clamped to {:.4f}", scale, clamped);
+    }
+    rig_.scale = clamped;
+    // The capsule is the player's body, so it has to resize with them or a
+    // two-centimetre passenger keeps colliding with a human-sized shape.
+    player_capsule_height_ = scene_.player_height_meters * clamped;
+}
+
+// ---------------------------------------------------------------------------
+// Scene transitions
+// ---------------------------------------------------------------------------
+
+std::string Application::save_path_for_scene(const std::string& scene_id) const {
+    // Beside the scene document, which is the one directory the runtime is
+    // guaranteed to be able to find on both PC VR and inside an APK's
+    // extracted data. Per scene, so a temple's puzzle state cannot collide
+    // with a laboratory's.
+    std::filesystem::path base(scene_path_);
+    const std::string name =
+        "save." + (scene_id.empty() ? std::string("scene") : scene_id) + ".json";
+    return (base.parent_path() / name).string();
+}
+
+bool Application::request_scene_transition(const std::string& scene_id,
+                                          const std::string& spawn_point_id) {
+    if (scene_id.empty()) return false;
+    // Only the first request in a frame wins. Two portals touched together
+    // would otherwise chain the player through two loads, landing them
+    // somewhere neither portal named.
+    if (pending_transition_.active) return false;
+    if (scene_id == scene_.scene_id) {
+        PTV_WARN("transition: already in scene '{}'; ignoring", scene_id);
+        return false;
+    }
+    if (scene_.scene_index.count(scene_id) == 0) {
+        // A build-time mistake, not a runtime condition: the scene compiler
+        // wrote this index from the same BuildSpec the portal came from, so a
+        // miss means they disagree.
+        PTV_WARN(
+            "transition: scene '{}' is not in this project's scene index; "
+            "the portal or menu naming it cannot be taken",
+            scene_id);
+        return false;
+    }
+    pending_transition_.active = true;
+    pending_transition_.scene_id = scene_id;
+    pending_transition_.spawn_point_id = spawn_point_id;
+    return true;
+}
+
+void Application::apply_pending_transition() {
+    if (!pending_transition_.active) return;
+    const std::string scene_id = pending_transition_.scene_id;
+    const std::string spawn_id = pending_transition_.spawn_point_id;
+    pending_transition_ = PendingTransition{};
+
+    const auto it = scene_.scene_index.find(scene_id);
+    if (it == scene_.scene_index.end()) return;
+
+    // The index stores paths relative to the current document, so a project
+    // can be moved or unpacked anywhere and still resolve.
+    const std::filesystem::path here =
+        std::filesystem::path(scene_path_).parent_path();
+    const std::string target = (here / it->second).string();
+
+    if (!load_scene_at(target, spawn_id)) {
+        PTV_ERROR("transition to '{}' failed; staying put", scene_id);
+    }
+}
+
+void Application::place_player_at_spawn(const std::string& spawn_point_id) {
+    Vec3 position = scene_.spawn.position;
+    Vec3 facing = glm::mat3_cast(scene_.spawn.rotation) * Vec3(0.0f, 0.0f, -1.0f);
+
+    if (!spawn_point_id.empty()) {
+        const auto found = std::find_if(
+            scene_.spawn_points.begin(), scene_.spawn_points.end(),
+            [&](const SpawnPointSpec& s) { return s.id == spawn_point_id; });
+        if (found != scene_.spawn_points.end()) {
+            position = found->position;
+            facing = found->facing;
+        } else {
+            // Landing at the default is far better than landing nowhere, but
+            // it is the wrong door and the player will notice, so say so.
+            PTV_WARN(
+                "transition: scene '{}' has no spawn point '{}'; using its "
+                "default spawn",
+                scene_.scene_id, spawn_point_id);
+        }
+    }
+
+    // A spawn point is authored in the scene's own world space, and the frame
+    // the player was riding belonged to the scene being left, so it is already
+    // gone by now (load_scene_at clears it). Setting through the world helpers
+    // keeps this correct if that ever stops being true.
+    set_rig_world_position(position);
+    const float fl = glm::length(Vec3(facing.x, 0.0f, facing.z));
+    if (fl > 1e-5f) {
+        set_rig_world_yaw(yaw_for_facing(facing));
+    }
+}
+
+bool Application::load_scene_at(const std::string& path,
+                                const std::string& spawn_point_id) {
+    if (!std::filesystem::exists(path)) {
+        PTV_ERROR("transition: no scene document at {}", path);
+        return false;
+    }
+
+    // 1) Remember what the player did to the place they are leaving. Deltas
+    //    only -- the outgoing scene is rebuilt from its own document plus
+    //    this, so a room the player never touched costs nothing to store.
+    if (!scene_.scene_id.empty()) {
+        SaveSystem::save_to_file(save_path_for_scene(scene_.scene_id), world_);
+    }
+
+    SceneDoc next{};
+    try {
+        next = LoadSceneJson(path);
+    } catch (const std::exception& e) {
+        PTV_ERROR("transition: could not parse {}: {}", path, e.what());
+        return false;
+    }
+
+    // 2) Tear the old world down. Mechanics first: an instance holds a cached
+    //    entity id, and letting it tick once against the new world would drive
+    //    whatever entity happens to reuse that id.
+    mechanics_.detach_all(world_);
+    for (auto& hand : hands_) hand.held = entt::null;
+    hand_entities_ = {entt::null, entt::null};
+    player_entity_ = entt::null;
+    portals_occupied_.clear();
+    // The vehicle, lift or NPC the player was riding belongs to the scene
+    // being torn down. Left set, the parent handle would dangle -- and entt
+    // reuses handles, so it would silently resolve to whatever entity took
+    // that slot in the new scene and drag the player around with it.
+    rig_.parent = entt::null;
+    rig_.parent_anchor.clear();
+    // Scale is deliberately NOT reset: a game that shrank the player for a
+    // reason should not have that undone by walking through a door.
+    // Nested interiors belonged to their hosts, which are gone. Cleared
+    // rather than unloaded one by one -- world_.clear() below destroys their
+    // entities anyway, and unload_nested_scene would be walking a registry
+    // that is about to be emptied.
+    nested_scenes_.clear();
+    // Physics bodies are dropped by rebuild_from_world below, which tracks
+    // them by body id rather than through the world, so it does not matter
+    // that the entities are gone by then.
+    world_.clear();
+
+    // 3) Stand the new one up, in the same order initialize() does, because
+    //    each step depends on the one before: entities before physics bodies,
+    //    bodies before the player capsule, the capsule before mechanics that
+    //    sweep against it.
+    scene_ = std::move(next);
+    scene_path_ = path;
+
+    place_player_at_spawn(spawn_point_id);
+    ApplySceneToWorld(scene_, world_);
+    resolve_project_mesh_paths(world_, scene_path_);
+
+    // 4) Overlay what the player already did HERE, before physics reads the
+    //    transforms -- a door left open has to be open when its collider is
+    //    built, or the player walks into a body that is not where the door is.
+    const std::string save = save_path_for_scene(scene_.scene_id);
+    if (std::filesystem::exists(save)) {
+        SaveSystem::load_from_file(save, world_);
+    }
+
+    physics_.rebuild_from_world(world_);
+    build_nav_graph();
+    create_player_body();
+    attach_skeletons();
+    build_render_env();
+    if (renderer_ready_) {
+        renderer_.set_performance(scene_.performance);
+        governor_.configure(scene_.performance);
+    }
+    ensure_player_locomotion_bindings();
+    mechanics_.attach_bindings(world_, mech_ctx_);
+
+    PTV_INFO("transition: now in scene '{}' ({} entities)", scene_.scene_id,
+             static_cast<int>(scene_.entities.size()));
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// Nested scenes
+// ---------------------------------------------------------------------------
+
+bool Application::nested_scene_loaded(const std::string& scene_id) const {
+    return std::any_of(nested_scenes_.begin(), nested_scenes_.end(),
+                       [&](const NestedScene& n) {
+                           return n.scene_id == scene_id;
+                       });
+}
+
+Mat4 Application::nested_mount_matrix(std::uint32_t host,
+                                      const std::string& anchor,
+                                      float scale) const {
+    Mat4 anchor_world(1.0f);
+    const auto e = static_cast<entt::entity>(host);
+    if (world_.registry().valid(e)) {
+        const AttachAnchor resolved = resolve_attach_anchor(host, anchor);
+        if (resolved.is_socket && sockets_svc_ != nullptr) {
+            anchor_world = sockets_svc_->socket_world(host, anchor.c_str());
+        } else if (resolved.valid && resolved.joint >= 0 &&
+                   skeleton_svc_ != nullptr) {
+            anchor_world = skeleton_svc_->joint_world(host, resolved.joint);
+        } else if (world_.registry().all_of<CTransform>(e)) {
+            anchor_world = world_.registry().get<CTransform>(e).t.matrix();
+        }
+    }
+    return glm::scale(anchor_world, Vec3(scale));
+}
+
+bool Application::load_nested_scene(const std::string& scene_id,
+                                    std::uint32_t host,
+                                    const std::string& anchor,
+                                    float fit_extent_m) {
+    if (scene_id.empty()) return false;
+    if (nested_scene_loaded(scene_id)) {
+        // Loading twice would stack two skulls' worth of geometry in the same
+        // place, and the second copy's ids would collide with the first's.
+        PTV_WARN("nested scene '{}' is already loaded", scene_id);
+        return false;
+    }
+    if (!world_.registry().valid(static_cast<entt::entity>(host))) {
+        PTV_WARN("nested scene '{}': host entity {} is not valid", scene_id,
+                 host);
+        return false;
+    }
+
+    const auto it = scene_.scene_index.find(scene_id);
+    if (it == scene_.scene_index.end()) {
+        PTV_WARN(
+            "nested scene '{}' is not in this project's scene index; the "
+            "mechanic naming it cannot load it",
+            scene_id);
+        return false;
+    }
+    const std::filesystem::path here =
+        std::filesystem::path(scene_path_).parent_path();
+    const std::string path = (here / it->second).string();
+
+    SceneDoc interior{};
+    try {
+        interior = LoadSceneJson(path);
+    } catch (const std::exception& e) {
+        PTV_ERROR("nested scene '{}': could not parse {}: {}", scene_id, path,
+                  e.what());
+        return false;
+    }
+    if (interior.entities.empty()) {
+        PTV_WARN("nested scene '{}' has no entities", scene_id);
+        return false;
+    }
+
+    // Derive the fit scale from what the interior actually measures. The
+    // author was told to work at human scale, so the number is theirs, not a
+    // constant we could assume.
+    Vec3 lo(std::numeric_limits<float>::max());
+    Vec3 hi(std::numeric_limits<float>::lowest());
+    for (const auto& es : interior.entities) {
+        const Vec3 p = es.transform.position;
+        lo = glm::min(lo, p);
+        hi = glm::max(hi, p);
+    }
+    const Vec3 extent = hi - lo;
+    const float longest = std::max(extent.x, extent.z);
+    float scale = 1.0f;
+    if (fit_extent_m > 0.0f && longest > 1e-3f) {
+        scale = fit_extent_m / longest;
+    }
+
+    SceneNesting nesting{};
+    nesting.id_prefix = scene_id;
+    nesting.scale = scale;
+    nesting.tag = "nested:" + scene_id;
+    nesting.mount = nested_mount_matrix(host, anchor, scale);
+
+    ApplySceneToWorld(interior, world_, &nesting);
+    resolve_project_mesh_paths(world_, path);
+
+    // Attach every new entity to the host anchor, which is what carries the
+    // interior as the host walks and turns. Reusing the attachment system
+    // rather than re-transforming the interior each frame means it rides the
+    // ANIMATED joint for free, and its colliders are already moved
+    // kinematically by tick_attachments.
+    // The loader tagged every entity it created, so the tag IS the list of
+    // new entities -- no before/after diff of the whole registry needed, and
+    // the same tag is what unloading uses later.
+    int attached = 0;
+    std::vector<entt::entity> fresh;
+    {
+        auto tagged = world_.registry().view<CTag>();
+        for (auto e : tagged) {
+            const auto& tags = tagged.get<CTag>(e).tags;
+            if (std::find(tags.begin(), tags.end(), nesting.tag) !=
+                tags.end()) {
+                fresh.push_back(e);
+            }
+        }
+    }
+    const Mat4 inv_mount = glm::inverse(nesting.mount);
+    for (auto e : fresh) {
+        if (!world_.registry().all_of<CTransform>(e)) continue;
+        // Already attached inside the interior (a lamp on a moving arm): leave
+        // that alone, since its parent is itself carried by the host.
+        if (world_.registry().all_of<CAttachment>(e)) continue;
+        const auto& t = world_.registry().get<CTransform>(e).t;
+        const Mat4 local = inv_mount * t.matrix();
+        CAttachment a{};
+        a.parent = host;
+        a.anchor = anchor;
+        a.local_position = Vec3(local[3]);
+        a.local_rotation = glm::normalize(glm::quat_cast(Mat4(glm::mat3(
+            glm::normalize(Vec3(local[0])), glm::normalize(Vec3(local[1])),
+            glm::normalize(Vec3(local[2]))))));
+        world_.registry().emplace<CAttachment>(e, std::move(a));
+        ++attached;
+    }
+
+    physics_.rebuild_from_world(world_);
+    mechanics_.attach_bindings(world_, mech_ctx_);
+
+    NestedScene record{};
+    record.scene_id = scene_id;
+    record.host = host;
+    record.anchor = anchor;
+    record.scale = scale;
+    record.tag = nesting.tag;
+    nested_scenes_.push_back(std::move(record));
+
+    PTV_INFO(
+        "nested scene '{}' loaded on entity {} anchor '{}': {} entities, "
+        "authored {:.1f} m across, scaled {:.4f} to fit {:.2f} m",
+        scene_id, host, anchor.empty() ? "(root)" : anchor.c_str(), attached,
+        longest, scale, fit_extent_m);
+    return true;
+}
+
+bool Application::unload_nested_scene(const std::string& scene_id) {
+    const auto it = std::find_if(nested_scenes_.begin(), nested_scenes_.end(),
+                                 [&](const NestedScene& n) {
+                                     return n.scene_id == scene_id;
+                                 });
+    if (it == nested_scenes_.end()) return false;
+
+    // If the player is inside it, get them out FIRST. Destroying the frame
+    // they are parented to would leave the rig pointing at a dead handle,
+    // which entt will reuse.
+    if (rig_.parent != entt::null &&
+        static_cast<std::uint32_t>(rig_.parent) == it->host) {
+        clear_reference_frame();
+        set_player_scale(1.0f);
+    }
+
+    const std::string tag = it->tag;
+    std::vector<std::uint32_t> doomed;
+    auto view = world_.registry().view<CTag>();
+    for (auto e : view) {
+        const auto& tags = view.get<CTag>(e).tags;
+        if (std::find(tags.begin(), tags.end(), tag) != tags.end()) {
+            doomed.push_back(static_cast<std::uint32_t>(e));
+        }
+    }
+    for (std::uint32_t e : doomed) destroy_entity_runtime(e);
+
+    nested_scenes_.erase(it);
+    PTV_INFO("nested scene '{}' unloaded ({} entities)", scene_id,
+             doomed.size());
+    return true;
+}
+
+void Application::tick_portals(const InputSnapshot& input) {
+    if (scene_.portals.empty() || pending_transition_.active) return;
+
+    // The head, not the rig origin: the player's body is where their head is,
+    // and a rig origin can sit outside the volume while they lean through it.
+    const Vec3 head = player_capsule_center_;
+
+    std::vector<std::string> inside;
+    inside.reserve(scene_.portals.size());
+    for (const auto& portal : scene_.portals) {
+        const Vec3 half = portal.size * 0.5f;
+        const Vec3 d = head - portal.position;
+        const bool within = std::abs(d.x) <= half.x &&
+                            std::abs(d.y) <= half.y &&
+                            std::abs(d.z) <= half.z;
+        if (!within) continue;
+        inside.push_back(portal.id);
+
+        const bool was_inside =
+            std::find(portals_occupied_.begin(), portals_occupied_.end(),
+                      portal.id) != portals_occupied_.end();
+
+        if (!portal.requires_interaction) {
+            // Only on the frame they arrive. Firing every frame they remain
+            // would re-request a transition they are already taking.
+            if (!was_inside) {
+                request_scene_transition(portal.to_scene,
+                                         portal.target_spawn_id);
+            }
+            continue;
+        }
+
+        // Gated on a deliberate squeeze, and on the squeeze STARTING while
+        // inside -- a player who walked in already holding a grip did not ask
+        // to leave.
+        for (int hand = 0; hand < 2; ++hand) {
+            const auto& h = input.hands[hand];
+            if (!h.hand_valid) continue;
+            if (h.prev_grip < 0.6f && h.grip >= 0.6f && was_inside) {
+                if (haptics_svc_ != nullptr) {
+                    haptics_svc_->pulse(hand, 0.06f, 0.5f);
+                }
+                request_scene_transition(portal.to_scene,
+                                         portal.target_spawn_id);
+                break;
+            }
+        }
+    }
+    portals_occupied_ = std::move(inside);
 }
 
 void Application::build_nav_graph() {
@@ -2575,8 +4067,11 @@ int Application::run(const Config& cfg) {
         // The rig transforms the stage origin into the world. We need
         // this to compute world-space hand poses for grab detection and
         // for the per-frame kinematic follow.
-        const Mat4 rig_mat = rig_world_from_stage(
-            rig_.pos_x, rig_.pos_y, rig_.pos_z, rig_.yaw_rad);
+        // Composed in one place (rig_world_matrix) so the reference frame and
+        // player scale reach every consumer at once. A second composition
+        // anywhere would drift from this one, and the player's hands would
+        // stop matching their eyes.
+        const Mat4 rig_mat = rig_world_matrix();
 
         // Compose world-space hand matrices once (reused for grab +
         // rendering to keep visual & physics in perfect lockstep).
@@ -2594,7 +4089,14 @@ int Application::run(const Config& cfg) {
         const XrPosef hand_poses[2] = {input.hand_left.pose, input.hand_right.pose};
         const bool aim_valid[2]  = {input.aim_left_valid, input.aim_right_valid};
         const XrPosef aim_poses[2] = {input.aim_left.pose, input.aim_right.pose};
-        const Quat rig_yaw_quat = glm::angleAxis(rig_.yaw_rad, Vec3(0, 1, 0));
+        // Total heading, including the parent frame's. Reading rig_.yaw_rad
+        // alone was correct only while the rig was always world-space: a
+        // player riding a turning vehicle would otherwise have hands that
+        // rotate with the vehicle while their reported orientation does not.
+        // Still yaw-only, because the frame itself is (see
+        // rig_parent_matrix).
+        const Quat rig_yaw_quat =
+            glm::angleAxis(matrix_yaw(rig_mat), Vec3(0, 1, 0));
         Mat4 hand_world[2]{Mat4(1.0f), Mat4(1.0f)};
         Vec3 hand_world_pos[2]{Vec3(0.0f), Vec3(0.0f)};
         Quat hand_world_rot[2]{Quat(1,0,0,0), Quat(1,0,0,0)};
@@ -2999,8 +4501,19 @@ int Application::run(const Config& cfg) {
         // animation has finished playing.
         tick_combat(dt);
 
+        // Is the player standing in a way out? Checked here, after physics and
+        // locomotion have settled where they actually are this frame.
+        tick_portals(snapshot);
+
         // Remember this frame's raw input for next frame's edge detection.
         prev_input_ = input;
+
+        // The frame boundary: every mechanic tick and every entity loop is
+        // finished, so swapping the world here cannot invalidate an iterator
+        // somebody upstream is still holding. This is the ONLY place a
+        // transition is performed, which is why ISceneTransition can only
+        // request one.
+        apply_pending_transition();
 
         // ------------------------------------------------------------
         // Render frame.
@@ -3150,8 +4663,17 @@ int Application::run(const Config& cfg) {
                         Mat4 world_from_head =
                             rig_mat * xr_pose_to_matrix(eyes[e].pose);
                         targets[e].view = glm::inverse(world_from_head);
+                        // Clip planes scale with the player. A 2 cm-tall
+                        // passenger with a fixed 5 cm near plane cannot see
+                        // their own hands or the surface they are standing on
+                        // -- both are inside it. The far plane scales too, so
+                        // depth precision stays distributed over the range
+                        // they can actually see rather than being spent on a
+                        // kilometre they will never reach.
+                        const float near_z = 0.05f * rig_.scale;
+                        const float far_z = 1000.0f * rig_.scale;
                         targets[e].projection = xr_fov_to_projection(
-                            eyes[e].fov, 0.05f, 1000.0f);
+                            eyes[e].fov, near_z, far_z);
                     }
                     // NOTE: Head pose cache (last_head_forward_xz_,
                     // last_head_world_pos_, last_head_pose_valid_) is
@@ -3333,7 +4855,7 @@ bool Application::initialize(const Config& cfg) {
                 glm::mat3_cast(scene_.spawn.rotation) * Vec3(0.0f, 0.0f, -1.0f);
             const float fl = glm::length(Vec3(f.x, 0.0f, f.z));
             if (fl > 1e-5f) {
-                rig_.yaw_rad = std::atan2(f.x, -f.z);
+                rig_.yaw_rad = yaw_for_facing(f);
             }
         }
         ApplySceneToWorld(scene_, world_);
@@ -3411,6 +4933,12 @@ bool Application::initialize(const Config& cfg) {
     haptics_svc_ = std::make_unique<HapticsService>(this);
     sockets_svc_ = std::make_unique<SocketsService>(this);
     skeleton_svc_ = std::make_unique<SkeletonService>(this);
+    // After attach_svc_, which it drives.
+    equip_svc_ = std::make_unique<EquipService>(this);
+    interactive_svc_ = std::make_unique<InteractiveService>(this);
+    persistence_svc_ = std::make_unique<PersistenceService>(this);
+    transition_svc_ = std::make_unique<TransitionService>(this);
+    ui_svc_ = std::make_unique<UiService>(this);
     mech_ctx_.locomotion = locomotion_svc_.get();
     mech_ctx_.physics = physics_svc_.get();
     mech_ctx_.contacts = contacts_svc_.get();
@@ -3425,6 +4953,11 @@ bool Application::initialize(const Config& cfg) {
     mech_ctx_.haptics = haptics_svc_.get();
     mech_ctx_.sockets = sockets_svc_.get();
     mech_ctx_.skeleton = skeleton_svc_.get();
+    mech_ctx_.equip = equip_svc_.get();
+    mech_ctx_.interactive = interactive_svc_.get();
+    mech_ctx_.persistence = persistence_svc_.get();
+    mech_ctx_.transition = transition_svc_.get();
+    mech_ctx_.ui = ui_svc_.get();
 
     ensure_player_locomotion_bindings();
     mechanics_.attach_bindings(world_, mech_ctx_);

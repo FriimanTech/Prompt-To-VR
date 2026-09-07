@@ -63,3 +63,6 @@ logs/
 
 # Generated files
 engine/generated/
+
+#Other
+3D_object_Test

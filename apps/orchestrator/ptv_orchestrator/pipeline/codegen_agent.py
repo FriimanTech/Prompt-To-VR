@@ -136,6 +136,15 @@ class CodegenAgentInput:
     just AI ones: a wave spawner needs the spawn caps, a HUD needs the health
     values, and a weapon needs to know which faction it damages."""
 
+    world_context_json: str = ""
+    """The declared vocabulary of every generated environment: interactive
+    ids and their state keys, spawn points, portals, nav regions.
+
+    These names are invented by the world architects, so this is the only
+    place gameplay code can learn them. A guessed id is not a compile error --
+    it resolves to nothing at runtime and the mechanic quietly does nothing --
+    which is why the world stage runs before codegen."""
+
     base_source_block: str = ""
     """For ``builtin+config_code_edit`` tasks: the source of the base
     built-in mechanic to COPY-AND-EDIT into this new generated mechanic.
@@ -376,6 +385,54 @@ def build_user_message(inp: CodegenAgentInput) -> str:
             "CTransform, and never play their walk/run clips yourself.\n"
             f"{inp.npc_plan_json}\n"
             if inp.npc_plan_json
+            else ""
+        )
+        + (
+            "\n================ GENERATED ENVIRONMENTS ================\n"
+            "What the world architects actually built and DECLARED. These ids "
+            "are real; anything not listed here does not exist.\n"
+            "  * Read and change an object's state with ctx.interactive: "
+            'get_state(id, key) / set_state(id, key, value). The state keys '
+            "listed per object are the only ones it has.\n"
+            "  * Never write CTransform on a declared interactive -- its "
+            "affordance built-in owns that motion, and a second writer fights "
+            "it every frame.\n"
+            "  * Persist facts that belong to no object (mission_complete, "
+            "score) with ctx.persistence. Object state persists on its own "
+            "through ctx.interactive; do not save it a second time.\n"
+            "  * Put the player INSIDE a character's head with "
+            "builtin.head_interior on the host, naming the nested interior's "
+            "scene id. Never build that yourself: the interior is a nested "
+            "environment from the world stage, not an asset, and the mechanic "
+            "already handles mounting it, shrinking the player and routing "
+            "head and stick input.\n"
+            "  * Put the player ON something that moves -- a vehicle, lift, "
+            "boat, platform, or a character they ride inside -- with "
+            "ctx.locomotion->set_reference_frame(entity, anchor), and "
+            "clear_reference_frame() to get off. The parent's motion then "
+            "carries them without their local position drifting, so standing "
+            "still on a moving platform arrives somewhere else. NEVER move the "
+            "player every frame to follow a platform yourself: that fights "
+            "locomotion and drifts. Resize them with "
+            "ctx.locomotion->set_player_scale(s) (1.0 = life size); clip "
+            "planes and their collision capsule follow.\n"
+            "  * Build a menu with builtin.ui_panel and ctx.ui, never from "
+            "scratch: set_rows(panel_id, rows, count) each frame with what is "
+            "true now, then poll_click(panel_id, &click) in a loop and act on "
+            "click.row_id. Rows are matched by ID, not index, so rebuilding "
+            "the list every frame is the correct thing to do. A wardrobe is "
+            "this plus ctx.equip; a mission select is this plus "
+            "ctx.transition.\n"
+            "  * Move the player between scenes with "
+            'ctx.transition->go_to(scene_id, spawn_point_id), using ids from '
+            "the lists below. It only REQUESTS -- the engine performs the swap "
+            "at a frame boundary, because tearing the world down inside a "
+            "mechanic tick would destroy the entities being iterated. Portals "
+            "the player physically walks through already work with no code; "
+            "call this only for a transition gameplay decides (a menu choice, "
+            "a completed objective).\n"
+            f"{inp.world_context_json}\n"
+            if inp.world_context_json
             else ""
         )
         + f"{base_source_section}"

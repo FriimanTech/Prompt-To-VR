@@ -167,6 +167,17 @@ def _package_assets(ctx: PipelineContext, build_dir: Path) -> list[str]:
     else:
         notes.append("scene.json missing -- run scene_compile first")
 
+    # Every OTHER scene too. A multi-scene game resolves a portal through the
+    # scene index, whose paths are relative to scene.json, so the siblings have
+    # to sit beside it inside the APK. Packaging only the entry point would
+    # leave a build that runs and looks right until the player walks into the
+    # first doorway.
+    siblings = sorted(ctx.project_dir.glob("scene.*.json"))
+    for path in siblings:
+        shutil.copy2(path, assets_dir / path.name)
+    if siblings:
+        notes.append(f"packaged {len(siblings)} additional scene document(s)")
+
     # GLBs live under the project assets dir. Once the asset_optimization
     # stage has produced an LOD chain for an asset we ship ONLY the LODs --
     # shipping the raw Tripo source too would multiply the APK size (a single

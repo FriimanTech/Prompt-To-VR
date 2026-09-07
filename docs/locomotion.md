@@ -243,3 +243,63 @@ multi-level environments (see [`world-generation.md`](world-generation.md))
 traversable with the default comfort locomotion. Smooth (slide) locomotion is
 still free-fly on XZ; a Jolt `CharacterVirtual` capsule for wall-blocked
 sliding is a tracked follow-up.
+
+## Reference frames: riding things that move
+
+`PlayerRig` position and yaw are expressed in a **reference frame**, which is
+world space until something parents it. Once parented, the parent's motion
+carries the player along *without their local position drifting* — which is the
+property that matters. Standing still on a moving platform means zero stick
+input and still arriving somewhere else.
+
+```cpp
+ctx.locomotion->set_reference_frame(lift_entity, "");        // ride the lift
+ctx.locomotion->set_reference_frame(npc, "head");            // ride a joint
+ctx.locomotion->clear_reference_frame();                     // step off
+```
+
+This is deliberately one generic feature rather than several specific ones.
+Vehicles, elevators, boats, lifts, moving platforms and a miniature player
+riding inside an NPC's head are the same problem, so none needs engine code of
+its own. Generated code must **never** move the player every frame to follow a
+platform by hand: that fights locomotion and drifts.
+
+Details that are load-bearing:
+
+- **The anchor may name a joint or socket.** A passenger inside a head has to
+  ride the *animated* skull; the entity's root transform sits at a walking
+  character's feet and does not turn with the neck.
+- **The frame carries position and heading only.** A parent that pitches (a
+  boat on a wave) must not pitch the player's horizon — tilting the player's
+  frame is the most reliable way to make someone sick in VR. The parent's roll
+  and pitch stay visible in the world around them, which is where they belong.
+- **Boarding and disembarking do not move the player.** The local offset is
+  recomputed on attach and detach, so stepping onto a lift does not teleport
+  you by a bookkeeping detail.
+- **`ILocomotion` still speaks world space.** `position()` and `yaw_radians()`
+  return world values and `teleport_to` takes one; the conversion happens at
+  the frame boundary. A world-space slide delta is rotated into the frame
+  before it is applied, or walking forward on a turning vehicle would curve.
+- **A scene transition clears the frame.** The vehicle belonged to the scene
+  being torn down, and entt reuses handles, so a stale parent would silently
+  resolve to whatever entity took that slot and drag the player around.
+
+## Player scale
+
+`ctx.locomotion->set_player_scale(s)` resizes the player: 1.0 is life size,
+0.02 is a two-centimetre passenger inside a skull. The **rig** scales, never
+the world — the world is what physics, navigation and every authored dimension
+agree on, and rescaling it would invalidate all of them at once.
+
+Scale is innermost in the composition, so it shrinks the player's own body and
+their tracked motion but not their offset within the frame: a passenger two
+metres along a deck is two metres along it whatever size they are. A one-metre
+physical step becomes two centimetres of world travel at 0.02.
+
+Clip planes scale with the player (`0.05 * scale` near, `1000 * scale` far). A
+two-centimetre passenger with a fixed 5 cm near plane cannot see their own
+hands or the floor they are standing on — both are inside it. The collision
+capsule scales too, or a tiny player keeps colliding with a human-sized shape.
+Scale is clamped to `[0.01, 100]`: below a centimetre the near plane collapses
+toward zero and wrecks depth precision, and above 100 a giant's near plane
+clips through everything within reach.

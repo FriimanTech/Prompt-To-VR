@@ -310,6 +310,31 @@ void tick_animators(World& world, float dt, const Vec3& viewer,
         gltf_mesh_load::build_joint_palette(sk.skeleton, sk.local_pose,
                                             sk.palette);
 
+        // --- Second palette for the player's own view -------------------
+        //
+        // Scaling the joints in the LOCAL pose and rebuilding is deliberate:
+        // the collapse then happens about each joint's own origin and the
+        // children follow automatically, which is what makes a hidden head
+        // disappear at the neck instead of leaving a sliver at the feet.
+        // Doing it here rather than in the renderer also keeps all pose math
+        // in the pose system.
+        if (auto* hide = world.registry().try_get<CSelfViewHide>(entity);
+            hide != nullptr && !hide->joints.empty() && hide->scale < 1.0f) {
+            static std::vector<JointPose> self_view_pose;
+            self_view_pose = sk.local_pose;
+            const float s = std::max(0.0f, hide->scale);
+            for (const int j : hide->joints) {
+                if (j < 0 || static_cast<size_t>(j) >= n) continue;
+                self_view_pose[static_cast<size_t>(j)].scale *= s;
+            }
+            gltf_mesh_load::build_joint_palette(sk.skeleton, self_view_pose,
+                                                sk.palette_self_view);
+        } else if (!sk.palette_self_view.empty()) {
+            // Toggled back on: drop the variant so the renderer falls back to
+            // the one palette rather than keeping a stale collapsed copy.
+            sk.palette_self_view.clear();
+        }
+
         // Overrides are per-frame statements, not sticky state: a mechanic
         // that stops driving a joint hands it straight back to the clip.
         if (anim) {

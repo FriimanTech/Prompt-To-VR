@@ -262,6 +262,72 @@ hand_str_ = params.value("hand", std::string("right"));
 if (control_ == "a" && input.button_a_pressed()) { /* jump */ }
 ```
 
+## Virtual panels (`builtin.ui_panel` + `ctx.ui`)
+
+Menus are engine-owned mechanics, not generated UI. `builtin.ui_panel` gives a
+world-anchored list of rows with a laser pointer: either hand may point (unless
+`pointer_hand` pins one), whichever hand's ray passes closest wins the
+highlight, and a rising trigger edge from *that* hand clicks. A stray pull from
+the other hand — busy doing something unrelated — does nothing.
+
+This is generalized from the locomotion menu, which proved the pattern but was
+hard-coded in `Application.cpp`: two pads, two pages, locomotion decisions
+written into the hit-test, and its own copies of edge detection and debounce.
+Every generated menu would have reimplemented all of that, differently.
+
+The division of labour is the point: the engine owns *where the panel sits,
+which row the pointer is on, and what counts as a click*; the game owns only
+what a row **means**. A wardrobe is then thin generated code —
+
+```cpp
+// Rebuild every frame from what IEquip actually reports. Rows are matched by
+// ID, not index, so a rebuild does not fight the pointer.
+std::uint32_t worn[16];
+const int n = ctx.equip->equipped_items(player, worn, 16);
+std::vector<UiRowDesc> rows;
+for (int i = 0; i < n; ++i) {
+    UiRowDesc r{};
+    r.id = ctx.equip->slot_of(worn[i]);
+    r.thumbnail = worn[i];                       // show the item itself
+    r.marked = true;                             // currently worn
+    r.enabled = ctx.equip->is_removable(worn[i]);  // greyed if fixed
+    rows.push_back(r);
+}
+ctx.ui->set_rows("wardrobe", rows.data(), static_cast<int>(rows.size()));
+
+UiClick click{};
+while (ctx.ui->poll_click("wardrobe", &click)) {
+    ctx.equip->unequip(worn[click.row_index]);
+}
+```
+
+Details that matter:
+
+- **Rows have no text.** The engine has no in-world text rendering, so a row is
+  a state-coloured plate plus an optional `thumbnail` entity whose mesh is drawn
+  on it. For a wardrobe that is the better answer regardless: the player
+  recognises their gauntlet by looking at it. `label` is carried for logs and
+  tests.
+- **`selected` vs `marked` are different facts.** `selected` is what the
+  pointer/caller is on right now; `marked` is a property of the thing
+  ("equipped", "owned"). A wardrobe needs both to show you inspecting one item
+  while wearing another.
+- **A disabled row is skipped by the pointer**, not highlighted then refused — a
+  highlight the player cannot act on reads as a broken panel. It still *lists*,
+  because hiding a helmet the player can see on their own body would leave them
+  hunting for it.
+- **Placement follows Meta's Head/Comfort guidance** (~1.5 m forward, ~0.20 m
+  below eye level) and is set once on open. Re-anchoring on every change would
+  jerk the panel around exactly when the player is reading it.
+- **Clicks queue and are polled** rather than dispatched by callback, because a
+  mechanic's tick is the only safe place to act. Poll in a loop: two hands can
+  click two rows in one frame. The queue is bounded at 16 and drops the oldest,
+  so a caller that stops polling does not leak.
+- The mechanic runs in the **Input** phase so a click is visible to
+  Simulate-phase mechanics on the same frame.
+
+A fixed menu needs no code at all — declare `rows` in the mechanic's params.
+
 ## Held weapons (GLB-asset mechanics)
 
 A mechanic bound to a grabbable GLB acts only while held:

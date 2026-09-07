@@ -56,6 +56,10 @@
         "category": {
           "$ref": "#/$defs/AssetCategory"
         },
+        "character_role": {
+          "$ref": "#/$defs/CharacterRole",
+          "default": "none"
+        },
         "collision_shape": {
           "default": "aabb",
           "description": "Deterministic collision primitive: 'aabb', 'sphere', 'capsule', or 'mesh' (from GLB).",
@@ -148,12 +152,31 @@
       "title": "AssetItem",
       "type": "object"
     },
+    "CharacterRole": {
+      "description": "What a character asset is FOR.\n\nCategory alone cannot answer this. A duck is ``category: character``\nwhether it patrols the level as an enemy or sits on a shelf to be picked\nup, and the two want different reference images: the actor needs a T-pose\nso it can be rigged and reused, the prop does not.\n\nReplaces the ``style_notes`` substring sniffing the scene compiler used to\ndo, which guessed the player avatar from phrases like \"player body\".",
+      "enum": [
+        "none",
+        "npc",
+        "player_avatar"
+      ],
+      "title": "CharacterRole",
+      "type": "string"
+    },
     "GenerationStrategy": {
       "enum": [
         "image_to_3d",
         "text_to_3d"
       ],
       "title": "GenerationStrategy",
+      "type": "string"
+    },
+    "ReferenceCoverage": {
+      "description": "How much of a character the reference image should contain.\n\nDefaults to ``full_body``, including a head, and that default is\nload-bearing: a head that exists can be hidden at runtime, while a head\nthat was never generated can never be shown. ``neck_down`` is therefore\nreserved for prompts that explicitly ask for a body-only avatar.",
+      "enum": [
+        "full_body",
+        "neck_down"
+      ],
+      "title": "ReferenceCoverage",
       "type": "string"
     },
     "ReferenceImageRequest": {
@@ -165,6 +188,10 @@
           "pattern": "^\\d{1,2}:\\d{1,2}$",
           "title": "Aspect Ratio",
           "type": "string"
+        },
+        "coverage": {
+          "$ref": "#/$defs/ReferenceCoverage",
+          "default": "full_body"
         },
         "negative_prompt": {
           "anyOf": [
@@ -186,6 +213,10 @@
           "title": "Number Of Images",
           "type": "integer"
         },
+        "pose": {
+          "$ref": "#/$defs/ReferencePose",
+          "default": "natural"
+        },
         "prompt": {
           "maxLength": 4000,
           "title": "Prompt",
@@ -197,6 +228,16 @@
       ],
       "title": "ReferenceImageRequest",
       "type": "object"
+    },
+    "ReferencePose": {
+      "description": "The pose the reference image should depict.\n\nThis exists because the downstream 3D asset inherits whatever pose the\nimage had, and a character captured mid-stride is far less useful than one\ncaptured in a neutral spread: rigging, retargeting and every external 3D\ntool expect a T-pose, so a character generated in an action pose is\neffectively locked to this pipeline.\n\n* ``natural`` \u2014 whatever best shows the object off. Correct for props,\n  scenery, FX and UI, and for a creature used as a grabbable prop rather\n  than an actor.\n* ``t_pose`` \u2014 arms straight out to the sides, legs straight and slightly\n  apart, facing camera. For humanoid and bipedal characters, including a\n  cartoon duck whose wings read as arms.\n* ``neutral_quadruped`` \u2014 standing square with the legs clearly separated.\n  A T-pose is meaningless for a four-legged, serpentine or aquatic\n  creature; this is the equivalent neutral capture.",
+      "enum": [
+        "natural",
+        "t_pose",
+        "neutral_quadruped"
+      ],
+      "title": "ReferencePose",
+      "type": "string"
     },
     "TripoRequest": {
       "additionalProperties": false,

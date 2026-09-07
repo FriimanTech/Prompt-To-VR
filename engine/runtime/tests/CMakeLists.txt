@@ -54,6 +54,8 @@ if(Python3_Interpreter_FOUND)
            COMMAND ptv_smoke clip_blend "${PTV_RIGGED_FIXTURE}")
   add_test(NAME ptv_smoke_animation_lod
            COMMAND ptv_smoke animation_lod "${PTV_RIGGED_FIXTURE}")
+  add_test(NAME ptv_smoke_self_view_hide
+           COMMAND ptv_smoke self_view_hide "${PTV_RIGGED_FIXTURE}")
   # Needs a real device; passes with an informational note when none exists.
   add_test(NAME ptv_smoke_skinning_gpu
            COMMAND ptv_smoke skinning_gpu "${PTV_RIGGED_FIXTURE}")
@@ -111,6 +113,18 @@ endif()
 
 # These two need no generated asset at all -- one is pure transform maths, the
 # other parses an inline scene -- so they run even without Python.
+add_test(NAME ptv_smoke_body_slots COMMAND ptv_smoke body_slots)
+add_test(NAME ptv_smoke_two_bone_ik COMMAND ptv_smoke two_bone_ik)
+add_test(NAME ptv_smoke_mirror_reflection COMMAND ptv_smoke mirror_reflection)
+add_test(NAME ptv_smoke_equip_semantics COMMAND ptv_smoke equip_semantics)
+add_test(NAME ptv_smoke_interactive_persistence
+         COMMAND ptv_smoke interactive_persistence)
+add_test(NAME ptv_smoke_affordance_state COMMAND ptv_smoke affordance_state)
+add_test(NAME ptv_smoke_visual_tags COMMAND ptv_smoke visual_tags)
+add_test(NAME ptv_smoke_scene_transitions COMMAND ptv_smoke scene_transitions)
+add_test(NAME ptv_smoke_ui_panel COMMAND ptv_smoke ui_panel)
+add_test(NAME ptv_smoke_reference_frame COMMAND ptv_smoke reference_frame)
+add_test(NAME ptv_smoke_nested_scene COMMAND ptv_smoke nested_scene)
 add_test(NAME ptv_smoke_grab_socket COMMAND ptv_smoke grab_socket)
 add_test(NAME ptv_smoke_clip_contract COMMAND ptv_smoke clip_contract)
 add_test(NAME ptv_smoke_physics_capsule COMMAND ptv_smoke physics_capsule)

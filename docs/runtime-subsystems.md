@@ -249,7 +249,65 @@ Dear ImGui via the GLFW backend. Renders into the mirror window only.
 ### Save system (`ptv::SaveSystem`)
 
 JSON snapshots of per-entity state. The scene is always authoritative on
-load; the save file only overlays state (e.g. inventory, health).
+load; the save file only overlays state (e.g. inventory, health). Keyed on
+**stable string ids**, not entt handles — handles are reassigned on every load,
+so a save keyed on them restores the wrong objects. Only **deltas** are stored:
+a room the player never touched costs nothing. One file per scene
+(`save.<scene_id>.json`), so a temple's puzzle state cannot collide with a
+laboratory's.
+
+### Scene transitions (`ptv::ISceneTransition`)
+
+A game with several environments needs a way from one to another. Two paths
+reach the same place:
+
+- **Portals**, declared by the world architect as a volume plus a target, are
+  handled in the frame loop (`tick_portals`) like teleport targets. A portal is
+  a region of space with a meaning, not an object the player picks up or breaks,
+  so it needs no entity and no mechanic. `requires_interaction` defaults to
+  **true**: walking through a doorway you did not mean to take, and losing the
+  room you were in, is worse than having to squeeze. The squeeze must also
+  *start* while inside — a player who walked in already gripping did not ask to
+  leave.
+- **`ctx.transition->go_to(scene_id, spawn_point_id)`**, for a transition
+  gameplay decides: a menu choosing a mission, a completed objective ending a
+  chapter.
+
+The service can only **request**. A mechanic is ticked from inside a loop over
+the entities a transition destroys, so performing the swap there invalidates the
+caller's iterator. Requests are recorded and honoured at a frame boundary
+(`apply_pending_transition`), after every entity loop has finished. Only the
+first request in a frame is honoured; two portals touched together would
+otherwise chain the player through two loads and land them somewhere neither
+named.
+
+Arrival is **named**, not positional, because the right place to stand depends
+on where the player came from: returning to a hub from a mission belongs at that
+mission's door, not at the hub's front gate. The author knows that and declares
+a `spawn_point`; the engine only looks it up, and falls back to the scene's
+default spawn with a warning if the name is missing.
+
+`load_scene_at` rebuilds everything derived from the scene, in the same order
+`initialize` does, because each step depends on the one before: entities, then
+physics bodies, then the player capsule, then the mechanics that sweep against
+it. Two ordering details matter — mechanics are detached *first* (an instance
+caches an entity id, and ticking once against the new world would drive whatever
+entity reused that id), and the incoming save is overlaid *before* physics is
+rebuilt (a door left open must be open when its collider is built, or the player
+walks into a body that is not where the door is).
+
+`World::clear()` drops the id map along with the entities. entt reuses handles,
+so a stale name would resolve *successfully* to whatever took that handle — a
+lookup for `front_door` quietly returning a lamp.
+
+Scene files are located through the **scene index**, a `scene_id -> relative
+path` map the compiler writes into every document. The runtime must resolve a
+sibling without knowing how a project is laid out, and identically inside a
+Quest APK where there is nothing to go looking around in. Every scene carries
+the whole index, since a menu may reach a scene no portal in the current room
+points at. `quest_build` packages `scene.json` plus every `scene.*.json`
+sibling; packaging only the entry point leaves a build that runs and looks right
+until the player walks into the first doorway.
 
 ## Generated-code rules
 

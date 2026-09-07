@@ -58,6 +58,29 @@ def test_build_spec_round_trip():
     assert back == spec
 
 
+def test_build_spec_defaults_to_a_full_headed_first_person_avatar():
+    # These defaults are load-bearing rather than cosmetic. A head that was
+    # never generated can never be shown, so the asset always has one and
+    # visibility is a runtime decision; and a modelled head must not imply
+    # that the camera lives inside the skull.
+    spec = _sample_build_spec()
+    assert spec.player_perspective.value == "first_person_avatar"
+    assert spec.player_avatar.coverage.value == "full_body"
+    assert spec.player_avatar.head_visibility.value == "hidden_in_self_view"
+    assert spec.player_avatar.leg_animation is True
+    assert spec.player_avatar.needs_mirror is False
+
+
+def test_scene_entry_defaults_to_an_exclusive_standalone_environment():
+    scene = SceneEntry(id="room", name="Room", summary="A small room.")
+    assert scene.kind.value == "standalone"
+    assert scene.environment_mode.value == "exclusive"
+    assert scene.host is None
+    assert scene.links == []
+    # Uniform interaction by default: divergence has to be asked for.
+    assert _sample_build_spec().interaction_rules == []
+
+
 def test_asset_manifest_forces_tripo_defaults():
     item = AssetItem(
         id="block",

@@ -34,6 +34,16 @@
       "title": "AssetEntry",
       "type": "object"
     },
+    "AvatarCoverage": {
+      "description": "How much of the player's body the avatar asset actually contains.\n\nDefault to ``full_body``. A head that exists can always be hidden at\nruntime, while a head that was never generated can never be shown, so\n``neck_down`` is reserved for prompts that explicitly ask for a body-only\navatar (\"just the suit from the feet to the neck\").",
+      "enum": [
+        "full_body",
+        "neck_down",
+        "hands_only"
+      ],
+      "title": "AvatarCoverage",
+      "type": "string"
+    },
     "ComfortLevel": {
       "enum": [
         "comfort",
@@ -41,6 +51,15 @@
         "intense"
       ],
       "title": "ComfortLevel",
+      "type": "string"
+    },
+    "EnvironmentMode": {
+      "description": "Whether a scene's environment is exclusive or spatially nested.\n\n* ``exclusive`` \u2014 one at a time. Entering it unloads the previous\n  environment, which is what keeps a multi-map game inside the Quest's\n  memory budget.\n* ``nested`` \u2014 loaded alongside a host environment and attached to an\n  entity in it, so both are active simultaneously. The inside of an\n  NPC's head, or a compartment inside a moving spacecraft.",
+      "enum": [
+        "exclusive",
+        "nested"
+      ],
+      "title": "EnvironmentMode",
       "type": "string"
     },
     "GameType": {
@@ -56,6 +75,50 @@
       ],
       "title": "GameType",
       "type": "string"
+    },
+    "HeadVisibility": {
+      "description": "Whether the avatar's head renders, and to whom.\n\nThis is a per-view decision, not a global one: hiding the head so the\ncamera is not inside the skull must not also make the avatar headless in\na mirror.\n\n* ``hidden_in_self_view`` \u2014 the default. Suppressed in the player's own\n  view, fully present everywhere else (mirrors, reflections).\n* ``always_visible`` \u2014 never suppressed. For prompts where the camera is\n  not at the eyes at all.\n* ``toggleable`` \u2014 starts hidden in self view, and the game exposes a\n  control to show or hide it, e.g. admiring an outfit in a mirror.",
+      "enum": [
+        "hidden_in_self_view",
+        "always_visible",
+        "toggleable"
+      ],
+      "title": "HeadVisibility",
+      "type": "string"
+    },
+    "InteractionRule": {
+      "additionalProperties": false,
+      "description": "A prompt-specified exception to uniform interaction behaviour.\n\nEquivalent objects behave identically in every environment by default,\nbecause the affordance binder is a deterministic table applied uniformly.\nThis is the only way to make them differ, so an intentional difference is\nalways explicit and reviewable: \"players cannot pick grass in the hub\"\nbecomes one row rather than a hope about agent diligence.",
+      "properties": {
+        "affordance": {
+          "maxLength": 64,
+          "title": "Affordance",
+          "type": "string"
+        },
+        "allowed": {
+          "default": false,
+          "title": "Allowed",
+          "type": "boolean"
+        },
+        "notes": {
+          "default": "",
+          "maxLength": 400,
+          "title": "Notes",
+          "type": "string"
+        },
+        "scene_id": {
+          "description": "Snake-case identifier, max 64 chars.",
+          "pattern": "^[a-z0-9][a-z0-9_.\\-]{0,63}$",
+          "title": "Scene Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "scene_id",
+        "affordance"
+      ],
+      "title": "InteractionRule",
+      "type": "object"
     },
     "LocomotionStyle": {
       "enum": [
@@ -126,13 +189,91 @@
       "title": "MechanicType",
       "type": "string"
     },
+    "NestedHost": {
+      "additionalProperties": false,
+      "description": "What a ``nested`` environment is attached to.",
+      "properties": {
+        "anchor_slot": {
+          "default": "head",
+          "maxLength": 64,
+          "title": "Anchor Slot",
+          "type": "string"
+        },
+        "asset_id": {
+          "description": "Snake-case identifier, max 64 chars.",
+          "pattern": "^[a-z0-9][a-z0-9_.\\-]{0,63}$",
+          "title": "Asset Id",
+          "type": "string"
+        },
+        "fit_to_host_extent_m": {
+          "default": 0.22,
+          "exclusiveMinimum": 0.0,
+          "maximum": 10.0,
+          "title": "Fit To Host Extent M",
+          "type": "number"
+        }
+      },
+      "required": [
+        "asset_id"
+      ],
+      "title": "NestedHost",
+      "type": "object"
+    },
+    "PlayerAvatarSpec": {
+      "additionalProperties": false,
+      "description": "What the player's own body is, and how it behaves.\n\nEvery field is an independent decision driven by the prompt. Nothing here\nmay be inferred from another field: a full head does not imply an\ninside-the-skull camera, and wanting a mirror does not imply wanting legs\nthat animate.",
+      "properties": {
+        "coverage": {
+          "$ref": "#/$defs/AvatarCoverage",
+          "default": "full_body"
+        },
+        "head_visibility": {
+          "$ref": "#/$defs/HeadVisibility",
+          "default": "hidden_in_self_view"
+        },
+        "leg_animation": {
+          "default": true,
+          "title": "Leg Animation",
+          "type": "boolean"
+        },
+        "needs_mirror": {
+          "default": false,
+          "title": "Needs Mirror",
+          "type": "boolean"
+        }
+      },
+      "title": "PlayerAvatarSpec",
+      "type": "object"
+    },
+    "PlayerPerspective": {
+      "description": "Where the player's viewpoint sits relative to their avatar.\n\nA modelled head must never imply that the camera lives inside the skull;\nthose are independent decisions, and only the prompt can say which the\ngame wants.\n\n* ``first_person_avatar`` \u2014 the ordinary case. The camera is at the\n  avatar's eyes and the player is inside the body the way they are inside\n  their own: they can look down at their hands, arms and legs, but they\n  do not see the inside of their own head.\n* ``inside_head_free_look`` \u2014 the player is a separate, miniature entity\n  inside their own avatar's head. Physical head rotation looks around the\n  skull and does NOT rotate the host; the controllers drive the host.\n* ``inside_head_npc_host`` \u2014 the player is a miniature entity inside an\n  autonomous NPC's head. The controllers drive the miniature player; the\n  NPC lives its own life and carries the interior with it.\n* ``inside_head_piloted`` \u2014 the player is a miniature entity inside their\n  own larger avatar's head, but normal VR controls map to the host: HMD\n  rotation turns the host's head, the sticks drive its locomotion and\n  turning. The \"climb into a giant robot\" case.",
+      "enum": [
+        "first_person_avatar",
+        "inside_head_free_look",
+        "inside_head_npc_host",
+        "inside_head_piloted"
+      ],
+      "title": "PlayerPerspective",
+      "type": "string"
+    },
     "SceneEntry": {
       "additionalProperties": false,
       "properties": {
+        "authoring_scale_m": {
+          "default": 0.0,
+          "maximum": 2000.0,
+          "minimum": 0.0,
+          "title": "Authoring Scale M",
+          "type": "number"
+        },
         "entry_point": {
           "default": false,
           "title": "Entry Point",
           "type": "boolean"
+        },
+        "environment_mode": {
+          "$ref": "#/$defs/EnvironmentMode",
+          "default": "exclusive"
         },
         "expected_playtime_minutes": {
           "default": 5.0,
@@ -141,16 +282,58 @@
           "title": "Expected Playtime Minutes",
           "type": "number"
         },
+        "host": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NestedHost"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
         "id": {
           "description": "Snake-case identifier, max 64 chars.",
           "pattern": "^[a-z0-9][a-z0-9_.\\-]{0,63}$",
           "title": "Id",
           "type": "string"
         },
+        "kind": {
+          "$ref": "#/$defs/SceneKind",
+          "default": "standalone"
+        },
+        "links": {
+          "items": {
+            "$ref": "#/$defs/SceneLink"
+          },
+          "maxItems": 32,
+          "title": "Links",
+          "type": "array"
+        },
         "name": {
           "maxLength": 128,
           "title": "Name",
           "type": "string"
+        },
+        "needs_unique_environment": {
+          "default": true,
+          "title": "Needs Unique Environment",
+          "type": "boolean"
+        },
+        "reuse_environment_from": {
+          "anyOf": [
+            {
+              "description": "Snake-case identifier, max 64 chars.",
+              "pattern": "^[a-z0-9][a-z0-9_.\\-]{0,63}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Reuse Environment From"
         },
         "summary": {
           "maxLength": 4000,
@@ -165,6 +348,63 @@
       ],
       "title": "SceneEntry",
       "type": "object"
+    },
+    "SceneKind": {
+      "description": "The role a scene plays in the game's structure.\n\nPurely descriptive: it tells the world architect what kind of place to\nbuild and tells the transition layer how the scene is reached.",
+      "enum": [
+        "standalone",
+        "hub",
+        "mission",
+        "chapter",
+        "interior"
+      ],
+      "title": "SceneKind",
+      "type": "string"
+    },
+    "SceneLink": {
+      "additionalProperties": false,
+      "description": "A one-way transition out of the scene that declares it.\n\nLinks are what make the environment graph explicit instead of implied.\nA star of links is a hub game, a chain is a story, and an arbitrary set\nis a teleport-device game; nothing in the engine assumes a shape.",
+      "properties": {
+        "kind": {
+          "$ref": "#/$defs/SceneLinkKind",
+          "default": "portal"
+        },
+        "return_spawn_point_id": {
+          "default": "",
+          "maxLength": 64,
+          "title": "Return Spawn Point Id",
+          "type": "string"
+        },
+        "spawn_point_id": {
+          "default": "",
+          "maxLength": 64,
+          "title": "Spawn Point Id",
+          "type": "string"
+        },
+        "to_scene": {
+          "description": "Snake-case identifier, max 64 chars.",
+          "pattern": "^[a-z0-9][a-z0-9_.\\-]{0,63}$",
+          "title": "To Scene",
+          "type": "string"
+        }
+      },
+      "required": [
+        "to_scene"
+      ],
+      "title": "SceneLink",
+      "type": "object"
+    },
+    "SceneLinkKind": {
+      "description": "How the player gets from one environment to another.",
+      "enum": [
+        "menu_select",
+        "trigger_volume",
+        "portal",
+        "vehicle",
+        "story_next"
+      ],
+      "title": "SceneLinkKind",
+      "type": "string"
     },
     "TargetDevice": {
       "description": "Which VR target the generated game is built and launched for.\n\n* ``pcvr`` \u2014 Windows native ``.exe`` (Vulkan + Win32 OpenXR), run on the\n  PC and viewed on the headset over Quest Link. The historical default.\n* ``quest`` \u2014 a standalone Android APK (Vulkan + Android OpenXR loader,\n  NativeActivity) installed and run locally on the Quest headset.\n\nStages 1-9 (BuildSpec .. scene compile, incl. codegen + worldgen) are\nidentical for both; only the build + launch stages branch on this value.",
@@ -251,6 +491,14 @@
       "default": null,
       "title": "Hud Summary"
     },
+    "interaction_rules": {
+      "items": {
+        "$ref": "#/$defs/InteractionRule"
+      },
+      "maxItems": 64,
+      "title": "Interaction Rules",
+      "type": "array"
+    },
     "locomotion": {
       "$ref": "#/$defs/LocomotionStyle",
       "default": "teleport"
@@ -281,12 +529,19 @@
       "title": "Pitch",
       "type": "string"
     },
+    "player_avatar": {
+      "$ref": "#/$defs/PlayerAvatarSpec"
+    },
     "player_height_meters": {
       "default": 1.7,
       "exclusiveMaximum": 3.0,
       "exclusiveMinimum": 0.0,
       "title": "Player Height Meters",
       "type": "number"
+    },
+    "player_perspective": {
+      "$ref": "#/$defs/PlayerPerspective",
+      "default": "first_person_avatar"
     },
     "prompt_id": {
       "description": "Snake-case identifier, max 64 chars.",

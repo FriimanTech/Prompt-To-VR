@@ -33,70 +33,17 @@
 #include <string>
 
 #include "../BuiltinMechanicBase.h"
+#include "../LocomotionClipSelector.h"
 
 #include <glm/gtc/quaternion.hpp>
 
 namespace ptv {
 namespace {
 
-constexpr float kPi = 3.14159265358979323846f;
-
-// Below this the character is standing still, whatever the AI asked for.
-constexpr float kIdleSpeedEpsilon = 0.05f;
-
-// How far past a tier boundary the speed must go before the clip changes,
-// as a fraction. Without it a character hovering exactly at the walk/run
-// threshold flickers between the two clips every frame.
-constexpr float kTierHysteresis = 0.12f;
-
-// The usable window for playback-rate scaling. Outside it the motion reads as
-// wrong rather than fast, so the tier changes instead.
-constexpr float kMinClipSpeed = 0.80f;
-constexpr float kMaxClipSpeed = 1.25f;
-
-// Apparent ground speed of a locomotion clip, as a multiple of the
-// character's height. A 1.8 m human walks at about 1.4 m/s and runs at about
-// 4 m/s, which is where these come from; scaling by height keeps a
-// house-sized creature and a knee-high one both looking right.
-constexpr float kWalkSpeedPerMeterOfHeight = 0.78f;
-constexpr float kRunSpeedPerMeterOfHeight = 2.2f;
-
-enum class Gait : int { Idle = 0, Walk = 1, Run = 2 };
-
-const char* gait_intent(Gait g) {
-    switch (g) {
-        case Gait::Walk: return "walk";
-        case Gait::Run: return "run";
-        case Gait::Idle:
-        default: return "idle";
-    }
-}
-
-float character_height(const World& world, std::uint32_t entity) {
-    if (world.has<CMesh>(entity)) {
-        const auto& m = world.get<CMesh>(entity);
-        if (m.target_scale_meters > 1.0e-4f) return m.target_scale_meters;
-        if (m.bounds_radius_m > 1.0e-4f) return 2.0f * m.bounds_radius_m;
-    }
-    if (world.has<CTransform>(entity)) {
-        return std::max(0.2f, world.get<CTransform>(entity).t.scale);
-    }
-    return 1.8f;
-}
-
-/** Apparent speed of one locomotion clip, in m/s.
- *
- *  Prefers what the scene compiler measured, falls back to a height-derived
- *  estimate. Never returns zero: it is a divisor. */
-float reference_speed(const World& world, std::uint32_t entity,
-                      const char* intent, float height, float fallback) {
-    if (world.has<CMesh>(entity)) {
-        const auto& speeds = world.get<CMesh>(entity).animation_speeds;
-        const auto it = speeds.find(intent);
-        if (it != speeds.end() && it->second > 1.0e-3f) return it->second;
-    }
-    return std::max(0.1f, fallback * height);
-}
+// Gait selection, clip-rate scaling and the height/reference-speed helpers
+// all live in LocomotionClipSelector.h now, shared with builtin.avatar_body.
+using locomotion_clips::body_height;
+using locomotion_clips::kIdleSpeedEpsilon;
 
 class CharacterLocomotionMechanic
     : public BuiltinMechanicBase<CharacterLocomotionMechanic> {
@@ -133,7 +80,7 @@ public:
                 : CLocomotionIntent{};
 
         auto& transform = world.get<CTransform>(self).t;
-        const float height = character_height(world, self);
+        const float height = body_height(world, self);
 
         // --- Desired horizontal motion --------------------------------
         //
@@ -232,83 +179,21 @@ private:
     }
 
     /** Pick the clip tier from the achieved speed and match its playback rate
-     *  to the ground actually being covered. */
+     *  to the ground actually being covered.
+     *
+     *  The selection itself lives in LocomotionClipSelector because
+     *  builtin.avatar_body needs the identical answer for the player's own
+     *  legs: an NPC and the player walking side by side at the same speed
+     *  have to scale their clips the same way, or one of them skates. */
     void drive_animation(World& world, std::uint32_t self, float speed,
                          bool sprint, float height, MechanicContext& ctx) {
-        if (ctx.skeleton == nullptr || !ctx.skeleton->has_skeleton(self)) {
-            return;
-        }
-
-        const float ref_walk =
-            ref_walk_override_ > 0.0f
-                ? ref_walk_override_
-                : reference_speed(world, self, "walk", height,
-                                  kWalkSpeedPerMeterOfHeight);
-        const float ref_run =
-            ref_run_override_ > 0.0f
-                ? ref_run_override_
-                : reference_speed(world, self, "run", height,
-                                  kRunSpeedPerMeterOfHeight);
-
-        const Gait wanted = choose_gait(speed, sprint, ref_walk);
-
-        // Fall back down the tiers the asset actually has. A creature rig has
-        // one locomotion preset, so "run" resolves to the walk clip played
-        // faster rather than to nothing at all.
-        Gait gait = wanted;
-        if (gait == Gait::Run && !ctx.skeleton->has_clip(self, "run")) {
-            gait = Gait::Walk;
-        }
-        if (gait == Gait::Walk && !ctx.skeleton->has_clip(self, "walk")) {
-            gait = Gait::Idle;
-        }
-
-        const char* intent = gait_intent(gait);
-        // play_clip is a no-op when this clip is already running, so calling
-        // it every frame costs a string compare and does not restart the
-        // cycle.
-        ctx.skeleton->play_clip(self, intent, /*looping=*/true, kGaitFade);
-
-        float rate = 1.0f;
-        if (gait == Gait::Walk) {
-            rate = speed / std::max(0.1f, ref_walk);
-        } else if (gait == Gait::Run) {
-            rate = speed / std::max(0.1f, ref_run);
-        }
-        ctx.skeleton->set_clip_speed(
-            self, std::clamp(rate, kMinClipSpeed, kMaxClipSpeed));
-
-        gait_ = gait;
+        locomotion_clips::Tunables tune{};
+        tune.walk_speed_mps = walk_speed_;
+        tune.run_speed_mps = run_speed_;
+        tune.reference_walk_mps = ref_walk_override_;
+        tune.reference_run_mps = ref_run_override_;
+        clips_.update(world, self, speed, sprint, height, tune, ctx);
     }
-
-    /** Tier selection with hysteresis around each boundary. */
-    Gait choose_gait(float speed, bool sprint, float ref_walk) const {
-        // The walk/run boundary sits where a walk clip would have to stretch
-        // past its usable range anyway.
-        const float run_boundary =
-            std::max(ref_walk * kMaxClipSpeed, 0.5f * (walk_speed_ + run_speed_));
-        const float up = 1.0f + kTierHysteresis;
-        const float down = 1.0f - kTierHysteresis;
-
-        if (speed <= kIdleSpeedEpsilon) return Gait::Idle;
-        if (sprint) return Gait::Run;
-
-        switch (gait_) {
-            case Gait::Idle:
-                return speed > kIdleSpeedEpsilon * up ? Gait::Walk : Gait::Idle;
-            case Gait::Walk:
-                if (speed > run_boundary * up) return Gait::Run;
-                return speed < kIdleSpeedEpsilon * down ? Gait::Idle
-                                                        : Gait::Walk;
-            case Gait::Run:
-            default:
-                return speed < run_boundary * down ? Gait::Walk : Gait::Run;
-        }
-    }
-
-    // Gait changes are frequent, so the blend is short enough to feel
-    // responsive but long enough to hide the pop.
-    static constexpr float kGaitFade = 0.18f;
 
     float walk_speed_{1.4f};
     float run_speed_{4.0f};
@@ -317,7 +202,7 @@ private:
     bool ground_snap_{true};
     float ref_walk_override_{0.0f};
     float ref_run_override_{0.0f};
-    Gait gait_{Gait::Idle};
+    locomotion_clips::Selector clips_;
 };
 
 }  // namespace

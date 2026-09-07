@@ -33,8 +33,24 @@ set(PTV_WORLDGEN_SOURCES
 # Per-project generated world builder(s), selected by project id. The stage
 # passes -DPTV_WORLD_PROJECT_ID=<id> so only that project's world code compiles.
 if(DEFINED PTV_WORLD_PROJECT_ID AND NOT "${PTV_WORLD_PROJECT_ID}" STREQUAL "")
-  file(GLOB_RECURSE PTV_WORLD_GENERATED CONFIGURE_DEPENDS
-    "${PTV_ENGINE_DIR}/generated/world/${PTV_WORLD_PROJECT_ID}/*.cpp")
+  # PTV_WORLD_ENV_ID narrows the glob to ONE environment's subdirectory.
+  #
+  # This is what makes several environments per project safe to generate in
+  # parallel. Without it every environment's C++ compiles into one binary, so
+  # they share a translation-unit set: two agents fight over identical
+  # filenames, duplicate helper types collide at namespace scope, and a syntax
+  # error in the head-interior fails the compile for the main world and burns
+  # its repair budget on someone else's mistake.
+  #
+  # Left empty, the glob takes the whole project directory, which is the old
+  # single-environment behaviour and keeps existing projects building.
+  if(DEFINED PTV_WORLD_ENV_ID AND NOT "${PTV_WORLD_ENV_ID}" STREQUAL "")
+    file(GLOB_RECURSE PTV_WORLD_GENERATED CONFIGURE_DEPENDS
+      "${PTV_ENGINE_DIR}/generated/world/${PTV_WORLD_PROJECT_ID}/${PTV_WORLD_ENV_ID}/*.cpp")
+  else()
+    file(GLOB_RECURSE PTV_WORLD_GENERATED CONFIGURE_DEPENDS
+      "${PTV_ENGINE_DIR}/generated/world/${PTV_WORLD_PROJECT_ID}/*.cpp")
+  endif()
   list(APPEND PTV_WORLDGEN_SOURCES ${PTV_WORLD_GENERATED})
 endif()
 

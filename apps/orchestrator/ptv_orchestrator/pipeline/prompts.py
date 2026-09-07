@@ -76,6 +76,74 @@ Mining Outpost"), emit one SceneEntry. The ``summary`` should describe
 layout, mood, lighting, encounters, and what mechanics are exercised
 there. Up to 4 000 chars per scene summary.
 
+EACH SCENE IS ITS OWN VR ENVIRONMENT. Every SceneEntry gets a whole
+generated environment of its own, so the scene list IS the environment
+list. Fill in the environment fields:
+
+  * ``kind`` -- ``hub`` for a persistent place the player keeps returning
+    to (a base of operations, an apartment, a fire station, a garage, a
+    museum), ``mission`` for a place entered from a hub, ``chapter`` for
+    one step of a linear story, ``interior`` for a space inside a
+    character or vehicle, ``standalone`` otherwise.
+  * ``links`` -- one entry per way OUT of this scene. ``menu_select`` for
+    a mission chosen from an interface, ``portal`` for a door or gate the
+    player walks through, ``trigger_volume`` for an area that transitions
+    on entry, ``vehicle`` for boarding something, ``story_next`` for an
+    automatic story progression. Set ``spawn_point_id`` to a name the
+    target scene should spawn the player at, and
+    ``return_spawn_point_id`` to where they come back to, so returning
+    from a mission puts them at the door they left through.
+    Links describe a GRAPH, not a fixed shape: a hub game is a star, a
+    story is a chain, a teleport-device game is an arbitrary graph.
+  * ``environment_mode`` -- ``nested`` ONLY when the space is physically
+    inside something else in another scene ("trapped inside the head of",
+    "a compartment inside the ship's computer core"). Set ``host`` to the
+    character asset and body slot it lives in. Everything else is
+    ``exclusive``.
+  * ``authoring_scale_m`` -- roughly how many metres across the place is.
+    For a ``nested`` interior give the size it should be AUTHORED at
+    (tens of metres, a real walkable level); the engine scales it down to
+    fit its host, so do not author a level inside a 0.22 m box.
+  * ``needs_unique_environment`` / ``reuse_environment_from`` -- set the
+    first false and the second to a sibling scene id only when two scenes
+    genuinely are the same place.
+
+Do NOT invent extra scenes to pad the game: every scene costs a full
+environment-generation pass.
+
+PLAYER PERSPECTIVE AND BODY. These are independent decisions -- a
+modelled head does NOT mean the camera is inside the skull.
+
+  * ``player_perspective`` -- ``first_person_avatar`` unless the prompt
+    explicitly describes being a smaller entity inside another body.
+    Use ``inside_head_free_look`` when head movement looks around inside
+    the host and the controllers drive the host;
+    ``inside_head_npc_host`` when the host is an autonomous NPC the
+    player does not control; ``inside_head_piloted`` when the player is
+    inside the host but normal VR controls drive it (the giant-robot
+    case).
+  * ``player_avatar.coverage`` -- ``full_body`` by DEFAULT, including a
+    head. Only use ``neck_down`` when the prompt explicitly asks for a
+    body-only avatar ("just the suit from the feet to the neck"). A head
+    that exists can be hidden at runtime; a head that was never generated
+    can never be shown.
+  * ``player_avatar.head_visibility`` -- ``hidden_in_self_view`` by
+    default, ``toggleable`` when the prompt wants a control to show or
+    hide the head or face, ``always_visible`` when the camera is not at
+    the eyes.
+  * ``player_avatar.leg_animation`` -- true by default, so the avatar's
+    legs walk when the player travels. Set false only when the prompt
+    says the avatar should slide without leg movement.
+  * ``player_avatar.needs_mirror`` -- true when the prompt mentions a
+    mirror, a reflection, or avatar customization.
+
+INTERACTION RULES. By default every equivalent object behaves the same
+way in every environment: if grass can be picked in the hub it can be
+picked in a mission. Emit an ``interaction_rules`` entry ONLY when the
+prompt explicitly asks for a difference ("players should not be able to
+pick up grass while inside the Hub"), naming the scene, the affordance,
+and whether it is allowed. Leave the list empty otherwise.
+
 ENGINE-CATALOG REUSE. The engine ships a *growing* catalog of reusable
 mechanics (teleport, sliding locomotion, snap turn, grab, throw,
 trigger zones, etc.). Generated mechanics that compile cleanly are
@@ -131,6 +199,37 @@ one. A good image prompt is a single focused paragraph:
   toward a clean reference shot.
 
 ``number_of_images`` is pinned to 1 by the schema. Do not request more.
+
+CHARACTER ROLE AND POSE. Set ``character_role`` on every ``character``
+asset, because ``category`` alone cannot answer what the thing is FOR:
+
+  * ``npc`` -- an actor that moves, patrols, fights or otherwise behaves
+    in the world.
+  * ``player_avatar`` -- the body the player loads into.
+  * ``none`` -- everything else, INCLUDING a creature the game only uses
+    as a grabbable prop or set dressing. A duck the player picks up off a
+    shelf is ``none``; a duck that chases the player is ``npc``.
+
+Then set ``reference.pose``, which is a SHAPE hint. The pipeline makes
+the final pose decision deterministically from ``character_role`` and
+the NPC plan, so your job is only to say what kind of body it is:
+
+  * ``t_pose`` for humanoid or bipedal characters, including a cartoon
+    animal whose wings or forelimbs read as arms.
+  * ``neutral_quadruped`` for genuinely four-legged, serpentine or
+    aquatic creatures, where a T-pose is meaningless.
+  * ``natural`` for props, scenery, FX and UI.
+
+You do NOT need to write pose wording into ``reference.prompt`` -- the
+stage appends a precise, tested pose clause and its own avoid-list. Do
+make sure your prompt text does not CONTRADICT it: for a character, do
+not describe an action pose, a dynamic angle, or a cropped composition.
+
+``reference.coverage`` is ``full_body`` unless the user's prompt
+explicitly asks for a body-only avatar ("just the suit from the feet to
+the neck"). Default to generating a head even when the game hides it:
+a head that exists can be hidden at runtime, but a head that was never
+generated can never be shown.
 
 TRIPO DEFAULTS (REQUIRED). Every asset intended for image-to-3D MUST
 set ``texture=true``, ``pbr=true``, and
@@ -1566,6 +1665,75 @@ REQUIREMENTS FOR A WORKING WORLD:
 - Use ``spawn_primitive`` for blocky structure and ``add_mesh`` for arbitrary
   procedural geometry (any shape you compute in C++). Use ``w.seed()`` for any
   randomness so results are reproducible.
+
+NAME EVERYTHING. Every ``spawn_primitive``, ``add_mesh`` and ``place_object``
+call MUST set ``name`` to something meaningful and specific ("front_door",
+"wall_north", "reception_desk", "building_r2_c3"). That name becomes the
+entity's permanent id, and saved game state is keyed on it. An unnamed object
+falls back to a positional id, and positional ids shift the moment you insert
+another call above them -- which silently makes a save restore the wrong
+objects after the world is regenerated. Repeated names are fine (they get a
+stable numeric suffix); blank ones are not.
+
+DECLARE WHAT CAN CHANGE. Geometry alone tells the engine nothing about what a
+thing IS. A box in a doorway is not a door: navigation will assert an
+unconditional route through it, nothing knows whether it starts open, and
+nothing can remember that the player opened it. So for anything whose
+configuration can change, or that the player can act on, ALSO call
+``interactive(...)`` with the SAME ``id`` as the geometry's name:
+
+    * ``kind`` is one of: ``door`` (doors, gates, windows, garage doors,
+      trapdoors -- hinged or sliding), ``switchable`` (lights, switches,
+      faucets, televisions, fireplaces, steam vents, conveyors, traffic
+      lights), ``container`` (drawers, cabinets, chests), ``mover`` (things
+      that travel between NAMED positions: elevator floors, a drawbridge
+      raised/lowered, barrier arms, retractable stairs, folding bunks,
+      curtains, a ladder stored/deployed), ``breakable`` (glass, destructible
+      walls, rock blockages), ``harvestable`` (a region that yields an object
+      when picked), ``movable`` (an object whose POSITION should persist when
+      the player moves it).
+    * ``initial_state`` is the state AT LOAD, and it must be honest. If your
+      hospital has some interior doors already open, declare those open and
+      the rest closed. Do not assume a uniform default -- the engine has no
+      way to know, and a save can only record a CHANGE from what you declared.
+      Use ``StateValue::of(true/false)`` for a flag, ``of(45.0f)`` for an
+      angle, ``named("floor_3")`` for an enumerated position.
+    * Give a ``door`` or ``container`` its ``hinge_point`` (in the object's own
+      frame), ``hinge_axis``, and ``min_angle_deg`` / ``max_angle_deg`` -- or
+      ``slide_axis`` + ``slide_distance_m`` for a sliding one. Give a ``mover``
+      its ``positions`` list. Give a ``harvestable`` its ``yields_asset_id``.
+    * ``locked`` is a MODIFIER, not a kind: a security gate is closed AND
+      locked, and those are separate facts.
+    * Every interactive MUST correspond to real geometry you created with that
+      exact name. A declaration with no geometry behind it renders as a
+      placeholder and fails validation.
+
+DECLARE ONLY WHAT MATTERS. State is for things whose configuration can change
+or that gameplay can touch. Static scenery -- walls, floors, kerbs, most
+furniture -- stays plain named geometry with no ``interactive`` call. Every
+interactive costs runtime bookkeeping, and Meta's budget for a busy Quest 3
+scene is roughly 200-300 draw calls, so declaring hundreds of them is a
+performance decision as much as a design one.
+
+NEVER DECLARE THOUSANDS OF SMALL INTERACTIVES. A grass field is ONE
+``harvestable`` region over batched geometry, whose ``yields_asset_id`` names
+the single blade a pick produces -- not one entity per blade. Measured VR
+foliage tests fall under 10 FPS on a Quest 3 at roughly 2,000 individually
+placed plants, so per-blade entities are not a close call. The same applies to
+rubble, coins, berries, leaves and crowds.
+
+GATE THE ROUTES THAT DOORS CONTROL. When a ``nav_link`` passes through
+something you declared -- a door, a gate, a drawbridge, a rock blockage -- set
+that link's ``gated_by`` to the interactive's id, plus the state that permits
+passage (``gate_state_key`` and ``gate_state_value``). Without it the link is
+an unconditional claim that the route exists, and an NPC will walk straight
+through a door the player just shut.
+
+USE THE TAGS THE ENGINE ALREADY READS. Tags on ``spawn_primitive`` /
+``add_mesh`` / ``place_object`` cost nothing and wire real behaviour:
+``grabbable`` makes an object pickable by the player's existing grab mechanic
+with no further work, ``ground`` / ``teleport_target`` mark walkable floor,
+``mirror_visible`` puts an object in a mirror's reflection.
 - ``MeshDesc`` GEOMETRY LAYOUT (exact API -- getting this wrong fails the
   build): ``positions`` and ``normals`` are FLAT ``std::vector<float>`` of xyz
   triples (``{x0,y0,z0, x1,y1,z1, ...}``), NOT ``std::vector<Vec3>``.

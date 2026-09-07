@@ -66,6 +66,159 @@ class MechanicType(str, Enum):
     hub = "hub"
 
 
+class PlayerPerspective(str, Enum):
+    """Where the player's viewpoint sits relative to their avatar.
+
+    A modelled head must never imply that the camera lives inside the skull;
+    those are independent decisions, and only the prompt can say which the
+    game wants.
+
+    * ``first_person_avatar`` — the ordinary case. The camera is at the
+      avatar's eyes and the player is inside the body the way they are inside
+      their own: they can look down at their hands, arms and legs, but they
+      do not see the inside of their own head.
+    * ``inside_head_free_look`` — the player is a separate, miniature entity
+      inside their own avatar's head. Physical head rotation looks around the
+      skull and does NOT rotate the host; the controllers drive the host.
+    * ``inside_head_npc_host`` — the player is a miniature entity inside an
+      autonomous NPC's head. The controllers drive the miniature player; the
+      NPC lives its own life and carries the interior with it.
+    * ``inside_head_piloted`` — the player is a miniature entity inside their
+      own larger avatar's head, but normal VR controls map to the host: HMD
+      rotation turns the host's head, the sticks drive its locomotion and
+      turning. The "climb into a giant robot" case.
+    """
+
+    first_person_avatar = "first_person_avatar"
+    inside_head_free_look = "inside_head_free_look"
+    inside_head_npc_host = "inside_head_npc_host"
+    inside_head_piloted = "inside_head_piloted"
+
+
+class AvatarCoverage(str, Enum):
+    """How much of the player's body the avatar asset actually contains.
+
+    Default to ``full_body``. A head that exists can always be hidden at
+    runtime, while a head that was never generated can never be shown, so
+    ``neck_down`` is reserved for prompts that explicitly ask for a body-only
+    avatar ("just the suit from the feet to the neck").
+    """
+
+    full_body = "full_body"
+    neck_down = "neck_down"
+    hands_only = "hands_only"
+
+
+class HeadVisibility(str, Enum):
+    """Whether the avatar's head renders, and to whom.
+
+    This is a per-view decision, not a global one: hiding the head so the
+    camera is not inside the skull must not also make the avatar headless in
+    a mirror.
+
+    * ``hidden_in_self_view`` — the default. Suppressed in the player's own
+      view, fully present everywhere else (mirrors, reflections).
+    * ``always_visible`` — never suppressed. For prompts where the camera is
+      not at the eyes at all.
+    * ``toggleable`` — starts hidden in self view, and the game exposes a
+      control to show or hide it, e.g. admiring an outfit in a mirror.
+    """
+
+    hidden_in_self_view = "hidden_in_self_view"
+    always_visible = "always_visible"
+    toggleable = "toggleable"
+
+
+class PlayerAvatarSpec(StrictModel):
+    """What the player's own body is, and how it behaves.
+
+    Every field is an independent decision driven by the prompt. Nothing here
+    may be inferred from another field: a full head does not imply an
+    inside-the-skull camera, and wanting a mirror does not imply wanting legs
+    that animate.
+    """
+
+    coverage: AvatarCoverage = AvatarCoverage.full_body
+    head_visibility: HeadVisibility = HeadVisibility.hidden_in_self_view
+    # In-sync leg animation while the player travels. Default true: assume
+    # the avatar's legs walk when the player walks unless the prompt says the
+    # avatar should just slide.
+    leg_animation: bool = True
+    # Set when the prompt asks for a mirror, avatar customization, or seeing
+    # your own reflection. Drives whether a mirror surface is placed and
+    # whether the head must stay renderable.
+    needs_mirror: bool = False
+
+
+class EnvironmentMode(str, Enum):
+    """Whether a scene's environment is exclusive or spatially nested.
+
+    * ``exclusive`` — one at a time. Entering it unloads the previous
+      environment, which is what keeps a multi-map game inside the Quest's
+      memory budget.
+    * ``nested`` — loaded alongside a host environment and attached to an
+      entity in it, so both are active simultaneously. The inside of an
+      NPC's head, or a compartment inside a moving spacecraft.
+    """
+
+    exclusive = "exclusive"
+    nested = "nested"
+
+
+class SceneKind(str, Enum):
+    """The role a scene plays in the game's structure.
+
+    Purely descriptive: it tells the world architect what kind of place to
+    build and tells the transition layer how the scene is reached.
+    """
+
+    standalone = "standalone"
+    hub = "hub"
+    mission = "mission"
+    chapter = "chapter"
+    interior = "interior"
+
+
+class SceneLinkKind(str, Enum):
+    """How the player gets from one environment to another."""
+
+    menu_select = "menu_select"
+    trigger_volume = "trigger_volume"
+    portal = "portal"
+    vehicle = "vehicle"
+    story_next = "story_next"
+
+
+class SceneLink(StrictModel):
+    """A one-way transition out of the scene that declares it.
+
+    Links are what make the environment graph explicit instead of implied.
+    A star of links is a hub game, a chain is a story, and an arbitrary set
+    is a teleport-device game; nothing in the engine assumes a shape.
+    """
+
+    to_scene: IdStr
+    kind: SceneLinkKind = SceneLinkKind.portal
+    # Named spawn point in the TARGET scene to arrive at.
+    spawn_point_id: str = Field(default="", max_length=64)
+    # Named spawn point in THIS scene to come back to, so returning from a
+    # mission or an exhibit puts the player at the door they left through
+    # rather than at the world origin.
+    return_spawn_point_id: str = Field(default="", max_length=64)
+
+
+class NestedHost(StrictModel):
+    """What a ``nested`` environment is attached to."""
+
+    # The character asset whose body hosts this interior.
+    asset_id: IdStr
+    # Canonical body slot on the host (see engine BodySlots), e.g. "head".
+    anchor_slot: str = Field(default="head", max_length=64)
+    # Longest-axis extent, in metres, the interior must fit inside after
+    # scaling. A human head is ~0.22 m.
+    fit_to_host_extent_m: float = Field(default=0.22, gt=0.0, le=10.0)
+
+
 class SceneEntry(StrictModel):
     id: IdStr
     name: str = Field(..., max_length=128)
@@ -77,6 +230,40 @@ class SceneEntry(StrictModel):
     expected_playtime_minutes: float = Field(
         default=5.0, ge=0.5, le=240.0
     )
+
+    # --- Environment shape (consumed by world generation) ---------------
+    kind: SceneKind = SceneKind.standalone
+    environment_mode: EnvironmentMode = EnvironmentMode.exclusive
+    # Required when environment_mode is nested.
+    host: Optional[NestedHost] = None
+    # Metres across that the world architect should author at. A nested
+    # interior is authored at human scale and scaled down to fit its host,
+    # because authoring a walkable level inside a 0.22 m box produces
+    # unusable geometry and nav regions.
+    authoring_scale_m: float = Field(default=0.0, ge=0.0, le=2000.0)
+    links: List[SceneLink] = Field(default_factory=list, max_length=32)
+    # False lets several scenes share one generated environment instead of
+    # paying for a duplicate; ``reuse_environment_from`` then says which.
+    needs_unique_environment: bool = True
+    reuse_environment_from: Optional[IdStr] = None
+
+
+class InteractionRule(StrictModel):
+    """A prompt-specified exception to uniform interaction behaviour.
+
+    Equivalent objects behave identically in every environment by default,
+    because the affordance binder is a deterministic table applied uniformly.
+    This is the only way to make them differ, so an intentional difference is
+    always explicit and reviewable: "players cannot pick grass in the hub"
+    becomes one row rather than a hope about agent diligence.
+    """
+
+    scene_id: IdStr
+    # Affordance kind ("harvestable", "door") or an affordance tag
+    # ("grabbable") the rule applies to.
+    affordance: str = Field(..., max_length=64)
+    allowed: bool = False
+    notes: str = Field(default="", max_length=400)
 
 
 class MechanicEntry(StrictModel):
@@ -140,6 +327,13 @@ class BuildSpec(StrictModel):
     comfort: ComfortLevel = ComfortLevel.comfort
     player_height_meters: float = Field(default=1.7, gt=0.0, lt=3.0)
 
+    # Where the player's viewpoint sits, and what their body is. Kept as two
+    # separate fields because camera placement and body shape are
+    # independent: a full-headed avatar is still viewed from the eyes unless
+    # the prompt asks for something stranger.
+    player_perspective: PlayerPerspective = PlayerPerspective.first_person_avatar
+    player_avatar: PlayerAvatarSpec = Field(default_factory=PlayerAvatarSpec)
+
     scenes: List[SceneEntry] = Field(..., min_length=1, max_length=50)
     mechanics: List[MechanicEntry] = Field(..., min_length=1)
     assets: List[AssetEntry] = Field(..., min_length=1, max_length=48)
@@ -148,3 +342,9 @@ class BuildSpec(StrictModel):
     hud_summary: Optional[str] = Field(default=None, max_length=4000)
     constraints: List[str] = Field(default_factory=list, max_length=50)
     acceptance_tests: List[TestEntry] = Field(..., min_length=1)
+
+    # Per-scene exceptions to otherwise-uniform interaction behaviour. Empty
+    # is the norm and means "equivalent objects behave the same everywhere".
+    interaction_rules: List[InteractionRule] = Field(
+        default_factory=list, max_length=64
+    )

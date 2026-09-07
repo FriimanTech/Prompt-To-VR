@@ -43,6 +43,17 @@ pre,
   @apply inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs border;
 }
 
+/* Small secondary action that lives inside a row and stays out of the way
+   until the row is hovered or focused. */
+.ptv-icon-button {
+  @apply rounded border border-white/10 bg-white/5 px-2 py-0.5 text-xs text-muted transition-colors hover:border-accent/40 hover:bg-accent/10 hover:text-accent;
+}
+
+.ptv-button:disabled,
+.ptv-button-primary:disabled {
+  @apply cursor-not-allowed opacity-40;
+}
+
 .ptv-input,
 .ptv-textarea {
   @apply w-full bg-panelmuted border border-white/10 rounded-lg px-3 py-2 text-sm outline-none focus:border-accent/60;

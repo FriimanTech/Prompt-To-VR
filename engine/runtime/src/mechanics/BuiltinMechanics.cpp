@@ -28,6 +28,13 @@ extern "C" int ptv_force_link_builtin_throw;
 extern "C" int ptv_force_link_builtin_recoil;
 extern "C" int ptv_force_link_builtin_hand_pose;
 extern "C" int ptv_force_link_builtin_character_locomotion;
+extern "C" int ptv_force_link_builtin_avatar_body;
+extern "C" int ptv_force_link_builtin_mirror_surface;
+extern "C" int ptv_force_link_builtin_equip;
+extern "C" int ptv_force_link_builtin_ui_panel;
+extern "C" int ptv_force_link_builtin_head_interior;
+extern "C" int ptv_force_link_builtin_motion_affordances;
+extern "C" int ptv_force_link_builtin_state_affordances;
 
 namespace {
 int sum_builtin_module_anchors() {
@@ -35,7 +42,14 @@ int sum_builtin_module_anchors() {
            ptv_force_link_builtin_slide + ptv_force_link_builtin_grab +
            ptv_force_link_builtin_throw + ptv_force_link_builtin_recoil +
            ptv_force_link_builtin_hand_pose +
-           ptv_force_link_builtin_character_locomotion;
+           ptv_force_link_builtin_character_locomotion +
+           ptv_force_link_builtin_avatar_body +
+           ptv_force_link_builtin_mirror_surface +
+           ptv_force_link_builtin_equip +
+           ptv_force_link_builtin_ui_panel +
+           ptv_force_link_builtin_head_interior +
+           ptv_force_link_builtin_motion_affordances +
+           ptv_force_link_builtin_state_affordances;
 }
 // Deliberately ``volatile``: a const, unused aggregate of the same values
 // gets constant-folded away and the modules go missing from the link again.

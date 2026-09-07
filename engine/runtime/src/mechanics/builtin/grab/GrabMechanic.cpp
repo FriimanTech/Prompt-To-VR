@@ -54,6 +54,18 @@ std::uint32_t find_grabbable(World& world, const Vec3& pos, float max_dist) {
             }
         }
         if (!grabbable) continue;
+        // An equipped item with passive protection is invisible to an
+        // ordinary grab, so brushing a hand past a worn gauntlet cannot rip
+        // it off. Taking it off deliberately is a different action, owned by
+        // builtin.equip's grab_pull path, which goes through IEquip rather
+        // than through this search.
+        if (world.registry().all_of<CEquipped>(e)) {
+            const auto& eq = world.registry().get<CEquipped>(e);
+            if (eq.wearer != InputSnapshot::kInvalidEntity &&
+                eq.passive_grab_protection) {
+                continue;
+            }
+        }
         const auto& ct = view.get<const CTransform>(e).t;
         const Vec3 dp = ct.position - pos;
         const float d2 = glm::dot(dp, dp);

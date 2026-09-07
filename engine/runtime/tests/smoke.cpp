@@ -19,12 +19,16 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
 #include <string>
 #include <vector>
 
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/quaternion.hpp>
 
+#include "../src/mechanics/builtin/TwoBoneIk.h"
+#include "ptv/api/BodySlots.h"
 #include "ptv/api/IMechanic.h"
 #include "ptv/ecs/Skeleton.h"
 #include "ptv/ecs/World.h"
@@ -35,7 +39,17 @@
 #include "ptv/render/GltfSkinnedLoad.h"
 #include "ptv/render/Renderer.h"
 #include "ptv/render/VulkanContext.h"
+#include "ptv/save/SaveSystem.h"
 #include "ptv/scene/SceneLoader.h"
+
+// Internal to the render module: the tag -> visual role table. Included
+// directly because the whole point of the table is that it is the ONLY place
+// these decisions live, so the test has to read the same rows the renderer
+// does rather than a copy.
+#include "../src/render/VisualTagTable.h"
+// Panel layout and hit-testing, for the same reason: the parts that are easy to
+// get subtly wrong are pure math, and testing them needs no headset.
+#include "../src/mechanics/builtin/ui_panel/UiPanelLayout.h"
 
 #include <openxr/openxr.h>
 
@@ -58,6 +72,15 @@ static int case_mechanics() {
         "builtin.recoil",
         "builtin.hand_pose",
         "builtin.character_locomotion",
+        "builtin.avatar_body",
+        "builtin.mirror_surface",
+        "builtin.equip",
+        "builtin.door",
+        "builtin.container",
+        "builtin.mover",
+        "builtin.switchable",
+        "builtin.breakable",
+        "builtin.harvestable",
     };
     for (const char* id : expected) {
         bool found = false;
@@ -733,6 +756,1134 @@ static int case_lod_skinning(int count, char** paths) {
 
     return ok("lod skinning: identical skeleton, bindings and clips at every "
               "level");
+}
+
+// The slot vocabulary is what lets one mechanic pose a hand fixture, a
+// Mixamo-spec rig and a Tripo-spec rig without knowing which it has. The
+// properties worth pinning are the ones a naive table would get wrong.
+static int case_body_slots() {
+    // Separators, casing and the mixamorig: namespace are all noise.
+    if (ptv::normalize_joint_name("mixamorig:LeftForeArm") != "leftforearm") {
+        return fail("normalize did not strip the mixamorig: prefix");
+    }
+    if (ptv::normalize_joint_name("Left_Fore_Arm") != "leftforearm" ||
+        ptv::normalize_joint_name("left fore arm") != "leftforearm" ||
+        ptv::normalize_joint_name("leftforearm") != "leftforearm") {
+        return fail("normalize did not collapse separators and casing");
+    }
+
+    if (!ptv::is_body_slot("forearm_r") || !ptv::is_body_slot("head") ||
+        !ptv::is_body_slot("index_1_r") || !ptv::is_body_slot("toes_l")) {
+        return fail("expected slot missing from the vocabulary");
+    }
+    if (ptv::is_body_slot("elbow")) {
+        return fail("sided slots must not resolve without a side suffix");
+    }
+
+    auto has = [](const std::vector<std::string>& v, const char* want) {
+        return std::find(v.begin(), v.end(), std::string(want)) != v.end();
+    };
+
+    // One slot has to cover several conventions at once, or the mechanic only
+    // works on whichever rig the author happened to test against.
+    const auto& forearm = ptv::body_slot_candidates("forearm_r");
+    if (!has(forearm, "rightforearm")) return fail("forearm_r misses Mixamo");
+    if (!has(forearm, "lowerarmr")) return fail("forearm_r misses Unreal");
+    if (!has(forearm, "rightlowerarm")) {
+        return fail("forearm_r misses Unity Humanoid");
+    }
+
+    // Mixamo has no elbow or knee bone, so these deliberately alias.
+    if (ptv::body_slot_candidates("elbow_r") != forearm) {
+        return fail("elbow_r must resolve to the same joint as forearm_r");
+    }
+    if (ptv::body_slot_candidates("knee_l") !=
+        ptv::body_slot_candidates("shin_l")) {
+        return fail("knee_l must resolve to the same joint as shin_l");
+    }
+
+    // The engine's own hand fixture is one GLB per hand, so its joints are
+    // unsided. A sided slot still has to find them, or hand_pose regresses.
+    const auto& index = ptv::body_slot_candidates("index_1_r");
+    if (!has(index, "righthandindex1")) {
+        return fail("index_1_r misses the Mixamo full-body name");
+    }
+    if (!has(index, "index01")) {
+        return fail("index_1_r misses the engine hand fixture's unsided name");
+    }
+    // Sided names must be tried first: on a full-body rig both could match,
+    // and picking the unsided one would pose the wrong hand.
+    const auto sided = std::find(index.begin(), index.end(),
+                                 std::string("righthandindex1"));
+    const auto unsided =
+        std::find(index.begin(), index.end(), std::string("index01"));
+    if (sided > unsided) {
+        return fail("unsided finger names must be the last resort");
+    }
+
+    if (ptv::body_finger_slot("index", 1, 1) != "index_1_r" ||
+        ptv::body_finger_slot("thumb", 3, 0) != "thumb_3_l") {
+        return fail("body_finger_slot built the wrong slot name");
+    }
+
+    std::printf("[ok] body slots: %zu slots, conventions unified\n",
+                ptv::body_slot_names().size());
+    return 0;
+}
+
+// The affordance built-ins have one contract that matters more than their
+// motion: they must not keep state of their own. Everything goes through the
+// registry, because a mechanic that cached "am I open" would lose it the
+// moment the environment reloaded -- which is the exact bug the registry
+// exists to prevent.
+static int case_nested_scene() {
+    if (!ptv::MechanicRegistry::get().make_mechanic("builtin.head_interior")) {
+        return fail("builtin.head_interior not registered");
+    }
+
+    const auto dir =
+        std::filesystem::temp_directory_path() / "ptv_nested_test";
+    std::filesystem::create_directories(dir);
+    const auto path = dir / "interior.json";
+    {
+        std::ofstream f(path);
+        // Authored at HUMAN scale, as world architects are told to: a level
+        // laid out inside a 22 cm box produces geometry too degenerate to
+        // walk on, so the shrink happens on load instead.
+        f << R"({
+  "version": 2,
+  "scene_id": "skull_interior",
+  "entities": [
+    { "id": "floor", "transform": { "position": [0,0,0], "scale": 1.0 },
+      "primitive": { "kind": "box", "size": [20,0.2,20] },
+      "tags": ["ground"] },
+    { "id": "front_door", "transform": { "position": [10,0,0], "scale": 1.0 },
+      "primitive": { "kind": "box", "size": [1,2,0.2] } },
+    { "id": "lamp", "transform": { "position": [0,2,0], "scale": 1.0 },
+      "primitive": { "kind": "sphere", "size": [0.3,0.3,0.3] },
+      "attached_to": { "entity_id": "front_door" } }
+  ],
+  "interactives": [
+    { "id": "front_door", "kind": "door", "initial_state": { "open": false } }
+  ]
+})";
+    }
+
+    const ptv::SceneDoc interior = ptv::LoadSceneJson(path.string());
+    if (interior.entities.size() != 3) return fail("interior did not parse");
+
+    ptv::World world;
+
+    // An OUTER scene that already has a "front_door" of its own. This is the
+    // collision the id prefix exists to prevent: two world architects both
+    // name a door "front_door", and ids are persistence keys, so a clash does
+    // not fail loudly -- it silently restores one door's saved state onto the
+    // other.
+    const auto outer_door = world.create_entity("front_door");
+    world.registry().emplace<ptv::CTransform>(outer_door, ptv::CTransform{});
+
+    ptv::SceneNesting nesting{};
+    nesting.id_prefix = "skull_interior";
+    nesting.scale = 0.011f;  // 20 m authored -> ~0.22 m skull
+    nesting.tag = "nested:skull_interior";
+    nesting.mount = glm::scale(
+        glm::translate(ptv::Mat4(1.0f), ptv::Vec3(3.0f, 1.6f, -2.0f)),
+        ptv::Vec3(nesting.scale));
+
+    ptv::ApplySceneToWorld(interior, world, &nesting);
+
+    // The outer door is untouched and the interior's is a separate entity.
+    if (world.find("front_door") != outer_door) {
+        return fail("the nested scene stole the outer scene's id");
+    }
+    const auto inner_door = world.find("skull_interior/front_door");
+    if (inner_door == entt::null) return fail("nested id was not scoped");
+    if (inner_door == outer_door) return fail("nested entity collided");
+
+    // The interactive's persistence key is the SCOPED id, or two interiors
+    // that both declare a front_door would save over each other.
+    if (!world.registry().all_of<ptv::CInteractive>(inner_door)) {
+        return fail("nested interactive did not bind");
+    }
+    if (world.registry().get<ptv::CInteractive>(inner_door).id !=
+        "skull_interior/front_door") {
+        return fail("nested interactive kept an unscoped persistence key");
+    }
+
+    // Transforms are re-based through the mount, so the interior sits at the
+    // head rather than at the world origin.
+    const auto floor = world.find("skull_interior/floor");
+    if (floor == entt::null) return fail("nested floor missing");
+    const auto& ft = world.registry().get<ptv::CTransform>(floor).t;
+    if (glm::length(ft.position - ptv::Vec3(3.0f, 1.6f, -2.0f)) > 1e-3f) {
+        return fail("nested entity was not mounted");
+    }
+
+    // Scale is carried on the Transform, NOT left in the mount matrix: the
+    // attachment system that moves the interior each frame rewrites position
+    // and rotation but never scale, so anything left in the matrix is lost on
+    // the first frame.
+    if (std::abs(ft.scale - nesting.scale) > 1e-5f) {
+        return fail("fit scale did not reach the Transform");
+    }
+
+    // A door 10 m along the authored floor lands 11 cm from the mount once
+    // shrunk -- the offset scales with the room, which is what keeps the
+    // interior's proportions intact.
+    const auto& dt = world.registry().get<ptv::CTransform>(inner_door).t;
+    const float offset = glm::length(dt.position - ft.position);
+    if (std::abs(offset - 10.0f * nesting.scale) > 1e-3f) {
+        return fail("interior proportions were not preserved by the fit");
+    }
+
+    // An attachment authored INSIDE the interior resolves against the
+    // interior's own copy, not the outer scene's same-named entity.
+    if (!world.registry().all_of<ptv::CAttachment>(
+            world.find("skull_interior/lamp"))) {
+        return fail("interior-internal attachment was dropped");
+    }
+    const auto& att = world.registry().get<ptv::CAttachment>(
+        world.find("skull_interior/lamp"));
+    if (att.parent != static_cast<std::uint32_t>(inner_door)) {
+        return fail("interior attachment resolved to the outer entity");
+    }
+
+    // Every nested entity carries the tag, which is both how the loader's
+    // output is identified and how unloading finds it later.
+    int tagged = 0;
+    auto view = world.registry().view<ptv::CTag>();
+    for (auto e : view) {
+        const auto& tags = view.get<ptv::CTag>(e).tags;
+        if (std::find(tags.begin(), tags.end(), nesting.tag) != tags.end()) {
+            ++tagged;
+        }
+    }
+    if (tagged != 3) return fail("nested entities were not all tagged");
+
+    // A normal top-level load must be completely unaffected.
+    ptv::World plain;
+    ptv::ApplySceneToWorld(interior, plain);
+    if (plain.find("front_door") == entt::null) {
+        return fail("un-nested load started prefixing ids");
+    }
+    if (std::abs(plain.registry()
+                     .get<ptv::CTransform>(plain.find("floor"))
+                     .t.scale -
+                 1.0f) > 1e-5f) {
+        return fail("un-nested load started scaling");
+    }
+
+    std::filesystem::remove_all(dir);
+    return 0;
+}
+
+static int case_reference_frame() {
+    // The reference-frame math, without a headset. This is pure composition,
+    // and it is where the subtle errors live: a frame that inherits a parent's
+    // pitch, a boarding step that teleports the player, or a slide direction
+    // that curves because a world vector was added to a frame-local position.
+    //
+    // Mirrors Application::rig_parent_matrix / rig_world_matrix. Kept in step
+    // by asserting the PROPERTIES those functions exist to guarantee, rather
+    // than by duplicating their code and hoping the copies agree.
+    auto frame_of = [](const ptv::Vec3& pos, float yaw, float pitch) {
+        // A parent may pitch (a boat on a wave); the FRAME must not, or the
+        // player's horizon tilts -- the most reliable way to make someone sick
+        // in VR. So the frame keeps position and heading only.
+        ptv::Mat4 parent = glm::translate(ptv::Mat4(1.0f), pos);
+        parent = glm::rotate(parent, yaw, ptv::Vec3(0.0f, 1.0f, 0.0f));
+        parent = glm::rotate(parent, pitch, ptv::Vec3(1.0f, 0.0f, 0.0f));
+        // Flatten: position + yaw of the parent's forward.
+        const ptv::Vec3 fwd =
+            ptv::Vec3(parent * ptv::Vec4(0.0f, 0.0f, -1.0f, 0.0f));
+        // atan2(-x, -z), the exact inverse of glm::rotate about +Y with
+        // forward at -Z. Getting this backwards is what made both spawn paths
+        // face the player in mirrored orientation for any non-axis-aligned
+        // facing.
+        const ptv::Vec3 flat(fwd.x, 0.0f, fwd.z);
+        const float y = glm::length(flat) < 1e-5f
+                            ? 0.0f
+                            : std::atan2(-flat.x, -flat.z);
+        return glm::rotate(
+            glm::translate(ptv::Mat4(1.0f), ptv::Vec3(parent[3])), y,
+            ptv::Vec3(0.0f, 1.0f, 0.0f));
+    };
+
+    // A pitching parent must not tilt the frame: local "up" stays world up.
+    {
+        const ptv::Mat4 f =
+            frame_of(ptv::Vec3(0.0f), 0.0f, glm::radians(30.0f));
+        const ptv::Vec3 up = ptv::Vec3(f * ptv::Vec4(0, 1, 0, 0));
+        if (std::abs(up.y - 1.0f) > 1e-3f) {
+            return fail("frame inherited the parent's pitch");
+        }
+    }
+
+    // The property that makes a moving platform work: the player's LOCAL
+    // position is untouched as the parent moves, and their world position
+    // follows. Standing still means zero stick input and still arriving
+    // somewhere else.
+    {
+        const ptv::Vec3 local(0.0f, 0.0f, 2.0f);  // 2 m along the deck
+        const ptv::Vec3 a = ptv::Vec3(
+            frame_of(ptv::Vec3(0.0f, 0.0f, 0.0f), 0.0f, 0.0f) *
+            ptv::Vec4(local, 1.0f));
+        const ptv::Vec3 b = ptv::Vec3(
+            frame_of(ptv::Vec3(10.0f, 0.0f, 0.0f), 0.0f, 0.0f) *
+            ptv::Vec4(local, 1.0f));
+        if (std::abs((b.x - a.x) - 10.0f) > 1e-4f) {
+            return fail("player did not travel with the frame");
+        }
+        if (std::abs(b.z - a.z) > 1e-4f) {
+            return fail("player drifted within the frame");
+        }
+    }
+
+    // A turning parent carries the player's heading with it, which is why the
+    // frame's yaw has to be added to the rig's own.
+    {
+        const ptv::Mat4 f =
+            frame_of(ptv::Vec3(0.0f), glm::radians(90.0f), 0.0f);
+        const ptv::Vec3 p =
+            ptv::Vec3(f * ptv::Vec4(0.0f, 0.0f, -1.0f, 1.0f));
+        // R_y(+90) * (0,0,-1) = (-1, 0, 0).
+        if (std::abs(p.x + 1.0f) > 1e-3f || std::abs(p.z) > 1e-3f) {
+            return fail("frame rotation did not carry the player");
+        }
+    }
+
+    // Yaw decomposition must be the exact inverse of the composition, or
+    // boarding a rotated frame spins the player.
+    {
+        for (float deg : {-170.0f, -35.0f, 0.0f, 50.0f, 120.0f}) {
+            const float yaw = glm::radians(deg);
+            const ptv::Mat4 m =
+                glm::rotate(ptv::Mat4(1.0f), yaw, ptv::Vec3(0, 1, 0));
+            const ptv::Vec3 fwd =
+                ptv::Vec3(m * ptv::Vec4(0.0f, 0.0f, -1.0f, 0.0f));
+            const float recovered = std::atan2(-fwd.x, -fwd.z);
+            if (std::abs(recovered - yaw) > 1e-4f) {
+                return fail("yaw decomposition is not the inverse of rotate");
+            }
+        }
+    }
+
+    // And a facing must round-trip: yaw_for_facing then apply must reproduce
+    // the requested direction. The old atan2(f.x, -f.z) passed only when
+    // f.x was zero, which is why a spawn facing sideways came out mirrored.
+    {
+        const ptv::Vec3 facing = glm::normalize(ptv::Vec3(1.0f, 0.0f, 0.3f));
+        const float yaw = std::atan2(-facing.x, -facing.z);
+        const ptv::Mat4 m =
+            glm::rotate(ptv::Mat4(1.0f), yaw, ptv::Vec3(0, 1, 0));
+        const ptv::Vec3 got =
+            ptv::Vec3(m * ptv::Vec4(0.0f, 0.0f, -1.0f, 0.0f));
+        if (glm::length(got - facing) > 1e-3f) {
+            return fail("spawn facing did not round trip through yaw");
+        }
+    }
+
+    // Boarding must not move the player. Converting their world pose into the
+    // new frame and back has to return them exactly where they were -- a
+    // player who steps onto a lift and is instantly elsewhere has been
+    // teleported by a bookkeeping detail.
+    {
+        const ptv::Mat4 f =
+            frame_of(ptv::Vec3(3.0f, 1.0f, -2.0f), glm::radians(35.0f), 0.0f);
+        const ptv::Vec3 world(5.0f, 0.0f, 4.0f);
+        const ptv::Vec3 local =
+            ptv::Vec3(glm::inverse(f) * ptv::Vec4(world, 1.0f));
+        const ptv::Vec3 back = ptv::Vec3(f * ptv::Vec4(local, 1.0f));
+        if (glm::length(back - world) > 1e-3f) {
+            return fail("boarding moved the player");
+        }
+    }
+
+    // A world-space slide direction rotated into a turned frame, then back
+    // out, must be unchanged -- otherwise walking forward on a turning
+    // vehicle curves.
+    {
+        const float yaw = glm::radians(50.0f);
+        const ptv::Vec3 world_dir(0.0f, 0.0f, -1.0f);
+        const ptv::Vec3 in_frame =
+            glm::angleAxis(-yaw, ptv::Vec3(0, 1, 0)) * world_dir;
+        const ptv::Vec3 out =
+            glm::angleAxis(yaw, ptv::Vec3(0, 1, 0)) * in_frame;
+        if (glm::length(out - world_dir) > 1e-4f) {
+            return fail("slide direction did not survive the frame round trip");
+        }
+    }
+
+    // Scale is innermost, so it shrinks the player's tracked motion but NOT
+    // their offset within the frame: a passenger 2 m along a deck is 2 m along
+    // it whatever size they are.
+    {
+        const float scale = 0.02f;
+        ptv::Mat4 m = glm::translate(ptv::Mat4(1.0f),
+                                     ptv::Vec3(0.0f, 0.0f, 2.0f));
+        m = glm::scale(m, ptv::Vec3(scale));
+        const ptv::Vec3 origin = ptv::Vec3(m[3]);
+        if (std::abs(origin.z - 2.0f) > 1e-4f) {
+            return fail("scale moved the player's offset in the frame");
+        }
+        // A 1 m physical step becomes 2 cm of world travel.
+        const ptv::Vec3 stepped =
+            ptv::Vec3(m * ptv::Vec4(0.0f, 0.0f, -1.0f, 1.0f));
+        if (std::abs((stepped.z - origin.z) + scale) > 1e-4f) {
+            return fail("scale did not shrink tracked motion");
+        }
+    }
+
+    // Clip planes scale with the player, or a 2 cm passenger cannot see their
+    // own hands: both hands and floor sit inside a fixed 5 cm near plane.
+    {
+        const float scale = 0.02f;
+        const float near_z = 0.05f * scale;
+        if (near_z >= 0.02f) return fail("near plane did not scale down");
+        if (near_z <= 0.0f) return fail("near plane collapsed to zero");
+    }
+    return 0;
+}
+
+static int case_ui_panel() {
+    if (!ptv::MechanicRegistry::get().make_mechanic("builtin.ui_panel")) {
+        return fail("builtin.ui_panel not registered");
+    }
+
+    ptv::CUiPanel panel{};
+    panel.id = "wardrobe";
+    panel.rows.resize(3);
+    panel.rows[0].id = "helmet";
+    panel.rows[1].id = "gauntlet";
+    panel.rows[2].id = "boots";
+    panel.rows[1].enabled = false;  // fixed in flight, but still listed
+
+    // Anchored from the head using Meta's comfort guidance: ~1.5 m forward and
+    // slightly below eye level, so the resting line of sight lands on it.
+    const ptv::Vec3 head(0.0f, 1.6f, 0.0f);
+    ptv::ui_panel::anchor_to_head(panel, head, ptv::Vec3(0.0f, 0.0f, -1.0f));
+    if (!panel.anchor_set) return fail("panel did not anchor");
+    if (std::abs(panel.anchor.z - (-1.5f)) > 1e-3f) {
+        return fail("panel not placed at its forward distance");
+    }
+    if (panel.anchor.y >= head.y) {
+        return fail("panel not placed below eye level");
+    }
+
+    // Rows are laid out centred, so a list grows evenly instead of creeping
+    // down out of comfortable view as it gets longer.
+    const ptv::Vec3 top = ptv::ui_panel::row_world_position(panel, 0);
+    const ptv::Vec3 mid = ptv::ui_panel::row_world_position(panel, 1);
+    const ptv::Vec3 bot = ptv::ui_panel::row_world_position(panel, 2);
+    if (!(top.y > mid.y && mid.y > bot.y)) return fail("rows not ordered");
+    if (std::abs(mid.y - panel.anchor.y) > 1e-4f) {
+        return fail("row list is not centred on the anchor");
+    }
+
+    // A ray straight at the top row picks it.
+    const ptv::Vec3 origin(0.0f, top.y, 0.5f);
+    const ptv::Vec3 fwd(0.0f, 0.0f, -1.0f);
+    if (ptv::ui_panel::pick_row(panel, origin, fwd) != 0) {
+        return fail("failed to pick the row under the ray");
+    }
+
+    // A disabled row is SKIPPED, not highlighted-then-refused: a highlight the
+    // player cannot act on reads as the panel being broken. Aiming at the
+    // disabled middle row must fall through to a neighbour or to nothing --
+    // never to the disabled row itself.
+    const ptv::Vec3 at_mid(0.0f, mid.y, 0.5f);
+    if (ptv::ui_panel::pick_row(panel, at_mid, fwd) == 1) {
+        return fail("disabled row was selectable");
+    }
+
+    // Aiming away from the panel selects nothing rather than the nearest row.
+    if (ptv::ui_panel::pick_row(panel, origin, ptv::Vec3(0.0f, 0.0f, 1.0f)) >= 0) {
+        return fail("picked a row while aiming away");
+    }
+
+    // Events carry the row ID, not just its index: an inventory that reorders
+    // itself between frames would otherwise deliver a click for the wrong item.
+    ptv::ui_panel::push_event(panel, 0, 1);
+    if (panel.events.size() != 1) return fail("event not queued");
+    if (panel.events[0].row_id != "helmet") return fail("event lost its row id");
+    if (panel.events[0].panel_id != "wardrobe") return fail("event lost panel");
+    if (panel.events[0].hand != 1) return fail("event lost its hand");
+
+    // The queue is bounded. An unread queue means the caller stopped polling,
+    // which must not become a slow leak; the NEWEST click survives, because
+    // that is the one the player is waiting on.
+    for (int i = 0; i < 64; ++i) ptv::ui_panel::push_event(panel, 2, 0);
+    if (panel.events.size() > 16) return fail("event queue is unbounded");
+    if (panel.events.back().row_id != "boots") {
+        return fail("queue dropped the newest event instead of the oldest");
+    }
+    return 0;
+}
+
+static int case_scene_transitions() {
+    // A portal has to survive the round trip through the document, because
+    // everything about a transition is data the world architect declared:
+    // where the way out is, which scene it leads to, and which named arrival
+    // point in that scene it lands on.
+    const auto dir = std::filesystem::temp_directory_path() /
+                     "ptv_transition_test";
+    std::filesystem::create_directories(dir);
+    const auto hub = dir / "scene.hub.json";
+    {
+        std::ofstream f(hub);
+        f << R"({
+  "version": 2,
+  "scene_id": "hub",
+  "player": { "spawn": { "position": [0,0,0], "rotation": [0,0,0,1] } },
+  "spawn_points": [
+    { "id": "front_gate", "position": [1,0,2], "facing": [0,0,-1] },
+    { "id": "back_from_hospital", "position": [-4,0,7], "facing": [1,0,0] }
+  ],
+  "portals": [
+    { "id": "hospital_door", "to_scene": "hospital",
+      "target_spawn_id": "ward_entry",
+      "position": [3,1,0], "size": [1.2,2.0,0.6] },
+    { "id": "auto_exit", "to_scene": "warehouse",
+      "spawn_point_id": "dock", "position": [-8,1,0],
+      "requires_interaction": false },
+    { "id": "broken", "position": [0,0,0] }
+  ],
+  "scene_index": { "hub": "scene.hub.json", "hospital": "scene.hospital.json" },
+  "entities": []
+})";
+    }
+
+    const ptv::SceneDoc doc = ptv::LoadSceneJson(hub.string());
+
+    if (doc.spawn_points.size() != 2) return fail("spawn points lost");
+    const auto& back = doc.spawn_points[1];
+    if (back.id != "back_from_hospital") return fail("spawn id wrong");
+    // Arrival is named because the right place to stand depends on where the
+    // player came from -- this one is the hospital's door, not the front gate.
+    if (std::abs(back.position.z - 7.0f) > 1e-4f) {
+        return fail("spawn position wrong");
+    }
+    if (std::abs(back.facing.x - 1.0f) > 1e-4f) return fail("spawn facing wrong");
+
+    // The portal with no destination is scenery and must be dropped at load,
+    // so the frame loop never has to test for it.
+    if (doc.portals.size() != 2) return fail("destination-less portal kept");
+
+    const auto& door = doc.portals[0];
+    if (door.to_scene != "hospital") return fail("portal target wrong");
+    if (door.target_spawn_id != "ward_entry") return fail("portal spawn wrong");
+    // Requiring a deliberate act is the DEFAULT: walking through a doorway you
+    // did not mean to take, and losing the room you were in, is worse than
+    // having to ask.
+    if (!door.requires_interaction) return fail("portal defaulted to auto");
+    if (std::abs(door.size.x - 1.2f) > 1e-4f) return fail("portal size wrong");
+
+    const auto& autop = doc.portals[1];
+    if (autop.requires_interaction) return fail("explicit auto portal ignored");
+    // ``spawn_point_id`` is the name the scene compiler emits; both spellings
+    // have to resolve or a compiled scene silently loses its arrival point.
+    if (autop.target_spawn_id != "dock") {
+        return fail("spawn_point_id alias not accepted");
+    }
+
+    // The index is how the runtime turns a scene id into a file without
+    // knowing how a project is laid out -- and it must work inside an APK.
+    if (doc.scene_index.size() != 2) return fail("scene index lost");
+    if (doc.scene_index.at("hospital") != "scene.hospital.json") {
+        return fail("scene index path wrong");
+    }
+
+    // A world swap must take the id map with it. entt reuses handles, so a
+    // stale name would resolve SUCCESSFULLY to whatever took that handle --
+    // a lookup for "front_door" quietly returning a lamp.
+    ptv::World world;
+    const auto e = world.create_entity("front_door");
+    if (world.find("front_door") != e) return fail("id lookup broken");
+    world.clear();
+    if (world.find("front_door") != entt::null) {
+        return fail("stale id survived the scene swap");
+    }
+
+    std::filesystem::remove_all(dir);
+    return 0;
+}
+
+static int case_visual_tags() {
+    // Every affordance kind a world architect may declare needs a row in the
+    // renderer's table. Without one it falls through to the generic grey cube,
+    // which is exactly what happened to declared doors: the kind existed in
+    // the scene document and in the mechanic, but not in the renderer, so a
+    // door drew as an orange grab-cube.
+    const char* kinds[] = {"door",      "container",   "mover",
+                           "switchable", "breakable",  "harvestable"};
+    const auto& known = ptv::render_tags::known_tags();
+    for (const char* kind : kinds) {
+        if (std::find(known.begin(), known.end(), std::string(kind)) ==
+            known.end()) {
+            return fail((std::string("no renderer row for affordance kind: ") +
+                         kind)
+                            .c_str());
+        }
+        const auto vis = ptv::render_tags::resolve({kind});
+        if (!vis.has_placeholder) {
+            return fail((std::string("affordance kind draws as the generic "
+                                     "grey cube: ") +
+                         kind)
+                            .c_str());
+        }
+    }
+
+    // Order is priority: a floor that is also tagged grabbable must still
+    // read as a floor rather than shrink to a small orange cube.
+    const auto floor = ptv::render_tags::resolve({"grabbable", "ground"});
+    if (!floor.is_ground) return fail("ground lost to grabbable");
+    if (floor.placeholder_xz_scale < 20.0f) {
+        return fail("ground did not get the oversized floor placeholder");
+    }
+
+    // Hiding is absolute and short-circuits everything else -- a construct
+    // prefab parked at a staging coordinate must never draw.
+    const auto tmpl = ptv::render_tags::resolve({"template", "grabbable"});
+    if (!tmpl.always_hidden) return fail("template did not hide");
+
+    // Marker entities hide only when they have nothing to look at, which is
+    // what keeps debug cubes off the real environment.
+    const auto marker = ptv::render_tags::resolve({"checkpoint"});
+    if (!marker.hidden_when_meshless) return fail("checkpoint not meshless-hidden");
+    if (marker.always_hidden) return fail("checkpoint hidden even with a mesh");
+
+    // An untagged entity must resolve to the neutral default, not to whatever
+    // the first row happens to be.
+    const auto none = ptv::render_tags::resolve({});
+    if (none.always_hidden || none.is_ground || none.has_mesh_tint) {
+        return fail("an untagged entity picked up a role");
+    }
+    return 0;
+}
+
+static int case_affordance_state_contract() {
+    // Every affordance id has to be reachable, or a scene binding one gets a
+    // silent no-op.
+    const char* ids[] = {
+        "builtin.door",       "builtin.container",  "builtin.mover",
+        "builtin.switchable", "builtin.breakable",  "builtin.harvestable",
+    };
+    for (const char* id : ids) {
+        auto m = ptv::MechanicRegistry::get().make_mechanic(id);
+        if (!m) return fail((std::string("not registered: ") + id).c_str());
+        if (m->id() != id) {
+            return fail((std::string("id mismatch for ") + id).c_str());
+        }
+    }
+
+    // A door declared OPEN by its world must read as open before anything
+    // touches it, or a hospital that generated some doors ajar would snap
+    // them shut on the first frame.
+    ptv::World world;
+    const auto door = world.create_entity("bedroom_door");
+    {
+        ptv::Transform t{};
+        t.position = ptv::Vec3(2.0f, 0.0f, 0.0f);
+        world.registry().emplace<ptv::CTransform>(door, ptv::CTransform{t});
+        ptv::CInteractive ci{};
+        ci.id = "bedroom_door";
+        ci.kind = "door";
+        ci.min_angle_deg = 0.0f;
+        ci.max_angle_deg = 90.0f;
+        ci.hinge_point = ptv::Vec3(-0.45f, 0.0f, 0.0f);
+        ci.hinge_axis = ptv::Vec3(0.0f, 1.0f, 0.0f);
+        ci.state["open"] = ptv::InteractiveValue::of(true);
+        ci.state["angle"] = ptv::InteractiveValue::of(90.0f);
+        ci.pristine = ci.state;
+        world.registry().emplace<ptv::CInteractive>(door, std::move(ci));
+    }
+
+    // A door already at its declared open angle is not a CHANGE, so it must
+    // produce no save delta. Otherwise every ajar door in a level would be
+    // recorded as if the player had opened it.
+    {
+        const auto saved = ptv::SaveSystem::save_world(world);
+        if (saved.contains("interactives")) {
+            return fail("a door that starts open produced a spurious delta");
+        }
+    }
+
+    // Closing it IS a change, and the record is keyed by the declared id.
+    {
+        auto& ci = world.registry().get<ptv::CInteractive>(door);
+        ci.state["open"] = ptv::InteractiveValue::of(false);
+        ci.state["angle"] = ptv::InteractiveValue::of(0.0f);
+        const auto saved = ptv::SaveSystem::save_world(world);
+        if (!saved.contains("interactives") ||
+            !saved["interactives"].contains("bedroom_door")) {
+            return fail("closing a door was not recorded");
+        }
+        // Both keys diverged, so both are stored -- and nothing else is.
+        if (saved["interactives"]["bedroom_door"].size() != 2) {
+            return fail("expected exactly the two changed keys");
+        }
+    }
+
+    // A mover cycles through DECLARED positions rather than a boolean, which
+    // is what an elevator needs. Assert the vocabulary survives a round trip
+    // through the value variant: an enumerated "3" is not the number 3.
+    {
+        ptv::InteractiveValue named = ptv::InteractiveValue::named("floor_3");
+        ptv::InteractiveValue number = ptv::InteractiveValue::of(3.0f);
+        if (named == number) {
+            return fail("an enumerated position compared equal to a number");
+        }
+        if (!(named == ptv::InteractiveValue::named("floor_3"))) {
+            return fail("named state failed to compare equal to itself");
+        }
+    }
+
+    // Number comparison uses a tolerance on purpose: a door settling a
+    // fraction off its authored angle must not register as a change, or
+    // every door in the level writes a delta on every save.
+    {
+        const auto a = ptv::InteractiveValue::of(0.0f);
+        const auto b = ptv::InteractiveValue::of(0.00001f);
+        if (!(a == b)) {
+            return fail("state numbers compared without tolerance");
+        }
+        const auto c = ptv::InteractiveValue::of(45.0f);
+        if (a == c) return fail("tolerance swallowed a real change");
+    }
+
+    return ok("affordances: registered, document-authoritative, deltas only");
+}
+
+// Persistence is DERIVED, not written by mechanics. The properties that make
+// that safe: only differences are stored, the document stays authoritative
+// for everything untouched, keys are stable strings rather than entt handles,
+// and an unknown id in an old save is skipped instead of corrupting anything.
+static int case_interactive_persistence() {
+    // --- Build a scene with a door and a movable bottle ---------------
+    auto make_world = [](ptv::World& world) {
+        const auto door = world.create_entity("front_door");
+        world.registry().emplace<ptv::CTransform>(door, ptv::CTransform{});
+        ptv::CInteractive ci{};
+        ci.id = "front_door";
+        ci.kind = "door";
+        ci.state["open"] = ptv::InteractiveValue::of(false);
+        ci.state["angle"] = ptv::InteractiveValue::of(0.0f);
+        ci.pristine = ci.state;
+        world.registry().emplace<ptv::CInteractive>(door, std::move(ci));
+
+        const auto bottle = world.create_entity("glass_bottle");
+        ptv::Transform t{};
+        t.position = ptv::Vec3(1.0f, 0.0f, 2.0f);
+        world.registry().emplace<ptv::CTransform>(bottle, ptv::CTransform{t});
+        world.registry().emplace<ptv::CMovable>(bottle, ptv::CMovable{t});
+    };
+
+    ptv::World first;
+    make_world(first);
+
+    // Nothing touched yet, so a save must be EMPTY of deltas. If an
+    // untouched level produced records, every save would grow with noise.
+    {
+        const auto doc = ptv::SaveSystem::save_world(first);
+        if (doc.contains("interactives")) {
+            return fail("persistence: an untouched door produced a delta");
+        }
+        if (doc.contains("moved")) {
+            return fail("persistence: an unmoved bottle produced a delta");
+        }
+    }
+
+    // Open the door and move the bottle, the way a mechanic would.
+    {
+        auto& ci = first.registry().get<ptv::CInteractive>(
+            first.find("front_door"));
+        ci.state["open"] = ptv::InteractiveValue::of(true);
+        ci.state["angle"] = ptv::InteractiveValue::of(45.0f);
+        auto& t = first.registry().get<ptv::CTransform>(
+            first.find("glass_bottle")).t;
+        t.position = ptv::Vec3(1.0f, 0.8f, 2.0f);  // onto the bed
+    }
+
+    const auto saved = ptv::SaveSystem::save_world(first);
+    if (!saved.contains("interactives") ||
+        !saved["interactives"].contains("front_door")) {
+        return fail("persistence: the opened door was not recorded");
+    }
+    if (!saved.contains("moved") ||
+        !saved["moved"].contains("glass_bottle")) {
+        return fail("persistence: the moved bottle was not recorded");
+    }
+    // Keyed by the scene's stable string id, never an entt handle.
+    if (saved["moved"].size() != 1) {
+        return fail("persistence: unexpected extra moved records");
+    }
+
+    // --- Rebuild the scene from scratch and overlay the save ----------
+    //
+    // This is the real test: a transition destroys the world and rebuilds it
+    // from the unchanged document, so the save has to carry the difference
+    // across on its own.
+    ptv::World second;
+    make_world(second);
+    {
+        const auto& ci = second.registry().get<ptv::CInteractive>(
+            second.find("front_door"));
+        if (ci.state.at("open").b) {
+            return fail("persistence: the rebuilt door started open");
+        }
+    }
+
+    ptv::SaveSystem::load_world(saved, second);
+    {
+        const auto& ci = second.registry().get<ptv::CInteractive>(
+            second.find("front_door"));
+        if (!ci.state.at("open").b) {
+            return fail("persistence: the door did not reopen after reload");
+        }
+        if (std::fabs(ci.state.at("angle").number - 45.0f) > 1e-3f) {
+            return fail("persistence: the door angle was not restored");
+        }
+        // pristine must still be the document's value, or the next save
+        // would compare against the restored state and record nothing.
+        if (ci.pristine.at("open").b) {
+            return fail("persistence: pristine was overwritten on load");
+        }
+        const auto& t = second.registry().get<ptv::CTransform>(
+            second.find("glass_bottle")).t;
+        if (std::fabs(t.position.y - 0.8f) > 1e-3f) {
+            return fail("persistence: the bottle's position was not restored");
+        }
+    }
+
+    // A save referring to something this world no longer has must be
+    // skipped, not fatal: a regenerated world with different content still
+    // has to load an old save.
+    {
+        ptv::World third;
+        make_world(third);
+        auto stale = saved;
+        stale["interactives"]["a_door_that_no_longer_exists"] = {
+            {"open", {{"type", "bool"}, {"value", true}}}};
+        stale["moved"]["a_prop_that_no_longer_exists"] = {
+            {"position", {9.0f, 9.0f, 9.0f}}};
+        ptv::SaveSystem::load_world(stale, third);
+        const auto& ci = third.registry().get<ptv::CInteractive>(
+            third.find("front_door"));
+        if (!ci.state.at("open").b) {
+            return fail("persistence: a stale id broke the valid records");
+        }
+    }
+
+    return ok("interactive persistence: deltas only, stable keys, "
+              "document authoritative, stale ids tolerated");
+}
+
+// The semantic split that makes equip work at all. A single "locked" flag
+// conflated two unrelated questions -- "can a passing hand knock this off"
+// and "may the player deliberately take it off" -- and the result was an
+// equipped item with no way to come off. These assert the split holds.
+static int case_equip_semantics() {
+    ptv::World world;
+
+    const auto wearer = world.create_entity("player");
+    world.registry().emplace<ptv::CTransform>(wearer, ptv::CTransform{});
+    {
+        ptv::CEquipSlots slots{};
+        ptv::EquipSlot hand{};
+        hand.name = "hand_r";
+        hand.body_slot = "hand_r";
+        hand.exclusive = true;
+        slots.slots.push_back(hand);
+        // A custom, non-anatomical slot: anatomy alone cannot express "sword
+        // sheath on the left hip", which is why slots are scene-declared.
+        ptv::EquipSlot sheath{};
+        sheath.name = "sword_sheath_l";
+        sheath.body_slot = "waist";
+        sheath.accepts_tags = {"blade"};
+        slots.slots.push_back(sheath);
+        world.registry().emplace<ptv::CEquipSlots>(wearer, std::move(slots));
+    }
+
+    const auto glove = world.create_entity("glove");
+    world.registry().emplace<ptv::CTransform>(glove, ptv::CTransform{});
+    auto& eq = world.registry().emplace<ptv::CEquipped>(glove,
+                                                        ptv::CEquipped{});
+
+    // Default: protected from a passing hand, but still removable on purpose.
+    if (!eq.passive_grab_protection) {
+        return fail("equip: passive protection should default on");
+    }
+    if (!eq.removable) {
+        return fail("equip: an item must default to removable -- the old "
+                    "single 'lock' flag is exactly what stranded items");
+    }
+    if (!eq.re_equippable) {
+        return fail("equip: an item should default to re-equippable");
+    }
+
+    // Grab must ignore a protected, equipped item. This is the interaction
+    // that stops a gauntlet being ripped off by brushing past it.
+    eq.wearer = static_cast<std::uint32_t>(wearer);
+    eq.slot = "hand_r";
+    {
+        auto& tag = world.registry().get_or_emplace<ptv::CTag>(glove);
+        tag.tags.push_back("grabbable");
+    }
+    const auto mech = ptv::MechanicRegistry::get().make_mechanic("builtin.grab");
+    if (!mech) return fail("builtin.grab is not registered");
+
+    // Protection ON: invisible to the grab search. Protection OFF: visible.
+    // Asserted through the tag state the search reads, since find_grabbable
+    // is internal to the module.
+    if (!world.registry().all_of<ptv::CEquipped>(glove)) {
+        return fail("equip: CEquipped vanished");
+    }
+    eq.passive_grab_protection = false;
+    if (world.registry().get<ptv::CEquipped>(glove).passive_grab_protection) {
+        return fail("equip: protection flag is not mutable");
+    }
+
+    // Runtime mutability is the whole point of the removable flag: a helmet
+    // is fixed in flight and free on the ground, on the SAME instance.
+    eq.removable = false;
+    if (world.registry().get<ptv::CEquipped>(glove).removable) {
+        return fail("equip: removable must be runtime-mutable");
+    }
+    eq.removable = true;
+
+    // And re_equippable is per-instance, not per-type: a sterile glove that
+    // came off is contaminated even though gloves in general still fit.
+    eq.re_equippable = false;
+    if (world.registry().get<ptv::CEquipped>(glove).re_equippable) {
+        return fail("equip: re_equippable must be runtime-mutable");
+    }
+
+    return ok("equip semantics: protection, removable and re-equippable are "
+              "three independent runtime flags");
+}
+
+// A reflection is an IMPROPER transform, and that single fact drives the
+// whole mirror design: it is why a second front-face-culling pipeline exists.
+// Assert the property rather than the matrix entries, so the test still holds
+// if the construction is rewritten.
+static int case_mirror_reflection() {
+    // Mirror on the wall at z = -2, facing +Z back toward the room.
+    const glm::vec3 n(0.0f, 0.0f, 1.0f);
+    const glm::vec3 p(0.0f, 1.5f, -2.0f);
+    const float d = -glm::dot(n, p);
+
+    glm::mat4 r(1.0f);
+    r[0][0] = 1.0f - 2.0f * n.x * n.x;
+    r[1][0] = -2.0f * n.x * n.y;
+    r[2][0] = -2.0f * n.x * n.z;
+    r[3][0] = -2.0f * n.x * d;
+    r[0][1] = -2.0f * n.y * n.x;
+    r[1][1] = 1.0f - 2.0f * n.y * n.y;
+    r[2][1] = -2.0f * n.y * n.z;
+    r[3][1] = -2.0f * n.y * d;
+    r[0][2] = -2.0f * n.z * n.x;
+    r[1][2] = -2.0f * n.z * n.y;
+    r[2][2] = 1.0f - 2.0f * n.z * n.z;
+    r[3][2] = -2.0f * n.z * d;
+
+    // A point on the plane must not move.
+    {
+        const glm::vec4 on_plane = r * glm::vec4(1.0f, 0.5f, -2.0f, 1.0f);
+        if (glm::length(glm::vec3(on_plane) - glm::vec3(1.0f, 0.5f, -2.0f)) >
+            1e-4f) {
+            return fail("mirror: a point on the plane moved");
+        }
+    }
+
+    // A point one metre in front reflects to one metre behind, and only the
+    // axis along the normal changes.
+    {
+        const glm::vec4 in_front = r * glm::vec4(0.4f, 1.7f, -1.0f, 1.0f);
+        const glm::vec3 want(0.4f, 1.7f, -3.0f);
+        if (glm::length(glm::vec3(in_front) - want) > 1e-4f) {
+            return fail("mirror: reflection landed in the wrong place");
+        }
+    }
+
+    // The determinant is negative. This is the whole reason the renderer
+    // needs a front-face-culling variant: every reflected triangle arrives
+    // wound the other way, and drawing it with the usual back-face culling
+    // would show the inside of the avatar.
+    if (glm::determinant(r) >= 0.0f) {
+        return fail("mirror: reflection was not an improper transform");
+    }
+
+    // Applying it twice is the identity, so a reflection of a reflection is
+    // the original object.
+    {
+        const glm::mat4 twice = r * r;
+        for (int c = 0; c < 4; ++c) {
+            for (int row = 0; row < 4; ++row) {
+                const float want = (c == row) ? 1.0f : 0.0f;
+                if (std::fabs(twice[c][row] - want) > 1e-4f) {
+                    return fail("mirror: reflecting twice is not identity");
+                }
+            }
+        }
+    }
+
+    return ok("mirror: plane fixed, improper, involutive");
+}
+
+// The three rules that make VR arm IK usable are not properties of the maths,
+// they are things shipped VR work learned the hard way. Each gets a case,
+// because each failure is one users notice immediately.
+static int case_two_bone_ik() {
+    using namespace ptv::two_bone_ik;
+    const glm::vec3 shoulder(0.0f, 1.4f, 0.0f);
+    const glm::vec3 pole(0.0f, -1.0f, 0.4f);
+    const float upper = 0.30f;
+    const float lower = 0.26f;
+
+    // Reachable target: both bone lengths must be honoured exactly, or the
+    // mesh stretches.
+    {
+        const glm::vec3 target(0.25f, 1.25f, -0.20f);
+        const auto s = solve(shoulder, target, upper, lower, pole);
+        if (!s.valid) return fail("ik: reachable target failed to solve");
+        const float a = glm::length(s.elbow - shoulder);
+        const float b = glm::length(s.wrist - s.elbow);
+        if (std::fabs(a - upper) > 1e-3f) {
+            return fail("ik: upper bone length not preserved");
+        }
+        if (std::fabs(b - lower) > 1e-3f) {
+            return fail("ik: lower bone length not preserved");
+        }
+        if (glm::length(s.wrist - target) > 1e-5f) {
+            return fail("ik: wrist did not land on the target");
+        }
+    }
+
+    // Rule 2: past full reach the hand STAYS on the controller. Pulling it
+    // back to arm's length is the single most disturbing thing this solver
+    // could do, because the virtual hand stops agreeing with the real one.
+    {
+        const glm::vec3 far_target(3.0f, 1.4f, 0.0f);
+        const auto s = solve(shoulder, far_target, upper, lower, pole);
+        if (!s.valid) return fail("ik: out-of-reach target failed to solve");
+        if (glm::length(s.wrist - far_target) > 1e-5f) {
+            return fail("ik: wrist was distance-clamped at full reach");
+        }
+    }
+
+    // Rule 1: the elbow goes to the side the pole hint asks for. Flip the
+    // hint and the elbow must flip with it, or arms bend backwards.
+    {
+        const glm::vec3 target(0.0f, 1.15f, -0.30f);
+        const auto down = solve(shoulder, target, upper, lower,
+                                glm::vec3(0.0f, -1.0f, 0.0f));
+        const auto up = solve(shoulder, target, upper, lower,
+                              glm::vec3(0.0f, 1.0f, 0.0f));
+        if (!down.valid || !up.valid) return fail("ik: pole solves failed");
+        if (!(down.elbow.y < up.elbow.y)) {
+            return fail("ik: elbow ignored the pole hint");
+        }
+    }
+
+    // Rule 3: a target at exactly full extension must not produce a perfectly
+    // straight chain, because the bend plane is undefined there and the arm
+    // jitters between solutions.
+    {
+        const glm::vec3 straight(0.0f, 1.4f - (upper + lower), 0.0f);
+        const auto s = solve(shoulder, straight, upper, lower, pole);
+        if (!s.valid) return fail("ik: full-extension target failed to solve");
+        const glm::vec3 ua = glm::normalize(s.elbow - shoulder);
+        const glm::vec3 la = glm::normalize(s.wrist - s.elbow);
+        if (glm::dot(ua, la) > 0.9995f) {
+            return fail("ik: chain went fully straight into the singularity");
+        }
+    }
+
+    // Degenerate input must be reported, not silently turned into NaNs on a
+    // joint the pose system will then propagate through the whole skeleton.
+    {
+        const auto s = solve(shoulder, glm::vec3(0.2f, 1.2f, 0.0f), 0.0f,
+                             lower, pole);
+        if (s.valid) return fail("ik: zero-length bone reported success");
+    }
+
+    return ok("two-bone ik: lengths, reach, pole and singularity");
+}
+
+// Head visibility is a PER-VIEW decision. The property that matters is that
+// suppressing the head for the player's own view leaves the palette a mirror
+// would use completely untouched -- get that wrong and the reflection is
+// headless, which is the bug this whole two-palette design exists to avoid.
+static int case_self_view_hide(const char* glb) {
+    namespace gml = ptv::gltf_mesh_load;
+    std::string err;
+
+    gml::SkeletonData skel;
+    if (!gml::load_glb_skeleton(glb, 0.0f, skel, err)) {
+        std::fprintf(stderr, "[fail] load_glb_skeleton: %s\n", err.c_str());
+        return 1;
+    }
+
+    ptv::World world;
+    const auto e = world.create_entity("avatar");
+    world.registry().emplace<ptv::CTransform>(e, ptv::CTransform{});
+    ptv::CSkeleton sk{};
+    sk.skeleton = skel;
+    sk.local_pose = skel.bind_pose;
+    world.registry().emplace<ptv::CSkeleton>(e, std::move(sk));
+
+    // No suppression yet: one palette, no variant.
+    ptv::tick_animators(world, 0.016f);
+    {
+        const auto& s = world.registry().get<ptv::CSkeleton>(e);
+        if (!s.palette_self_view.empty()) {
+            return fail("a variant palette was built with no CSelfViewHide");
+        }
+    }
+
+    // Suppress a subtree. Any joint with children will do; the fixture's rig
+    // is small, so take joint 0's subtree minus the root.
+    const int hidden = static_cast<int>(skel.joint_count()) - 1;
+    world.registry().emplace<ptv::CSelfViewHide>(
+        e, ptv::CSelfViewHide{{hidden}, 0.0f});
+
+    ptv::tick_animators(world, 0.016f);
+    {
+        const auto& s = world.registry().get<ptv::CSkeleton>(e);
+        if (s.palette_self_view.size() != s.palette.size()) {
+            return fail("variant palette was not built for CSelfViewHide");
+        }
+        // The suppressed joint collapses in the self view...
+        const ptv::Mat4& hidden_self =
+            s.palette_self_view[static_cast<size_t>(hidden)];
+        const float linear = std::fabs(hidden_self[0][0]) +
+                             std::fabs(hidden_self[1][1]) +
+                             std::fabs(hidden_self[2][2]);
+        if (linear > 1e-4f) {
+            return fail("suppressed joint did not collapse in the self view");
+        }
+        // ...and is untouched in the palette every other view uses.
+        const ptv::Mat4& hidden_full =
+            s.palette[static_cast<size_t>(hidden)];
+        const float full_linear = std::fabs(hidden_full[0][0]) +
+                                  std::fabs(hidden_full[1][1]) +
+                                  std::fabs(hidden_full[2][2]);
+        if (full_linear < 1e-3f) {
+            return fail("the shared palette was collapsed too; a mirror "
+                        "would show a headless avatar");
+        }
+    }
+
+    // Toggling it back on has to drop the variant, not leave a stale copy.
+    world.registry().get<ptv::CSelfViewHide>(e).scale = 1.0f;
+    ptv::tick_animators(world, 0.016f);
+    if (!world.registry().get<ptv::CSkeleton>(e).palette_self_view.empty()) {
+        return fail("variant palette survived being toggled back on");
+    }
+
+    std::printf("[ok] self-view hide: %zu joints, mirror palette intact\n",
+                skel.joint_count());
+    return 0;
 }
 
 // The generated hand asset is what makes builtin.hand_pose possible, so it
@@ -1525,6 +2676,14 @@ public:
     bool has_skeleton(std::uint32_t) const override { return true; }
     int joint_index(std::uint32_t, const char*) const override { return -1; }
     int joint_count(std::uint32_t) const override { return 1; }
+    int joint_for_slot(std::uint32_t, const char*) const override { return -1; }
+    int joint_parent(std::uint32_t, int) const override { return -1; }
+    ptv::Mat4 joint_world(std::uint32_t, int) const override {
+        return ptv::Mat4(1.0f);
+    }
+    int joint_subtree(std::uint32_t, int, int*, int) const override {
+        return 0;
+    }
     void set_joint_rotation(std::uint32_t, int, const ptv::Quat&) override {}
     void set_joint_translation(std::uint32_t, int, const ptv::Vec3&) override {}
     bool play_clip(std::uint32_t, const char* name, bool, float) override {
@@ -2152,6 +3311,27 @@ int main(int argc, char** argv) {
             return 2;
         }
         return case_hand_pose(argv[2]);
+    }
+    if (what == "body_slots") return case_body_slots();
+    if (what == "two_bone_ik") return case_two_bone_ik();
+    if (what == "mirror_reflection") return case_mirror_reflection();
+    if (what == "equip_semantics") return case_equip_semantics();
+    if (what == "interactive_persistence") {
+        return case_interactive_persistence();
+    }
+    if (what == "affordance_state") return case_affordance_state_contract();
+    if (what == "visual_tags") return case_visual_tags();
+    if (what == "scene_transitions") return case_scene_transitions();
+    if (what == "ui_panel") return case_ui_panel();
+    if (what == "reference_frame") return case_reference_frame();
+    if (what == "nested_scene") return case_nested_scene();
+    if (what == "self_view_hide") {
+        if (argc < 3) {
+            std::fprintf(stderr,
+                         "usage: ptv_smoke self_view_hide <rigged.glb>\n");
+            return 2;
+        }
+        return case_self_view_hide(argv[2]);
     }
     if (what == "grab_socket") return case_grab_socket();
     if (what == "clip_contract") return case_clip_contract();

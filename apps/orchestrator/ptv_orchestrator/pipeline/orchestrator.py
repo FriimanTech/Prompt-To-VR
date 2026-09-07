@@ -85,8 +85,20 @@ _SHARED_STAGES: list[tuple[ProjectStage, StageFn]] = [
     # ahead of asset_optimization is safe -- the optimizer preserves the source
     # coordinate system.
     (ProjectStage.asset_contract, stage_asset_contract.run),
-    (ProjectStage.code_generation, stage_code_generation.run),
+    # Runs BEFORE code_generation, which is the reverse of the original order.
+    #
+    # The worlds are what gameplay code acts on. A mechanic that opens a door,
+    # routes an NPC through a building, or reacts to a lever needs the ids of
+    # the things the world architect actually declared -- and until this stage
+    # has run, nobody knows them. Generating C++ first meant the codegen agent
+    # had to invent plausible names for objects that did not exist yet, and
+    # every one of those guesses resolved to nothing at runtime.
+    #
+    # There is no dependency the other way: a world builder links no ECS and
+    # never calls into a mechanic, so it has nothing to learn from the
+    # generated gameplay code.
     (ProjectStage.world_generation, stage_world_generation.run),
+    (ProjectStage.code_generation, stage_code_generation.run),
     # Runs here (not next to asset_normalization) so the engine build tree
     # already exists from the codegen compile-verify step -- ptv_glb_optimize
     # is then a cheap incremental target rather than a cold engine build.

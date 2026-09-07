@@ -216,6 +216,27 @@ def test_google_imagen_writes_png(tmp_path, monkeypatch):
     assert r.model == "imagen-4.0-generate-001"
 
 
+def test_gemini_prompt_folds_negatives_in_exactly_once():
+    # Gemini image models have no negative_prompt field, so the only place an
+    # avoid-list can go is the text. Two things matter: it has to be there at
+    # all, and it must not be duplicated -- the reference-image stage already
+    # combines its pose avoid-list into one string before calling.
+    from ptv_providers.google_image_client import _compose_gemini_prompt
+
+    folded = _compose_gemini_prompt("a duck in T-pose", "A-pose, sitting")
+    assert "a duck in T-pose" in folded
+    assert "A-pose, sitting" in folded
+    assert folded.count("Avoid in the image:") == 1
+
+
+def test_gemini_prompt_without_negatives_is_left_alone():
+    from ptv_providers.google_image_client import _compose_gemini_prompt
+
+    assert _compose_gemini_prompt("a duck", None) == "a duck"
+    # Whitespace-only must not produce a dangling "Avoid in the image:".
+    assert _compose_gemini_prompt("a duck", "   ") == "a duck"
+
+
 def test_google_gemini_writes_png(tmp_path, monkeypatch):
     _install_fake_genai(monkeypatch)
     cfg = GoogleImageConfig(

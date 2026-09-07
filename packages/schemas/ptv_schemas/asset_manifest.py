@@ -82,6 +82,61 @@ class TripoRequest(StrictModel):
     )
 
 
+class ReferencePose(str, Enum):
+    """The pose the reference image should depict.
+
+    This exists because the downstream 3D asset inherits whatever pose the
+    image had, and a character captured mid-stride is far less useful than one
+    captured in a neutral spread: rigging, retargeting and every external 3D
+    tool expect a T-pose, so a character generated in an action pose is
+    effectively locked to this pipeline.
+
+    * ``natural`` — whatever best shows the object off. Correct for props,
+      scenery, FX and UI, and for a creature used as a grabbable prop rather
+      than an actor.
+    * ``t_pose`` — arms straight out to the sides, legs straight and slightly
+      apart, facing camera. For humanoid and bipedal characters, including a
+      cartoon duck whose wings read as arms.
+    * ``neutral_quadruped`` — standing square with the legs clearly separated.
+      A T-pose is meaningless for a four-legged, serpentine or aquatic
+      creature; this is the equivalent neutral capture.
+    """
+
+    natural = "natural"
+    t_pose = "t_pose"
+    neutral_quadruped = "neutral_quadruped"
+
+
+class ReferenceCoverage(str, Enum):
+    """How much of a character the reference image should contain.
+
+    Defaults to ``full_body``, including a head, and that default is
+    load-bearing: a head that exists can be hidden at runtime, while a head
+    that was never generated can never be shown. ``neck_down`` is therefore
+    reserved for prompts that explicitly ask for a body-only avatar.
+    """
+
+    full_body = "full_body"
+    neck_down = "neck_down"
+
+
+class CharacterRole(str, Enum):
+    """What a character asset is FOR.
+
+    Category alone cannot answer this. A duck is ``category: character``
+    whether it patrols the level as an enemy or sits on a shelf to be picked
+    up, and the two want different reference images: the actor needs a T-pose
+    so it can be rigged and reused, the prop does not.
+
+    Replaces the ``style_notes`` substring sniffing the scene compiler used to
+    do, which guessed the player avatar from phrases like "player body".
+    """
+
+    none = "none"
+    npc = "npc"
+    player_avatar = "player_avatar"
+
+
 class ReferenceImageRequest(StrictModel):
     """Reference image parameters sent to Gemini / Imagen.
 
@@ -97,6 +152,12 @@ class ReferenceImageRequest(StrictModel):
     aspect_ratio: str = Field(default="1:1", pattern=r"^\d{1,2}:\d{1,2}$")
     number_of_images: int = Field(default=1, ge=1, le=1)
     negative_prompt: Optional[str] = Field(default=None, max_length=1000)
+    # Proposed by the manifest agent, then RECONCILED deterministically by the
+    # reference-image stage: the agent supplies the creature-shape hint it is
+    # good at, and the pipeline decides the pose from facts on disk rather
+    # than trusting a model to remember a rule.
+    pose: ReferencePose = ReferencePose.natural
+    coverage: ReferenceCoverage = ReferenceCoverage.full_body
 
 
 class AssetItem(StrictModel):
@@ -104,6 +165,10 @@ class AssetItem(StrictModel):
     name: str = Field(..., max_length=128)
     category: AssetCategory
     style_notes: str = Field(..., max_length=2000)
+    # What this character is for, when it is one. Read by the reference-image
+    # stage to decide pose and by the scene compiler to place the avatar,
+    # replacing style_notes keyword matching.
+    character_role: CharacterRole = CharacterRole.none
     reference: ReferenceImageRequest
     strategy: GenerationStrategy = GenerationStrategy.image_to_3d
     tripo: TripoRequest = Field(default_factory=TripoRequest)

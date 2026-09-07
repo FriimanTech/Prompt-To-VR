@@ -122,6 +122,81 @@ API - use them or ignore them): `building_grid`, `wall_shell`, `path`,
 blocky structure, `Mesh` for `add_mesh` geometry the player must not pass
 through, `None` for distant decoration.
 
+### Names are permanent ids
+
+Set `name` on every `spawn_primitive`, `add_mesh` and `place_object` call, and
+make it specific: `front_door`, `wall_north`, `reception_desk`. That name
+becomes the entity's id in `scene.json`, and saved game state is keyed on it.
+
+Leave it blank and the object gets a positional id instead. Positional ids look
+harmless until you insert one more call above them, at which point every id
+below shifts by one -- and a save written before that change now restores the
+wrong objects, with nothing reporting a problem. Repeated names are fine; they
+get a deterministic numeric suffix (`wall`, `wall_2`, `wall_3`).
+
+### Why declaring state is your job too
+
+Geometry says nothing about what a thing IS. A box in a doorway is not a door:
+navigation will claim an unconditional route through it, nothing knows whether
+it starts open, and nothing can remember that the player opened it.
+
+So call `interactive(...)` for anything whose configuration can change or that
+the player can act on, using the SAME `id` as the geometry's name. The engine
+then attaches the matching mechanic automatically -- you do not wire behaviour,
+you declare what exists.
+
+| `kind` | Covers | Key parameters |
+|---|---|---|
+| `door` | doors, gates, windows, garage doors, trapdoors | `hinge_point`, `hinge_axis`, `min_angle_deg`, `max_angle_deg`, or `slide_axis` + `slide_distance_m` |
+| `switchable` | lights, switches, faucets, TVs, fireplaces, vents, conveyors, traffic lights | `positions` for more than two states |
+| `container` | drawers, cabinets, chests | same as `door` |
+| `mover` | elevators, drawbridges, barrier arms, retractable stairs, curtains | `positions` (named) |
+| `breakable` | glass, destructible walls, rock blockages | — |
+| `harvestable` | a region that yields an object when picked | `yields_asset_id` |
+| `movable` | an object whose position should persist when moved | — |
+
+`initial_state` is the state AT LOAD and it must be honest. If your hospital
+has some interior doors already open, declare those open and the rest closed.
+The engine cannot infer it, and a save can only ever record a *change* from
+what you declared -- so a wrong initial state is wrong forever.
+
+`locked` is a modifier, not a kind: a security gate is closed AND locked, and
+those are two separate facts.
+
+Every `interactive` must correspond to real geometry you created with that
+exact name. A declaration with nothing behind it renders as a placeholder cube
+and fails validation.
+
+### Declare only what matters
+
+Static scenery -- walls, floors, kerbs, most furniture -- stays plain named
+geometry with no `interactive` call. Every interactive costs runtime
+bookkeeping, and Meta's budget for a busy Quest 3 scene is roughly 200-300 draw
+calls, so this is a performance decision as much as a design one.
+
+**Never declare thousands of small interactives.** A grass field is ONE
+`harvestable` region over batched geometry whose `yields_asset_id` names the
+single blade a pick produces — not an entity per blade. Measured VR foliage
+tests fall under 10 FPS on a Quest 3 at roughly 2,000 individually placed
+plants. The same applies to rubble, coins, berries and leaves.
+
+### Gate the routes your doors control
+
+When a `nav_link` passes through something you declared, set that link's
+`gated_by` to the interactive's id plus the state that permits passage
+(`gate_state_key`, `gate_state_value`). Without it the link is an
+unconditional claim that the route exists, and an NPC walks straight through a
+door the player just shut.
+
+### Tags the engine already reads
+
+Tags cost nothing and wire real behaviour:
+
+- `grabbable` — the player's existing grab mechanic can pick the object up,
+  with no further work from you.
+- `ground` / `teleport_target` — walkable floor.
+- `mirror_visible` — the object appears in a mirror's reflection.
+
 ## Rendering & lighting contract (READ THIS - it decides how bright things look)
 
 The engine is a faithful renderer: it draws EXACTLY what you author and imposes

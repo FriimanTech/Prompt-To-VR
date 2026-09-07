@@ -7,6 +7,7 @@
 #include <vector>
 #include <unordered_map>
 
+#include "ptv/api/InteractiveState.h"
 #include "ptv/math/Math.h"
 
 namespace ptv {
@@ -80,6 +81,62 @@ struct PhysicsProps {
     std::string collision_shape{"aabb"};
     float restitution{0.2f};
     float friction{0.5f};
+};
+
+/** Declared changeable state for one world object.
+ *
+ * Parsed as-is from the world document; ``ApplySceneToWorld`` matches ``id``
+ * against an entity's own id and attaches a ``CInteractive``. Keeping them
+ * separate in the document rather than nesting state inside the entity is
+ * what lets a validator check the interactive list on its own -- for a
+ * missing geometry match, a duplicate id, or a nav gate naming something
+ * that was never declared. */
+struct InteractiveSpec {
+    std::string id;
+    std::string kind;
+    std::unordered_map<std::string, InteractiveValue> initial_state;
+    bool locked{false};
+    std::vector<std::string> tags;
+    Vec3 hinge_point{0.0f};
+    Vec3 hinge_axis{0.0f, 1.0f, 0.0f};
+    float min_angle_deg{0.0f};
+    float max_angle_deg{90.0f};
+    Vec3 slide_axis{0.0f};
+    float slide_distance_m{0.0f};
+    std::vector<std::string> positions;
+    std::string yields_asset_id;
+};
+
+/** A named place to arrive at in this scene.
+ *
+ * Arrival has to be named rather than positional because the sensible place to
+ * stand depends on where you came FROM: returning to a hub from a mission
+ * belongs at the mission's own door, not at the hub's front gate. The author
+ * knows that and declares it; the engine only looks it up. */
+struct SpawnPointSpec {
+    std::string id;
+    Vec3 position{0.0f};
+    Vec3 facing{0.0f, 0.0f, -1.0f};
+};
+
+/** A way out of this scene and into another.
+ *
+ * Declared as a volume plus a target rather than as an entity with a mechanic,
+ * because a portal is not something the player picks up or breaks -- it is a
+ * region of space with a meaning, which is the same shape as a teleport target
+ * and is handled in the same place. */
+struct PortalSpec {
+    std::string id;
+    std::string to_scene;
+    std::string target_spawn_id;
+    Vec3 position{0.0f};
+    /** Full extents of the trigger volume. */
+    Vec3 size{1.0f, 2.0f, 0.5f};
+    /** When true the player must deliberately act while inside the volume.
+     *  Walking through a doorway you did not mean to take, and losing the room
+     *  you were in, is the failure this prevents; an author opts out only for
+     *  a portal that IS the intended path. */
+    bool requires_interaction{true};
 };
 
 /** Walkable topology declared by the world builder, straight from
@@ -261,6 +318,25 @@ struct SceneDoc {
      *  navigation degrades to local steering. */
     std::vector<NavRegionSpec> nav_regions;
     std::vector<NavLinkSpec> nav_links;
+    /** Declared changeable state, straight from the world builder's
+     *  ``interactives`` block. Bound to entities by matching id at load, so
+     *  the geometry and the state that describes it stay one object. */
+    std::vector<InteractiveSpec> interactives;
+
+    /** Named arrival points, and the ways out of this scene. */
+    std::vector<SpawnPointSpec> spawn_points;
+    std::vector<PortalSpec> portals;
+
+    /** scene_id -> the file that scene compiled to, as a path RELATIVE to
+     *  this document.
+     *
+     *  The runtime needs to load a sibling scene without knowing how the
+     *  orchestrator lays out a project, and it has to work identically inside
+     *  a Quest APK, where there is no filesystem to go looking around in. So
+     *  the compiler writes down where everything went and the engine just
+     *  reads it. A portal naming a scene that is not in here cannot be taken,
+     *  and says so once rather than failing silently. */
+    std::unordered_map<std::string, std::string> scene_index;
 };
 
 SceneDoc LoadSceneJson(const std::string& path);

@@ -1,8 +1,12 @@
 #include "WorldGen.h"
 
+#include <cctype>
 #include <cmath>
 #include <map>
+#include <string>
+#include <unordered_map>
 #include <utility>
+#include <vector>
 
 namespace ptv::world {
 
@@ -219,12 +223,75 @@ public:
 
     void nav_link(const NavLinkDesc& d) override {
         if (d.from_id.empty() || d.to_id.empty()) return;
-        nav_links_.push_back(nlohmann::json{
+        nlohmann::json l{
             {"from", d.from_id},
             {"to", d.to_id},
             {"point", vec3_json(d.point)},
             {"cost_multiplier", d.cost_multiplier},
             {"bidirectional", d.bidirectional},
+        };
+        // A gate turns an unconditional assertion that the route exists into
+        // one conditional on an interactive's state, which is what stops an
+        // NPC walking through a door the player just shut.
+        if (!d.gated_by.empty()) {
+            l["gated_by"] = d.gated_by;
+            l["gate_state_key"] =
+                d.gate_state_key.empty() ? "open" : d.gate_state_key;
+            l["gate_state_value"] = state_value_json(d.gate_state_value);
+        }
+        nav_links_.push_back(std::move(l));
+    }
+
+    void interactive(const InteractiveDesc& d) override {
+        nlohmann::json state = nlohmann::json::object();
+        for (const auto& [key, value] : d.initial_state) {
+            state[key] = state_value_json(value);
+        }
+        nlohmann::json i{
+            {"id", d.id},
+            {"kind", d.kind},
+            {"initial_state", std::move(state)},
+            {"locked", d.locked},
+            {"tags", d.tags},
+        };
+        // Kind parameters are emitted only when they carry information, so a
+        // switch's record does not claim to have a hinge.
+        if (d.kind == "door" || d.kind == "container" || d.kind == "mover") {
+            i["hinge_point"] = vec3_json(d.hinge_point);
+            i["hinge_axis"] = vec3_json(d.hinge_axis);
+            i["min_angle_deg"] = d.min_angle_deg;
+            i["max_angle_deg"] = d.max_angle_deg;
+            if (d.slide_distance_m > 0.0f) {
+                i["slide_axis"] = vec3_json(d.slide_axis);
+                i["slide_distance_m"] = d.slide_distance_m;
+            }
+        }
+        if (!d.positions.empty()) i["positions"] = d.positions;
+        if (!d.yields_asset_id.empty()) {
+            i["yields_asset_id"] = d.yields_asset_id;
+        }
+        interactives_.push_back(std::move(i));
+    }
+
+    void spawn_point(const SpawnPointDesc& d) override {
+        const float yaw = std::atan2(d.facing.x, -d.facing.z);
+        const float hy = yaw * 0.5f;
+        spawn_points_.push_back(nlohmann::json{
+            {"id", d.id},
+            {"position", vec3_json(d.position)},
+            {"rotation", nlohmann::json::array({0.0f, std::sin(hy), 0.0f,
+                                                std::cos(hy)})},
+        });
+    }
+
+    void portal(const PortalDesc& d) override {
+        portals_.push_back(nlohmann::json{
+            {"id", d.id},
+            {"to_scene", d.to_scene},
+            {"target_spawn_id", d.target_spawn_id},
+            {"position", vec3_json(d.position)},
+            {"size", vec3_json(d.size)},
+            {"requires_interaction", d.requires_interaction},
         });
     }
 
@@ -244,17 +311,79 @@ public:
                 {"links", nav_links_},
             };
         }
+        // Same reasoning for the rest: absent means "this world declared
+        // none", which a validator has to be able to tell apart from empty.
+        if (!interactives_.empty()) doc_["interactives"] = interactives_;
+        if (!spawn_points_.empty()) doc_["spawn_points"] = spawn_points_;
+        if (!portals_.empty()) doc_["portals"] = portals_;
         return doc_;
     }
 
 private:
+    /** Serialize a StateValue, tagging the variant so a reader can tell an
+     *  enumerated "3" from the number 3. */
+    static nlohmann::json state_value_json(const StateValue& v) {
+        switch (v.type) {
+            case StateValue::Type::Bool:
+                return nlohmann::json{{"type", "bool"}, {"value", v.b}};
+            case StateValue::Type::Number:
+                return nlohmann::json{{"type", "number"}, {"value", v.number}};
+            case StateValue::Type::Name:
+                return nlohmann::json{{"type", "name"}, {"value", v.name}};
+            case StateValue::Type::Vector:
+            default:
+                return nlohmann::json{{"type", "vector"},
+                                      {"value", vec3_json(v.vector)}};
+        }
+    }
+
+    /** Slugify a name into an id fragment: lowercase, alphanumeric and
+     *  underscores only, runs collapsed. */
+    static std::string slugify(const std::string& name) {
+        std::string out;
+        out.reserve(name.size());
+        bool last_us = false;
+        for (const char c : name) {
+            const auto u = static_cast<unsigned char>(c);
+            // ASCII alphanumerics ONLY. A name written with accents or in a
+            // non-Latin script arrives here as multi-byte UTF-8, and
+            // std::isalnum on those bytes is locale-dependent -- so passing
+            // them through would put raw bytes in an id that is both a JSON
+            // key and a persistence key. Treat them as separators instead:
+            // the id becomes less pretty, never invalid.
+            if (u < 128 && std::isalnum(u) != 0) {
+                out += static_cast<char>(std::tolower(u));
+                last_us = false;
+            } else if (!out.empty() && !last_us) {
+                out += '_';
+                last_us = true;
+            }
+        }
+        while (!out.empty() && out.back() == '_') out.pop_back();
+        return out;
+    }
+
     nlohmann::json base_entity(const std::string& name,
                                const std::vector<std::string>& tags) {
+        // Ids are derived from the author's own name, NOT from a positional
+        // counter. The old "env_<n>" scheme meant inserting one
+        // spawn_primitive call renumbered every entity after it -- and since
+        // these ids are the keys saved state is written under, a regenerated
+        // world would silently restore the wrong objects. Repeats get a
+        // deterministic numeric suffix so ids stay unique without depending
+        // on call order for the FIRST occurrence.
+        std::string base = slugify(name);
+        if (base.empty()) base = "entity";
+        const int seen = ++name_counts_[base];
+        std::string id = seen == 1 ? base : base + "_" + std::to_string(seen);
+        ++entity_count_;
+
         nlohmann::json e{
-            {"id", "env_" + std::to_string(entity_count_++)},
+            {"id", id},
             {"name", name},
             {"tags", tags},
         };
+        entity_ids_.push_back(id);
         return e;
     }
 
@@ -263,6 +392,13 @@ private:
     nlohmann::json doc_;
     std::vector<nlohmann::json> nav_regions_;
     std::vector<nlohmann::json> nav_links_;
+    std::vector<nlohmann::json> interactives_;
+    std::vector<nlohmann::json> spawn_points_;
+    std::vector<nlohmann::json> portals_;
+    /** Occurrences per slugified name, so a repeated name gets a stable
+     *  suffix instead of every entity depending on call order. */
+    std::unordered_map<std::string, int> name_counts_;
+    std::vector<std::string> entity_ids_;
     int entity_count_{0};
     int light_count_{0};
     bool has_ground_{false};

@@ -1,20 +1,31 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useParams } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { api, eventStream } from "../api/client";
-import { StageTimeline } from "../components/StageTimeline";
+import { api } from "../api/client";
+import { eventStream } from "../api/client";
+import { StageTimeline, type PipelineEvent } from "../components/StageTimeline";
 import { ArtifactBrowser } from "../components/ArtifactBrowser";
 import { LogsViewer } from "../components/LogsViewer";
-import { resumableStages, stageLabel } from "../lib/stages";
+import {
+  COST_HINTS,
+  STAGE_GROUPS,
+  stageName,
+  stagesFor,
+} from "../lib/stages";
 
-/** Dropdown button: pick any pipeline stage to resume from. Running it re-runs
- *  that stage and every stage after it (stages before are skipped). */
+/** Pick a stage to resume from: that stage and everything after it re-runs.
+ *
+ *  Grouped and cost-marked because the choice is a spending decision as much
+ *  as a scheduling one -- resuming from reference images re-bills every image,
+ *  every mesh, every rig and every clip downstream of it. */
 function ResumeFromMenu({
-  projectId,
   targetDevice,
+  disabled,
+  onPick,
 }: {
-  projectId: string;
   targetDevice: string;
+  disabled: boolean;
+  onPick: (stage: string) => void;
 }) {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
@@ -35,15 +46,18 @@ function ResumeFromMenu({
     };
   }, [open]);
 
+  const stages = stagesFor(targetDevice);
+
   return (
     <div className="relative" ref={ref}>
       <button
         className="ptv-button"
         aria-haspopup="menu"
         aria-expanded={open}
+        disabled={disabled}
         onClick={() => setOpen((o) => !o)}
       >
-        Resume from stage
+        Resume from…
         <span aria-hidden className="text-xs">
           ▾
         </span>
@@ -51,31 +65,87 @@ function ResumeFromMenu({
       {open && (
         <div
           role="menu"
-          className="absolute right-0 z-30 mt-1 max-h-80 min-w-[18rem] overflow-auto ptv-card p-1"
+          className="absolute right-0 z-30 mt-1 max-h-[70vh] w-[26rem] overflow-auto ptv-card p-1"
         >
-          <div className="px-3 py-1.5 text-xs text-muted">
-            Runs the selected stage and everything after it.
+          <div className="px-3 py-2 text-xs text-muted">
+            Runs the chosen stage <strong className="text-white">and every
+            stage after it</strong>. Anything before is skipped.
           </div>
-          {resumableStages(targetDevice).map((s) => (
-            <button
-              key={s}
-              role="menuitem"
-              className="block w-full rounded px-3 py-1.5 text-left text-sm hover:bg-white/5"
-              onClick={() => {
-                setOpen(false);
-                api.run(projectId, { resume_from: s }).catch(() => void 0);
-              }}
-            >
-              {stageLabel(s)}
-            </button>
-          ))}
+          {STAGE_GROUPS.map((group) => {
+            const groupStages = stages.filter((s) => s.group === group.id);
+            if (groupStages.length === 0) return null;
+            return (
+              <div key={group.id} className="mb-1">
+                <div className="px-3 pt-2 pb-1 text-[0.65rem] font-medium uppercase tracking-wider text-muted">
+                  {group.label}
+                </div>
+                {groupStages.map((s) => (
+                  <button
+                    key={s.id}
+                    role="menuitem"
+                    className="flex w-full items-center gap-2 rounded px-3 py-1.5 text-left text-sm hover:bg-white/5"
+                    onClick={() => {
+                      setOpen(false);
+                      onPick(s.id);
+                    }}
+                  >
+                    <span className="mono w-5 shrink-0 text-right text-xs text-muted">
+                      {s.step}
+                    </span>
+                    <span className="min-w-0 flex-1 truncate">{s.label}</span>
+                    {s.cost === "credits" && (
+                      <span
+                        className="ptv-pill shrink-0 border-warn/40 bg-warn/10 text-warn"
+                        title={COST_HINTS.credits}
+                      >
+                        credits
+                      </span>
+                    )}
+                  </button>
+                ))}
+              </div>
+            );
+          })}
         </div>
       )}
     </div>
   );
 }
 
+function ProviderHealth() {
+  const health = useQuery({ queryKey: ["health"], queryFn: api.health });
+  if (!health.data) return null;
+  const h = health.data;
+  const keys: [string, boolean][] = [
+    ["Anthropic", h.has_anthropic_key],
+    ["OpenAI", h.has_openai_key],
+    ["Google", h.has_google_key],
+    ["Tripo", h.has_tripo_key],
+  ];
+  const missing = keys.filter(([, ok]) => !ok);
+  if (missing.length === 0) return null;
+  // Surfaced on the project page, not just a settings screen: a missing Tripo
+  // key does not fail until stage 7, by which point four LLM stages have
+  // already been paid for.
+  return (
+    <div className="ptv-card border-warn/30 bg-warn/5 p-3 text-xs">
+      <span className="text-warn">Missing provider keys: </span>
+      <span className="text-muted">
+        {missing.map(([n]) => n).join(", ")}. Stages that need them will fail or
+        fall back.
+      </span>
+    </div>
+  );
+}
+
 type Tab = "pipeline" | "prompt" | "artifacts" | "logs";
+
+const TAB_LABELS: Record<Tab, string> = {
+  pipeline: "Pipeline",
+  prompt: "Prompt",
+  artifacts: "Artifacts",
+  logs: "Logs",
+};
 
 export default function ProjectDetailPage() {
   const { id = "" } = useParams();
@@ -91,32 +161,54 @@ export default function ProjectDetailPage() {
     refetchInterval: 8000,
   });
   const [tab, setTab] = useState<Tab>("pipeline");
-  const [events, setEvents] = useState<{ stage: string; status: string; message: string; at: string }[]>([]);
+  const [events, setEvents] = useState<PipelineEvent[]>([]);
+  const [notice, setNotice] = useState<string>("");
 
   useEffect(() => {
     if (!id) return;
     const src = eventStream(id);
-    src.onmessage = (e) => {
+    const push = (e: MessageEvent) => {
       try {
-        const data = JSON.parse(e.data);
-        setEvents((prev) => [...prev.slice(-199), data]);
-        void qc.invalidateQueries({ queryKey: ["project", id] });
-        void qc.invalidateQueries({ queryKey: ["artifacts", id] });
+        const data = JSON.parse(e.data) as PipelineEvent;
+        setEvents((prev) => [...prev.slice(-399), data]);
       } catch {
-        /* ignore */
+        /* a malformed frame must not break the stream */
       }
     };
-    src.addEventListener("pipeline", (e: MessageEvent) => {
-      try {
-        const data = JSON.parse(e.data);
-        setEvents((prev) => [...prev.slice(-199), data]);
-      } catch { /* */ }
-    });
+    src.onmessage = (e) => {
+      push(e);
+      void qc.invalidateQueries({ queryKey: ["project", id] });
+      void qc.invalidateQueries({ queryKey: ["artifacts", id] });
+    };
+    src.addEventListener("pipeline", push as EventListener);
     return () => src.close();
   }, [id, qc]);
 
+  /** Every run button funnels through here so a failure is reported once,
+   *  visibly, instead of being swallowed by a bare .catch. */
+  const start = useCallback(
+    (opts: { stage?: string; resume?: boolean; resume_from?: string }, what: string) => {
+      setNotice(`Starting ${what}…`);
+      api
+        .run(id, opts)
+        .then(() => {
+          setNotice(`Started ${what}.`);
+          void qc.invalidateQueries({ queryKey: ["project", id] });
+        })
+        .catch((e: unknown) => setNotice(`Could not start ${what}: ${String(e)}`));
+    },
+    [id, qc],
+  );
+
+  useEffect(() => {
+    if (!notice) return;
+    const t = setTimeout(() => setNotice(""), 6000);
+    return () => clearTimeout(t);
+  }, [notice]);
+
   if (project.isLoading) return <div className="text-muted">Loading…</div>;
-  if (project.error) return <div className="text-err">{String(project.error)}</div>;
+  if (project.error)
+    return <div className="text-err">{String(project.error)}</div>;
   if (!project.data) return null;
   const p = project.data;
 
@@ -124,58 +216,121 @@ export default function ProjectDetailPage() {
   const canLaunch = isQuest
     ? Boolean(p.latest_build_apk)
     : Boolean(p.latest_build_exe);
-  const launchLabel = isQuest ? "Install & launch on Quest" : "Launch latest build";
+  const launchLabel = isQuest ? "Install & launch on Quest" : "Launch build";
+  const busy = p.status === "running";
 
   return (
     <div className="space-y-4">
-      <div className="flex items-start justify-between">
-        <div>
-          <h1 className="text-xl font-semibold">{p.title}</h1>
-          <div className="text-xs text-muted mono">{p.project_id}</div>
-          <div className="mt-1 inline-block rounded px-2 py-0.5 text-xs bg-white/5 text-muted">
-            {isQuest ? "Quest (standalone APK)" : "PC VR (Quest Link)"}
+      <div className="flex flex-wrap items-start justify-between gap-4">
+        <div className="min-w-0">
+          <h1 className="truncate text-xl font-semibold">{p.title}</h1>
+          <div className="mt-1 flex flex-wrap items-center gap-2">
+            <span className="mono text-xs text-muted">{p.project_id}</span>
+            <span className="ptv-pill border-white/10 bg-white/5 text-muted">
+              {isQuest ? "Quest (standalone APK)" : "PC VR (Quest Link)"}
+            </span>
+            <span
+              className={
+                "ptv-pill " +
+                (busy
+                  ? "border-accent/40 bg-accent/10 text-accent"
+                  : p.status === "failed"
+                    ? "border-err/40 bg-err/10 text-err"
+                    : "border-white/10 bg-white/5 text-muted")
+              }
+            >
+              {busy ? `running · ${stageName(p.current_stage)}` : p.status}
+            </span>
           </div>
         </div>
-        <div className="flex flex-wrap gap-2">
-          <button className="ptv-button" onClick={() => api.run(id).catch(() => void 0)}>
+
+        <div className="flex flex-wrap items-center gap-2">
+          <button
+            className="ptv-button"
+            disabled={busy}
+            title={
+              busy
+                ? "A run is already in progress"
+                : "Run every stage from the beginning. Re-bills all asset generation."
+            }
+            onClick={() => start({}, "a full run")}
+          >
             Run full pipeline
           </button>
-          <button className="ptv-button" onClick={() => api.run(id, { resume: true }).catch(() => void 0)}>
+          <button
+            className="ptv-button"
+            disabled={busy}
+            title={
+              busy
+                ? "A run is already in progress"
+                : "Continue from the first stage that has not succeeded."
+            }
+            onClick={() => start({ resume: true }, "a resume")}
+          >
             Resume
           </button>
-          <ResumeFromMenu projectId={id} targetDevice={p.target_device} />
+          <ResumeFromMenu
+            targetDevice={p.target_device}
+            disabled={busy}
+            onPick={(s) => start({ resume_from: s }, `resume from ${stageName(s)}`)}
+          />
           <button
-            className={canLaunch ? "ptv-button-primary" : "ptv-button-primary opacity-40 cursor-not-allowed"}
+            className={
+              canLaunch
+                ? "ptv-button-primary"
+                : "ptv-button-primary cursor-not-allowed opacity-40"
+            }
             disabled={!canLaunch}
-            onClick={() => api.launch(id).catch(() => void 0)}
+            title={
+              canLaunch
+                ? launchLabel
+                : "No build yet. Run the pipeline through the build stage first."
+            }
+            onClick={() => api.launch(id).catch((e) => setNotice(String(e)))}
           >
             {launchLabel}
           </button>
         </div>
       </div>
 
-      <div className="flex gap-2 border-b border-white/5">
-        {(["pipeline", "prompt", "artifacts", "logs"] as Tab[]).map((t) => (
+      {notice && (
+        <div className="ptv-card border-accent/30 bg-accent/5 p-3 text-xs text-muted">
+          {notice}
+        </div>
+      )}
+      <ProviderHealth />
+
+      <div className="flex gap-1 border-b border-white/5">
+        {(Object.keys(TAB_LABELS) as Tab[]).map((t) => (
           <button
             key={t}
             onClick={() => setTab(t)}
             className={
-              "px-3 py-2 text-sm border-b-2 -mb-px " +
+              "-mb-px border-b-2 px-3 py-2 text-sm transition-colors " +
               (tab === t
                 ? "border-accent text-accent"
                 : "border-transparent text-muted hover:text-white")
             }
           >
-            {t[0].toUpperCase() + t.slice(1)}
+            {TAB_LABELS[t]}
+            {t === "artifacts" && artifacts.data && artifacts.data.length > 0 && (
+              <span className="mono ml-1.5 text-xs text-muted">
+                {artifacts.data.length}
+              </span>
+            )}
           </button>
         ))}
       </div>
 
       {tab === "pipeline" && (
-        <StageTimeline state={p} events={events} />
+        <StageTimeline
+          state={p}
+          events={events}
+          onRunStage={(s) => start({ stage: s }, `${stageName(s)} on its own`)}
+        />
       )}
       {tab === "prompt" && (
-        <pre className="ptv-card p-4 mono text-sm whitespace-pre-wrap">
+        <pre className="ptv-card whitespace-pre-wrap p-4 mono text-sm">
           {p.prompt}
         </pre>
       )}

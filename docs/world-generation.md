@@ -1,10 +1,23 @@
 # World generation (agentic VR environments)
 
-The VR **environment** is authored entirely in C++ by a single ChatGPT "world
-architect" agent, compiled and run **offline**, and emitted as `scene.json` that
-the engine loads like any scene. The environment is **no longer** a Tripo GLB;
-Tripo still generates the discrete **objects** the player interacts with
-(characters, props, fx), which are merged in on top of the environment.
+Every VR **environment** is authored in C++ by a ChatGPT "world architect"
+agent, compiled and run **offline**, and emitted as a `scene.json` the engine
+loads like any scene. The environment is **no longer** a Tripo GLB; Tripo still
+generates the discrete **objects** the player interacts with (characters,
+props, fx), which are merged in on top of the environment.
+
+**One environment per scene, not one per project.** A game whose BuildSpec has
+a hub, three missions and a boss arena gets five environments, generated in
+parallel. The single-environment version of this stage was the reason a
+six-scene game shipped one real place and five scenes of gameplay entities
+floating in an empty void — and nothing reported it, because one world had
+been produced successfully.
+
+An image-to-3D asset is not an alternative for this. Tripo generates a mesh
+seen from outside; a room has to be entered, so its walls face inward, it needs
+a floor that holds a player, doorways that are actual holes, and walkable space
+the navigation system can route through. None of that is recoverable from a
+single reference image.
 
 ## Pipeline
 
@@ -12,31 +25,135 @@ Tripo still generates the discrete **objects** the player interacts with
 build_spec -> asset_manifest -> npc_plan -> mechanic_plan -> scene_spec
   -> reference_images -> tripo_models -> asset_rigging -> asset_animation
   -> asset_normalization -> asset_contract
-  -> code_generation (mechanics DAG)
   -> world_generation (this stage)
+  -> code_generation (mechanics DAG)
   -> asset_optimization (decimation + LOD chain)
-  -> scene_compile (merge world + gameplay)
+  -> scene_compile (merge world + gameplay, per scene)
   -> cmake_build | quest_build -> engine_promotion
 ```
 
-`world_generation` (`apps/orchestrator/ptv_orchestrator/pipeline/stage_world_generation.py`):
+`world_generation` runs **before** `code_generation`, which is the reverse of
+the original order. Gameplay code acts on the worlds: a mechanic that opens a
+door or routes an NPC through a building needs the ids the world architect
+actually declared, and nobody knows them until this stage has run. Generated
+C++ used to be written first, so the codegen agent had to invent plausible
+names for objects that did not exist yet — and an invented id is not a compile
+error, it resolves to nothing at runtime and the mechanic silently does
+nothing. Nothing points the other way: a world builder links no ECS and never
+calls a mechanic, so it has nothing to learn from gameplay code.
 
-1. Builds the **world architect** agent (`world_agent.py`) via the OpenAI Agents
+### Which environments get generated
+
+The scene list IS the environment list. `_environment_jobs` walks
+`BuildSpec.scenes` and skips a scene that names `reuse_environment_from` (it
+shares a sibling's environment; generating it again would pay for a second
+xhigh-reasoning agent run to produce the same place twice). Past
+`world_max_environments` the list is capped, and the cap always keeps the entry
+point — a game that drops its first scene has nowhere to start.
+
+### Per environment
+
+Each environment runs the same loop, and **everything it touches is its own**:
+
+| Per-environment | Value |
+| --- | --- |
+| Source directory | `engine/generated/world/<project_id>/<scene_id>/` |
+| Builder id | `generated.world.<project_id>.<scene_id>` |
+| C++ namespace | `ptv::world::ptv_world_<scene_id>` |
+| Build tree | `projects/<id>/builds/worldgen/<scene_id>/` |
+| Agent session | `ptv-world-<project_id>-<scene_id>` |
+| Output | `projects/<id>/world.<scene_id>.scene.json` |
+| Seed | derived from `<project_id>/<scene_id>` |
+
+That isolation is the whole reason parallel generation is safe. Sharing one
+build would mean sharing a translation-unit set: two agents fighting over
+identical filenames, duplicate helper types colliding at namespace scope, and a
+syntax error in the head interior failing the main world's compile and spending
+its repair budget on someone else's mistake. `PTV_WORLD_ENV_ID` narrows the
+CMake glob to one subdirectory to enforce it. Separate seeds keep two places in
+one game from coming out with identical procedural variation.
+
+It is affordable because `ptv_worldgen` links almost nothing — nlohmann_json
+plus optional glm, with no Vulkan, OpenXR, Jolt, renderer or ECS — so N
+configure-and-builds in parallel are cheap.
+
+The steps, per environment:
+
+1. Build the **world architect** agent (`world_agent.py`) via the OpenAI Agents
    SDK: model `world_model` (default `gpt-5.5`), `ModelSettings(reasoning=
    Reasoning(effort=world_reasoning_effort))` (default `high`), `WebSearchTool`
-   enabled, a persistent `Session`, and `max_turns = world_agent_max_turns`.
-2. Hands it `engine/world_author_guide.md` (the "understand the engine" input),
-   the BuildSpec brief, and the list of available object asset ids.
-3. Writes the agent's bounded C++ into `engine/generated/world/<project_id>/`.
-4. Compiles the offline `ptv_worldgen` host and, on compile failure, feeds the
-   errors back to the same session to fix; retries up to `world_max_repair_rounds`.
-5. Runs the host to emit `projects/<id>/world.scene.json` and validates it
-   (ground present, spawn on ground, sane entity count); refines on invalid.
-6. If the budget is exhausted, emits a deterministic **fallback world** so the
-   project still boots.
+   enabled, a per-environment `Session`, `max_turns = world_agent_max_turns`.
+2. Hand it `engine/world_author_guide.md` (the "understand the engine" input),
+   the BuildSpec brief, the available object asset ids, and a **per-environment
+   brief** naming which scene it is authoring, that scene's role, its exits, and
+   — for a nested environment — its host and authoring scale.
+3. Write the bounded C++ into that environment's own directory.
+4. Compile that environment's own `ptv_worldgen`; on failure feed the errors
+   back to the same session, up to `world_max_repair_rounds`.
+5. Run the host to emit `world.<scene_id>.scene.json` and validate it.
+6. On an exhausted budget, emit a deterministic **fallback world for that
+   environment only** — one bad place must not take a whole game down. The
+   stage still succeeds, and its message names which environment fell back so
+   it can be regenerated alone.
 
-`scene_compile` then merges `world.scene.json` (environment entities + sky +
-lights + spawn) into the entry-point scene, with gameplay entities on top.
+A single-environment project keeps the historical layout exactly: one
+directory, `generated.world.<project_id>`, no namespace requirement, and
+`world.scene.json`. Nothing about an existing project changes.
+
+### The architects do not talk to each other
+
+Each gets its whole contract up front in a deterministic brief, and
+cross-environment consistency is checked deterministically afterwards. This is
+deliberate: a shared brief cannot disagree with itself, whereas negotiation
+between parallel agents can. Each environment carries its own nav graph, so
+there is no shared structure for one to corrupt for another.
+
+`scene_compile` then merges each scene's own `world.<scene_id>.scene.json`
+(environment entities + sky + lights + spawn) into that scene, with gameplay
+entities on top, recording `environment_builder_id` so a bad room can be traced
+to the agent that authored it. A scene reusing a sibling's environment resolves
+through `reuse_environment_from` — `needs_unique_environment: false` on its own
+never said WHICH environment was being borrowed.
+
+### Nested environments (interiors)
+
+A scene with `environment_mode: nested` is not merged into a scene of its own.
+It is **loaded at runtime into a live world**, mounted on a host entity's joint
+and shrunk to fit — the inside of a character's skull, a dollhouse, a snow
+globe. The outer world stays loaded and keeps running, which is the entire
+point: the host walks around living its own life while the player inside
+notices nothing, because they and the interior hang off the same anchor.
+
+`ApplySceneToWorld` takes a `SceneNesting` for this rather than there being a
+second loader — a parallel implementation would drift from this one the first
+time a component was added to a scene document. Two things change on the way
+in:
+
+- **Ids are namespaced** (`skull_interior/front_door`). Two world architects
+  will both name a door `front_door`, and ids are persistence keys, so a clash
+  does not fail loudly — it silently restores one door's saved state onto the
+  other. Attachments and interactives inside the interior resolve through the
+  same scoping, so an interior-internal reference finds the interior's own copy
+  rather than the outer scene's same-named entity.
+- **Transforms are re-based** through the mount matrix, and the uniform fit
+  scale is baked into each entity's `Transform::scale` rather than left in the
+  matrix. The attachment system that carries the interior each frame rewrites
+  position and rotation but deliberately never touches scale, so anything left
+  in the matrix would be lost on the first frame.
+
+Every nested entity is attached to the host anchor and tagged
+`nested:<scene_id>`. Reusing the attachment system means the interior rides the
+**animated** joint for free and its colliders are already moved kinematically,
+so the miniature player can stand on a floor that is travelling through the
+world. The tag is both how the loader's output is identified and how unloading
+finds it later.
+
+The interior is authored at **human scale** and shrunk on load, never authored
+small: the engine measures what was actually built and derives the factor. A
+level laid out inside a 22 cm box produces geometry and nav regions too
+degenerate to walk on. `builtin.head_interior` names the interior's scene id
+explicitly — the `world.<scene_id>` convention cannot apply, because a nested
+interior has no scene of its own to be paired with.
 
 ## The generated-code boundary (safety)
 
@@ -148,8 +265,18 @@ Source: `engine/worldgen/samples/starter_city.cpp`.
 - `world_model` (default `gpt-5.5`)
 - `world_reasoning_effort` (default `high`; one of none|minimal|low|medium|high|xhigh;
   keep at `high`/`xhigh` — `medium` risks first-try compile failures in the generated C++)
-- `world_max_repair_rounds` (default 6)
+- `world_max_repair_rounds` (default 6, **per environment**)
 - `world_agent_max_turns` (default 80)
+- `world_max_parallel_workers` (default 3) — how many architects run at once.
+  Each is an independent agent plus a CMake configure-and-build, so this trades
+  wall-clock time against local CPU and API concurrency limits.
+- `world_max_environments` (default 12) — hard cap on environments per project.
+  Every one is a full agent run with its own compile loop, so this is the
+  stage's cost ceiling.
+- `world_max_interactives_per_env` (default 512) — cap on declared interactives
+  in one environment. Each carries runtime bookkeeping, and Meta's guidance for
+  a busy Quest 3 scene is roughly 200–300 draw calls, so this is a performance
+  bound as much as a correctness one.
 
 ## Deferred / follow-ups
 

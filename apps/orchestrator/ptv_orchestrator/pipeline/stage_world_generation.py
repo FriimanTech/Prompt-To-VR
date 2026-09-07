@@ -26,6 +26,8 @@ import json
 import os
 import shutil
 import subprocess
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
 
@@ -59,6 +61,155 @@ def run(ctx: PipelineContext) -> StageResult:
     return run_with_architect(ctx, architect=None)
 
 
+@dataclass(frozen=True)
+class EnvironmentJob:
+    """One environment to generate.
+
+    Derived from ``BuildSpec.scenes``: the scene list IS the environment list,
+    minus any scene that borrows a sibling's environment rather than getting
+    its own.
+    """
+
+    scene_id: str
+    name: str
+    summary: str
+    kind: str
+    nested: bool
+    host_asset_id: str
+    host_anchor: str
+    fit_extent_m: float
+    authoring_scale_m: float
+    links: tuple[tuple[str, str, str], ...]  # (to_scene, kind, spawn_point_id)
+    entry_point: bool
+
+
+@dataclass
+class EnvironmentResult:
+    job: EnvironmentJob
+    ok: bool
+    used_fallback: bool
+    attempts: int
+    detail: str
+    artifact: str = ""
+
+
+def _environment_jobs(ctx: PipelineContext) -> list[EnvironmentJob]:
+    """Which environments this project needs, in scene order.
+
+    A scene naming ``reuse_environment_from`` is skipped: it shares a
+    sibling's environment, and generating a duplicate would pay for a second
+    xhigh-reasoning agent run to produce the same place twice.
+    """
+
+    try:
+        build_spec = ctx.store.load_build_spec(ctx.project_id)
+    except Exception:
+        return []
+
+    cap = int(getattr(ctx.settings, "world_max_environments", 12))
+    jobs: list[EnvironmentJob] = []
+    for scene in build_spec.scenes:
+        if getattr(scene, "reuse_environment_from", None):
+            continue
+        if not getattr(scene, "needs_unique_environment", True):
+            continue
+        host = getattr(scene, "host", None)
+        mode = getattr(getattr(scene, "environment_mode", None), "value", "")
+        jobs.append(
+            EnvironmentJob(
+                scene_id=scene.id,
+                name=scene.name,
+                summary=(scene.summary or "")[:2000],
+                kind=getattr(getattr(scene, "kind", None), "value", "standalone"),
+                nested=(mode == "nested"),
+                host_asset_id=getattr(host, "asset_id", "") if host else "",
+                host_anchor=getattr(host, "anchor_slot", "head") if host else "",
+                fit_extent_m=(
+                    getattr(host, "fit_to_host_extent_m", 0.22) if host else 0.0
+                ),
+                authoring_scale_m=float(
+                    getattr(scene, "authoring_scale_m", 0.0) or 0.0
+                ),
+                links=tuple(
+                    (
+                        link.to_scene,
+                        getattr(getattr(link, "kind", None), "value", "portal"),
+                        link.spawn_point_id or "",
+                    )
+                    for link in (getattr(scene, "links", None) or [])
+                ),
+                entry_point=bool(getattr(scene, "entry_point", False)),
+            )
+        )
+
+    if len(jobs) > cap:
+        ctx.emit(
+            ProjectStage.world_generation,
+            "warning",
+            f"{len(jobs)} environments requested; capping at {cap}. Each one "
+            "is a full agent run with its own compile loop.",
+        )
+        # Keep the entry point whatever happens -- a project that drops its
+        # first scene has nowhere to start.
+        entry = [j for j in jobs if j.entry_point]
+        rest = [j for j in jobs if not j.entry_point]
+        jobs = (entry + rest)[:cap]
+    return jobs
+
+
+def _env_brief(job: EnvironmentJob, total: int) -> list[str]:
+    """The per-environment half of the architect's brief.
+
+    Every environment gets its whole contract UP FRONT, because the agents do
+    not talk to each other. That is deliberate: a shared, deterministic brief
+    cannot disagree with itself, whereas negotiation between parallel agents
+    can. Cross-environment consistency is then checked deterministically
+    afterwards rather than coordinated during.
+    """
+
+    lines = [
+        f"You are authoring ONE environment of {total} in this game: "
+        f"'{job.scene_id}' ({job.name}).",
+        f"Its role in the game is: {job.kind}.",
+        "Author ONLY this environment. Do NOT reference another "
+        "environment's nav regions, ids, or geometry -- you cannot see them "
+        "and they cannot see you.",
+    ]
+    if job.summary:
+        lines.append(f"What this place is: {job.summary}")
+    if job.authoring_scale_m > 0.0:
+        lines.append(
+            f"Author it at roughly {job.authoring_scale_m:.0f} m across."
+        )
+    if job.nested:
+        lines.append(
+            "This environment is NESTED inside another character's "
+            f"'{job.host_anchor}' (asset '{job.host_asset_id}'). Author it at "
+            "HUMAN scale as a real walkable level -- the engine scales the "
+            f"whole thing down to fit {job.fit_extent_m:.2f} m afterwards. Do "
+            "not try to model it at that size yourself; a level authored "
+            "inside a 0.22 m box produces unusable geometry and nav regions. "
+            "Include the openings the design calls for (eye sockets, viewing "
+            "ports) as real holes in the shell, so looking through them shows "
+            "the outside world."
+        )
+    if job.links:
+        lines.append(
+            "This environment has exits. Declare a portal for each one the "
+            "player physically walks through, and a named spawn_point for "
+            "each arrival:"
+        )
+        for to_scene, link_kind, spawn in job.links:
+            spawn_note = f", arriving at spawn '{spawn}'" if spawn else ""
+            lines.append(f"  - to '{to_scene}' via {link_kind}{spawn_note}")
+        lines.append(
+            "A 'menu_select' exit needs NO portal geometry -- it is chosen "
+            "from an interface -- but the TARGET still needs the named spawn "
+            "point to arrive at."
+        )
+    return lines
+
+
 def run_with_architect(
     ctx: PipelineContext, architect: Optional[WorldArchitect] = None
 ) -> StageResult:
@@ -71,10 +222,32 @@ def run_with_architect(
 
     repo_root: Path = ctx.settings.repo_root
     project_id = ctx.project_id
-    builder_id = f"generated.world.{project_id}"
-    out_dir = repo_root / "engine" / "generated" / "world" / project_id
     gen_root = repo_root / "engine" / "generated"
-    world_scene_path = ctx.project_dir / "world.scene.json"
+    project_world_root = gen_root / "world" / project_id
+
+    # Which environments this game needs. One per scene that owns its own
+    # place; the scene list IS the environment list.
+    jobs = _environment_jobs(ctx)
+    multi_env = len(jobs) > 1
+
+    # Single-environment projects keep the historical layout exactly, so
+    # nothing about an existing project changes: one directory, one builder
+    # id, one world.scene.json.
+    def _env_paths(job: Optional[EnvironmentJob]) -> tuple[str, Path, Path, str]:
+        """(builder_id, out_dir, scene_path, env_subdir) for one environment."""
+        if job is None or not multi_env:
+            return (
+                f"generated.world.{project_id}",
+                project_world_root,
+                ctx.project_dir / "world.scene.json",
+                "",
+            )
+        return (
+            f"generated.world.{project_id}.{job.scene_id}",
+            project_world_root / job.scene_id,
+            ctx.project_dir / f"world.{job.scene_id}.scene.json",
+            job.scene_id,
+        )
 
     # Persist a detailed world-generation log so the UI Logs tab (and any
     # post-mortem debugging) shows the FULL agent iteration history and
@@ -92,10 +265,12 @@ def run_with_architect(
     if ctx.settings.openai_api_key and not os.environ.get("OPENAI_API_KEY"):
         os.environ["OPENAI_API_KEY"] = ctx.settings.openai_api_key
 
-    # Fresh output dir so stale files from a previous run never compile.
-    if out_dir.exists():
-        shutil.rmtree(out_dir, ignore_errors=True)
-    out_dir.mkdir(parents=True, exist_ok=True)
+    # Clear the whole project's world tree once, up front. Per-environment
+    # cleanup alone would leave an environment that a re-planned BuildSpec no
+    # longer has, and its stale .cpp would still be swept up by the glob.
+    if project_world_root.exists():
+        shutil.rmtree(project_world_root, ignore_errors=True)
+    project_world_root.mkdir(parents=True, exist_ok=True)
 
     # Asset map (asset_id -> glb_path) for optional place_object().
     asset_map, object_assets = _load_object_assets(ctx)
@@ -106,164 +281,307 @@ def run_with_architect(
     guide = _read_engine_guide(ctx)
     build_excerpt = _build_spec_excerpt(ctx)
 
-    if architect is None:
-        architect = WorldArchitect(
-            instructions=WORLD_BUILDER_SYSTEM,
-            model=ctx.settings.world_model,
-            reasoning_effort=ctx.settings.world_reasoning_effort,
-            max_turns=ctx.settings.world_agent_max_turns,
-            session_id=f"ptv-world-{project_id}",
+    # Cross-scene structure is checked BEFORE any agent runs, because these
+    # problems are the planner's, not the architect's: a link to a scene that
+    # does not exist or an unreachable mission cannot be fixed by writing
+    # better C++. Reporting them up front also avoids paying for an
+    # environment that was never going to be reachable.
+    try:
+        graph_problems = validate_environment_graph(
+            ctx.store.load_build_spec(ctx.project_id)
         )
-
-    inp = WorldAgentInput(
-        project_id=project_id,
-        output_subdir=f"engine/generated/world/{project_id}",
-        builder_id=builder_id,
-        engine_guide=guide,
-        build_spec_excerpt=build_excerpt,
-        object_assets_json=json.dumps(object_assets, indent=2),
-        extra_instructions=[
-            f"Register with PTV_REGISTER_WORLD_BUILDER(\"{builder_id}\", ...).",
-            "Only place_object() with asset ids from the available list.",
-        ],
-    )
+    except Exception:
+        graph_problems = []
+    for problem in graph_problems:
+        ctx.emit(ProjectStage.world_generation, "warning", problem[:200])
+        ctx.store.append_log(ctx.project_id, "world", f"graph: {problem}")
 
     max_rounds = int(ctx.settings.world_max_repair_rounds)
-    message = build_initial_message(inp)
-    seed = _seed_for(project_id)
 
-    last_error = ""
-    for attempt in range(1, max_rounds + 1):
+    def _generate_one(job: Optional[EnvironmentJob]) -> EnvironmentResult:
+        """Author, compile, run and validate ONE environment.
+
+        Everything an environment touches is its own: directory, builder id,
+        namespace, build tree, agent session and repair budget. That isolation
+        is what makes running several at once safe -- a syntax error in the
+        head interior must not fail the main world's compile and spend its
+        repair rounds.
+        """
+
+        env_builder_id, env_out_dir, env_scene_path, env_subdir = _env_paths(job)
+        label = job.scene_id if job is not None else "world"
+
+        def _log(text: str) -> None:
+            ctx.store.append_log(project_id, "world", f"[{label}] {text}")
+
+        # Fresh output dir so stale files from a previous run never compile.
+        if env_out_dir.exists():
+            shutil.rmtree(env_out_dir, ignore_errors=True)
+        env_out_dir.mkdir(parents=True, exist_ok=True)
+
+        env_architect = architect
+        if env_architect is None:
+            env_architect = WorldArchitect(
+                instructions=WORLD_BUILDER_SYSTEM,
+                model=ctx.settings.world_model,
+                reasoning_effort=ctx.settings.world_reasoning_effort,
+                max_turns=ctx.settings.world_agent_max_turns,
+                # Per-environment session: the agents share no history, which
+                # is the point. They coordinate through a deterministic brief,
+                # not by talking.
+                session_id=f"ptv-world-{project_id}-{label}",
+            )
+
+        extra = [
+            f'Register with PTV_REGISTER_WORLD_BUILDER("{env_builder_id}", ...).',
+            "Only place_object() with asset ids from the available list.",
+        ]
+        if env_subdir:
+            extra.append(
+                "Wrap ALL of your code in "
+                f"`namespace ptv_world_{_ns_token(env_subdir)} {{ ... }}` "
+                "inside namespace ptv::world. Several environments are built "
+                "for this game and identical helper names at namespace scope "
+                "would collide."
+            )
+        if job is not None:
+            extra.extend(_env_brief(job, len(jobs)))
+
+        inp = WorldAgentInput(
+            project_id=project_id,
+            output_subdir=(
+                f"engine/generated/world/{project_id}"
+                + (f"/{env_subdir}" if env_subdir else "")
+            ),
+            builder_id=env_builder_id,
+            engine_guide=guide,
+            build_spec_excerpt=build_excerpt,
+            object_assets_json=json.dumps(object_assets, indent=2),
+            extra_instructions=extra,
+        )
+
+        message = build_initial_message(inp)
+        # Seeded per environment, so two places in one game do not come out
+        # with identical procedural variation.
+        seed = _seed_for(f"{project_id}/{label}")
+        last_error = ""
+
+        for attempt in range(1, max_rounds + 1):
+            ctx.emit(
+                ProjectStage.world_generation,
+                "agent_turn",
+                f"{label}: architect attempt {attempt}/{max_rounds}",
+            )
+            _log(f"\n===== attempt {attempt}/{max_rounds} =====")
+            try:
+                result = env_architect.run(message)
+            except WorldAgentError as exc:
+                last_error = f"agent error: {exc}"
+                _log("AGENT ERROR: " + str(exc))
+                ctx.emit(
+                    ProjectStage.world_generation,
+                    "warn",
+                    f"{label}: {last_error}"[:240],
+                )
+                break
+
+            if result.plan:
+                _log("PLAN:\n" + result.plan)
+            _log("FILES: " + ", ".join(Path(f.path).name for f in result.files))
+            if result.notes:
+                _log("NOTES:\n" + result.notes)
+
+            # 1) Write + bounds-check the files.
+            violations = _write_world_files(
+                result, env_out_dir, gen_root, project_id, ctx
+            )
+            if violations:
+                last_error = "bounds violations"
+                _log("BOUNDS VIOLATIONS:\n" + "\n".join(violations))
+                ctx.emit(
+                    ProjectStage.world_generation,
+                    "bounds_reject",
+                    f"{label} attempt {attempt}: {len(violations)} violation(s)",
+                )
+                message = (
+                    "Your files violated the world include boundary. Fix them "
+                    "and return the COMPLETE corrected files[] again (same "
+                    "schema, same builder_id). Violations:\n"
+                    + "\n".join(violations)
+                )
+                continue
+
+            # 2) Compile this environment's own host.
+            ok, log_text = _build_worldgen(ctx, env_subdir)
+            if not ok:
+                last_error = "compile failed"
+                _log("COMPILE FAILED:\n" + log_text)
+                ctx.emit(
+                    ProjectStage.world_generation,
+                    "compile_error",
+                    f"{label} attempt {attempt}: "
+                    f"{_error_excerpt(log_text)[:200]}",
+                )
+                message = build_repair_message(_tail(log_text, 12_000))
+                continue
+            _log("compile ok")
+
+            # 3) Run the host and validate the emitted world.
+            ran, run_log = _run_worldgen(
+                ctx, env_builder_id, seed, assets_json_path, env_scene_path,
+                env_subdir,
+            )
+            if not ran:
+                last_error = "host run failed"
+                _log("HOST RUN FAILED:\n" + run_log)
+                ctx.emit(
+                    ProjectStage.world_generation,
+                    "run_error",
+                    f"{label}: {run_log[:200]}",
+                )
+                message = build_repair_message(
+                    "The host failed to run/emit the scene:\n"
+                    + _tail(run_log, 4_000)
+                )
+                continue
+            if run_log.strip():
+                _log("HOST OUTPUT:\n" + run_log)
+
+            valid, reason = _validate_world_scene(env_scene_path)
+            if not valid:
+                last_error = f"invalid scene: {reason}"
+                _log("INVALID SCENE: " + reason)
+                ctx.emit(
+                    ProjectStage.world_generation,
+                    "invalid_scene",
+                    f"{label}: {reason}"[:200],
+                )
+                message = build_validation_repair_message(reason)
+                continue
+
+            _log(f"SUCCESS in {attempt} attempt(s): {reason}")
+            return EnvironmentResult(
+                job=job or _placeholder_job(),
+                ok=True,
+                used_fallback=False,
+                attempts=attempt,
+                detail=reason,
+                artifact=_rel(env_scene_path, repo_root),
+            )
+
+        # Exhausted this environment's budget. Fall back for THIS environment
+        # only: one bad place must not take a whole game down.
+        _log(f"\n===== fallback (agent unavailable: {last_error}) =====")
         ctx.emit(
             ProjectStage.world_generation,
-            "agent_turn",
-            f"architect attempt {attempt}/{max_rounds}",
+            "fallback",
+            f"{label}: agent world unavailable ({last_error}); "
+            "emitting fallback world",
         )
-        _wlog(f"\n===== attempt {attempt}/{max_rounds} =====")
-        try:
-            result = architect.run(message)
-        except WorldAgentError as exc:
-            last_error = f"agent error: {exc}"
-            _wlog("AGENT ERROR: " + str(exc))
-            ctx.emit(ProjectStage.world_generation, "warn", last_error[:240])
-            break
+        fb_ok, fb_log = _emit_fallback_world(ctx, seed, env_scene_path)
+        _log(("FALLBACK OK\n" if fb_ok else "FALLBACK FAILED\n") + fb_log)
+        return EnvironmentResult(
+            job=job or _placeholder_job(),
+            ok=fb_ok,
+            used_fallback=True,
+            attempts=max_rounds,
+            detail=last_error if fb_ok else _error_excerpt(fb_log)[:300],
+            artifact=_rel(env_scene_path, repo_root) if fb_ok else "",
+        )
 
-        if result.plan:
-            _wlog("PLAN:\n" + result.plan)
-        _wlog("FILES: " + ", ".join(Path(f.path).name for f in result.files))
-        if result.notes:
-            _wlog("NOTES:\n" + result.notes)
-
-        # 1) Write + bounds-check the files.
-        violations = _write_world_files(result, out_dir, gen_root, project_id, ctx)
-        if violations:
-            last_error = "bounds violations"
-            _wlog("BOUNDS VIOLATIONS:\n" + "\n".join(violations))
-            ctx.emit(
-                ProjectStage.world_generation,
-                "bounds_reject",
-                f"attempt {attempt}: {len(violations)} violation(s)",
-            )
-            message = (
-                "Your files violated the world include boundary. Fix them and "
-                "return the COMPLETE corrected files[] again (same schema, same "
-                "builder_id). Violations:\n" + "\n".join(violations)
-            )
-            continue
-
-        # 2) Compile the offline host.
-        ok, log_text = _build_worldgen(ctx)
-        if not ok:
-            last_error = "compile failed"
-            excerpt = _error_excerpt(log_text)
-            _wlog("COMPILE FAILED:\n" + log_text)
-            ctx.emit(
-                ProjectStage.world_generation,
-                "compile_error",
-                f"attempt {attempt}: {excerpt[:200]}",
-            )
-            message = build_repair_message(_tail(log_text, 12_000))
-            continue
-        _wlog("compile ok")
-
-        # 3) Run the host and validate the emitted world.
-        ran, run_log = _run_worldgen(ctx, builder_id, seed, assets_json_path,
-                                     world_scene_path)
-        if not ran:
-            last_error = "host run failed"
-            _wlog("HOST RUN FAILED:\n" + run_log)
-            ctx.emit(ProjectStage.world_generation, "run_error", run_log[:200])
-            message = build_repair_message(
-                "The host failed to run/emit the scene:\n" + _tail(run_log, 4_000)
-            )
-            continue
-        if run_log.strip():
-            _wlog("HOST OUTPUT:\n" + run_log)
-
-        valid, reason = _validate_world_scene(world_scene_path)
-        if not valid:
-            last_error = f"invalid scene: {reason}"
-            _wlog("INVALID SCENE: " + reason)
-            ctx.emit(ProjectStage.world_generation, "invalid_scene", reason[:200])
-            message = build_validation_repair_message(reason)
-            continue
-
-        # Success.
-        _wlog(f"SUCCESS in {attempt} attempt(s): {reason}")
-        rel = _rel(world_scene_path, repo_root)
-        ctx.store.record_stage(
-            state,
+    # ------------------------------------------------------------------
+    # Drive it. One environment keeps the historical serial path exactly; a
+    # multi-environment game fans out, mirroring how scene_spec already
+    # parallelizes its per-scene agents.
+    # ------------------------------------------------------------------
+    results: list[EnvironmentResult] = []
+    if not multi_env:
+        results.append(_generate_one(jobs[0] if jobs else None))
+    else:
+        workers = max(
+            1,
+            min(int(ctx.settings.world_max_parallel_workers), len(jobs)),
+        )
+        ctx.emit(
             ProjectStage.world_generation,
-            ProjectStatus.succeeded,
-            message=f"world built by agent in {attempt} attempt(s); {reason}",
-            artifacts=[rel],
+            "info",
+            f"generating {len(jobs)} environments with {workers} "
+            "parallel architect(s)",
         )
-        ctx.emit(ProjectStage.world_generation, "succeeded", f"world.scene.json ({reason})")
-        return StageResult(
-            stage=ProjectStage.world_generation,
-            artifacts=[rel],
-            message="agent world",
-        )
+        ordered: list[Optional[EnvironmentResult]] = [None] * len(jobs)
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = {
+                pool.submit(_generate_one, job): i
+                for i, job in enumerate(jobs)
+            }
+            for future in futures:
+                ordered[futures[future]] = future.result()
+        results = [r for r in ordered if r is not None]
 
-    # ------------------------------------------------------------------
-    # Exhausted the repair budget (or agent errored): deterministic fallback
-    # so the project still boots into something walkable.
-    # ------------------------------------------------------------------
-    _wlog(f"\n===== fallback (agent unavailable: {last_error}) =====")
-    ctx.emit(
-        ProjectStage.world_generation,
-        "fallback",
-        f"agent world unavailable ({last_error}); emitting fallback world",
-    )
-    fb_ok, fb_log = _emit_fallback_world(ctx, seed, world_scene_path)
-    _wlog(("FALLBACK OK\n" if fb_ok else "FALLBACK FAILED\n") + fb_log)
-    if not fb_ok:
+    artifacts = [r.artifact for r in results if r.artifact]
+    failed = [r for r in results if not r.ok]
+    fell_back = [r for r in results if r.used_fallback and r.ok]
+
+    if not artifacts:
+        detail = "; ".join(r.detail for r in failed) or "no world produced"
         ctx.store.record_stage(
             state,
             ProjectStage.world_generation,
             ProjectStatus.failed,
-            message=f"agent world failed ({last_error}) and fallback failed: "
-            + _error_excerpt(fb_log)[:300],
+            message=f"no environment could be produced: {detail}"[:400],
         )
         ctx.emit(ProjectStage.world_generation, "failed", "no world produced")
-        raise RuntimeError(
-            f"world_generation failed: agent ({last_error}) and fallback both failed"
-        )
+        raise RuntimeError(f"world_generation failed: {detail}")
 
-    rel = _rel(world_scene_path, repo_root)
+    # A single environment falling back is survivable; the project still
+    # boots, and the message says which one so it can be regenerated alone.
+    summary_parts = [f"{len(artifacts)} environment(s)"]
+    if fell_back:
+        summary_parts.append(
+            "fallback for " + ", ".join(r.job.scene_id for r in fell_back)
+        )
+    if failed:
+        summary_parts.append(
+            "FAILED for " + ", ".join(r.job.scene_id for r in failed)
+        )
+    summary = "; ".join(summary_parts)
+
+    _wlog(f"\n===== stage summary: {summary} =====")
     ctx.store.record_stage(
         state,
         ProjectStage.world_generation,
         ProjectStatus.succeeded,
-        message=f"fallback world (agent unavailable: {last_error})",
-        artifacts=[rel],
+        message=summary[:400],
+        artifacts=artifacts,
     )
-    ctx.emit(ProjectStage.world_generation, "succeeded", "fallback world.scene.json")
+    ctx.emit(ProjectStage.world_generation, "succeeded", summary)
     return StageResult(
         stage=ProjectStage.world_generation,
-        artifacts=[rel],
-        message="fallback world",
+        artifacts=artifacts,
+        message=summary,
     )
+
+
+def _placeholder_job() -> EnvironmentJob:
+    """Stand-in for the single-environment path, which has no scene entry."""
+    return EnvironmentJob(
+        scene_id="world",
+        name="World",
+        summary="",
+        kind="standalone",
+        nested=False,
+        host_asset_id="",
+        host_anchor="",
+        fit_extent_m=0.0,
+        authoring_scale_m=0.0,
+        links=(),
+        entry_point=True,
+    )
+
+
+def _ns_token(env_id: str) -> str:
+    """A C++-safe namespace fragment from a scene id."""
+    return "".join(c if c.isalnum() else "_" for c in env_id).strip("_") or "env"
 
 
 # ---------------------------------------------------------------------------
@@ -352,10 +670,19 @@ def _worldgen_source_dir(ctx: PipelineContext) -> Path:
     return ctx.settings.engine_dir / "worldgen"
 
 
-def _build_worldgen(ctx: PipelineContext) -> tuple[bool, str]:
-    """Configure + build ptv_worldgen (standalone) with this project's world
-    sources. Returns (ok, combined_log)."""
-    build_dir = ctx.project_dir / "builds" / "worldgen"
+def _build_worldgen(
+    ctx: PipelineContext, env_subdir: str = ""
+) -> tuple[bool, str]:
+    """Configure + build ptv_worldgen (standalone) with ONE environment's
+    world sources. Returns (ok, combined_log).
+
+    Each environment gets its own build tree and its own narrowed source glob.
+    That is affordable precisely because this host links almost nothing --
+    nlohmann_json plus optional glm, with no Vulkan, OpenXR, Jolt, renderer or
+    ECS -- so N configure-and-builds in parallel are cheap, and it is what
+    keeps one environment's compile error out of another's repair budget.
+    """
+    build_dir = _worldgen_build_dir(ctx, env_subdir)
     logs: list[str] = []
 
     def _sink(line: str) -> None:
@@ -369,10 +696,25 @@ def _build_worldgen(ctx: PipelineContext) -> tuple[bool, str]:
         platform=ctx.settings.cmake_generator_platform,
         config=ctx.settings.cmake_build_config,
         vcpkg_root=ctx.settings.vcpkg_root,
-        extra_cache=(("PTV_WORLD_PROJECT_ID", ctx.project_id),),
+        extra_cache=(
+            ("PTV_WORLD_PROJECT_ID", ctx.project_id),
+            # Empty narrows to nothing, which is the single-environment
+            # layout; a scene id narrows the glob to that one subdirectory.
+            ("PTV_WORLD_ENV_ID", env_subdir),
+        ),
         on_line=_sink,
     )
     return result.exit_code == 0, "\n".join(logs)
+
+
+def _worldgen_build_dir(ctx: PipelineContext, env_subdir: str = "") -> Path:
+    """Build tree for one environment's host.
+
+    Separate per environment so two architects compiling at the same time do
+    not overwrite each other's object files and binaries.
+    """
+    base = ctx.project_dir / "builds" / "worldgen"
+    return base / env_subdir if env_subdir else base
 
 
 def _worldgen_exe(ctx: PipelineContext, build_dir: Path) -> Optional[Path]:
@@ -393,11 +735,12 @@ def _run_worldgen(
     seed: int,
     assets_json_path: Path,
     out_path: Path,
+    env_subdir: str = "",
     *,
     force_fallback: bool = False,
 ) -> tuple[bool, str]:
-    """Run the host to emit world.scene.json. Returns (ok, log)."""
-    build_dir = ctx.project_dir / "builds" / "worldgen"
+    """Run the host to emit one environment's scene json. Returns (ok, log)."""
+    build_dir = _worldgen_build_dir(ctx, env_subdir)
     exe = _worldgen_exe(ctx, build_dir)
     if exe is None:
         return False, "ptv_worldgen.exe not found after build"
@@ -490,14 +833,303 @@ def _validate_world_scene(path: Path) -> tuple[bool, str]:
     if not isinstance(spawn, dict) or "position" not in spawn:
         return False, "no player spawn"
 
+    id_problems = _validate_entity_ids(doc)
+    if id_problems:
+        return False, "ids: " + "; ".join(id_problems[:4])
+
     nav_problems = _validate_navigation(doc)
     if nav_problems:
         return False, "navigation: " + "; ".join(nav_problems[:4])
 
+    interactive_problems = _validate_interactives(doc)
+    if interactive_problems:
+        return False, "interactives: " + "; ".join(interactive_problems[:4])
+
+    portal_problems = _validate_portals(doc)
+    if portal_problems:
+        return False, "portals: " + "; ".join(portal_problems[:4])
+
     nav = doc.get("navigation") or {}
     regions = nav.get("regions") or []
     nav_note = f", {len(regions)} nav regions" if regions else ""
-    return True, f"{len(entities)} entities{nav_note}"
+    n_interactive = len(doc.get("interactives") or [])
+    int_note = f", {n_interactive} interactives" if n_interactive else ""
+    return True, f"{len(entities)} entities{nav_note}{int_note}"
+
+
+# Every affordance kind the engine can bind. Kept as a literal rather than
+# imported from the scene-compile stage so world generation does not depend on
+# a later stage; the shared test asserts the two agree.
+_AFFORDANCE_KINDS = frozenset(
+    {
+        "door",
+        "switchable",
+        "container",
+        "mover",
+        "breakable",
+        "harvestable",
+        "movable",
+    }
+)
+
+# Ceiling on declared interactives in one environment. Mirrors
+# Settings.world_max_interactives_per_env; duplicated here so the pure
+# validator stays callable without a settings object.
+_MAX_INTERACTIVES = 512
+
+
+def _validate_entity_ids(doc: dict) -> list[str]:
+    """Entity ids must exist and be unique.
+
+    These ids are the keys saved game state is written under, so a duplicate
+    does not merely look untidy -- two objects share one save slot and each
+    overwrites the other, restoring a state that never existed. A blank id is
+    worse: every unnamed object collides.
+    """
+
+    problems: list[str] = []
+    seen: dict[str, int] = {}
+    blank = 0
+    for entity in doc.get("entities") or []:
+        if not isinstance(entity, dict):
+            continue
+        ident = str(entity.get("id") or "")
+        if not ident:
+            blank += 1
+            continue
+        seen[ident] = seen.get(ident, 0) + 1
+    if blank:
+        problems.append(f"{blank} entity(ies) have no id")
+    duplicates = sorted(k for k, n in seen.items() if n > 1)
+    if duplicates:
+        problems.append(
+            "duplicate entity id(s): " + ", ".join(duplicates[:5])
+        )
+    return problems
+
+
+def _validate_interactives(doc: dict) -> list[str]:
+    """Check declared state against the geometry it claims to describe.
+
+    The failure this exists to prevent is silent: an interactive whose id
+    matches no entity produces a scene where the affordance binder has
+    nothing to bind, so the door simply is not a door -- and the world looks
+    completely fine. Same for a kind the engine has never heard of.
+    """
+
+    interactives = doc.get("interactives")
+    if not isinstance(interactives, list) or not interactives:
+        return []
+
+    problems: list[str] = []
+    if len(interactives) > _MAX_INTERACTIVES:
+        problems.append(
+            f"{len(interactives)} interactives declared, over the "
+            f"{_MAX_INTERACTIVES} cap; state belongs on things that can "
+            "change, not on static scenery"
+        )
+
+    entity_ids = {
+        str(e.get("id"))
+        for e in (doc.get("entities") or [])
+        if isinstance(e, dict) and e.get("id")
+    }
+
+    seen: set[str] = set()
+    for spec in interactives:
+        if not isinstance(spec, dict):
+            problems.append("an interactive entry is not an object")
+            continue
+        ident = str(spec.get("id") or "")
+        if not ident:
+            problems.append("an interactive has no id")
+            continue
+        if ident in seen:
+            problems.append(f"duplicate interactive id '{ident}'")
+            continue
+        seen.add(ident)
+
+        kind = str(spec.get("kind") or "")
+        if kind not in _AFFORDANCE_KINDS:
+            problems.append(
+                f"interactive '{ident}' has unknown kind '{kind}'; expected "
+                "one of " + ", ".join(sorted(_AFFORDANCE_KINDS))
+            )
+        if ident not in entity_ids:
+            problems.append(
+                f"interactive '{ident}' has no entity with that id, so "
+                "nothing can bind to it"
+            )
+
+        # A door with no range cannot move, which reads as a door that does
+        # not work rather than as a configuration mistake.
+        if kind in ("door", "container"):
+            has_hinge = abs(
+                float(spec.get("max_angle_deg", 0.0) or 0.0)
+                - float(spec.get("min_angle_deg", 0.0) or 0.0)
+            ) > 1e-3
+            has_slide = float(spec.get("slide_distance_m", 0.0) or 0.0) > 1e-3
+            if not has_hinge and not has_slide:
+                problems.append(
+                    f"interactive '{ident}' is a {kind} with neither a hinge "
+                    "range nor a slide distance, so it cannot open"
+                )
+        if kind == "mover" and len(spec.get("positions") or []) < 2:
+            problems.append(
+                f"interactive '{ident}' is a mover with fewer than two named "
+                "positions, so it has nowhere to travel"
+            )
+        if kind == "harvestable" and not spec.get("yields_asset_id"):
+            problems.append(
+                f"interactive '{ident}' is harvestable but names no "
+                "yields_asset_id, so picking it would produce nothing"
+            )
+
+    # Nav gates have to name something real, or the route is either
+    # permanently open or permanently shut depending on how the runtime reads
+    # a missing id -- both of which are wrong and neither of which is visible.
+    nav = doc.get("navigation") or {}
+    for link in nav.get("links") or []:
+        if not isinstance(link, dict):
+            continue
+        gate = str(link.get("gated_by") or "")
+        if not gate:
+            continue
+        if gate not in seen:
+            problems.append(
+                f"nav link {link.get('from')} -> {link.get('to')} is gated by "
+                f"'{gate}', which is not a declared interactive"
+            )
+    return problems
+
+
+def _validate_portals(doc: dict) -> list[str]:
+    """Portals must name a target and an arrival point.
+
+    A portal with no target scene is a door to nowhere; one with no spawn id
+    drops the player at the target's world origin, which is usually inside
+    geometry.
+    """
+
+    portals = doc.get("portals")
+    spawn_points = doc.get("spawn_points")
+    have_portals = isinstance(portals, list) and portals
+    have_spawns = isinstance(spawn_points, list) and spawn_points
+    # Checked independently: a world whose transitions are all menu-driven
+    # declares named spawn points and NO portals, and its spawn ids still
+    # have to be unique.
+    if not have_portals and not have_spawns:
+        return []
+
+    problems: list[str] = []
+    seen: set[str] = set()
+    for portal in portals if have_portals else []:
+        if not isinstance(portal, dict):
+            continue
+        ident = str(portal.get("id") or "")
+        if not ident:
+            problems.append("a portal has no id")
+            continue
+        if ident in seen:
+            problems.append(f"duplicate portal id '{ident}'")
+        seen.add(ident)
+        if not portal.get("to_scene"):
+            problems.append(f"portal '{ident}' names no target scene")
+
+    # Duplicate spawn point ids would make "arrive at the north door"
+    # ambiguous, and the ambiguity resolves differently per run.
+    spawn_seen: set[str] = set()
+    for spawn in doc.get("spawn_points") or []:
+        if not isinstance(spawn, dict):
+            continue
+        ident = str(spawn.get("id") or "")
+        if not ident:
+            problems.append("a spawn point has no id")
+            continue
+        if ident in spawn_seen:
+            problems.append(f"duplicate spawn point id '{ident}'")
+        spawn_seen.add(ident)
+    # Whether a portal's target_spawn_id exists is deliberately NOT checked
+    # here: that spawn lives in the TARGET environment, which this validator
+    # cannot see. It belongs to the cross-environment pass.
+    return problems
+
+
+def validate_environment_graph(build_spec: Any) -> list[str]:
+    """Cross-scene checks that no single environment can see.
+
+    Each world architect authors one environment and is told not to reference
+    another, so these are the mistakes only the whole picture reveals: a link
+    to a scene that does not exist, a borrowed environment that was never
+    generated, or a scene nothing can reach.
+    """
+
+    scenes = list(getattr(build_spec, "scenes", None) or [])
+    if not scenes:
+        return ["build spec declares no scenes"]
+
+    ids = {s.id for s in scenes}
+    problems: list[str] = []
+
+    for scene in scenes:
+        for link in getattr(scene, "links", None) or []:
+            if link.to_scene not in ids:
+                problems.append(
+                    f"scene '{scene.id}' links to '{link.to_scene}', which is "
+                    "not a scene in this build"
+                )
+        borrowed = getattr(scene, "reuse_environment_from", None)
+        if borrowed:
+            if borrowed not in ids:
+                problems.append(
+                    f"scene '{scene.id}' reuses the environment of "
+                    f"'{borrowed}', which is not a scene in this build"
+                )
+            elif borrowed == scene.id:
+                problems.append(
+                    f"scene '{scene.id}' reuses its own environment"
+                )
+        elif not getattr(scene, "needs_unique_environment", True):
+            problems.append(
+                f"scene '{scene.id}' says it does not need a unique "
+                "environment but names no reuse_environment_from, so it is "
+                "ambiguous which environment it borrows"
+            )
+        host = getattr(scene, "host", None)
+        mode = getattr(getattr(scene, "environment_mode", None), "value", "")
+        if mode == "nested" and host is None:
+            problems.append(
+                f"scene '{scene.id}' is nested but names no host to attach to"
+            )
+
+    # Reachability from the entry point. An unreachable mission is content
+    # that was generated, paid for, and can never be played.
+    entry = next((s.id for s in scenes if s.entry_point), scenes[0].id)
+    reachable = {entry}
+    frontier = [entry]
+    while frontier:
+        current = frontier.pop()
+        scene = next((s for s in scenes if s.id == current), None)
+        if scene is None:
+            continue
+        for link in getattr(scene, "links", None) or []:
+            if link.to_scene in ids and link.to_scene not in reachable:
+                reachable.add(link.to_scene)
+                frontier.append(link.to_scene)
+    # A nested environment is entered by its host, not by a link.
+    for scene in scenes:
+        if getattr(getattr(scene, "environment_mode", None), "value", "") == (
+            "nested"
+        ):
+            reachable.add(scene.id)
+
+    unreachable = sorted(ids - reachable)
+    if unreachable and len(scenes) > 1:
+        problems.append(
+            "no route from the entry point to scene(s): "
+            + ", ".join(unreachable)
+        )
+    return problems
 
 
 # How far a doorway point may sit outside the rooms it joins before it counts

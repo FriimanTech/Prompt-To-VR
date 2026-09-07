@@ -59,7 +59,22 @@ def _style_notes_lower(asset: AssetItem) -> str:
 
 
 def _character_role(asset: AssetItem) -> str:
-    """Heuristic: 'enemy', 'player_avatar', or 'npc' for a character asset."""
+    """'enemy', 'player_avatar', or 'npc' for a character asset.
+
+    Prefers the explicit ``character_role`` the manifest now carries. The
+    keyword matching below is the fallback for artifacts generated before
+    that field existed -- it guessed the player avatar from phrases like
+    "player body", which worked until a prompt phrased it differently.
+    """
+
+    explicit = getattr(asset, "character_role", None)
+    if explicit is not None and getattr(explicit, "value", "none") != "none":
+        # 'enemy' is still a style-notes distinction: the schema records what
+        # the character IS to the player, not which side it fights for, and
+        # faction comes from the NpcPlan instead.
+        if explicit.value == "player_avatar":
+            return "player_avatar"
+
     text = _style_notes_lower(asset)
     enemy_kw = (
         "enemy", "hostile", "boss", "drone", "minion", "monster",
@@ -786,6 +801,132 @@ def _repoint_world_meshes_to_lods(
     return out
 
 
+# ---------------------------------------------------------------------------
+# The affordance binder
+# ---------------------------------------------------------------------------
+#
+# Turns each interactive the world builder declared into a real mechanic
+# binding on the entity that carries it. This is deliberately a TABLE applied
+# uniformly rather than a fourth LLM stage, and the reason is the property the
+# design most needs: equivalent objects must behave the same way in every
+# environment of a game. An agent reading six environments and all their
+# mechanics is exactly the thing that wires grass in the hub and forgets it in
+# the mission. A lookup applied to every environment cannot forget.
+#
+# Intentional divergence still has a home -- BuildSpec.interaction_rules --
+# so a difference is always explicit and reviewable rather than an accident.
+
+AFFORDANCE_MECHANICS: dict[str, str] = {
+    "door": "builtin.door",
+    "switchable": "builtin.switchable",
+    "container": "builtin.container",
+    "mover": "builtin.mover",
+    "breakable": "builtin.breakable",
+    "harvestable": "builtin.harvestable",
+    # 'movable' is intentionally absent: it declares that an object's
+    # transform should persist, which the engine handles from the declaration
+    # itself. builtin.grab already provides the interaction.
+    "movable": "",
+}
+
+
+def _interaction_denied(
+    build_spec: Any, scene_id: str, kind: str, tags: list[str]
+) -> bool:
+    """Does a prompt-specified rule forbid interacting with this here?
+
+    Matches on the affordance kind or any of its tags, so a rule can be
+    written against either vocabulary ("no harvestable in the hub" or "no
+    grabbable in the hub").
+    """
+
+    for rule in getattr(build_spec, "interaction_rules", None) or []:
+        if rule.scene_id != scene_id:
+            continue
+        if rule.affordance != kind and rule.affordance not in tags:
+            continue
+        if not rule.allowed:
+            return True
+    return False
+
+
+def bind_affordances(
+    doc: dict, build_spec: Any, scene_id: str
+) -> tuple[int, list[str]]:
+    """Attach affordance mechanics to the entities that declared them.
+
+    Returns ``(bound_count, notes)``. Mutates ``doc`` in place: each matching
+    entity gains a ``mechanic_bindings`` entry, and an interactive a policy
+    forbids is marked so the runtime refuses the interaction AND suppresses
+    its affordance cue -- advertising an action that will be refused is worse
+    than showing no cue at all.
+    """
+
+    interactives = doc.get("interactives")
+    if not isinstance(interactives, list) or not interactives:
+        return 0, []
+
+    by_id: dict[str, dict] = {}
+    for entity in doc.get("entities") or []:
+        if isinstance(entity, dict) and entity.get("id"):
+            by_id[str(entity["id"])] = entity
+
+    bound = 0
+    notes: list[str] = []
+    for spec in interactives:
+        if not isinstance(spec, dict):
+            continue
+        interactive_id = str(spec.get("id") or "")
+        kind = str(spec.get("kind") or "")
+        if not interactive_id or not kind:
+            continue
+
+        tags = [str(t) for t in (spec.get("tags") or [])]
+        if _interaction_denied(build_spec, scene_id, kind, tags):
+            # The mechanic is still bound; only permission changes. The
+            # player performs the identical gesture in both environments and
+            # the policy decides whether it succeeds, which is how the
+            # requirement was framed.
+            spec["interaction_allowed"] = False
+            notes.append(f"{interactive_id}: {kind} denied by interaction_rules")
+
+        mechanic_id = AFFORDANCE_MECHANICS.get(kind)
+        if mechanic_id is None:
+            notes.append(f"{interactive_id}: unknown affordance kind '{kind}'")
+            continue
+        if not mechanic_id:
+            continue  # declaration-only kind, e.g. 'movable'
+
+        entity = by_id.get(interactive_id)
+        if entity is None:
+            # The D8 validator reports this as a hard error; here we simply
+            # do not invent a binding for geometry that is not present.
+            notes.append(
+                f"{interactive_id}: no entity with that id, not bound"
+            )
+            continue
+
+        bindings = entity.setdefault("mechanic_bindings", [])
+        if any(
+            isinstance(b, dict) and b.get("id") == mechanic_id
+            for b in bindings
+        ):
+            continue  # already bound, e.g. by an explicit SceneSpec binding
+
+        params: dict[str, Any] = {}
+        # Per-instance parameters come from the declaration, which is the
+        # whole reason a tag could not have done this job: a tag is a bare
+        # string and cannot carry a hinge axis.
+        if kind == "harvestable":
+            params["reach_m"] = 0.5
+        bindings.append(
+            {"id": mechanic_id, "builtin_id": mechanic_id, "params": params}
+        )
+        bound += 1
+
+    return bound, notes
+
+
 def _merge_world_into_scene(
     doc: dict,
     world_doc: dict,
@@ -820,6 +961,19 @@ def _merge_world_into_scene(
     if isinstance(world_spawn, dict) and "position" in world_spawn:
         doc.setdefault("player", {})
         doc["player"]["spawn"] = world_spawn
+
+    # Declared state, exits and named arrival points travel with the
+    # environment that declared them.
+    for key in ("interactives", "spawn_points", "portals"):
+        if world_doc.get(key):
+            doc[key] = world_doc[key]
+
+    # Provenance. The merge used to drop this, which meant a compiled scene
+    # carried an environment with no record of where it came from -- and with
+    # several environments per project, that is the difference between
+    # debugging a bad world and guessing which agent produced it.
+    if world_doc.get("builder_id"):
+        doc["environment_builder_id"] = world_doc["builder_id"]
     return doc
 
 
@@ -849,15 +1003,6 @@ def run(ctx: PipelineContext) -> StageResult:
         else {}
     )
 
-    # The C++-generated environment for this project (from world_generation).
-    world_doc: dict | None = None
-    world_path = ctx.project_dir / "world.scene.json"
-    if world_path.exists():
-        try:
-            world_doc = json.loads(world_path.read_text(encoding="utf-8"))
-        except Exception:
-            world_doc = None
-
     # The environment merges into the entry-point scene (the launched scene.json).
     entry_id: str | None = next(
         (s.id for s in build_spec.scenes if s.entry_point), None
@@ -865,11 +1010,56 @@ def run(ctx: PipelineContext) -> StageResult:
     if entry_id is None and build_spec.scenes:
         entry_id = build_spec.scenes[0].id
 
+    def _load_world(scene_id: str) -> dict | None:
+        """The generated environment for one scene.
+
+        Looks for ``world.<scene_id>.scene.json`` first, so every scene can
+        have its own environment, and falls back to the single project-wide
+        ``world.scene.json`` for projects generated before that was true.
+        A scene that reuses a sibling's environment is resolved through
+        ``reuse_environment_from``, because ``needs_unique_environment:
+        false`` on its own never said WHICH environment was being borrowed.
+        """
+
+        entry = next(
+            (s for s in build_spec.scenes if s.id == scene_id), None
+        )
+        source = scene_id
+        if entry is not None:
+            borrowed = getattr(entry, "reuse_environment_from", None)
+            if borrowed:
+                source = borrowed
+
+        candidates = [
+            ctx.project_dir / f"world.{source}.scene.json",
+            ctx.project_dir / "world.scene.json",
+        ]
+        for path in candidates:
+            if not path.exists():
+                continue
+            try:
+                return json.loads(path.read_text(encoding="utf-8"))
+            except Exception:
+                # A malformed world document must not take the whole compile
+                # down: the scene still builds, just without its environment,
+                # and the stage reports it.
+                ctx.emit(
+                    ProjectStage.scene_compile,
+                    "warning",
+                    f"{scene_id}: could not parse {path.name}",
+                )
+                return None
+        return None
+
     builds_dir = ctx.project_dir / "builds" / "scene"
     builds_dir.mkdir(parents=True, exist_ok=True)
     artifacts: list[str] = []
 
+    # Accumulated, not written as we go: every scene's document needs the
+    # index, and the index is not known until every scene has been compiled.
+    compiled: list[tuple[str, dict]] = []
     entry_scene_json: str | None = None
+    entry_id_written: str | None = None
     for scene_entry in build_spec.scenes:
         spec_path = ctx.project_dir / f"scene_spec.{scene_entry.id}.json"
         if not spec_path.exists():
@@ -880,10 +1070,33 @@ def run(ctx: PipelineContext) -> StageResult:
         doc = compile_scene_json(
             build_spec, manifest, plan, scene_spec, normalization, asset_contract
         )
-        if world_doc is not None and scene_entry.id == entry_id:
+        # Every scene gets its own environment now, not just the entry point.
+        # Previously the other scenes compiled to gameplay entities floating
+        # in an empty void, which is what a six-scene project actually
+        # produced.
+        world_doc = _load_world(scene_entry.id)
+        if world_doc is not None:
             doc = _merge_world_into_scene(
                 doc, world_doc, normalization, asset_contract
             )
+
+        # Connect the declarations to the mechanics. Uniform across every
+        # scene by construction, so equivalent objects cannot behave
+        # differently in one environment than another unless a rule says so.
+        bound, notes = bind_affordances(doc, build_spec, scene_entry.id)
+        if bound:
+            ctx.emit(
+                ProjectStage.scene_compile,
+                "info",
+                f"{scene_entry.id}: bound {bound} affordance mechanic(s)",
+            )
+        for note in notes:
+            ctx.emit(
+                ProjectStage.scene_compile,
+                "warning",
+                f"{scene_entry.id}: {note}",
+            )
+
         over_budget = check_animated_agent_budget(
             doc.get("entities") or [], doc.get("performance")
         )
@@ -897,18 +1110,53 @@ def run(ctx: PipelineContext) -> StageResult:
                 ctx.project_id, "scene_compile",
                 f"{scene_entry.id}: {over_budget}",
             )
-        out = builds_dir / f"{scene_entry.id}.scene.json"
-        out.write_text(json.dumps(doc, indent=2, sort_keys=True), encoding="utf-8")
-        artifacts.append(str(out.relative_to(ctx.settings.repo_root)).replace("\\", "/"))
-        if scene_entry.entry_point or entry_scene_json is None:
-            entry_scene_json = str(out)
+        compiled.append((scene_entry.id, doc))
+        if scene_entry.entry_point or entry_id_written is None:
+            entry_id_written = scene_entry.id
 
-    # Canonical top-level scene.json used by the runtime.
+    # ------------------------------------------------------------------
+    # The scene index.
+    #
+    # A portal names a target scene; the runtime has to turn that into a file
+    # without knowing how a project is laid out, and it has to work identically
+    # inside a Quest APK where there is nothing to go looking around in. So the
+    # compiler writes down where every scene went and the engine just reads it.
+    # Paths are relative to the document, so a project can be moved or unpacked
+    # anywhere.
+    #
+    # Every scene gets the WHOLE index, not just its own exits. A menu that
+    # offers a mission list, or a generated mechanic ending a chapter, needs to
+    # reach a scene no portal in the current room points at.
+    # ------------------------------------------------------------------
+    index = {scene_id: f"scene.{scene_id}.json" for scene_id, _doc in compiled}
+    for scene_id, doc in compiled:
+        doc["scene_index"] = index
+
+        # Written beside scene.json, because that is what the index paths are
+        # relative to and what the APK packages.
+        runtime_path = ctx.project_dir / f"scene.{scene_id}.json"
+        payload = json.dumps(doc, indent=2, sort_keys=True)
+        runtime_path.write_text(payload, encoding="utf-8")
+        artifacts.append(
+            str(runtime_path.relative_to(ctx.settings.repo_root)).replace("\\", "/")
+        )
+
+        # Kept for artifact continuity and debugging; the runtime does not read
+        # from here.
+        build_copy = builds_dir / f"{scene_id}.scene.json"
+        build_copy.write_text(payload, encoding="utf-8")
+        artifacts.append(
+            str(build_copy.relative_to(ctx.settings.repo_root)).replace("\\", "/")
+        )
+
+        if scene_id == entry_id_written:
+            entry_scene_json = payload
+
+    # Canonical top-level scene.json used by the runtime: a copy of the entry
+    # point, sitting alongside its siblings so the index resolves from it.
     if entry_scene_json is not None:
         top = ctx.project_dir / "scene.json"
-        Path(top).write_text(
-            Path(entry_scene_json).read_text(encoding="utf-8"), encoding="utf-8"
-        )
+        top.write_text(entry_scene_json, encoding="utf-8")
         state.latest_scene_json = str(top)
         ctx.store.save_state(state)
         artifacts.append(str(top.relative_to(ctx.settings.repo_root)).replace("\\", "/"))

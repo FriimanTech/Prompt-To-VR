@@ -60,6 +60,48 @@ enum class Collision : std::uint8_t { None, Box, Sphere, Mesh };
 
 enum class PrimitiveKind : std::uint8_t { Box, Plane, Cylinder, Sphere, Ramp };
 
+/** One value of declared state.
+ *
+ * A variant rather than a bool because the things worlds actually contain
+ * disagree about shape: a traffic light is enumerated, a door is a continuous
+ * angle, an elevator is a named floor, and a switch is a flag. Squeezing all
+ * of those into a boolean is what forces state into the IDENTIFIER instead,
+ * and then an opened ``door_closed_1`` is a name that contradicts reality --
+ * while still being the key its saves are written under. */
+struct StateValue {
+    enum class Type : std::uint8_t { Bool, Number, Name, Vector };
+    Type type{Type::Bool};
+    bool b{false};
+    float number{0.0f};
+    std::string name;  // "closed", "green", "floor_3"
+    Vec3 vector{};
+
+    static StateValue of(bool v) {
+        StateValue s{};
+        s.type = Type::Bool;
+        s.b = v;
+        return s;
+    }
+    static StateValue of(float v) {
+        StateValue s{};
+        s.type = Type::Number;
+        s.number = v;
+        return s;
+    }
+    static StateValue named(std::string v) {
+        StateValue s{};
+        s.type = Type::Name;
+        s.name = std::move(v);
+        return s;
+    }
+    static StateValue of(const Vec3& v) {
+        StateValue s{};
+        s.type = Type::Vector;
+        s.vector = v;
+        return s;
+    }
+};
+
 // --- Descriptors -----------------------------------------------------------
 
 // Sky gradient PLUS the global environment/atmosphere knobs that shape the
@@ -124,7 +166,14 @@ struct PrimitiveDesc {
     Vec3 size{1.0f, 1.0f, 1.0f};  // full extents in meters
     Color color{0.8f, 0.8f, 0.82f};
     Collision collision{Collision::Box};
+    /** Gameplay tags. Several are already read by the engine and cost
+     *  nothing to add: ``grabbable`` makes an object pickable by
+     *  ``builtin.grab`` with no further wiring, ``ground`` /
+     *  ``teleport_target`` mark walkable floor, ``mirror_visible`` puts the
+     *  object in a mirror. */
     std::vector<std::string> tags{};
+    /** Becomes the entity's stable id, so give everything a meaningful name.
+     *  Repeats are disambiguated deterministically (wall, wall_2, wall_3). */
     std::string name{};
 };
 
@@ -180,6 +229,69 @@ struct NavLinkDesc {
      *  preferred over a ladder. */
     float cost_multiplier{1.0f};
     bool bidirectional{true};
+    /** Interactive whose state controls this crossing, or empty for a link
+     *  that is always open.
+     *
+     *  Without this a nav link is an UNCONDITIONAL assertion that the route
+     *  exists, so an NPC walks through a closed door -- the link knows a
+     *  doorway is there but nothing tells it a door is in the doorway. Name
+     *  the door here and give the state that permits passage. */
+    std::string gated_by{};
+    /** State key and value on ``gated_by`` that allow passage, e.g.
+     *  ("open", true) or ("state", "raised"). */
+    std::string gate_state_key{};
+    StateValue gate_state_value{};
+};
+
+/** Something in the world whose state can change, or that gameplay can act
+ *  on.
+ *
+ * Declaring this is what lets the rest of the engine stop guessing. Without
+ * it nothing knows that the thing in the doorway IS a door, whether it starts
+ * open, or what "open" would even mean for it -- so navigation asserts an
+ * unconditional crossing, and persistence has no pristine value to compare a
+ * change against.
+ *
+ * Identity and state are deliberately SEPARATE. ``id`` is permanent and is
+ * the key saves are written under; ``initial_state`` is what changes. Encode
+ * the state in the name instead and the key starts lying the moment the
+ * player touches it.
+ *
+ * Declare this only for things whose configuration can change or that
+ * gameplay can touch. Static scenery stays plain geometry: every interactive
+ * costs runtime bookkeeping, and a Quest 3 busy scene has a budget of roughly
+ * 200-300 draw calls to work inside. Never declare thousands of small ones --
+ * a grass field is batched geometry plus ONE ``harvestable`` region, because
+ * measured VR foliage tests fall under 10 FPS at around 2,000 instances. */
+struct InteractiveDesc {
+    /** Stable, unique, author-chosen. This is the persistence key for the
+     *  life of the project, so it must not encode anything that changes. */
+    std::string id;
+    /** One of: "door", "switchable", "container", "mover", "breakable",
+     *  "harvestable", "movable". */
+    std::string kind;
+    /** Named state and its value at load, e.g. {"open", of(false)} or
+     *  {"floor", named("floor_1")}. */
+    std::vector<std::pair<std::string, StateValue>> initial_state{};
+
+    // --- Kind parameters. Only the relevant ones are read. -------------
+    /** Hinge for a door or lid: a point and an axis, plus the range it may
+     *  swing through. A standard door is 0 to 90; some go past it. */
+    Vec3 hinge_point{};
+    Vec3 hinge_axis{0.0f, 1.0f, 0.0f};
+    float min_angle_deg{0.0f};
+    float max_angle_deg{90.0f};
+    /** Slide for a drawer or sliding door. */
+    Vec3 slide_axis{};
+    float slide_distance_m{0.0f};
+    /** Named positions for a mover: elevator floors, raised/lowered. */
+    std::vector<std::string> positions{};
+    /** What one pick yields, for a harvestable region. */
+    std::string yields_asset_id{};
+    /** A MODIFIER, not a kind: a gate can be closed AND locked, and the two
+     *  are independent questions. */
+    bool locked{false};
+    std::vector<std::string> tags{};
 };
 
 struct ObjectPlacement {
@@ -187,6 +299,33 @@ struct ObjectPlacement {
     Transform transform{};
     std::vector<std::string> tags{};
     std::string name{};
+};
+
+/** A named place to arrive at.
+ *
+ * More than one is needed because returning from a mission or an exhibit has
+ * to put the player back at the door they left through, not at the world
+ * origin. */
+struct SpawnPointDesc {
+    std::string id;  // "mission_start", "returned_from_hospital"
+    Vec3 position{};
+    Vec3 facing{0.0f, 0.0f, -1.0f};
+};
+
+/** A way out of this environment and into another.
+ *
+ * This is what the author places -- the gate, the doorway, the fire truck --
+ * and the engine wires to a transition. A mission chosen from a menu needs no
+ * portal geometry and uses a scene link instead. */
+struct PortalDesc {
+    std::string id;
+    std::string to_scene;         // target environment id
+    std::string target_spawn_id;  // named spawn in the target
+    Vec3 position{};
+    Vec3 size{1.0f, 2.0f, 0.5f};  // trigger volume, full extents
+    /** False makes it transition on entry rather than on a deliberate
+     *  interaction. */
+    bool requires_interaction{true};
 };
 
 // --- The facade the builder talks to (pure data accumulator) ---------------
@@ -213,6 +352,18 @@ public:
     // rather than only reacting to whatever is directly in front of them.
     virtual void nav_region(const NavRegionDesc& desc) = 0;
     virtual void nav_link(const NavLinkDesc& desc) = 0;
+
+    // Declare something whose state can change or that gameplay can act on.
+    // Call this AFTER the geometry it describes, and give it that geometry's
+    // name so the two are bound together. See InteractiveDesc.
+    virtual void interactive(const InteractiveDesc& desc) = 0;
+
+    // Named arrival points. ``player_spawn`` sets the default one; these are
+    // the extra destinations transitions can target by name.
+    virtual void spawn_point(const SpawnPointDesc& desc) = 0;
+
+    // A way out of this environment into another.
+    virtual void portal(const PortalDesc& desc) = 0;
 
     // A deterministic per-world seed (set by the host). Use it for any
     // pseudo-random variation so results are reproducible.
@@ -309,6 +460,12 @@ inline void building_grid(WorldContext& w, const BuildingGridDesc& d) {
             p.color = d.color;
             p.collision = Collision::Box;
             p.tags = {"building"};
+            // Named per grid cell, not left blank. Entity ids are derived
+            // from these names, and an unnamed primitive falls back to a
+            // positional suffix -- which is exactly the instability that
+            // makes saved state point at the wrong object after a rebuild.
+            p.name = "building_r" + std::to_string(r) + "_c" +
+                     std::to_string(c);
             w.spawn_primitive(p);
         }
     }
@@ -329,7 +486,8 @@ inline void wall_shell(WorldContext& w, const WallShellDesc& d) {
     const float hw = d.width * 0.5f;
     const float hd = d.depth * 0.5f;
     const float y = d.height * 0.5f;
-    auto wall = [&](Vec3 pos, Vec3 size) {
+    // Named by which side they are, so the ids stay meaningful and stable.
+    auto wall = [&](const char* side, Vec3 pos, Vec3 size) {
         PrimitiveDesc p{};
         p.kind = PrimitiveKind::Box;
         p.size = size;
@@ -337,18 +495,19 @@ inline void wall_shell(WorldContext& w, const WallShellDesc& d) {
         p.color = d.color;
         p.collision = Collision::Box;
         p.tags = {"wall"};
+        p.name = std::string("wall_") + side;
         w.spawn_primitive(p);
     };
-    wall({d.center.x, d.center.y + y, d.center.z - hd},
+    wall("north", {d.center.x, d.center.y + y, d.center.z - hd},
          {d.width, d.height, d.thickness});
-    wall({d.center.x, d.center.y + y, d.center.z + hd},
+    wall("south", {d.center.x, d.center.y + y, d.center.z + hd},
          {d.width, d.height, d.thickness});
-    wall({d.center.x - hw, d.center.y + y, d.center.z},
+    wall("west", {d.center.x - hw, d.center.y + y, d.center.z},
          {d.thickness, d.height, d.depth});
-    wall({d.center.x + hw, d.center.y + y, d.center.z},
+    wall("east", {d.center.x + hw, d.center.y + y, d.center.z},
          {d.thickness, d.height, d.depth});
     if (d.ceiling) {
-        wall({d.center.x, d.center.y + d.height, d.center.z},
+        wall("ceiling", {d.center.x, d.center.y + d.height, d.center.z},
              {d.width, d.thickness, d.depth});
     }
 }
@@ -377,6 +536,7 @@ inline void path(WorldContext& w, const PathDesc& d) {
     p.color = d.color;
     p.collision = Collision::Box;
     p.tags = {"path"};
+    p.name = "path";
     w.spawn_primitive(p);
 }
 
@@ -400,6 +560,7 @@ inline void platform_set(WorldContext& w, const PlatformSetDesc& d) {
         p.color = d.color;
         p.collision = Collision::Box;
         p.tags = {"platform"};
+        p.name = "platform_" + std::to_string(i + 1);
         w.spawn_primitive(p);
     }
 }
