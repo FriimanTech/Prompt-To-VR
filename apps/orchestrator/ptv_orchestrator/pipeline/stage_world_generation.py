@@ -3,7 +3,7 @@ the C++ for the VR environment, iterating under a compile-and-repair loop.
 
 Flow
 ----
-1. Build the architect (OpenAI Agents SDK, gpt-5.5 @ reasoning xhigh,
+1. Build the architect (OpenAI Agents SDK, gpt-5.6-sol @ reasoning high,
    WebSearchTool, persistent Session) and hand it the engine guide + game brief.
 2. Write its bounded C++ into ``engine/generated/world/<project_id>/`` (world
    include whitelist enforced; violations are fed back to the agent).
@@ -42,10 +42,12 @@ from .bounds import (
     validate_world_includes,
 )
 from .context import PipelineContext, StageResult
-from .prompts import WORLD_BUILDER_SYSTEM
+from .proc import proc_hooks, run_tracked
+from .prompts import world_builder_system
 from .world_agent import (
     WorldAgentError,
     WorldAgentInput,
+    WorldAgentOutputError,
     WorldAgentResult,
     WorldArchitect,
     build_initial_message,
@@ -322,14 +324,16 @@ def run_with_architect(
         env_architect = architect
         if env_architect is None:
             env_architect = WorldArchitect(
-                instructions=WORLD_BUILDER_SYSTEM,
+                instructions=world_builder_system(state.target_device),
                 model=ctx.settings.world_model,
                 reasoning_effort=ctx.settings.world_reasoning_effort,
+                verbosity=ctx.settings.world_verbosity,
                 max_turns=ctx.settings.world_agent_max_turns,
                 # Per-environment session: the agents share no history, which
                 # is the point. They coordinate through a deterministic brief,
                 # not by talking.
                 session_id=f"ptv-world-{project_id}-{label}",
+                log=_log,
             )
 
         extra = [
@@ -367,6 +371,7 @@ def run_with_architect(
         last_error = ""
 
         for attempt in range(1, max_rounds + 1):
+            ctx.raise_if_cancelled()
             ctx.emit(
                 ProjectStage.world_generation,
                 "agent_turn",
@@ -375,6 +380,32 @@ def run_with_architect(
             _log(f"\n===== attempt {attempt}/{max_rounds} =====")
             try:
                 result = env_architect.run(message)
+            except WorldAgentOutputError as exc:
+                # The model answered, it just did not match the schema. The
+                # session still remembers the files it wrote, so spending
+                # another round naming the bad field is worth far more than
+                # dropping this environment to the fallback world.
+                last_error = f"output error: {exc}"
+                _log("OUTPUT ERROR: " + str(exc))
+                ctx.emit(
+                    ProjectStage.world_generation,
+                    "warn",
+                    f"{label}: {last_error}"[:240],
+                )
+                bullets = "\n".join(f"- {i}" for i in exc.issues) or "- (unspecified)"
+                message = (
+                    "Your answer did not match the WorldAgentResult schema. "
+                    "Fix ALL of these and return the COMPLETE result again "
+                    "(same builder_id, full files[]):\n"
+                    f"{bullets}"
+                    if not exc.truncated
+                    else (
+                        "Your answer was CUT OFF before the JSON was "
+                        "complete: it exceeded the output token limit. "
+                        "Return the same world with fewer, shorter files."
+                    )
+                )
+                continue
             except WorldAgentError as exc:
                 last_error = f"agent error: {exc}"
                 _log("AGENT ERROR: " + str(exc))
@@ -703,6 +734,7 @@ def _build_worldgen(
             ("PTV_WORLD_ENV_ID", env_subdir),
         ),
         on_line=_sink,
+        **proc_hooks(ctx),
     )
     return result.exit_code == 0, "\n".join(logs)
 
@@ -756,9 +788,7 @@ def _run_worldgen(
     if not force_fallback:
         args += ["--builder", builder_id]
     try:
-        proc = subprocess.run(
-            args, capture_output=True, text=True, timeout=120
-        )
+        proc = run_tracked(ctx, args, timeout=120)
     except Exception as exc:  # pragma: no cover
         return False, f"host launch failed: {exc}"
     log = (proc.stdout or "") + (proc.stderr or "")
@@ -786,6 +816,7 @@ def _emit_fallback_world(
         vcpkg_root=ctx.settings.vcpkg_root,
         extra_cache=(("PTV_WORLD_PROJECT_ID", ""),),  # no project sources
         on_line=_sink,
+        **proc_hooks(ctx),
     )
     if result.exit_code != 0:
         return False, "\n".join(logs)
@@ -794,10 +825,11 @@ def _emit_fallback_world(
     if exe is None:
         return False, "fallback ptv_worldgen.exe not found"
     try:
-        proc = subprocess.run(
+        proc = run_tracked(
+            ctx,
             [str(exe), "--out", str(out_path), "--seed", str(seed),
              "--builder", "builtin.world.fallback"],
-            capture_output=True, text=True, timeout=120,
+            timeout=120,
         )
     except Exception as exc:  # pragma: no cover
         return False, f"fallback host launch failed: {exc}"

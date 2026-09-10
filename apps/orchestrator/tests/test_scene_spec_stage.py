@@ -31,6 +31,7 @@ import pytest
 from ptv_orchestrator.events import EventBus, PipelineEvent
 from ptv_orchestrator.pipeline import stage_scene_spec
 from ptv_orchestrator.pipeline.context import PipelineContext
+from ptv_orchestrator.pipeline.scene_spec_agent import SceneSpecOutputError
 from ptv_orchestrator.settings import Settings
 from ptv_orchestrator.storage import ProjectStore
 from ptv_schemas import (
@@ -45,6 +46,7 @@ from ptv_schemas import (
     ReferenceImageRequest,
     SceneEntry,
     SceneSpec,
+    TargetDevice,
     TestEntry,
     Transform,
 )
@@ -306,9 +308,15 @@ def _composer_factory(
     delay_seconds: float = 0.0,
     payload_fn: PayloadFn = None,
 ):
-    """Return a ComposerFactory ``(settings, session_id) -> _FakeComposer``."""
+    """Return a ComposerFactory ``(settings, session_id, device, log) ->
+    _FakeComposer``."""
 
-    def factory(_settings: Settings, _session_id: str) -> _FakeComposer:
+    def factory(
+        _settings: Settings,
+        _session_id: str,
+        _target_device: TargetDevice = TargetDevice.pcvr,
+        _log: Any = None,
+    ) -> _FakeComposer:
         return _FakeComposer(
             registry=registry,
             delay_seconds=delay_seconds,
@@ -622,6 +630,79 @@ def test_semantic_repair_then_succeeds(tmp_path):
     saved = store.load_scene_spec(pid, filename="scene_spec.scene_00.json")
     asset_ids = {e.mesh.asset_id for e in saved.entities if e.mesh}
     assert {"city", "gauntlet"} <= asset_ids
+
+
+def test_truncated_output_is_repaired_with_a_smaller_ask(tmp_path):
+    """A compose cut off at the token cap must not be answered with "fix
+    these problems" -- there is nothing wrong with the content, there is
+    just too much of it, so the repair turn asks for fewer entities."""
+    store, pid, settings = _seed(tmp_path, n_scenes=1)
+    settings.scene_spec_max_entities = 42
+    ctx, bus = _ctx_with_bus(store, pid, settings)
+
+    def payload(scene_id: str, attempt: int) -> SceneSpec:
+        if attempt == 0:
+            raise SceneSpecOutputError(
+                "model output was cut off after 60000 chars",
+                issues=[],
+                truncated=True,
+            )
+        return _make_valid_scene(scene_id)
+
+    reg = _Registry()
+    result = stage_scene_spec.run_with_composer_factory(
+        ctx, _composer_factory(reg, payload_fn=payload)
+    )
+
+    assert [s.scene_id for s in result.data] == ["scene_00"]
+    assert len(reg.calls) == 2
+    repair_prompt = reg.calls[1].prompt
+    assert "CUT OFF" in repair_prompt
+    assert "at most 42 entities" in repair_prompt
+
+
+def test_output_problems_are_surfaced_per_field(tmp_path):
+    """The field-level issues reach the UI instead of one redacted line."""
+    store, pid, settings = _seed(tmp_path, n_scenes=1)
+    ctx, bus = _ctx_with_bus(store, pid, settings)
+
+    def payload(scene_id: str, attempt: int) -> SceneSpec:
+        if attempt == 0:
+            raise SceneSpecOutputError(
+                "model output failed schema validation (2 problem(s))",
+                issues=["entities.0.name: Input should be a valid string"],
+            )
+        return _make_valid_scene(scene_id)
+
+    reg = _Registry()
+    stage_scene_spec.run_with_composer_factory(
+        ctx, _composer_factory(reg, payload_fn=payload)
+    )
+
+    messages = [e.message for e in bus.published]
+    assert any("entities.0.name" in m for m in messages), messages
+    assert "entities.0.name" in reg.calls[1].prompt
+
+
+def test_compose_diagnostics_are_written_to_the_project_log(tmp_path):
+    """This stage used to write nothing to disk, so a failed compose left
+    no trace of what the model actually said."""
+    store, pid, settings = _seed(tmp_path, n_scenes=1)
+    ctx, _bus = _ctx_with_bus(store, pid, settings)
+
+    seen: list[str] = []
+
+    def factory(_settings, _session_id, _device, log):
+        log("hello from the composer")
+        seen.append("built")
+        return _FakeComposer(registry=_Registry())
+
+    stage_scene_spec.run_with_composer_factory(ctx, factory)
+
+    log_path = store.dir_for(pid) / "logs" / "scene_spec.log"
+    assert log_path.exists(), "scene_spec.log was never created"
+    assert "hello from the composer" in log_path.read_text(encoding="utf-8")
+    assert seen == ["built"]
 
 
 def test_repair_budget_exhausted_fails_stage(tmp_path):

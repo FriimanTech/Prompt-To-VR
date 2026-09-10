@@ -181,7 +181,9 @@ class CodegenAgentError(RuntimeError):
 def run_codegen_agent(
     inp: CodegenAgentInput,
     *,
-    model: str = "gpt-5.5",
+    model: str = "gpt-5.6-sol",
+    reasoning_effort: str = "high",
+    verbosity: str = "medium",
     runner: Optional[RunnerFn] = None,
 ) -> CodegenAgentResult:
     """Run one OpenAI Agents SDK session for one claimed CodeTask.
@@ -195,9 +197,16 @@ def run_codegen_agent(
     inp:
         The bundle the worker built for this CodeTask.
     model:
-        Model id (``gpt-5``, ``gpt-5-mini``, etc). Must be compatible
-        with the OpenAI Agents SDK. Default matches
-        ``Settings.openai_hard_model``.
+        Model id. Must be compatible with the OpenAI Agents SDK.
+        Default matches ``Settings.codegen_model``.
+    reasoning_effort:
+        ``reasoning.effort`` for the run. This MUST be passed explicitly
+        (see :func:`_default_sdk_runner`) -- leaving the Agent without
+        model settings lets the SDK infer them from the model name, and
+        for ``gpt-5.6-sol`` it infers ``none``, i.e. no reasoning at all
+        on the hardest C++ generation in the pipeline.
+    verbosity:
+        ``text.verbosity`` for the run.
     runner:
         Optional injection point for tests. If supplied, the SDK is not
         imported and the callable is invoked directly with
@@ -218,7 +227,9 @@ def run_codegen_agent(
             )
         return result
 
-    return _default_sdk_runner(inp, model)
+    return _default_sdk_runner(
+        inp, model, reasoning_effort=reasoning_effort, verbosity=verbosity
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -226,7 +237,13 @@ def run_codegen_agent(
 # ---------------------------------------------------------------------------
 
 
-def _default_sdk_runner(inp: CodegenAgentInput, model: str) -> CodegenAgentResult:
+def _default_sdk_runner(
+    inp: CodegenAgentInput,
+    model: str,
+    *,
+    reasoning_effort: str = "high",
+    verbosity: str = "medium",
+) -> CodegenAgentResult:
     """Production runner. Imports the SDK lazily so unit tests that
     inject a stub don't need the dependency installed."""
 
@@ -237,9 +254,11 @@ def _default_sdk_runner(inp: CodegenAgentInput, model: str) -> CodegenAgentResul
         from agents import (  # type: ignore
             Agent,
             AgentOutputSchema,
+            ModelSettings,
             Runner,
             WebSearchTool,
         )
+        from openai.types.shared import Reasoning  # type: ignore
     except ImportError as exc:  # pragma: no cover - exercised only in real runs
         raise CodegenAgentError(
             "openai-agents is not installed. Add `openai-agents` to "
@@ -262,9 +281,28 @@ def _default_sdk_runner(inp: CodegenAgentInput, model: str) -> CodegenAgentResul
         name=f"ptv-codegen-{inp.task_id}",
         instructions=inp.instructions,
         model=model,
+        # Explicit, and it has to be. When an Agent is constructed without
+        # model settings, the SDK back-fills them from the model NAME:
+        #
+        #   if self.model is not None and self.model_settings == \
+        #           get_default_model_settings():
+        #       self.model_settings = _initial_model_settings_for_model(self.model)
+        #
+        # Its table maps ``gpt-5`` to effort ``low`` but ``gpt-5.6-sol`` to
+        # ``none``. This stage used to pass nothing, so the model rename
+        # alone would have silently stripped reasoning from the C++
+        # generation that has to compile against the engine API first try.
+        model_settings=ModelSettings(
+            reasoning=Reasoning(effort=reasoning_effort),
+            verbosity=verbosity,
+        ),
         # ``WebSearchTool`` is the hosted web-search tool. We pass NO
         # numeric cap on calls — the cap is implicit in the agent's
         # own loop budget. See multi_agent_update.md, Part B5.
+        #
+        # Note this keeps us on the Responses API, which the SDK uses by
+        # default. That matters on 5.6: reasoning combined with function
+        # tools is Responses-only.
         tools=[WebSearchTool()],
         output_type=output_schema,
     )

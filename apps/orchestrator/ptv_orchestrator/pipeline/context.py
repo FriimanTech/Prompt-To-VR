@@ -28,6 +28,12 @@ class PipelineContext:
     store: ProjectStore
     bus: EventBus
     dry_run: bool = False
+    # The in-flight run this context belongs to, when there is one. Stages
+    # call ``raise_if_cancelled()`` at loop boundaries so Abort takes effect
+    # without waiting for a twenty-minute build to finish. ``None`` in tests
+    # and in any caller that runs a stage outside a registered run, where
+    # cancellation is simply a no-op.
+    run: Any = None
     # caches filled as stages run
     build_spec: Any = None
     asset_manifest: Any = None
@@ -38,6 +44,20 @@ class PipelineContext:
     @property
     def project_dir(self) -> Path:
         return self.store.dir_for(self.project_id)
+
+    def raise_if_cancelled(self) -> None:
+        """Cooperative cancellation point. Raises ``RunCancelled``."""
+        if self.run is not None:
+            self.run.raise_if_cancelled()
+
+    def register_process(self, proc: Any) -> None:
+        """Track a child process so Abort can kill its whole tree."""
+        if self.run is not None:
+            self.run.register_process(proc)
+
+    def forget_process(self, proc: Any) -> None:
+        if self.run is not None:
+            self.run.forget_process(proc)
 
     def emit(self, stage: ProjectStage, status: str, message: str = "") -> None:
         self.bus.publish(

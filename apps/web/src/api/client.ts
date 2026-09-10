@@ -100,6 +100,13 @@ export const api = {
       method: "POST",
       body: JSON.stringify(opts ?? {}),
     }),
+  /** Stop the in-flight run. Also clears a stale "running" state left by a
+   *  server that was killed mid-stage, so the project becomes usable again. */
+  abort: (id: string) =>
+    req<{ ok: boolean; aborted: boolean; reconciled: boolean }>(
+      `/projects/${id}/abort`,
+      { method: "POST" },
+    ),
   launch: (id: string, scene_json?: string) =>
     req<{ ok: boolean; exe?: string; apk?: string; package?: string }>(
       `/projects/${id}/launch`,

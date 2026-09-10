@@ -28,6 +28,7 @@ from ptv_schemas import ProjectStage, ProjectStatus
 from ..build import assemble_debug, find_debug_apk
 from ..quest_ids import quest_package_name
 from .context import PipelineContext, StageResult
+from .proc import proc_hooks
 
 _SHADER_EXTS = (".vert", ".frag", ".comp")
 # Files in the template that carry @PTV_*@ tokens.
@@ -253,7 +254,9 @@ def run(ctx: PipelineContext) -> StageResult:
             f.write(line + "\n")
         ctx.emit(ProjectStage.quest_build, "log", line[:512])
 
-    result = assemble_debug(project_dir=build_dir, on_line=_sink)
+    result = assemble_debug(
+        project_dir=build_dir, on_line=_sink, **proc_hooks(ctx)
+    )
 
     apk = find_debug_apk(build_dir)
     ok = result.exit_code == 0 and apk is not None

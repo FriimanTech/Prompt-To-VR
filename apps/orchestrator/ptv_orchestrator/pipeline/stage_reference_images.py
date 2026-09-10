@@ -58,6 +58,7 @@ def run(ctx: PipelineContext) -> StageResult:
         return client
 
     for item in manifest.items:
+        ctx.raise_if_cancelled()
         if item.strategy.value != "image_to_3d":
             # No reference image needed for text-to-3D.
             continue

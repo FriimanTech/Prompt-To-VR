@@ -333,6 +333,9 @@ export function statusTone(status: string): StatusTone {
     case "fallback":
     case "bounds_reject":
     case "invalid_scene":
+    // Aborting is not a failure: nothing is broken and the project is
+    // immediately re-runnable, so it reads as a caution, not an error.
+    case "aborted":
       return "warn";
     case "failed":
     case "compile_error":

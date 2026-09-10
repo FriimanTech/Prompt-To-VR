@@ -12,7 +12,7 @@ from fastapi.responses import FileResponse
 from sse_starlette.sse import EventSourceResponse
 
 from ..engine_catalog import builtin_catalog, promoted_catalog
-from ..events import get_bus
+from ..events import PipelineEvent, get_bus
 from ..pipeline import (
     resume_from_stage,
     resume_pipeline,
@@ -185,6 +185,59 @@ def run(project_id: str, req: RunStageRequest, background: BackgroundTasks):
         return {"ok": True, "mode": "resume"}
     background.add_task(run_pipeline, project_id)
     return {"ok": True, "mode": "full"}
+
+
+@router.post("/projects/{project_id}/abort")
+def abort(project_id: str):
+    """Stop the in-flight run, or unstick a project that only looks busy.
+
+    Two cases, both of which used to leave the user with a project they
+    could not touch:
+
+    * A run IS in flight -- set its cancel flag and kill the child
+      processes it spawned, so the stage stops at its next checkpoint
+      instead of finishing a twenty-minute build first.
+    * Nothing is running but the persisted state says ``running`` -- the
+      orchestrator was killed mid-stage. Stamp it ``aborted`` so the UI
+      re-enables Run and Resume. Startup does this automatically; the
+      button is here for the case where it somehow did not.
+
+    Requests already sent to a provider cannot be recalled, and their
+    artifacts are still written -- a Resume then reuses them.
+    """
+    from ptv_schemas import ProjectStatus
+
+    from ..runs import ABORT_MESSAGE, get_registry
+
+    store = _store()
+    try:
+        state = store.load_state(project_id)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="project not found")
+
+    if get_registry().abort(project_id):
+        # The run itself records the ``aborted`` status when it unwinds, so
+        # that the stage the user actually interrupted is the one blamed.
+        return {"ok": True, "aborted": True, "reconciled": False}
+
+    if state.status == ProjectStatus.running:
+        store.record_stage(
+            state,
+            state.current_stage,
+            ProjectStatus.aborted,
+            message=f"{ABORT_MESSAGE} (no run was in flight)",
+        )
+        get_bus().publish(
+            PipelineEvent(
+                project_id=project_id,
+                stage=state.current_stage.value,
+                status="aborted",
+                message="cleared a stale running state",
+            )
+        )
+        return {"ok": True, "aborted": False, "reconciled": True}
+
+    return {"ok": True, "aborted": False, "reconciled": False}
 
 
 @router.post("/projects/{project_id}/launch")

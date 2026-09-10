@@ -106,7 +106,7 @@ Two workers cannot claim the same row.
 
 1. Build `CodegenAgentInput` with ledger snapshot + `dep_exports` from completed deps
 2. For `code_edit`: attach `base_source_block` from `read_builtin_sources(catalog_id)`
-3. **`run_codegen_agent()`** — OpenAI Agents SDK, `WebSearchTool` enabled (no cap), model `openai_hard_model`
+3. **`run_codegen_agent()`** — OpenAI Agents SDK, `WebSearchTool` enabled (no cap), model `codegen_model` (`gpt-5.6-sol`) with an EXPLICIT `codegen_reasoning_effort` of `high`. The effort cannot be left out: the SDK back-fills model settings from the model name and infers `none` for this model, which would silently strip reasoning from the stage.
 4. Agent must follow 4-step process (metadata → deps/ledger → optional search → multi-file C++)
 5. **`_write_files()`** per returned file:
    - `validate_includes()` / `validate_header_content()` (no registration macros in headers)

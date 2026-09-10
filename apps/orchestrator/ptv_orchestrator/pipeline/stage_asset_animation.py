@@ -239,6 +239,7 @@ def run(ctx: PipelineContext) -> StageResult:
     errors: list[str] = []
 
     for job in pending:
+        ctx.raise_if_cancelled()
         item = job["item"]
         item_dir: Path = job["item_dir"]
         presets: list[str] = job["presets"]

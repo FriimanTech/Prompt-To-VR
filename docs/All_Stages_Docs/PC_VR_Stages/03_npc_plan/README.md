@@ -50,7 +50,7 @@ This stage runs **before rigging** because animation is expensive and only the p
 
 1. Collect character-category assets from the manifest.
 2. If none → save empty `NpcPlan`, skip LLM, succeed.
-3. Otherwise run **NpcDirector** (OpenAI Agents SDK, `gpt-5.5`) with prompt + BuildSpec + manifest.
+3. Otherwise run **NpcDirector** (OpenAI Agents SDK, `gpt-5.6-sol`) with prompt + BuildSpec + manifest.
 4. Drop entries for unknown asset ids.
 5. Reconcile manifest rig/animation flags to match the plan.
 6. Save `npc_plan.json`.
@@ -99,7 +99,7 @@ Matches each character `AssetItem` to an `NpcSpec`:
 - OpenAI Agents SDK: `Agent` + `Runner.run_sync`
 - Structured output: `NpcPlan` via `AgentOutputSchema`
 - **No tools**
-- Default model: `gpt-5.5`, reasoning `high`
+- Default model: `gpt-5.6-sol`, reasoning `high`
 
 ### Artifact I/O
 
@@ -121,7 +121,7 @@ Matches each character `AssetItem` to an `NpcSpec`:
 
 ### Settings
 
-`npc_plan_model`, `npc_plan_reasoning_effort`, `npc_plan_agent_max_turns`
+`npc_plan_model` (gpt-5.6-sol), `npc_plan_reasoning_effort` (high), `npc_plan_verbosity` (medium), `npc_plan_agent_max_turns`, `npc_plan_max_retries`
 
 ### NpcSpec downstream usage
 

@@ -29,9 +29,9 @@ A concrete example prompt lives in the `NewProjectPage` sample text.
 |---|---|---|
 | `BuildSpec` | `build_spec.json` | Claude Opus (via `LlmClient`; OpenAI fallback) |
 | `AssetManifest` | `asset_manifest.json` | Claude Sonnet (via `LlmClient`; OpenAI fallback) |
-| `NpcPlan` | `npc_plan.json` | OpenAI Agents SDK `gpt-5.5` (no tools); reconciles manifest |
-| `MechanicPlan` | `mechanic_plan.json` | OpenAI Agents SDK `gpt-5.5` (no tools) |
-| `SceneSpec` | `scene_spec.<scene_id>.json`, `scene_spec.json` | OpenAI Agents SDK `gpt-5.5` (per scene) |
+| `NpcPlan` | `npc_plan.json` | OpenAI Agents SDK `gpt-5.6-sol` (no tools); reconciles manifest |
+| `MechanicPlan` | `mechanic_plan.json` | OpenAI Agents SDK `gpt-5.6-sol` (no tools) |
+| `SceneSpec` | `scene_spec.<scene_id>.json`, `scene_spec.json` | OpenAI Agents SDK `gpt-5.6-sol` (per scene) |
 | `CodeTask` (embedded in MechanicPlan) | `*.codetask.json` beside generated `*.cpp` | MechanicPlan stage (executed by codegen agents) |
 | Rigging record | `asset_rig.json`, `model_rigged.glb` | Tripo `asset_rigging` stage |
 | Animation record | `asset_animation.json`, `model_animated.glb` | Tripo `asset_animation` stage |

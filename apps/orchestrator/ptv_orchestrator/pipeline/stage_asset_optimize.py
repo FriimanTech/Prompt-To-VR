@@ -115,6 +115,7 @@ def run(ctx: PipelineContext) -> StageResult:
     total_out_tris = 0
 
     for asset_id in usable:
+        ctx.raise_if_cancelled()
         info = report[asset_id]
         src = ctx.settings.repo_root / info["glb_path"]
         if not src.exists():
@@ -328,6 +329,7 @@ def _ensure_tool(ctx: PipelineContext, stage: ProjectStage) -> Path:
         vcpkg_root=ctx.settings.vcpkg_root,
         build_target="ptv_glb_optimize",
         on_line=lambda m: ctx.emit(stage, "log", m[:400]),
+        **proc_hooks(ctx),
     )
     if result.exit_code != 0:
         raise RuntimeError(

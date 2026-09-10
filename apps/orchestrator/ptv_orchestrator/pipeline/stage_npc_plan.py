@@ -23,6 +23,7 @@ rigging stage never sees them.
 
 from __future__ import annotations
 
+import os
 from typing import Optional
 
 from ptv_schemas import (
@@ -32,6 +33,7 @@ from ptv_schemas import (
     ProjectStage,
     ProjectStatus,
 )
+from ptv_schemas.asset_manifest import AssetItem, CharacterRole
 
 from .context import PipelineContext, StageResult
 from .npc_plan_agent import (
@@ -50,6 +52,27 @@ _STAGE = ProjectStage.npc_plan
 _ACTOR_CATEGORIES = {AssetCategory.character}
 
 
+def _is_actor_candidate(item: AssetItem) -> bool:
+    """Could this asset be a NON-player character?
+
+    Category alone is not the answer, and using it alone was a bug: the
+    player's own body is ``category: character`` too, so a first-person game
+    with no NPCs at all still looked like it had one. That spent an agent turn
+    to be told what the manifest already said, and it defeated the empty-plan
+    short circuit below that exists for exactly this case.
+
+    ``character_role`` is the field that separates the two, and it is why that
+    field exists -- see its docstring in ``ptv_schemas.asset_manifest``.
+
+    Only ``player_avatar`` is excluded, deliberately: a character whose role is
+    ``none`` is still a candidate, because the role is set by an upstream agent
+    and an unset one must not silently remove a real enemy from the plan.
+    """
+    if item.category not in _ACTOR_CATEGORIES:
+        return False
+    return item.character_role != CharacterRole.player_avatar
+
+
 def run(ctx: PipelineContext) -> StageResult:
     return run_with_director(ctx, director=None)
 
@@ -66,14 +89,26 @@ def run_with_director(
         ctx.project_id
     )
 
-    candidates = [i for i in manifest.items if i.category in _ACTOR_CATEGORIES]
+    candidates = [i for i in manifest.items if _is_actor_candidate(i)]
     if not candidates:
-        # A book-reading experience or a puzzle game has no characters, and
-        # that is a complete answer -- not a reason to spend an agent turn.
+        # A book-reading experience, a puzzle game, or a first-person shooting
+        # range whose only character is the player's own avatar has no NPCs,
+        # and that is a complete answer -- not a reason to spend an agent turn.
         plan = NpcPlan(prompt_id=build_spec.prompt_id)
         art = ctx.store.save_npc_plan(ctx.project_id, plan)
         ctx.npc_plan = plan
-        message = "no character assets; empty NPC plan"
+        # Says WHICH of the two reasons applies, because "no NPC assets" on a
+        # game that clearly has a character on screen reads as a bug.
+        avatars = sum(
+            1
+            for i in manifest.items
+            if i.character_role == CharacterRole.player_avatar
+        )
+        message = (
+            "only the player's own avatar; empty NPC plan"
+            if avatars
+            else "no character assets; empty NPC plan"
+        )
         ctx.store.record_stage(
             state, _STAGE, ProjectStatus.succeeded, message=message,
             artifacts=[art.path],
@@ -81,13 +116,31 @@ def run_with_director(
         ctx.emit(_STAGE, "succeeded", message)
         return StageResult(stage=_STAGE, artifacts=[art.path])
 
+    # Bridge OPENAI_API_KEY into os.environ for the Agents SDK (BaseSettings
+    # does not export it automatically), mirroring the mechanic_plan /
+    # scene_spec / world / codegen stages.
+    #
+    # This stage NEEDS it more than they do, not less: it is the first
+    # Agents-SDK stage in a run, so on a cold orchestrator nothing has
+    # populated os.environ yet. Missing here, the NPC director failed on every
+    # fresh run and only appeared to work once a later stage had set the key
+    # for the rest of the process -- which made a deterministic bug look
+    # intermittent.
+    if ctx.settings.openai_api_key and not os.environ.get("OPENAI_API_KEY"):
+        os.environ["OPENAI_API_KEY"] = ctx.settings.openai_api_key
+
     if director is None:
         director = NpcDirector(
             instructions=NPC_PLAN_SYSTEM,
             model=ctx.settings.npc_plan_model,
             reasoning_effort=ctx.settings.npc_plan_reasoning_effort,
+            verbosity=ctx.settings.npc_plan_verbosity,
             max_turns=ctx.settings.npc_plan_agent_max_turns,
             session_id=f"ptv-npc-plan-{ctx.project_id}",
+            max_retries=ctx.settings.npc_plan_max_retries,
+            log=lambda text: ctx.store.append_log(
+                ctx.project_id, "npc_plan", text
+            ),
         )
 
     inp = NpcPlanAgentInput(

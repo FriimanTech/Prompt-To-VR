@@ -145,6 +145,7 @@ def run(ctx: PipelineContext) -> StageResult:
     attempted = 0
     per_item_errors: list[str] = []
     for item in pending:
+        ctx.raise_if_cancelled()
         item_dir = assets_dir / item.id
         item_dir.mkdir(parents=True, exist_ok=True)
         attempted += 1

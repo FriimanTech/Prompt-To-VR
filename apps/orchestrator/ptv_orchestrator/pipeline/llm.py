@@ -18,6 +18,9 @@ def make_llm(settings: Settings) -> LlmClient:
     945-line BuildSpec for a complex VR game) do not silently truncate
     when downstream stages produce large structured artifacts
     (MechanicPlan, SceneSpec, CodeTask).
+
+    The ``openai_*_reasoning_effort`` knobs are what distinguish the two
+    fallback tiers, since both now run ``gpt-5.6-sol``.
     """
     return build_default_llm_client(
         anthropic_api_key=settings.anthropic_api_key,
@@ -26,6 +29,8 @@ def make_llm(settings: Settings) -> LlmClient:
         claude_light_model=settings.claude_light_model,
         openai_hard_model=settings.openai_hard_model,
         openai_light_model=settings.openai_light_model,
+        openai_hard_reasoning_effort=settings.openai_hard_reasoning_effort,
+        openai_light_reasoning_effort=settings.openai_light_reasoning_effort,
         claude_max_tokens=settings.claude_max_tokens,
         openai_max_tokens=settings.openai_max_tokens,
         openai_max_tokens_ceiling=settings.openai_max_tokens_ceiling,

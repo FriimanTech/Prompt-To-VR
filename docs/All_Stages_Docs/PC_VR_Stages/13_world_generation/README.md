@@ -46,7 +46,7 @@ Level layout needs deterministic walkable space, nav graphs, and lighting that m
 
 ### End-to-end flow (plain language)
 
-1. **WorldArchitect** agent (`gpt-5.5`, WebSearch enabled) writes C++ files.
+1. **WorldArchitect** agent (`gpt-5.6-sol`, WebSearch enabled) writes C++ files.
 2. Validate includes (`validate_world_includes`).
 3. Build and run `ptv_worldgen` subprocess.
 4. Validate output JSON (ground, spawn, navigation self-consistency).
@@ -86,7 +86,7 @@ Generated world code:
 
 ### WorldArchitect agent
 
-OpenAI Agents SDK + WebSearch + SQLiteSession. Settings: `world_model` (gpt-5.5), high/xhigh reasoning, `world_agent_max_turns` (80).
+OpenAI Agents SDK + WebSearch + SQLiteSession. Settings: `world_model` (gpt-5.6-sol), `world_reasoning_effort` = high (xhigh for max quality), `world_verbosity` (medium), `world_agent_max_turns` (80).
 
 Repair uses `build_repair_message()` feeding compile errors or validation issues back into same session.
 

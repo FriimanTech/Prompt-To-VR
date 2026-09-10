@@ -20,12 +20,27 @@ The three providers used by the pipeline.
   is unavailable (no key, rate-limited, transient API error, etc.).
 - Get an API key at <https://platform.openai.com/api-keys>.
 - Paste into `.env` as `OPENAI_API_KEY`.
-- Default models (configurable in `.env`):
-  - `OPENAI_HARD_MODEL=gpt-5` (codegen agents + Claude fallback for hard JSON).
-  - `OPENAI_LIGHT_MODEL=gpt-5-mini` (Claude fallback for light JSON).
-  - If you have Responses-API access to the newest coding model, set
-    `OPENAI_HARD_MODEL=gpt-5.3-codex` (verify availability first; Responses
-    API rollout was still in progress at the time of writing).
+- **Every** OpenAI call in the pipeline runs `gpt-5.6-sol` (~1.05M context,
+  128K max output). What varies per stage is `reasoning.effort`, which 5.6
+  accepts as `none | low | medium (default) | high | xhigh | max`. Note that
+  `minimal` was valid on gpt-5 and is **gone** in 5.6 — the orchestrator
+  rejects it at startup rather than letting it 400 mid-run.
+- Claude-fallback tiers (configurable in `.env`). Both are the same model, so
+  effort is what distinguishes them:
+  - `OPENAI_HARD_MODEL=gpt-5.6-sol` +
+    `OPENAI_HARD_REASONING_EFFORT=high` — the Opus-equivalent path
+    (BuildSpec, the master planner).
+  - `OPENAI_LIGHT_MODEL=gpt-5.6-sol` +
+    `OPENAI_LIGHT_REASONING_EFFORT=medium` — the Sonnet-equivalent path
+    (AssetManifest). `medium` rather than `low` deliberately: this is the
+    call that decides which assets get rigged and animated, at roughly 30
+    and 20 Tripo credits each.
+- Per-stage agent knobs (`NPC_PLAN_MODEL`, `MECHANIC_PLAN_MODEL`,
+  `SCENE_SPEC_MODEL`, `WORLD_MODEL`, `CODEGEN_MODEL` and their
+  `*_REASONING_EFFORT` partners) are documented in `.env.example`. Codegen
+  has its own rather than borrowing the fallback tier: it always runs on
+  OpenAI, so tuning the Claude fallback should not silently retune C++
+  generation.
 - Behaviour: every stage calls the shared `LlmClient`, which tries Claude
   first; on a missing key or a `ProviderCallError`, it transparently retries
   the same request against OpenAI. Model ids are translated (`claude-opus-4-7`
@@ -215,17 +230,17 @@ Pills are red with ✗ if a key is missing.
 
 | Stage | Primary | Fallback (if Claude unavailable) | Structured? |
 |---|---|---|---|
-| BuildSpec | Anthropic `claude-opus-4-7` | OpenAI `gpt-5` | JSON schema |
-| AssetManifest | Anthropic `claude-sonnet-4-6` | OpenAI `gpt-5-mini` | JSON schema |
-| NPC plan | OpenAI Agents SDK `gpt-5.5` (no tools) | — (OpenAI-only) | JSON schema |
-| MechanicPlan | OpenAI Agents SDK `gpt-5.5` (no tools) | — (OpenAI-only) | JSON schema |
-| SceneSpec (per scene) | OpenAI Agents SDK `gpt-5.5` (no tools) + validate-and-repair | — (OpenAI-only) | JSON schema |
+| BuildSpec | Anthropic `claude-opus-4-7` | OpenAI `gpt-5.6-sol` @ `high` | JSON schema |
+| AssetManifest | Anthropic `claude-sonnet-4-6` | OpenAI `gpt-5.6-sol` @ `medium` | JSON schema |
+| NPC plan | OpenAI Agents SDK `gpt-5.6-sol` @ `high` (no tools) | — (OpenAI-only) | JSON schema |
+| MechanicPlan | OpenAI Agents SDK `gpt-5.6-sol` @ `high` (no tools) | — (OpenAI-only) | JSON schema |
+| SceneSpec (per scene) | OpenAI Agents SDK `gpt-5.6-sol` @ `medium` (no tools) + validate-and-repair | — (OpenAI-only) | JSON schema |
 | Reference image | Google `gemini-3.1-flash-image` | — | — |
 | Image-to-3D | Tripo (default latest, configurable) | — | textured + PBR |
 | Auto-rigging | Tripo rig-check + rig | — | — |
 | Animation retarget | Tripo retarget | — | — |
-| C++ modules (code_generation) | OpenAI Agents SDK `openai_hard_model` (default `gpt-5`) + `WebSearchTool` | — (OpenAI-only) | free-form, guarded by boundaries |
-| World generation | OpenAI Agents SDK `world_model` (default `gpt-5.5`) + `WebSearchTool` | — (OpenAI-only) | C++ source, compile-verify |
+| C++ modules (code_generation) | OpenAI Agents SDK `codegen_model` (default `gpt-5.6-sol`) @ `high` + `WebSearchTool` | — (OpenAI-only) | free-form, guarded by boundaries |
+| World generation | OpenAI Agents SDK `world_model` (default `gpt-5.6-sol`) @ `high` + `WebSearchTool` | — (OpenAI-only) | C++ source, compile-verify |
 | Engine promotion | — (deterministic index) | — | — |
 
 The orchestrator never sends binary assets back to a provider; images go
@@ -235,8 +250,8 @@ Gemini → disk → Tripo, and C++ generation is prompt-only.
 
 ### `openai.BadRequestError: 'temperature' does not support 0.0 with this model`
 
-You are calling a **reasoning** model (`gpt-5`, `gpt-5-mini`, `gpt-5-nano`,
-`gpt-5-codex`, or the `o1`/`o3`/`o4` families). Those models reject
+You are calling a **reasoning** model (the whole `gpt-5*` family including
+`gpt-5.6-sol`, or the `o1`/`o3`/`o4` families). Those models reject
 `temperature`, `top_p`, `presence_penalty`, `frequency_penalty`, and
 `logprobs`. The bundled `OpenAIClient` detects this automatically and omits
 the kwargs; if you still see the error, make sure you're on the current
@@ -245,12 +260,16 @@ build (pull the repo) or pin a non-reasoning model like
 
 ### `ProviderCallError: OpenAI response was truncated (finish_reason='length')`
 
-Reasoning models spend tokens "thinking" before they emit the final JSON.
-The default cap is 16K tokens. If a complex BuildSpec or long CodeTask hits
-it, either:
+Reasoning models spend tokens "thinking" before they emit the final JSON,
+and `max_completion_tokens` caps the TOTAL of reasoning plus visible output.
+The default cap is 96K with an auto-retry up to 128K (exactly
+`gpt-5.6-sol`'s max output). If a complex BuildSpec or long CodeTask still
+hits it, either:
 
-* raise `OpenAIConfig.max_tokens` (or pass `max_tokens=...` on the call), or
-* set `OPENAI_HARD_MODEL=gpt-5-mini` (faster, cheaper, smaller reasoning budget needed for our schemas).
+* raise `OPENAI_MAX_TOKENS` (or pass `max_tokens=...` on the call), or
+* lower the tier's reasoning effort (e.g.
+  `OPENAI_HARD_REASONING_EFFORT=medium`) so fewer of the 128K tokens are
+  spent on invisible reasoning.
 
 ### `negative_prompt` on reference images
 

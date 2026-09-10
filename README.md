@@ -31,6 +31,7 @@ The repo is a monorepo:
 - [`docs/local-setup.md`](docs/local-setup.md)
 - [`docs/build-and-run.md`](docs/build-and-run.md)
 - [`docs/quest-build.md`](docs/quest-build.md)
+- [`docs/run-lifecycle.md`](docs/run-lifecycle.md) — aborting a run, recovering a stuck project
 - [`docs/provider-setup.md`](docs/provider-setup.md)
 - [`docs/prompt-schema.md`](docs/prompt-schema.md)
 - [`docs/world-generation.md`](docs/world-generation.md)
@@ -42,15 +43,16 @@ The repo is a monorepo:
 ## High-level flow (17 stages)
 
 Shared stages **1–15** are identical for `pcvr` and `quest`. Only **stage 16**
-branches on `BuildSpec.target_device` (PC VR vs Quest toggle in New Project).
+branches on `ProjectState.target_device` (the PC VR vs Quest toggle in New
+Project, mirrored into `BuildSpec.target_device`).
 
 ```
 prompt
   →  1. BuildSpec (Claude Opus)
   →  2. AssetManifest (Claude Sonnet)     # objects only; environment is C++
-  →  3. NPC plan (OpenAI gpt-5.5)
-  →  4. MechanicPlan (OpenAI gpt-5.5)
-  →  5. SceneSpec (OpenAI gpt-5.5, per scene)
+  →  3. NPC plan (OpenAI gpt-5.6-sol)
+  →  4. MechanicPlan (OpenAI gpt-5.6-sol)
+  →  5. SceneSpec (OpenAI gpt-5.6-sol, per scene)
   →  6. Reference images (Gemini)
   →  7. Tripo image-to-3D (textured + PBR)
   →  8. Auto-rigging (Tripo)

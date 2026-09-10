@@ -170,6 +170,7 @@ def run(ctx: PipelineContext) -> StageResult:
     errors: list[str] = []
 
     for item, item_dir, source in pending:
+        ctx.raise_if_cancelled()
         task_id = _read_task_id(item_dir)
         try:
             check = client.rig_check(task_id=task_id, glb_path=None if task_id else source)

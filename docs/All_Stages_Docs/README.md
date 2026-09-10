@@ -23,7 +23,7 @@ flowchart TD
   S16q --> S17
 ```
 
-Stages **1–15** and **17** are identical for PC VR and Quest. Only **stage 16** branches on `BuildSpec.target_device`.
+Stages **1–15** and **17** are identical for PC VR and Quest. Only **stage 16** branches on `ProjectState.target_device` (mirrored into `BuildSpec.target_device`).
 
 ## Stage index
 

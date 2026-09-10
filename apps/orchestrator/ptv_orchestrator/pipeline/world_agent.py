@@ -9,7 +9,7 @@ Verified against the current SDK docs (2026):
 
 * ``from agents import Agent, Runner, WebSearchTool, ModelSettings, SQLiteSession``
 * ``from openai.types.shared import Reasoning``
-* ``Agent(model="gpt-5.6-sol", model_settings=ModelSettings(reasoning=Reasoning(effort="xhigh"),
+* ``Agent(model="gpt-5.6-sol", model_settings=ModelSettings(reasoning=Reasoning(effort="high"),
   verbosity="medium"), tools=[WebSearchTool()], output_type=...)``
 * ``Runner.run_sync(agent, message, session=session, max_turns=...)`` -> RunResult
 * ``RunResult.final_output_as(Cls)``
@@ -24,6 +24,12 @@ from dataclasses import dataclass, field
 from typing import Callable, List, Optional
 
 from pydantic import BaseModel, Field
+
+from .agent_output_capture import (
+    MAX_LOGGED_OUTPUT_CHARS,
+    diagnose_output_failure,
+    make_capturing_schema,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -100,9 +106,28 @@ class WorldAgentInput:
 RunnerFn = Callable[[str], WorldAgentResult]
 """(message) -> result. Runs one turn within the persistent session."""
 
+LogFn = Callable[[str], None]
+"""Sink for per-turn diagnostics (the stage writes logs/world.log)."""
+
 
 class WorldAgentError(RuntimeError):
     """Raised when the agent run fails or returns an unusable result."""
+
+
+class WorldAgentOutputError(WorldAgentError):
+    """The model produced output that did not validate.
+
+    Distinct from :class:`WorldAgentError` because this one IS worth another
+    turn: the session still remembers the files it wrote, and the next
+    message can name the field that was wrong.
+    """
+
+    def __init__(
+        self, message: str, *, issues: list[str], truncated: bool = False
+    ) -> None:
+        super().__init__(message)
+        self.issues = issues
+        self.truncated = truncated
 
 
 # ---------------------------------------------------------------------------
@@ -123,17 +148,28 @@ class WorldArchitect:
         *,
         instructions: str,
         model: str = "gpt-5.6-sol",
-        reasoning_effort: str = "xhigh",
+        # ``high``, matching ``Settings.world_reasoning_effort``. This used
+        # to default to ``xhigh`` while the stage passed ``high``, so the
+        # class default documented a tier that never actually ran.
+        reasoning_effort: str = "high",
+        verbosity: str = "medium",
         max_turns: int = 80,
         session_id: str = "ptv-world",
         runner: Optional[RunnerFn] = None,
+        log: Optional[LogFn] = None,
     ) -> None:
         self.instructions = instructions
         self.model = model
         self.reasoning_effort = reasoning_effort
+        self.verbosity = verbosity
         self.max_turns = max_turns
         self.session_id = session_id
+        self.log = log
         self._runner = runner  # injected (tests) or lazily built
+
+    def _log(self, text: str) -> None:
+        if self.log is not None:
+            self.log(text)
 
     def run(self, message: str) -> WorldAgentResult:
         if self._runner is None:
@@ -149,9 +185,9 @@ class WorldArchitect:
     def _build_default_runner(self) -> RunnerFn:
         """Construct the real Agents SDK agent + in-memory session once."""
         try:
+            import agents as agents_mod  # type: ignore
             from agents import (  # type: ignore
                 Agent,
-                AgentOutputSchema,
                 ModelSettings,
                 Runner,
                 SQLiteSession,
@@ -165,14 +201,17 @@ class WorldArchitect:
                 "apps/orchestrator`."
             ) from exc
 
-        # ``WorldAgentResult`` carries max_length constraints not compatible
-        # with OpenAI strict JSON schema mode; disable strict so the model
-        # emits freely and the SDK still validates via Pydantic.
-        output_schema = AgentOutputSchema(WorldAgentResult, strict_json_schema=False)
+        # ``WorldAgentResult`` is not strict-schema compatible, so Pydantic
+        # is what validates the result. The capturing wrapper keeps the raw
+        # output so a validation failure can name the offending field rather
+        # than costing the environment its whole repair budget.
+        output_schema = make_capturing_schema(
+            agents_mod, WorldAgentResult, strict=False
+        )
 
         model_settings = ModelSettings(
             reasoning=Reasoning(effort=self.reasoning_effort),
-            verbosity="medium",
+            verbosity=self.verbosity,
         )
 
         agent = Agent(
@@ -189,18 +228,34 @@ class WorldArchitect:
         session = SQLiteSession(self.session_id)
 
         def _run(message: str) -> WorldAgentResult:
+            output_schema.reset()
+            self._log(
+                f"turn: model={self.model} effort={self.reasoning_effort} "
+                f"message={len(message)} chars"
+            )
             try:
                 run_result = Runner.run_sync(
                     agent, message, session=session, max_turns=self.max_turns
                 )
-            except Exception as exc:  # pragma: no cover - live SDK
-                raise WorldAgentError(f"Agents SDK run failed: {exc}") from exc
-            try:
                 return run_result.final_output_as(WorldAgentResult)
             except Exception as exc:  # pragma: no cover - live SDK
-                raise WorldAgentError(
-                    f"Agents SDK returned non-conforming output: {exc}"
-                ) from exc
+                raw = output_schema.last_raw
+                if raw is not None:
+                    self._log(
+                        f"FAILED; raw model output ({len(raw)} chars) follows:\n"
+                        f"{raw[:MAX_LOGGED_OUTPUT_CHARS]}"
+                    )
+                diagnosis = diagnose_output_failure(raw, exc, WorldAgentResult)
+                self._log(f"FAILED: {diagnosis.message}")
+                for issue in diagnosis.issues:
+                    self._log(f"  issue: {issue}")
+                if diagnosis.repairable:
+                    raise WorldAgentOutputError(
+                        diagnosis.message,
+                        issues=diagnosis.issues,
+                        truncated=diagnosis.truncated,
+                    ) from exc
+                raise WorldAgentError(diagnosis.message) from exc
 
         return _run
 

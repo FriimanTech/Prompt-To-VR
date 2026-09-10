@@ -1,7 +1,13 @@
 # Quest (standalone) build path
 
 Prompt-To-VR can build a generated game for two targets, chosen at create time
-via `BuildSpec.target_device` / the PC VR vs Quest toggle in the New Project UI:
+with the PC VR vs Quest toggle in the New Project UI. That choice is stored on
+`ProjectState.target_device`, which is the **single source of truth**: the
+orchestrator routes the build tail off it, `asset_optimization` derives the
+`PerformanceProfile` from it, the launch route reads it, and every planning
+prompt names it. `BuildSpec.target_device` is a mirrored copy — the build_spec
+stage overwrites whatever the model returned with the project's value, and a
+stale copy from an older project is re-stamped at run start.
 
 - `pcvr` (default): a Windows `.exe` (Vulkan + Win32 OpenXR) run on the PC
 and viewed on the headset over Quest Link. Built by `stage_cmake`.
@@ -16,7 +22,7 @@ the build + launch stages branch on the device. Generated mechanics use only
 
 ```
 prompt + device toggle
-  -> BuildSpec.target_device
+  -> ProjectState.target_device  (source of truth; mirrored into BuildSpec)
   -> shared stages 1-15 (scene.json + generated C++ + LOD GLBs + world.scene.json)
   -> pcvr:  cmake_build (.exe)      -> launch_exe (Quest Link)
      quest: quest_build (APK)       -> adb install -r + am start NativeActivity

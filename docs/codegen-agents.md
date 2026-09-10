@@ -221,24 +221,56 @@ docs in April / May 2026 with version `0.17.x`.
 For each claimed task the worker calls:
 
 ```python
-result = run_codegen_agent(inp, model=settings.openai_hard_model)
+result = run_codegen_agent(
+    inp,
+    model=settings.codegen_model,
+    reasoning_effort=settings.codegen_reasoning_effort,
+    verbosity=settings.codegen_verbosity,
+)
 ```
 
 Internally:
 
 ```python
-from agents import Agent, Runner, WebSearchTool
+from agents import Agent, ModelSettings, Runner, WebSearchTool
+from openai.types.shared import Reasoning
 
 agent = Agent(
     name=f"ptv-codegen-{task.id}",
     instructions=CODE_TASK_SYSTEM,
-    model="gpt-5",                          # settings.openai_hard_model
+    model="gpt-5.6-sol",                    # settings.codegen_model
+    model_settings=ModelSettings(           # MUST be explicit -- see below
+        reasoning=Reasoning(effort="high"), # settings.codegen_reasoning_effort
+        verbosity="medium",
+    ),
     tools=[WebSearchTool()],                # hosted; NO numeric cap on calls
     output_type=CodegenAgentResult,         # Pydantic structured output
 )
 run_result = Runner.run_sync(agent, build_user_message(inp))
 return run_result.final_output_as(CodegenAgentResult)
 ```
+
+### Why `model_settings` is not optional here
+
+`Agent.__post_init__` back-fills model settings from the model **name** when
+a caller passes none:
+
+```python
+if self.model is not None and self.model_settings == get_default_model_settings():
+    self.model_settings = _initial_model_settings_for_model(self.model)
+```
+
+The SDK's table maps `gpt-5` to effort `low` but `gpt-5.6-sol` to effort
+**`none`**. This stage passed no settings for most of its life, so the model
+upgrade alone would have silently removed reasoning from the hardest C++
+generation in the pipeline — no error, no log line, just worse code and more
+compile-repair rounds. `apps/orchestrator/tests/test_model_migration.py`
+asserts the constructed `Agent` really carries `high`.
+
+Codegen also reads its **own** `codegen_model` rather than
+`openai_hard_model`. That setting means "which OpenAI model do we use when
+Claude is down"; codegen is not a fallback, so tuning the Claude fallback
+should not silently retune C++ generation.
 
 ### Web search cap policy
 
@@ -476,8 +508,10 @@ CODEGEN_MAX_PARALLEL_AGENTS=3
 # Required for the codegen stage: OpenAI Agents SDK uses this key.
 OPENAI_API_KEY=sk-...
 
-# Model the SDK targets (any chat-capable OpenAI model).
-OPENAI_HARD_MODEL=gpt-5
+# Model + reasoning effort the SDK targets for THIS stage. Effort must be
+# explicit: the SDK infers `none` for gpt-5.6-sol when it is omitted.
+CODEGEN_MODEL=gpt-5.6-sol
+CODEGEN_REASONING_EFFORT=high
 ```
 
 Settings live in `apps/orchestrator/ptv_orchestrator/settings.py`.
@@ -560,7 +594,7 @@ by the holding hand's aim pose.
 
 ## Classifications (MechanicPlan)
 
-The MechanicPlan stage (an OpenAI Agents SDK agent, `gpt-5.5`, no tools —
+The MechanicPlan stage (an OpenAI Agents SDK agent, `gpt-5.6-sol`, no tools —
 plan output only) classifies each mechanic:
 
 * `builtin` — a catalog mechanic satisfies as-is.

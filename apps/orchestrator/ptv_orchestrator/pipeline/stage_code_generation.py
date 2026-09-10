@@ -58,6 +58,7 @@ from ptv_schemas import (
     ProjectStage,
     ProjectStatus,
     SceneSpec,
+    TargetDevice,
 )
 
 from ..build.cmake_runner import configure_and_build
@@ -79,7 +80,8 @@ from .codegen_agent import (
 )
 from .codegen_board import CodegenBoard
 from .context import PipelineContext, StageResult
-from .prompts import CODE_TASK_SYSTEM
+from .proc import proc_hooks
+from .prompts import code_task_system
 
 
 # Maps ``CodeTaskKind`` -> directory under ``engine/generated/``.
@@ -231,7 +233,10 @@ def run_with_runner(
     # ------------------------------------------------------------------
     # Spawn the thread pool and drain the board
     # ------------------------------------------------------------------
-    model_id = getattr(ctx.settings, "openai_hard_model", "gpt-5")
+    # Codegen has its own model knobs rather than borrowing
+    # ``openai_hard_model`` (which means "what we use when Claude is down").
+    # The effort in particular must be explicit: the Agents SDK infers it
+    # from the model name otherwise, and infers ``none`` for gpt-5.6-sol.
     runtime = _StageRuntime(
         ctx=ctx,
         board=board,
@@ -240,7 +245,9 @@ def run_with_runner(
         static=static_ctx,
         gen_root=gen_root,
         repo_root=repo_root,
-        model_id=model_id,
+        model_id=ctx.settings.codegen_model,
+        reasoning_effort=ctx.settings.codegen_reasoning_effort,
+        verbosity=ctx.settings.codegen_verbosity,
         agent_runner=agent_runner,
     )
 
@@ -402,6 +409,12 @@ class _StaticContext:
     # inventing a hard-coded offset it cannot possibly know.
     sockets_by_asset: dict[str, list[str]]
 
+    # Which VR target this project builds for, read once from ProjectState
+    # (the source of truth) so every task's system prompt names the build
+    # that is actually happening. A Quest APK runs on a mobile GPU; code
+    # written for a desktop budget misses frame rate there.
+    target_device: TargetDevice = TargetDevice.pcvr
+
     # What every NPC is supposed to do, as decided once by the npc_plan stage.
     # Handed to every task rather than only AI ones: a wave spawner needs the
     # spawn caps, a HUD needs the health values, and a weapon needs to know
@@ -545,6 +558,7 @@ def _load_static_context(ctx: PipelineContext) -> _StaticContext:
         scene_specs=scene_specs,
         scene_files=scene_files,
         sockets_by_asset=sockets_by_asset,
+        target_device=ctx.store.load_state(ctx.project_id).target_device,
         npc_plan_json=npc_plan_json,
         world_context_json=_load_world_context(ctx),
     )
@@ -573,6 +587,8 @@ class _StageRuntime:
         repo_root: Path,
         model_id: str,
         agent_runner: Optional[RunnerFn],
+        reasoning_effort: str = "high",
+        verbosity: str = "medium",
         code_edit_base_by_task_id: Optional[dict[str, str]] = None,
     ) -> None:
         self.ctx = ctx
@@ -583,6 +599,8 @@ class _StageRuntime:
         self.gen_root = gen_root
         self.repo_root = repo_root
         self.model_id = model_id
+        self.reasoning_effort = reasoning_effort
+        self.verbosity = verbosity
         self.agent_runner = agent_runner
 
         self.produced: list[str] = []
@@ -598,6 +616,12 @@ class _StageRuntime:
         """
 
         while True:
+            # An abort must not have to wait for the whole board to drain:
+            # each worker stops before claiming its next task. The one in
+            # flight is left in_progress, which the board's own resume logic
+            # already knows how to reset.
+            self.ctx.raise_if_cancelled()
+
             # Belt-and-suspenders: even though mark_done refreshes
             # blocked, calling refresh_blocked at the top of every loop
             # iteration is the documented contract and ensures
@@ -710,14 +734,18 @@ class _StageRuntime:
             build_spec_excerpt=bs_excerpt,
             npc_plan_json=self.static.npc_plan_json,
             world_context_json=self.static.world_context_json,
-            instructions=CODE_TASK_SYSTEM,
+            instructions=code_task_system(self.static.target_device),
             base_source_block=base_source_block,
             repair_context=repair_context,
             extra_instructions=extra,
         )
 
         result = run_codegen_agent(
-            inp, model=self.model_id, runner=self.agent_runner
+            inp,
+            model=self.model_id,
+            reasoning_effort=self.reasoning_effort,
+            verbosity=self.verbosity,
+            runner=self.agent_runner,
         )
 
         # Headers produced by this task's declared dependency tasks. They live
@@ -909,6 +937,7 @@ class _StageRuntime:
         """
         last_log = ""
         for rnd in range(0, max_rounds + 1):
+            self.ctx.raise_if_cancelled()
             self.ctx.emit(
                 ProjectStage.code_generation,
                 "verify",
@@ -1260,6 +1289,7 @@ def _default_verify_compile(ctx: PipelineContext) -> tuple[bool, str]:
         # on-disk C++ actually fails to compile (exactly the shooting_hub
         # partial-repair regression). The verify MUST reflect current files.
         clean_first=True,
+        **proc_hooks(ctx),
     )
     text = "\n".join(logs)
     try:

@@ -63,7 +63,7 @@ What this module does
    ``assets/<asset_id>.glb`` path is computed once so the LLM cannot
    invent a wrong path that would later fail GLB normalization.
 
-Each scene is composed by an OpenAI Agents SDK agent (``gpt-5.5``, NO
+Each scene is composed by an OpenAI Agents SDK agent (``gpt-5.6-sol``, NO
 tools) via :class:`SceneSpecComposer`, mirroring the mechanic_plan and
 world stages. After each compose the stage runs a deterministic
 :func:`_validate_scene_semantics` check (asset coverage, environment
@@ -93,15 +93,18 @@ from ptv_schemas import (
     ProjectStage,
     ProjectStatus,
     SceneSpec,
+    TargetDevice,
 )
 
 from ..settings import Settings
 from .context import PipelineContext, StageResult
-from .prompts import SCENE_SPEC_SYSTEM
+from .prompts import scene_spec_system
 from .scene_spec_agent import (
     SceneSpecAgentError,
     SceneSpecComposer,
+    SceneSpecOutputError,
     build_repair_message,
+    build_truncation_message,
 )
 
 
@@ -110,26 +113,50 @@ from .scene_spec_agent import (
 # ---------------------------------------------------------------------------
 
 
-# A ``ComposerFactory`` takes the orchestrator ``Settings`` plus a unique
-# per-scene ``session_id`` and returns an object exposing
-# ``.compose(message) -> SceneSpec`` (a :class:`SceneSpecComposer`).
-# ``_default_composer_factory`` is the production wiring; tests inject a
-# fake. We accept a *factory* (not a pre-built composer) because each
-# scene needs its OWN agent session, and some tests want to count
-# constructions and be sure no agent is built at import-time.
-ComposerFactory = Callable[[Settings, str], Any]
+# A ``ComposerFactory`` takes the orchestrator ``Settings``, a unique
+# per-scene ``session_id`` and the project's target device, and returns an
+# object exposing ``.compose(message) -> SceneSpec`` (a
+# :class:`SceneSpecComposer`). ``_default_composer_factory`` is the
+# production wiring; tests inject a fake. We accept a *factory* (not a
+# pre-built composer) because each scene needs its OWN agent session, and
+# some tests want to count constructions and be sure no agent is built at
+# import-time.
+ComposerFactory = Callable[[Settings, str, TargetDevice, Callable[[str], None]], Any]
+
+
+def _scene_log(ctx: PipelineContext, scene_id: str) -> Callable[[str], None]:
+    """Per-scene sink for ``logs/scene_spec.log``.
+
+    This stage used to write nothing to disk, so when a compose failed the
+    only trace left anywhere was one redacted sentence in
+    ``project_state.json`` -- the raw model output was gone. The world
+    stage has always logged; now this one does too.
+    """
+
+    def _log(text: str) -> None:
+        ctx.store.append_log(ctx.project_id, "scene_spec", f"[{scene_id}] {text}")
+
+    return _log
 
 
 def _default_composer_factory(
-    settings: Settings, session_id: str
+    settings: Settings,
+    session_id: str,
+    target_device: TargetDevice,
+    log: Optional[Callable[[str], None]] = None,
 ) -> SceneSpecComposer:
     """Build a real Agents-SDK scene composer from settings."""
     return SceneSpecComposer(
-        instructions=SCENE_SPEC_SYSTEM,
+        instructions=scene_spec_system(
+            target_device, max_entities=int(settings.scene_spec_max_entities)
+        ),
         model=settings.scene_spec_model,
         reasoning_effort=settings.scene_spec_reasoning_effort,
+        verbosity=settings.scene_spec_verbosity,
+        max_output_tokens=int(settings.scene_spec_max_output_tokens),
         max_turns=settings.scene_spec_agent_max_turns,
         session_id=session_id,
+        log=log,
     )
 
 
@@ -143,7 +170,7 @@ def run_with_composer_factory(
     """Compose one SceneSpec per BuildSpec scene, in parallel.
 
     Each scene is composed by its own OpenAI Agents SDK agent
-    (``gpt-5.5``, no tools) with a validate-and-repair loop.
+    (``gpt-5.6-sol``, no tools) with a validate-and-repair loop.
     ``composer_factory`` lets tests inject a fake composer without
     touching the SDK or the network.
 
@@ -222,6 +249,7 @@ def run_with_composer_factory(
     heartbeat = _Heartbeat(ctx=ctx, total=total)
 
     def _do_one(index: int, scene_entry: Any) -> _SceneJob:
+        ctx.raise_if_cancelled()
         scene_id = scene_entry.id
 
         # ----------------------------------------------------------
@@ -254,7 +282,10 @@ def run_with_composer_factory(
         heartbeat.start(scene_id, index)
         try:
             composer = composer_factory(
-                ctx.settings, f"ptv-scene-{ctx.project_id}-{scene_id}"
+                ctx.settings,
+                f"ptv-scene-{ctx.project_id}-{scene_id}",
+                state.target_device,
+                _scene_log(ctx, scene_id),
             )
             scene_spec = _compose_one_scene(
                 ctx=ctx,
@@ -555,8 +586,10 @@ def _compose_one_scene(
 
     message = _build_user_message(scene_entry, static)
     issues: list[str] = []
+    repair_message: Optional[str] = None
 
     for attempt in range(max_repair_rounds + 1):
+        ctx.raise_if_cancelled()
         if attempt > 0:
             ctx.emit(
                 ProjectStage.scene_spec,
@@ -564,14 +597,39 @@ def _compose_one_scene(
                 f"[{index + 1}/{total}] repairing scene '{scene_entry.id}' "
                 f"(round {attempt}/{max_repair_rounds}): {len(issues)} issue(s)",
             )
-        msg = message if attempt == 0 else build_repair_message(issues)
+        msg = message if attempt == 0 else (repair_message or build_repair_message(issues))
 
         try:
             scene = composer.compose(msg)
+        except SceneSpecOutputError as e:
+            # The model produced something, it just did not validate. That
+            # IS repairable in-context -- but only if the next turn is told
+            # what was actually wrong, which is why the error carries
+            # field-level issues instead of a redacted one-liner.
+            if e.truncated:
+                issues = [str(e)]
+                repair_message = build_truncation_message(
+                    int(ctx.settings.scene_spec_max_entities)
+                )
+            else:
+                issues = e.issues or [str(e)]
+                repair_message = build_repair_message(issues)
+            for issue in issues:
+                ctx.emit(
+                    ProjectStage.scene_spec,
+                    "info",
+                    f"[{index + 1}/{total}] '{scene_entry.id}' output problem: "
+                    f"{issue[:200]}",
+                )
+            if attempt >= max_repair_rounds:
+                raise
+            continue
         except SceneSpecAgentError as e:
-            # Schema / SDK failure. Treat as a repairable issue while we
-            # still have budget; otherwise surface it.
-            issues = [f"agent returned invalid/non-conforming output: {e}"]
+            # Transport / turn-budget / API failure: there is no model output
+            # to repair, so re-sending the original brief is the best we can
+            # do. Asking it to "fix" a network error would be nonsense.
+            issues = [f"agent run failed: {e}"]
+            repair_message = message
             if attempt >= max_repair_rounds:
                 raise
             continue
@@ -579,6 +637,7 @@ def _compose_one_scene(
         issues = _validate_scene_semantics(scene, scene_entry, static)
         if not issues:
             return scene
+        repair_message = build_repair_message(issues)
         if attempt >= max_repair_rounds:
             raise SceneSpecAgentError(
                 f"scene '{scene_entry.id}' failed semantic validation after "
@@ -609,8 +668,8 @@ def _validate_scene_semantics(
 
     if not scene.entities:
         issues.append(
-            "entities[] is empty; a real scene needs at least the "
-            "environment and the player rig"
+            "entities[] is empty; a real scene needs at least the player "
+            "rig and one entity per AssetItem"
         )
 
     # Asset coverage: every AssetItem must appear at least once as a mesh.
@@ -627,18 +686,10 @@ def _validate_scene_semantics(
             f"(each must appear at least once): {shown}"
         )
 
-    # Environment presence: if the manifest has an environment asset, the
-    # scene must contain an entity tagged 'environment' the player spawns in.
-    has_env_asset = any(
-        a.get("category") == "environment" for a in static.assets_compact
-    )
-    if has_env_asset and not any(
-        "environment" in e.tags for e in scene.entities
-    ):
-        issues.append(
-            "no entity is tagged 'environment' even though the manifest has "
-            "an environment asset; the player must spawn inside it"
-        )
+    # There is deliberately no "the scene must contain an environment"
+    # check any more: the environment is authored in C++ by the world
+    # architect and merged in by the scene compiler, so requiring the
+    # composer to invent one was demanding an entity it should not own.
 
     # Mechanic-binding validity: every mechanic_id must be a known binding
     # id from the plan (builtin.* or generated.<task_id>).

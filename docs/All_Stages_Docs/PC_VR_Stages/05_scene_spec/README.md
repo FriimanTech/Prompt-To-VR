@@ -42,14 +42,14 @@ Without schema validation here, the codegen agent and scene compiler would see i
 
 ### Key concepts and terms
 
-- **Validate-and-repair loop** — After the agent emits a SceneSpec, deterministic checks run (asset coverage, valid mechanic binding ids, environment presence). Problems are fed back to the **same agent session** for repair, up to `scene_spec_max_repair_rounds`.
+- **Validate-and-repair loop** — After the agent emits a SceneSpec, deterministic checks run (asset coverage, valid mechanic binding ids). Problems are fed back to the **same agent session** for repair, up to `scene_spec_max_repair_rounds`. There is no "environment presence" check: the environment is authored in C++ by the world architect and merged in by the scene compiler.
 - **Parallel workers** — Multiple scenes compose concurrently via `ThreadPoolExecutor` (capped by `scene_spec_max_parallel_workers`).
 - **Compressed context** — Each scene agent gets a ~5–8K token summary instead of the full multi-scene dump (~39K).
 - **Idempotent resume** — If valid `scene_spec.*.json` already exist on disk, stage may skip LLM calls.
 
 ### End-to-end flow (plain language)
 
-1. For each scene in BuildSpec, spawn a **SceneSpecComposer** agent (`gpt-5.5`).
+1. For each scene in BuildSpec, spawn a **SceneSpecComposer** agent (`gpt-5.6-sol`).
 2. Agent produces SceneSpec JSON.
 3. `_validate_scene_semantics()` checks coverage and bindings.
 4. If invalid, feed errors back and repair (same session).
@@ -91,13 +91,36 @@ for attempt in 0..scene_spec_max_repair_rounds:
     else: raise SceneSpecAgentError
 ```
 
-**Validation checks:** matching scene_id, non-empty entities, every manifest asset referenced, environment entity tag present, mechanic binding ids exist in MechanicPlan.
+**Validation checks:** matching scene_id, non-empty entities, every manifest asset referenced, mechanic binding ids exist in MechanicPlan.
 
 ### SceneSpecComposer agent
 
 - OpenAI Agents SDK + **SQLiteSession** (repair context preserved across rounds)
-- Model: `scene_spec_model` (gpt-5.5), reasoning medium
+- Model: `scene_spec_model`, effort `scene_spec_reasoning_effort`, verbosity `scene_spec_verbosity`, explicit `scene_spec_max_output_tokens`
 - No WebSearch
+
+### Strict structured output
+
+The agent's `output_type` is **not** `SceneSpec` but `WireSceneSpec`
+(`pipeline/scene_spec_wire.py`) with `strict_json_schema=True`, mapped back to
+`SceneSpec` by `to_scene_spec()`. OpenAI strict mode then constrains decoding,
+so malformed JSON and ids that violate the `IdStr` pattern become impossible
+rather than merely discouraged.
+
+`SceneSpec` itself cannot be the wire schema: strict mode requires
+`additionalProperties: false` everywhere, and `MeshRef.sockets` and
+`MechanicBinding.params` are open-ended dicts. The wire model drops `sockets`
+(the scene compiler fills them from `asset_contract.json`) and carries
+`params` as a list of `(key, value_json)` pairs.
+
+Non-strict output caused a real ten-minute triple failure: the SDK redacts
+model payloads by default, so a Pydantic validation error arrived as the single
+line `Invalid JSON when parsing model output`, the repair turn had nothing to
+say, and the agent repeated the same mistake until the budget ran out.
+`agent_output_capture.make_capturing_schema` now keeps the raw output, which is
+written to `logs/scene_spec.log` and turned into field-level repair
+instructions. Truncation at the token cap takes a separate branch that asks for
+FEWER entities instead of "fix these problems".
 
 ### Outputs
 
@@ -118,7 +141,7 @@ Worker exception fails whole stage. Validation exhaustion → SceneSpecAgentErro
 
 ### Settings
 
-`scene_spec_model`, `scene_spec_max_parallel_workers` (3), `scene_spec_max_repair_rounds` (2), `scene_spec_agent_max_turns`
+`scene_spec_model`, `scene_spec_reasoning_effort`, `scene_spec_verbosity`, `scene_spec_max_output_tokens` (64000), `scene_spec_max_entities` (120), `scene_spec_max_parallel_workers` (3), `scene_spec_max_repair_rounds` (2), `scene_spec_agent_max_turns`
 
 ### `_validate_scene_semantics()` checks (deterministic)
 
@@ -127,7 +150,6 @@ Worker exception fails whole stage. Validation exhaustion → SceneSpecAgentErro
 | `scene.id` matches BuildSpec | Wrong scene file |
 | `entities` non-empty | Empty scene |
 | Every manifest asset id on some entity | Coverage gap |
-| Environment anchor entity present | Missing world hook |
 | Mechanic binding ids exist in plan | Invalid binding |
 
 Non-empty issues → repair via `build_repair_message()` in same SQLiteSession.

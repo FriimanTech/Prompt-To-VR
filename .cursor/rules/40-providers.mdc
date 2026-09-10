@@ -4,7 +4,7 @@ globs: ["packages/provider-clients/**/*", "apps/orchestrator/**/*"]
 alwaysApply: false
 ---
 
-# Provider rules (verified April 2026)
+# Provider rules (verified September 2026)
 
 ## Anthropic (Claude)
 
@@ -18,34 +18,53 @@ alwaysApply: false
 - For tool-using agents, pass `strict: true` on tool definitions to get
   grammar-constrained tool inputs.
 
-## OpenAI (ChatGPT fallback for Claude)
+## OpenAI
 
-- Python SDK: `openai`.
-- Default models: `gpt-5` (hard), `gpt-5-mini` (light), configurable via
-  `OPENAI_HARD_MODEL` / `OPENAI_LIGHT_MODEL`.
+- Python SDK: `openai`. Agents: `openai-agents` (import path `agents`).
+- **Every** OpenAI call in the pipeline runs `gpt-5.6-sol` (~1.05M context,
+  128K max output). What varies per stage is `reasoning.effort`.
+- `reasoning.effort` on gpt-5.6 accepts
+  `none | low | medium (default) | high | xhigh | max`. **`minimal` was valid
+  on gpt-5 and is GONE in 5.6** — `Settings` validates the value at startup
+  so a stale `.env` entry fails there rather than as a 400 mid-run.
+- Claude-fallback tiers are `(model, effort)` PAIRS, not just model names:
+  both tiers are `gpt-5.6-sol`, separated by
+  `OPENAI_HARD_REASONING_EFFORT` (`high`) and
+  `OPENAI_LIGHT_REASONING_EFFORT` (`medium`). Any new call path through
+  `LlmClient` must forward the effort; dropping it silently collapses the
+  two tiers onto the model's own default.
 - Pipeline stages MUST call the shared `LlmClient` (via
   `ptv_orchestrator.pipeline.llm.make_llm`), NOT `AnthropicClient` or
   `OpenAIClient` directly. The facade falls back from Claude to ChatGPT
   transparently on `ProviderConfigError` / `ProviderCallError` and
-  translates model names automatically.
+  translates the tier automatically.
 - For structured outputs the OpenAI wrapper uses JSON mode
   (`response_format={"type": "json_object"}`) with the schema embedded in
   the system prompt. Callers re-validate the returned JSON with the
   original Pydantic model, matching the Claude path exactly.
-- **Reasoning models (GPT-5 family + o1/o3/o4) reject sampling params.**
-  `gpt-5`, `gpt-5-mini`, `gpt-5-nano`, `gpt-5-codex`, dated snapshots thereof,
-  and the o-series models return HTTP 400 if you pass `temperature`,
-  `top_p`, `presence_penalty`, `frequency_penalty`, or `logprobs`. Only
-  `gpt-5-chat-latest` and legacy `gpt-4o*` / `gpt-4.1*` models accept them.
-  The `OpenAIClient` wrapper detects reasoning models via
+- **Agents SDK: never construct an `Agent` without `model_settings`.**
+  `Agent.__post_init__` back-fills them from the model NAME, and its table
+  maps `gpt-5.6-sol` to effort `none` — i.e. no reasoning at all, silently.
+  Always pass `ModelSettings(reasoning=Reasoning(effort=...), verbosity=...)`
+  explicitly. `apps/orchestrator/tests/test_model_migration.py` guards this.
+- **Tools + reasoning is Responses-only on 5.6.** Chat Completions permits
+  function tools only at effort `none`. The Agents SDK uses Responses by
+  default, so the tool-carrying stages (`world_generation`,
+  `code_generation`) are fine — do not switch them to Chat Completions.
+- **Reasoning models reject sampling params.** The whole `gpt-5*` family
+  (except `gpt-5*-chat-latest`) plus the o-series return HTTP 400 if you
+  pass `temperature`, `top_p`, `presence_penalty`, `frequency_penalty`, or
+  `logprobs`. The `OpenAIClient` wrapper detects them via
   `is_reasoning_model(name)` and OMITS `temperature` automatically, so call
   sites can keep passing `temperature=0.0` uniformly.
-- Reasoning models consume "thinking" tokens before emitting output. The
-  default `OpenAIConfig.max_tokens` is 16384 to accommodate this. If you see
+- Reasoning models consume "thinking" tokens before emitting output, and the
+  cap covers reasoning PLUS visible output. `OpenAIConfig.max_tokens`
+  defaults to 96K with an auto-retry up to 128K (Sol's max output). On
   `ProviderCallError: OpenAI response was truncated (finish_reason='length')`,
-  raise the cap or simplify the schema.
-- Use `max_completion_tokens` (NOT the legacy `max_tokens`) on Chat Completions
-  for GPT-5 family models.
+  raise the cap or lower the effort.
+- Use `max_completion_tokens` (NOT the legacy `max_tokens`) on Chat
+  Completions for GPT-5 family models; on Responses it is
+  `max_output_tokens`.
 
 ## Google GenAI (Gemini image generation)
 

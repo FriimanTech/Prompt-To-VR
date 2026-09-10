@@ -75,7 +75,7 @@ orchestrator and a reusable Vulkan + OpenXR engine core.
    (`claude-opus-4-7`). Use `claude-sonnet-4-6` for lighter work. If Claude
    is unavailable (missing key or API error) the pipeline transparently
    falls back to OpenAI via the shared `LlmClient`
-   (`OPENAI_HARD_MODEL=gpt-5`, `OPENAI_LIGHT_MODEL=gpt-5-mini`).
+   (both tiers `gpt-5.6-sol`, separated by reasoning effort).
 8. Tripo image-to-3D calls MUST enable textured, PBR output with image-aligned
    textures (`texture=True`, `pbr=True`, `texture_alignment="original_image"`)
    and MUST target the **V3** API; V2 is retired 2026-11-01.
@@ -113,7 +113,7 @@ orchestrator and a reusable Vulkan + OpenXR engine core.
 2. BuildSpec → **AssetManifest** (Claude Sonnet, structured output). Only
    OBJECTS (characters, props, fx, ui) — the environment is not a GLB.
 2b. Prompt + BuildSpec + AssetManifest → **NpcPlan** (`npc_plan`, OpenAI
-   Agents SDK agent, `gpt-5.5`, no tools). Decides per character: role,
+   Agents SDK agent, `gpt-5.6-sol` @ reasoning `high`, no tools). Decides per character: role,
    faction and who it fights, `movement_style`, behaviours, and which
    animation intents those behaviours actually use. Runs BEFORE rigging
    because "does this thing need animation at all" is the most expensive
@@ -125,7 +125,7 @@ orchestrator and a reusable Vulkan + OpenXR engine core.
    `scene_spec` and codegen so all three describe the same game. A game
    with no characters emits an empty plan and makes no agent call.
 3. AssetManifest + BuildSpec + NpcPlan → **MechanicPlan** (OpenAI Agents SDK agent,
-   `gpt-5.5`, no tools). Each mechanic is classified `builtin`,
+   `gpt-5.6-sol` @ reasoning `high`, no tools). Each mechanic is classified `builtin`,
    `builtin+config`, `builtin+config_code_edit` (copy a built-in's source and
    edit it into a NEW generated mechanic — never replaces the built-in), or
    `generate`. The agent also assigns a controller `binding`
@@ -134,7 +134,7 @@ orchestrator and a reusable Vulkan + OpenXR engine core.
    not a conflict). BuildSpec labels each mechanic `regular` or
    `hub` (a shared foundation like a shooting hub).
 4. All above → **SceneSpec**, one per scene (OpenAI Agents SDK agent,
-   `gpt-5.5`, no tools) with a deterministic validate-and-repair loop
+   `gpt-5.6-sol` @ reasoning `medium`, no tools) with a deterministic validate-and-repair loop
    (asset coverage, environment presence, valid mechanic-binding ids);
    problems are fed back into the same agent session up to
    `scene_spec_max_repair_rounds`. Scenes fan out across
@@ -199,7 +199,7 @@ orchestrator and a reusable Vulkan + OpenXR engine core.
    the stage fails loudly if the generated C++ still does not compile
    (`codegen_verify_compile`, default on).
 8b. **World generation**: a single world-architect agent (OpenAI Agents SDK,
-   `gpt-5.5` @ reasoning `xhigh`, `WebSearchTool`) writes `IWorldBuilder` C++
+   `gpt-5.6-sol` @ reasoning `high`, `WebSearchTool`) writes `IWorldBuilder` C++
    in `engine/generated/world/<project_id>/`, compiled + run offline in
    `ptv_worldgen` under a compile-and-repair loop → `world.scene.json`
    (deterministic fallback world if the budget is exhausted). The builder
@@ -241,7 +241,10 @@ orchestrator and a reusable Vulkan + OpenXR engine core.
    stage that sees both a CodeTask's `required_sockets` and the asset's
    derived sockets, so a mechanic requiring a socket its asset cannot supply
    fails the build loudly, with every violation listed at once.
-10. Build (branches on `BuildSpec.target_device`):
+10. Build (branches on `ProjectState.target_device`, the create-time UI toggle
+   that is the single source of truth and is mirrored into
+   `BuildSpec.target_device`; every planning prompt names the target too, so a
+   Quest project is planned against a mobile GPU budget):
     - `pcvr`: CMake configure + build (Visual Studio 18 2026, toolset v145) → `.exe`.
     - `quest`: `quest_build` instantiates `engine/android`, packages
       `scene.json` + GLBs + `.spv` into the APK assets, and runs
@@ -249,16 +252,34 @@ orchestrator and a reusable Vulkan + OpenXR engine core.
 11. Launch (branches on target_device): `pcvr` runs the `.exe` through OpenXR
     (Quest Link); `quest` does `adb install -r` + `am start` the NativeActivity.
 
-## Verified model / SDK choices (April 2026)
+## Verified model / SDK choices (September 2026)
 
 - Claude: `claude-opus-4-7` (hard), `claude-sonnet-4-6` (light). Structured
   outputs via `output_config.format = {type: "json_schema", schema: ...}`.
   Strict tool use via `strict: true`. No beta headers required.
-- OpenAI (ChatGPT fallback): default `gpt-5` (hard) and `gpt-5-mini`
-  (light) via Chat Completions. Structured outputs via JSON mode
-  (`response_format={"type": "json_object"}`) + schema embedded in the
-  system prompt; caller re-validates with the same Pydantic model. The
-  `LlmClient` wrapper applies the fallback transparently.
+- OpenAI: **every** OpenAI call in the pipeline runs `gpt-5.6-sol`
+  (~1.05M context, 128K max output). What varies per stage is
+  `reasoning.effort`, which 5.6 accepts as
+  `none | low | medium (default) | high | xhigh | max`. `minimal` was valid
+  on gpt-5 and is GONE in 5.6, so `Settings` rejects it at startup rather
+  than letting it 400 mid-run.
+  - ChatGPT fallback (Chat Completions, no tools, via `LlmClient`): both
+    tiers are `gpt-5.6-sol` and are told apart by effort — `high` for the
+    Opus-equivalent path (build_spec), `medium` for the Sonnet-equivalent
+    one (asset_manifest, the call that decides which assets spend Tripo
+    credits on rigging and animation). Structured outputs via JSON mode
+    (`response_format={"type": "json_object"}`) + schema embedded in the
+    system prompt; caller re-validates with the same Pydantic model.
+  - Agents SDK stages (Responses API): `npc_plan` and `mechanic_plan` at
+    `high`, `scene_spec` at `medium`, `world_generation` at `high`,
+    `code_generation` at `high`. Codegen's effort **must** stay explicit:
+    `Agent.__post_init__` back-fills `model_settings` from the model NAME
+    when none is passed, and it infers `none` for `gpt-5.6-sol`, which
+    would silently strip reasoning from the hardest C++ in the pipeline.
+  - The tool-carrying stages (`world_generation`, `code_generation`) must
+    stay on the Responses API: on 5.6, reasoning combined with function
+    tools is Responses-only — Chat Completions allows tools at effort
+    `none` only.
 - Google GenAI: Python package `google-genai`. Imagen
 - Google GenAI: Python package `google-genai`. Reference images use
   `gemini-3.1-flash-image` with `generate_content` and

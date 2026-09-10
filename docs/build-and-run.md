@@ -59,7 +59,7 @@ On success:
 
 ## Quest standalone (APK)
 
-When `BuildSpec.target_device` is `quest`, stage 16 runs `quest_build` instead
+When `ProjectState.target_device` is `quest`, stage 16 runs `quest_build` instead
 of `cmake_build`. The web panel's **Launch latest build** uses `adb install -r`
 and starts the NativeActivity on a connected Quest 3.
 

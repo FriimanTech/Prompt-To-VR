@@ -7,12 +7,19 @@ directly. Behaviour:
 2. If Anthropic raises :class:`ProviderConfigError` or
    :class:`ProviderCallError` AND the OpenAI client ``is_available()``,
    log a warning and retry against OpenAI, transparently mapping
-   ``claude-opus-4-7`` → ``OPENAI_HARD_MODEL`` and
-   ``claude-sonnet-4-6`` → ``OPENAI_LIGHT_MODEL``.
+   ``claude-opus-4-7`` → the hard tier and
+   ``claude-sonnet-4-6`` → the light tier.
 3. Otherwise, re-raise the original error.
 
 This keeps the call site stable: stage code always passes Claude model
 names; the facade rewrites them if we fall over to OpenAI.
+
+A "tier" is a ``(model, reasoning_effort)`` pair, not just a model name.
+Both tiers now run ``gpt-5.6-sol``, so effort is the ONLY thing that
+distinguishes the Opus-equivalent path from the Sonnet-equivalent one --
+which is why this facade has to forward it. It previously translated the
+model name and dropped the effort on the floor, leaving every fallback call
+on whatever the model's own default happened to be.
 """
 
 from __future__ import annotations
@@ -38,22 +45,35 @@ class LlmClient:
         self.openai = openai or OpenAIClient()
 
     # ------------------------------------------------------------------
-    # Model name translation
+    # Tier translation
     # ------------------------------------------------------------------
-    def _openai_model_for(self, anthropic_model: str | None) -> str | None:
-        """Translate a Claude model id into an OpenAI model id.
+    def _openai_tier_for(
+        self, anthropic_model: str | None
+    ) -> tuple[str | None, str]:
+        """Translate a Claude model id into an OpenAI ``(model, effort)``.
 
         * If the caller explicitly asked for the configured Anthropic light
-          model, use the OpenAI light model.
-        * Otherwise, use the OpenAI hard model.
-        * If the caller passed ``None``, pass ``None`` through so OpenAI's
-          own default (hard model) applies.
+          model, use the light tier.
+        * Otherwise, use the hard tier.
+        * If the caller passed ``None``, pass ``None`` for the model so
+          OpenAI's own default (hard model) applies -- but still send the
+          hard tier's effort, because "default model" and "no reasoning
+          configuration" are not the same thing.
         """
-        if anthropic_model is None:
-            return None
-        if anthropic_model == self.anthropic.config.light_model:
-            return self.openai.config.light_model
-        return self.openai.config.hard_model
+        if anthropic_model is not None and (
+            anthropic_model == self.anthropic.config.light_model
+        ):
+            return (
+                self.openai.config.light_model,
+                self.openai.config.light_reasoning_effort,
+            )
+        model = None if anthropic_model is None else self.openai.config.hard_model
+        return model, self.openai.config.hard_reasoning_effort
+
+    def _openai_model_for(self, anthropic_model: str | None) -> str | None:
+        """Model half of :meth:`_openai_tier_for`. Kept for callers that
+        only care which model a Claude id maps to."""
+        return self._openai_tier_for(anthropic_model)[0]
 
     # ------------------------------------------------------------------
     # Public API (matches AnthropicClient / OpenAIClient)
@@ -80,14 +100,21 @@ class LlmClient:
         except (ProviderConfigError, ProviderCallError) as e:
             if not self.openai.is_available():
                 raise
-            log.warning("Claude unavailable (%s); falling back to OpenAI.", e)
+            openai_model, effort = self._openai_tier_for(model)
+            log.warning(
+                "Claude unavailable (%s); falling back to OpenAI (%s, effort=%s).",
+                e,
+                openai_model or self.openai.config.hard_model,
+                effort,
+            )
             return self.openai.generate_json(
                 prompt=prompt,
                 schema=schema,
                 system=system,
-                model=self._openai_model_for(model),
+                model=openai_model,
                 max_tokens=max_tokens,
                 temperature=temperature,
+                reasoning_effort=effort,
             )
 
     def generate_code(
@@ -110,15 +137,21 @@ class LlmClient:
         except (ProviderConfigError, ProviderCallError) as e:
             if not self.openai.is_available():
                 raise
+            openai_model, effort = self._openai_tier_for(model)
             log.warning(
-                "Claude unavailable (%s); falling back to OpenAI for code gen.", e
+                "Claude unavailable (%s); falling back to OpenAI for code gen "
+                "(%s, effort=%s).",
+                e,
+                openai_model or self.openai.config.hard_model,
+                effort,
             )
             return self.openai.generate_code(
                 prompt=prompt,
                 system=system,
-                model=self._openai_model_for(model),
+                model=openai_model,
                 max_tokens=max_tokens,
                 temperature=temperature,
+                reasoning_effort=effort,
             )
 
 
@@ -130,6 +163,8 @@ def build_default_llm_client(
     claude_light_model: str,
     openai_hard_model: str,
     openai_light_model: str,
+    openai_hard_reasoning_effort: str | None = None,
+    openai_light_reasoning_effort: str | None = None,
     claude_max_tokens: int | None = None,
     openai_max_tokens: int | None = None,
     openai_max_tokens_ceiling: int | None = None,
@@ -167,6 +202,10 @@ def build_default_llm_client(
         "hard_model": openai_hard_model,
         "light_model": openai_light_model,
     }
+    if openai_hard_reasoning_effort is not None:
+        openai_kwargs["hard_reasoning_effort"] = openai_hard_reasoning_effort
+    if openai_light_reasoning_effort is not None:
+        openai_kwargs["light_reasoning_effort"] = openai_light_reasoning_effort
     if openai_max_tokens is not None:
         openai_kwargs["max_tokens"] = int(openai_max_tokens)
     if openai_max_tokens_ceiling is not None:

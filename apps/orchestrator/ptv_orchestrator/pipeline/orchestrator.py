@@ -1,13 +1,26 @@
-"""Top-level pipeline orchestrator."""
+"""Top-level pipeline orchestrator.
+
+Runs are claimed through the :mod:`..runs` registry, which serves two
+purposes. It enforces one run per project -- two concurrent cmake processes
+on the same build dir race on the vcpkg install lock and one inevitably dies
+with ``STATUS_CONTROL_C_EXIT`` -- and it carries the cancel flag and child
+process handles that make Abort possible.
+
+Every entry point here guarantees the project reaches a TERMINAL status.
+Leaving ``running`` behind is not a cosmetic problem: the UI disables every
+button while a project claims to be running, so a stage that died without
+stamping a result locked the user out of their own project.
+"""
 
 from __future__ import annotations
 
-import threading
-from typing import Callable
+from contextlib import contextmanager
+from typing import Callable, Iterator, Optional
 
 from ptv_schemas import ProjectStage, ProjectStatus, TargetDevice
 
 from ..events import get_bus
+from ..runs import ABORT_MESSAGE, RunCancelled, RunHandle, get_registry
 from ..settings import Settings, get_settings
 from ..storage import ProjectStore
 from . import (
@@ -31,24 +44,7 @@ from . import (
     stage_world_generation,
 )
 from .context import PipelineContext, StageResult
-
-
-# Per-project lock so two concurrent background tasks (e.g. the user hitting
-# "Run full pipeline" and then "Resume" while the first is still running)
-# can't both spawn cmake.exe against the same build dir. Two simultaneous
-# cmake processes on the same project race on the vcpkg install lock and
-# one inevitably gets killed with STATUS_CONTROL_C_EXIT.
-_PROJECT_LOCKS: dict[str, threading.Lock] = {}
-_PROJECT_LOCKS_GUARD = threading.Lock()
-
-
-def _project_lock(project_id: str) -> threading.Lock:
-    with _PROJECT_LOCKS_GUARD:
-        lock = _PROJECT_LOCKS.get(project_id)
-        if lock is None:
-            lock = threading.Lock()
-            _PROJECT_LOCKS[project_id] = lock
-        return lock
+from .target_device import sync_build_spec_device
 
 
 StageFn = Callable[[PipelineContext], StageResult]
@@ -133,66 +129,144 @@ def _stages_for_project(ctx: PipelineContext) -> list[tuple[ProjectStage, StageF
     return _stages_for(device)
 
 
-def _make_ctx(project_id: str, settings: Settings | None = None) -> PipelineContext:
+def _make_ctx(
+    project_id: str,
+    settings: Settings | None = None,
+    run: Optional[RunHandle] = None,
+) -> PipelineContext:
     settings = settings or get_settings()
     return PipelineContext(
         project_id=project_id,
         settings=settings,
         store=ProjectStore(settings.projects_dir),
         bus=get_bus(),
+        run=run,
     )
 
 
-def run_pipeline(project_id: str, settings: Settings | None = None) -> None:
-    lock = _project_lock(project_id)
-    if not lock.acquire(blocking=False):
-        # Another pipeline run is in flight. Emit a UI event so the user
-        # sees why nothing is happening and bail out cleanly; don't raise
-        # (FastAPI BackgroundTasks would surface an unhelpful traceback).
+@contextmanager
+def _claimed_run(
+    project_id: str,
+    settings: Settings | None,
+    busy_stage: ProjectStage,
+) -> Iterator[Optional[PipelineContext]]:
+    """Claim the project, yield a context, and always leave a terminal status.
+
+    Yields ``None`` when another run already holds the project; the caller
+    then does nothing. Emitting a "skipped" event rather than raising keeps
+    FastAPI's BackgroundTasks from surfacing an unhelpful traceback for what
+    is really just a double-click.
+    """
+    registry = get_registry()
+    handle = registry.start(project_id)
+    if handle is None:
         ctx = _make_ctx(project_id, settings)
         ctx.emit(
-            ProjectStage.build_spec,
+            busy_stage,
             "skipped",
             "another run is already in progress for this project",
         )
+        yield None
         return
+
+    ctx = _make_ctx(project_id, settings, run=handle)
     try:
-        ctx = _make_ctx(project_id, settings)
-        state = ctx.store.load_state(project_id)
-        state.status = ProjectStatus.running
-        ctx.store.save_state(state)
-        try:
-            for stage, fn in _stages_for(state.target_device):
-                fn(ctx)
-        except Exception as e:
-            state = ctx.store.load_state(project_id)
-            ctx.store.record_stage(
-                state,
-                state.current_stage,
-                ProjectStatus.failed,
-                message=str(e)[:1000],
-            )
-            ctx.emit(state.current_stage, "failed", str(e)[:300])
-            raise
+        yield ctx
+    except RunCancelled:
+        _stamp(ctx, ProjectStatus.aborted, ABORT_MESSAGE)
+        # Swallowed deliberately: the user asked for this, and a traceback
+        # in the server log would imply something went wrong.
+    except Exception as exc:
+        _stamp(ctx, ProjectStatus.failed, str(exc)[:1000])
+        raise
+    else:
+        _settle(ctx)
     finally:
-        lock.release()
+        handle.kill_processes()
+        registry.finish(project_id)
+
+
+def _stamp(ctx: PipelineContext, status: ProjectStatus, message: str) -> None:
+    """Record a terminal status against whatever stage was current.
+
+    Never raises: this runs while handling another exception, and losing the
+    original error to a bookkeeping failure would be the worse outcome.
+    """
+    try:
+        state = ctx.store.load_state(ctx.project_id)
+        ctx.store.record_stage(state, state.current_stage, status, message=message)
+        ctx.emit(state.current_stage, status.value, message[:300])
+    except Exception:  # pragma: no cover - defensive
+        pass
+
+
+def _settle(ctx: PipelineContext) -> None:
+    """After a clean return, make sure the project is not still 'running'.
+
+    A stage that returns without stamping a result (or a stage list that
+    ended early) would otherwise leave the project looking busy forever.
+    """
+    state = ctx.store.load_state(ctx.project_id)
+    if state.status != ProjectStatus.running:
+        return
+    ctx.store.record_stage(
+        state,
+        state.current_stage,
+        ProjectStatus.succeeded,
+        message="run finished",
+    )
+
+
+def _reconcile_build_spec_device(ctx: PipelineContext) -> None:
+    """Re-stamp ``build_spec.json`` if it disagrees with the project.
+
+    Projects created before the build_spec stage learned about the device
+    have the schema default (``pcvr``) on disk regardless of what the user
+    picked. Every stage that matters already reads
+    ``ProjectState.target_device``, so this only repairs the mirrored copy --
+    no need to pay for a BuildSpec regeneration to fix one enum.
+    """
+    state = ctx.store.load_state(ctx.project_id)
+    try:
+        spec = ctx.store.load_build_spec(ctx.project_id)
+    except (FileNotFoundError, ValueError):
+        return  # not planned yet, or unreadable: the stage will rewrite it
+    spec, changed = sync_build_spec_device(spec, state.target_device)
+    if not changed:
+        return
+    ctx.build_spec = spec
+    ctx.store.save_build_spec(ctx.project_id, spec)
+    ctx.emit(
+        ProjectStage.build_spec,
+        "info",
+        f"build_spec.target_device re-stamped to the project's "
+        f"{state.target_device.value!r}",
+    )
+
+
+def _mark_running(ctx: PipelineContext) -> None:
+    state = ctx.store.load_state(ctx.project_id)
+    state.status = ProjectStatus.running
+    ctx.store.save_state(state)
+
+
+def run_pipeline(project_id: str, settings: Settings | None = None) -> None:
+    with _claimed_run(project_id, settings, ProjectStage.build_spec) as ctx:
+        if ctx is None:
+            return
+        _mark_running(ctx)
+        device = ctx.store.load_state(project_id).target_device
+        for stage, fn in _stages_for(device):
+            ctx.raise_if_cancelled()
+            fn(ctx)
 
 
 def resume_pipeline(project_id: str, settings: Settings | None = None) -> None:
-    lock = _project_lock(project_id)
-    if not lock.acquire(blocking=False):
-        ctx = _make_ctx(project_id, settings)
-        ctx.emit(
-            ProjectStage.build_spec,
-            "skipped",
-            "another run is already in progress for this project",
-        )
-        return
-    try:
-        ctx = _make_ctx(project_id, settings)
+    with _claimed_run(project_id, settings, ProjectStage.build_spec) as ctx:
+        if ctx is None:
+            return
+        _mark_running(ctx)
         state = ctx.store.load_state(project_id)
-        state.status = ProjectStatus.running
-        ctx.store.save_state(state)
 
         # For each stage, find the LATEST (not just any) record. A stage is only
         # safely skippable if its most recent record is ``succeeded``. Once we hit
@@ -210,8 +284,6 @@ def resume_pipeline(project_id: str, settings: Settings | None = None) -> None:
                 break
 
         _run_stages_from(ctx, resume_from)
-    finally:
-        lock.release()
 
 
 def _run_stages_from(ctx: PipelineContext, resume_from: ProjectStage | None) -> None:
@@ -221,6 +293,7 @@ def _run_stages_from(ctx: PipelineContext, resume_from: ProjectStage | None) -> 
     stages are skipped (nothing to do). Downstream artefacts depend on upstream
     ones, so once we start we run every remaining stage in order.
     """
+    _reconcile_build_spec_device(ctx)
     resuming = False
     for stage, fn in _stages_for_project(ctx):
         if not resuming:
@@ -228,6 +301,7 @@ def _run_stages_from(ctx: PipelineContext, resume_from: ProjectStage | None) -> 
                 ctx.emit(stage, "skipped", "already done")
                 continue
             resuming = True
+        ctx.raise_if_cancelled()
         fn(ctx)
 
 
@@ -242,17 +316,9 @@ def resume_from_stage(
     stage -- e.g. pick ``world_generation`` to re-author the world and rebuild
     everything downstream.
     """
-    lock = _project_lock(project_id)
-    if not lock.acquire(blocking=False):
-        ctx = _make_ctx(project_id, settings)
-        ctx.emit(
-            stage,
-            "skipped",
-            "another run is already in progress for this project",
-        )
-        return
-    try:
-        ctx = _make_ctx(project_id, settings)
+    with _claimed_run(project_id, settings, stage) as ctx:
+        if ctx is None:
+            return
         if stage not in [s for s, _ in _stages_for_project(ctx)]:
             # Not a pipeline-runnable stage (e.g. cmake_configure is folded into
             # cmake_build; created/ready_to_launch/failed are markers).
@@ -262,37 +328,18 @@ def resume_from_stage(
                 f"stage '{stage.value}' cannot be run directly",
             )
             return
-        state = ctx.store.load_state(project_id)
-        state.status = ProjectStatus.running
-        ctx.store.save_state(state)
-        try:
-            _run_stages_from(ctx, stage)
-        except Exception as e:
-            state = ctx.store.load_state(project_id)
-            ctx.store.record_stage(
-                state,
-                state.current_stage,
-                ProjectStatus.failed,
-                message=str(e)[:1000],
-            )
-            ctx.emit(state.current_stage, "failed", str(e)[:300])
-            raise
-    finally:
-        lock.release()
+        _mark_running(ctx)
+        _run_stages_from(ctx, stage)
 
 
 def run_stage(project_id: str, stage: ProjectStage, settings: Settings | None = None) -> None:
-    lock = _project_lock(project_id)
-    if not lock.acquire(blocking=False):
-        ctx = _make_ctx(project_id, settings)
-        ctx.emit(stage, "skipped", "another run is already in progress")
-        return
-    try:
-        ctx = _make_ctx(project_id, settings)
+    with _claimed_run(project_id, settings, stage) as ctx:
+        if ctx is None:
+            return
+        _mark_running(ctx)
+        _reconcile_build_spec_device(ctx)
         for s, fn in _stages_for_project(ctx):
             if s == stage:
                 fn(ctx)
                 return
         raise ValueError(f"Unknown stage: {stage}")
-    finally:
-        lock.release()

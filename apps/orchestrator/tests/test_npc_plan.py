@@ -31,6 +31,7 @@ from ptv_schemas import (
     ProjectStatus,
     ReferenceImageRequest,
 )
+from ptv_schemas.asset_manifest import CharacterRole
 from ptv_orchestrator.events import EventBus
 from ptv_orchestrator.pipeline import stage_npc_plan
 from ptv_orchestrator.pipeline.context import PipelineContext
@@ -135,6 +136,91 @@ def test_a_game_with_no_characters_skips_the_agent(tmp_path: Path):
     )
     assert saved["npcs"] == []
     assert result.stage is ProjectStage.npc_plan
+
+
+def test_the_players_own_avatar_is_not_an_npc(tmp_path: Path):
+    """A first-person shooting range has one character asset -- the player's
+    own body -- and zero NPCs.
+
+    Filtering on ``category`` alone counted that avatar as a candidate, so the
+    empty-plan short circuit never fired and the director was called to be
+    told what the manifest already said. The player is not a NON-player
+    character; ``character_role`` is the field that says so.
+    """
+    manifest = AssetManifest(
+        prompt_id="game",
+        items=[
+            _asset(
+                "player-range-avatar",
+                AssetCategory.character,
+                character_role=CharacterRole.player_avatar,
+            ),
+            _asset("pistol", AssetCategory.prop),
+        ],
+    )
+    ctx = _ctx(tmp_path, manifest)
+    director = _Director(error="the agent must not be called")
+
+    stage_npc_plan.run_with_director(ctx, director=director)
+
+    assert director.seen_message == ""
+    assert ctx.npc_plan.npcs == []
+
+
+def test_a_character_with_no_declared_role_is_still_a_candidate(tmp_path: Path):
+    """Only ``player_avatar`` is excluded, and deliberately so.
+
+    The role is set by an upstream agent. Requiring it to say ``npc`` would
+    mean an unset value silently removes a real enemy from the plan -- and
+    then nothing reconciles the manifest, so its rigging guesses go through
+    unchallenged and bill credits nobody vetted.
+    """
+    manifest = AssetManifest(
+        prompt_id="game",
+        items=[_asset("goblin", AssetCategory.character)],
+    )
+    assert manifest.items[0].character_role is CharacterRole.none
+
+    ctx = _ctx(tmp_path, manifest)
+    director = _Director(plan=NpcPlan(prompt_id="game"))
+
+    stage_npc_plan.run_with_director(ctx, director=director)
+
+    assert "goblin" in director.seen_message
+
+
+def test_an_avatar_alongside_real_npcs_still_runs_the_director(tmp_path: Path):
+    """Excluding the avatar must not exclude the enemies standing next to it."""
+    manifest = AssetManifest(
+        prompt_id="game",
+        items=[
+            _asset(
+                "avatar",
+                AssetCategory.character,
+                character_role=CharacterRole.player_avatar,
+            ),
+            _asset(
+                "goblin",
+                AssetCategory.character,
+                character_role=CharacterRole.npc,
+            ),
+        ],
+    )
+    ctx = _ctx(tmp_path, manifest)
+    director = _Director(plan=NpcPlan(prompt_id="game"))
+
+    stage_npc_plan.run_with_director(ctx, director=director)
+
+    # The director is told about the goblin and NOT about the avatar, so it
+    # cannot plan behaviour for the player's own body.
+    assert "goblin" in director.seen_message
+    candidates_line = [
+        line
+        for line in director.seen_message.splitlines()
+        if line.startswith("- Character assets in this manifest:")
+    ]
+    assert candidates_line, "the candidate list was not passed to the director"
+    assert "avatar" not in candidates_line[0]
 
 
 def test_a_slide_only_npc_never_reaches_the_rigging_stage(tmp_path: Path):

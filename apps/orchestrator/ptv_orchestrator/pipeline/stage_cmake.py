@@ -123,6 +123,7 @@ def run(ctx: PipelineContext) -> StageResult:
                 ("PTV_APP_NAME", app_name),
             ),
             on_line=_sink,
+            **proc_hooks(ctx),
         )
 
     result = _run_once()

@@ -380,7 +380,17 @@ def _llm(
     o_sdk = _FakeOpenAISdk(openai_text)
     a = AnthropicClient(AnthropicConfig(api_key=claude_key, hard_model="claude-opus-4-7", light_model="claude-sonnet-4-6"))
     a._sdk = a_sdk
-    o = OpenAIClient(OpenAIConfig(api_key=openai_key, hard_model="gpt-5", light_model="gpt-5-mini"))
+    # The shipped configuration: BOTH tiers on gpt-5.6-sol, told apart by
+    # reasoning effort rather than by model name.
+    o = OpenAIClient(
+        OpenAIConfig(
+            api_key=openai_key,
+            hard_model="gpt-5.6-sol",
+            light_model="gpt-5.6-sol",
+            hard_reasoning_effort="high",
+            light_reasoning_effort="medium",
+        )
+    )
     o._sdk = o_sdk
     return LlmClient(anthropic=a, openai=o), a_sdk, o_sdk
 
@@ -398,7 +408,7 @@ def test_llm_falls_back_to_openai_when_claude_key_missing():
     llm, a_sdk, _ = _llm(claude_key=None, openai_text='{"answer": "gpt"}')
     r = llm.generate_json(prompt="x", schema={"type": "object"})
     assert r.data == {"answer": "gpt"}
-    assert r.model == "gpt-5"
+    assert r.model == "gpt-5.6-sol"
     # Anthropic was never hit because the config check short-circuits.
     assert a_sdk.calls == 0
 
@@ -416,7 +426,7 @@ def test_llm_falls_back_when_claude_sdk_raises_auth_error():
     )
     r = llm.generate_json(prompt="x", schema={"type": "object"})
     assert r.data == {"answer": "gpt"}
-    assert r.model == "gpt-5"
+    assert r.model == "gpt-5.6-sol"
     # Anthropic WAS invoked once, then the exception was converted into a
     # ProviderCallError, caught by LlmClient, and retried on OpenAI.
     assert a_sdk.calls == 1
@@ -429,7 +439,12 @@ def test_llm_reraises_when_openai_also_unavailable():
         llm.generate_json(prompt="x", schema={"type": "object"})
 
 
-def test_llm_translates_light_model_on_fallback():
+def test_llm_translates_light_tier_on_fallback():
+    """A Sonnet request maps to the LIGHT tier.
+
+    Both tiers run the same model now, so the model name alone no longer
+    proves the translation happened -- the reasoning effort does.
+    """
     llm, _, o_sdk = _llm(claude_key=None, openai_text='{"ok": true}')
     llm.generate_json(
         prompt="x",
@@ -437,10 +452,11 @@ def test_llm_translates_light_model_on_fallback():
         model=llm.anthropic.config.light_model,  # "claude-sonnet-4-6"
     )
     kw = o_sdk.last_instance.chat.completions.last_kwargs
-    assert kw["model"] == "gpt-5-mini"  # light model translation
+    assert kw["model"] == "gpt-5.6-sol"
+    assert kw["reasoning_effort"] == "medium"
 
 
-def test_llm_translates_hard_model_on_fallback():
+def test_llm_translates_hard_tier_on_fallback():
     llm, _, o_sdk = _llm(claude_key=None, openai_text='{"ok": true}')
     llm.generate_json(
         prompt="x",
@@ -448,17 +464,41 @@ def test_llm_translates_hard_model_on_fallback():
         model=llm.anthropic.config.hard_model,  # "claude-opus-4-7"
     )
     kw = o_sdk.last_instance.chat.completions.last_kwargs
-    assert kw["model"] == "gpt-5"
+    assert kw["model"] == "gpt-5.6-sol"
+    assert kw["reasoning_effort"] == "high"
+
+
+def test_llm_sends_hard_effort_when_no_model_was_requested():
+    """"Use the default model" and "send no reasoning configuration" are
+    not the same thing; omitting the model must not omit the effort."""
+    llm, _, o_sdk = _llm(claude_key=None, openai_text='{"ok": true}')
+    llm.generate_json(prompt="x", schema={"type": "object"})
+    kw = o_sdk.last_instance.chat.completions.last_kwargs
+    assert kw["reasoning_effort"] == "high"
 
 
 def test_llm_generate_code_fallback_path():
     llm, _, o_sdk = _llm(claude_key=None, openai_text="// plain code")
     r = llm.generate_code(prompt="write", model=llm.anthropic.config.light_model)
-    assert r.model == "gpt-5-mini"
+    assert r.model == "gpt-5.6-sol"
     assert r.raw_text == "// plain code"
     kw = o_sdk.last_instance.chat.completions.last_kwargs
     # generate_code does NOT constrain response_format.
     assert "response_format" not in kw
+
+
+def test_llm_generate_code_also_forwards_the_tier_effort():
+    """``generate_code`` had no ``reasoning_effort`` parameter at all, so
+    the code-writing fallback ran on the model's own default -- the one
+    workload where reasoning matters most."""
+    llm, _, o_sdk = _llm(claude_key=None, openai_text="// plain code")
+    llm.generate_code(prompt="write", model=llm.anthropic.config.hard_model)
+    kw = o_sdk.last_instance.chat.completions.last_kwargs
+    assert kw["reasoning_effort"] == "high"
+
+    llm.generate_code(prompt="write", model=llm.anthropic.config.light_model)
+    kw = o_sdk.last_instance.chat.completions.last_kwargs
+    assert kw["reasoning_effort"] == "medium"
 
 
 # ---------------------------------------------------------------------------
@@ -481,6 +521,33 @@ def test_openai_max_tokens_falls_back_when_env_garbage(monkeypatch):
     monkeypatch.setenv("OPENAI_MAX_TOKENS", "not-a-number")
     cfg = OpenAIConfig.from_env()
     assert cfg.max_tokens == 96_000  # dataclass default
+
+
+def test_openai_defaults_are_sol_on_both_tiers():
+    cfg = OpenAIConfig()
+    assert cfg.hard_model == "gpt-5.6-sol"
+    assert cfg.light_model == "gpt-5.6-sol"
+    assert cfg.hard_reasoning_effort == "high"
+    assert cfg.light_reasoning_effort == "medium"
+    # 128K is gpt-5.6-sol's documented max output, so the auto-retry
+    # ceiling must not promise more than the model can deliver.
+    assert cfg.max_tokens_ceiling == 128_000
+
+
+def test_openai_reasoning_effort_loaded_from_env(monkeypatch):
+    monkeypatch.setenv("OPENAI_HARD_REASONING_EFFORT", "max")
+    monkeypatch.setenv("OPENAI_LIGHT_REASONING_EFFORT", "low")
+    cfg = OpenAIConfig.from_env()
+    assert cfg.hard_reasoning_effort == "max"
+    assert cfg.light_reasoning_effort == "low"
+
+
+def test_sol_is_detected_as_a_reasoning_model():
+    """If this regressed, the client would send ``temperature`` (a 400 on
+    Sol) and would stop sending ``reasoning_effort`` entirely."""
+    assert is_reasoning_model("gpt-5.6-sol")
+    assert is_reasoning_model("gpt-5.6-luna")
+    assert is_reasoning_model("gpt-5.6-sol-2026-09-01")
 
 
 def test_anthropic_max_tokens_loaded_from_env(monkeypatch):
@@ -506,8 +573,8 @@ def test_build_default_llm_client_propagates_max_tokens():
         openai_api_key="sk-test",
         claude_hard_model="claude-opus-4-7",
         claude_light_model="claude-sonnet-4-6",
-        openai_hard_model="gpt-5",
-        openai_light_model="gpt-5-mini",
+        openai_hard_model="gpt-5.6-sol",
+        openai_light_model="gpt-5.6-sol",
         claude_max_tokens=50_000,
         openai_max_tokens=70_000,
         openai_max_tokens_ceiling=110_000,
@@ -515,6 +582,27 @@ def test_build_default_llm_client_propagates_max_tokens():
     assert client.anthropic.config.max_tokens == 50_000
     assert client.openai.config.max_tokens == 70_000
     assert client.openai.config.max_tokens_ceiling == 110_000
+
+
+def test_build_default_llm_client_propagates_reasoning_effort():
+    """Without this the per-tier effort in Settings does nothing, and both
+    tiers collapse onto the model's own default."""
+    from ptv_providers import build_default_llm_client
+
+    client = build_default_llm_client(
+        anthropic_api_key="sk-ant",
+        openai_api_key="sk-test",
+        claude_hard_model="claude-opus-4-7",
+        claude_light_model="claude-sonnet-4-6",
+        openai_hard_model="gpt-5.6-sol",
+        openai_light_model="gpt-5.6-sol",
+        openai_hard_reasoning_effort="xhigh",
+        openai_light_reasoning_effort="low",
+    )
+    assert client.openai.config.hard_reasoning_effort == "xhigh"
+    assert client.openai.config.light_reasoning_effort == "low"
+    assert client._openai_tier_for("claude-opus-4-7") == ("gpt-5.6-sol", "xhigh")
+    assert client._openai_tier_for("claude-sonnet-4-6") == ("gpt-5.6-sol", "low")
 
 
 def test_build_default_llm_client_keeps_dataclass_defaults_when_unset():
@@ -527,8 +615,8 @@ def test_build_default_llm_client_keeps_dataclass_defaults_when_unset():
         openai_api_key="sk-test",
         claude_hard_model="claude-opus-4-7",
         claude_light_model="claude-sonnet-4-6",
-        openai_hard_model="gpt-5",
-        openai_light_model="gpt-5-mini",
+        openai_hard_model="gpt-5.6-sol",
+        openai_light_model="gpt-5.6-sol",
     )
     assert client.anthropic.config.max_tokens == AnthropicConfig().max_tokens
     assert client.openai.config.max_tokens == OpenAIConfig().max_tokens

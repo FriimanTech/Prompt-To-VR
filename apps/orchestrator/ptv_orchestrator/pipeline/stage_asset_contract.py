@@ -38,6 +38,7 @@ from typing import Any
 from ptv_schemas import ProjectStage, ProjectStatus
 
 from .context import PipelineContext, StageResult
+from .proc import proc_hooks
 
 _STAGE = ProjectStage.asset_contract
 
@@ -64,7 +65,9 @@ def run(ctx: PipelineContext) -> StageResult:
             normalization = {}
 
     hints_by_id = {item.id: list(item.socket_hints) for item in manifest.items}
-    targets = _resolvable_assets(normalization, hints_by_id)
+    targets = _resolvable_assets(
+        normalization, hints_by_id, ctx.settings.repo_root
+    )
 
     report: dict[str, dict[str, Any]] = {}
     derived = 0
@@ -73,6 +76,7 @@ def run(ctx: PipelineContext) -> StageResult:
     if targets:
         tool = _ensure_tool(ctx)
         for asset_id, glb_path in targets:
+            ctx.raise_if_cancelled()
             entry = _derive(tool, glb_path, hints_by_id.get(asset_id, []))
             report[asset_id] = entry
             if entry.get("sockets"):
@@ -117,8 +121,18 @@ def run(ctx: PipelineContext) -> StageResult:
 def _resolvable_assets(
     normalization: dict[str, dict[str, Any]],
     hints_by_id: dict[str, list[str]],
+    repo_root: Path,
 ) -> list[tuple[str, Path]]:
-    """(asset_id, source GLB) pairs worth running the tool on."""
+    """(asset_id, ABSOLUTE source GLB) pairs worth running the tool on.
+
+    ``asset_normalization.json`` stores paths RELATIVE TO THE REPO ROOT, so
+    they must be resolved against ``repo_root`` -- never against the process
+    working directory. Resolving against the cwd is what silently produced
+    ``<repo>/apps/web/projects/...`` for a whole pipeline run when the
+    orchestrator happened to be started from the web app's directory: every
+    GLB "went missing", every asset was skipped, and the stage still reported
+    success. Every sibling stage anchors on ``repo_root``; so does this one.
+    """
     out: list[tuple[str, Path]] = []
     for asset_id in hints_by_id:
         info = normalization.get(asset_id) or {}
@@ -130,14 +144,16 @@ def _resolvable_assets(
         raw = info.get("glb_source") or info.get("glb_path")
         if not raw:
             continue
-        out.append((asset_id, Path(raw)))
+        path = Path(raw)
+        out.append((asset_id, path if path.is_absolute() else repo_root / path))
     return out
 
 
 def _derive(tool: Path, glb_path: Path, hints: list[str]) -> dict[str, Any]:
-    """Run ptv_glb_sockets on one GLB and shape its output for the contract."""
-    if not glb_path.is_absolute():
-        glb_path = Path.cwd() / glb_path
+    """Run ptv_glb_sockets on one GLB and shape its output for the contract.
+
+    ``glb_path`` is already absolute: see :func:`_resolvable_assets`.
+    """
     if not glb_path.exists():
         return {
             "status": "skipped",
@@ -229,6 +245,7 @@ def _ensure_tool(ctx: PipelineContext) -> Path:
         vcpkg_root=ctx.settings.vcpkg_root,
         build_target="ptv_glb_sockets",
         on_line=lambda m: ctx.emit(_STAGE, "log", m[:400]),
+        **proc_hooks(ctx),
     )
     if result.exit_code != 0:
         raise RuntimeError(

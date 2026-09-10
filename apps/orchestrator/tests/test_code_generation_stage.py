@@ -919,7 +919,7 @@ def test_configure_and_build_clean_first_appends_flag(monkeypatch) -> None:
 
     monkeypatch.setattr(cmake_runner, "find_cmake", lambda: "cmake")
 
-    def fake_run(cmd, *, cwd, on_line):
+    def fake_run(cmd, *, cwd, on_line, on_proc=None, on_proc_done=None):
         captured.append(list(cmd))
         return 0
 
@@ -948,7 +948,11 @@ def test_configure_and_build_without_clean_first_omits_flag(monkeypatch) -> None
     captured: list[list[str]] = []
     monkeypatch.setattr(cmake_runner, "find_cmake", lambda: "cmake")
     monkeypatch.setattr(
-        cmake_runner, "_run", lambda cmd, *, cwd, on_line: captured.append(list(cmd)) or 0
+        cmake_runner,
+        "_run",
+        lambda cmd, *, cwd, on_line, on_proc=None, on_proc_done=None: (
+            captured.append(list(cmd)) or 0
+        ),
     )
 
     cmake_runner.configure_and_build(

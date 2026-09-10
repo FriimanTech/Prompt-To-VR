@@ -1,12 +1,79 @@
-"""Prompt templates for each planning stage."""
+"""Prompt templates for each planning stage.
+
+Every planning prompt has to name the target device, because the engine
+builds two of them: a Windows ``.exe`` viewed over Quest Link (``pcvr``) and
+a standalone Android APK that runs on the headset's own Snapdragon GPU
+(``quest``). Those are not the same performance budget, so the prompts are
+templates carrying a ``DEVICE_TOKEN`` sentinel and the ``*_system()``
+accessors below substitute the real target read from
+``ProjectState.target_device``. The module-level ``*_SYSTEM`` constants are
+the ``pcvr`` rendering, kept so existing imports keep working.
+
+Substitution is a plain ``str.replace`` rather than ``str.format`` because
+several of these prompts contain literal C++ braces.
+"""
 
 from __future__ import annotations
 
+from ptv_schemas import TargetDevice
 
-BUILD_SPEC_SYSTEM = """You are the master planner for a local-first prompt-to-native-VR-game
-system. The runtime is a native C++ Vulkan + OpenXR executable on Windows
-PC VR (Meta Quest 3 via Quest Link). Your job is to turn the user's prompt
-into a BuildSpec that describes a FULL VR GAME, not a tech demo.
+
+DEVICE_TOKEN = "<<<PTV_TARGET_DEVICE>>>"
+ENTITY_BUDGET_TOKEN = "<<<PTV_MAX_ENTITIES>>>"
+
+_SHARED_RUNTIME = (
+    "The runtime is a native C++ VR engine (Vulkan + OpenXR + EnTT + Jolt\n"
+    "Physics) that ships a game as one of two standalone builds: a Quest APK\n"
+    "or a PC VR executable."
+)
+
+_PCVR_CLAUSE = f"""{_SHARED_RUNTIME}
+
+THIS BUILD TARGETS PC VR: a Windows .exe that renders on the PC's own GPU
+and is viewed on a Meta Quest 3 over Quest Link. You may assume a desktop
+GPU budget -- generous triangle and draw-call counts, many simultaneous
+animated characters, and assets loaded from the local filesystem."""
+
+_QUEST_CLAUSE = f"""{_SHARED_RUNTIME}
+
+THIS BUILD TARGETS QUEST STANDALONE: an Android APK (NativeActivity +
+Android OpenXR loader) sideloaded onto a Meta Quest 3 and run on the
+headset's own Snapdragon GPU, with NO PC in the loop at runtime. Budget
+accordingly: far tighter triangle and draw-call limits, fewer
+simultaneous animated characters (skinning and AI compete with the render
+thread for mobile CPU), and every asset has to fit inside the APK. Do not
+plan desktop-only techniques."""
+
+
+def device_clause(target_device: TargetDevice) -> str:
+    """The runtime-target paragraph shared by every planning prompt.
+
+    ``ProjectState.target_device`` is the single source of truth (the user
+    picks it in the UI at create time), so a planner has to be told which
+    of the two targets is actually being built: a Quest APK runs on a
+    mobile GPU and a PC VR .exe does not.
+    """
+    if target_device == TargetDevice.quest:
+        return _QUEST_CLAUSE
+    return _PCVR_CLAUSE
+
+
+def _with_device(template: str, target_device: TargetDevice) -> str:
+    """Substitute ``DEVICE_TOKEN``, or append the clause if absent."""
+    clause = device_clause(target_device)
+    if DEVICE_TOKEN in template:
+        return template.replace(DEVICE_TOKEN, clause)
+    return f"{template.rstrip()}\n\nTARGET DEVICE\n\n{clause}\n"
+
+
+_BUILD_SPEC_TMPL = """You are the master planner for a local-first prompt-to-native-VR-game
+system.
+
+<<<PTV_TARGET_DEVICE>>>
+
+Set ``target_device`` to match the target named above. Your job is to turn
+the user's prompt into a BuildSpec that describes a FULL VR GAME, not a
+tech demo.
 
 GAME SCALE. The schema now allows:
 * up to 50 scenes,
@@ -414,7 +481,7 @@ Numbers should be plausible for the fiction: a human walks ~1.4 m/s and runs
 """
 
 
-MECHANIC_PLAN_SYSTEM = """You are the mechanic planner. For every mechanic in the BuildSpec emit a
+_MECHANIC_PLAN_TMPL = """You are the mechanic planner. For every mechanic in the BuildSpec emit a
 matching MechanicPlanItem. There is NO upper bound on the number of plan
 items -- a full VR game can map to dozens of mechanics (movement,
 hover, flight, combat, each construct family, recharge, mission flow,
@@ -582,16 +649,23 @@ for ``base_builtin_id`` (builtin+config_code_edit).
 """
 
 
-SCENE_SPEC_SYSTEM = """You are the scene composer. Produce a SceneSpec for the supplied scene_id
+_SCENE_SPEC_TMPL = """You are the scene composer. Produce a SceneSpec for the supplied scene_id
 using entities that reference asset ids from the AssetManifest and mechanic
 bindings that reference mechanic ids from the MechanicPlan (either
 "builtin.*" or "generated.<code_task_id>").
 
-GAME SCALE. ``entities`` may contain up to 1 000 items. A real VR
-scene has the environment, the player rig, NPCs, enemies, interactive
-props, decorative props, lights, HUD anchors, and gameplay triggers
-all coexisting -- do not under-populate. Conversely, do not pad with
-filler: every entity should have a clear in-game purpose.
+YOU DO NOT AUTHOR THE ENVIRONMENT. The world -- terrain, buildings,
+rooms, lighting rigs, props that are part of the architecture, and all
+its decoration -- is written in C++ by the world architect and merged
+into the final scene by the deterministic scene compiler. Your job is
+the GAMEPLAY layer that lives inside that world: the player rig, the
+assets from the AssetManifest, NPCs and enemies, interactive and
+grabbable objects, HUD anchors, and gameplay triggers.
+
+SCENE SIZE. Emit at most <<<PTV_MAX_ENTITIES>>> entities. Every entity
+must have a clear in-game purpose -- do not pad with decorative filler
+(that is the world architect's job, and a scene large enough to run out
+of output tokens is a scene that fails to build at all).
 
 Asset-to-entity mapping (HARD REQUIREMENT). Every AssetItem in the
 AssetManifest MUST appear at least once in ``entities`` with an
@@ -599,12 +673,11 @@ appropriate ``mesh`` block, and the entity's role MUST honour the
 prompt's stated purpose for that asset. Use ``AssetItem.category`` plus
 ``style_notes`` to choose the role:
 
-  * ``environment`` -> the world the player spawns inside. Place the
-    entity at position [0,0,0] with rotation identity, ``physics.kind =
+  * ``environment`` (rare -- the manifest normally holds objects only,
+    since the environment is C++) -> if one is present anyway, place it
+    at position [0,0,0] with rotation identity, ``physics.kind =
     "static"``, ``physics.collision_shape = "mesh"``, and tags
-    ``["environment"]`` (add ``"hover_allowed"`` only if the prompt
-    permits flight). The PlayerSpawn transform MUST sit on/inside this
-    environment (typical y = player_height_meters from BuildSpec).
+    ``["environment"]``.
   * ``character`` whose ``style_notes`` describes the player body
     (Superman, Iron Man, Master Chief, etc.) -> attach to the player
     rig at [0, 0, 0] with tags ``["player_avatar"]`` and no physics
@@ -626,13 +699,10 @@ prompt's stated purpose for that asset. Use ``AssetItem.category`` plus
   * ``ui`` -> no physics, tags include ``["hud"]``, world-anchored
     (e.g. 1.2 m in front of the spawn at eye height).
 
-If the AssetManifest names a city / arena / room / plaza / terrain, that
-asset IS the environment the player spawns in -- never leave it floating
-unreferenced.
-
 Rules:
  * Use meters and radians. Player height defaults to 1.7 m.
- * The player spawn must be placed so the user faces the main action.
+ * The player spawn must be placed so the user faces the main action
+   (typical y = player_height_meters from BuildSpec).
  * Place reachable interactables within 0.3-1.2 m of the spawn.
  * Keep the scene deterministic (no random positions).
  * Reasonable scale: tables ~0.9 m tall, door frames ~2.1 m tall.
@@ -641,8 +711,18 @@ Rules:
    movement / locomotion mechanics bind to the player rig entity;
    construct / weapon mechanics bind to the player's hand entity;
    AI / enemy mechanics bind to the enemy entity; world triggers bind
-   to their trigger-zone entity. Forward the MechanicPlan ``config``
-   into ``params`` so the runtime sees the per-game tuning.
+   to their trigger-zone entity.
+ * ``param_overrides`` is for OVERRIDES ONLY. The scene compiler already
+   merges each mechanic's MechanicPlan ``config`` into the binding
+   params, so re-emitting that config wastes output and risks
+   contradicting it. Add an entry only when THIS entity genuinely needs
+   a different value (e.g. one of two weapons firing slower).
+ * Ids are lowercase snake_case (``paper_target_03``, not
+   ``PaperTarget03``).
+ * Encode each ``param_overrides`` value as JSON in ``value_json``:
+   ``0.35``, ``true``, ``[0,1,0]``, or a quoted string like ``"right"``.
+ * Sockets are derived from geometry by the asset_contract stage and
+   filled in by the scene compiler -- you do not emit them.
 """
 
 
@@ -654,9 +734,11 @@ acceptance test, scaling with the size of the game.
 """
 
 
-CODE_TASK_SYSTEM = """You are a careful C++20 developer producing one MECHANIC for the
-Prompt-To-Native-VR engine. The runtime is local-first native C++
-(Vulkan + OpenXR) on Windows PC VR (Meta Quest 3 via Quest Link).
+_CODE_TASK_TMPL = """You are a careful C++20 developer producing one MECHANIC for the
+Prompt-To-Native-VR engine.
+
+<<<PTV_TARGET_DEVICE>>>
+
 There is NO Unity, NO Unreal, NO Godot, NO browser-VR, NO WebXR --
 reject any technique or snippet that targets those runtimes even if
 web search surfaces them.
@@ -1615,7 +1697,7 @@ the macro called EXACTLY ONCE across the entire file set).
 # prompt sets the role, hard boundaries, and output contract.
 # ---------------------------------------------------------------------------
 
-WORLD_BUILDER_SYSTEM = """
+_WORLD_BUILDER_TMPL = """
 You are the VR WORLD ARCHITECT for Prompt-To-Native-VR. You write ALL the C++
 that builds a full, creative, walkable VR ENVIRONMENT for a native C++ VR engine
 (Vulkan + OpenXR + EnTT + Jolt). Be ambitious and specific to the prompt: build
@@ -1775,3 +1857,46 @@ MULTI-FILE C++ RULES (same as the engine's other codegen):
 OUTPUT: return the WorldAgentResult schema (files[] with full C++ contents,
 builder_id, plan, notes). No markdown fences inside file contents.
 """
+
+
+# ---------------------------------------------------------------------------
+# Device-aware accessors.
+#
+# Each stage calls the accessor with the project's ``target_device`` so the
+# prompt names the build that is actually happening. The ``*_SYSTEM``
+# constants below are the ``pcvr`` rendering, kept for existing imports and
+# for prompt-content regression tests.
+# ---------------------------------------------------------------------------
+
+
+def build_spec_system(target_device: TargetDevice) -> str:
+    return _with_device(_BUILD_SPEC_TMPL, target_device)
+
+
+def mechanic_plan_system(target_device: TargetDevice) -> str:
+    return _with_device(_MECHANIC_PLAN_TMPL, target_device)
+
+
+def scene_spec_system(
+    target_device: TargetDevice, *, max_entities: int = 120
+) -> str:
+    """The scene composer's instructions, with its entity budget baked in."""
+    return _with_device(
+        _SCENE_SPEC_TMPL.replace(ENTITY_BUDGET_TOKEN, str(max_entities)),
+        target_device,
+    )
+
+
+def code_task_system(target_device: TargetDevice) -> str:
+    return _with_device(_CODE_TASK_TMPL, target_device)
+
+
+def world_builder_system(target_device: TargetDevice) -> str:
+    return _with_device(_WORLD_BUILDER_TMPL, target_device)
+
+
+BUILD_SPEC_SYSTEM = build_spec_system(TargetDevice.pcvr)
+MECHANIC_PLAN_SYSTEM = mechanic_plan_system(TargetDevice.pcvr)
+SCENE_SPEC_SYSTEM = scene_spec_system(TargetDevice.pcvr)
+CODE_TASK_SYSTEM = code_task_system(TargetDevice.pcvr)
+WORLD_BUILDER_SYSTEM = world_builder_system(TargetDevice.pcvr)

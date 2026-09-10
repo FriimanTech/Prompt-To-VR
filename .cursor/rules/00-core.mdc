@@ -14,7 +14,8 @@ alwaysApply: true
   **vcpkg manifest mode**.
 - Do not add cloud services: no Supabase, S3, Temporal, cloud auth, multiplayer,
   speech-to-text, marketplace publishing, Steam packaging in this version.
-- Two build targets are supported via `BuildSpec.target_device`: `pcvr` (Windows
+- Two build targets are supported via `ProjectState.target_device` (chosen in
+  the New Project UI and mirrored into `BuildSpec.target_device`): `pcvr` (Windows
   .exe over Quest Link) and `quest` (standalone Android APK, Gradle + NDK,
   sideloaded via adb for LOCAL testing). Meta Store submission is out of scope.
 - Prefer determinism over agent improvisation. Prefer reusable built-in VR

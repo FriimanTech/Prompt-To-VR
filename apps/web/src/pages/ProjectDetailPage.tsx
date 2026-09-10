@@ -200,6 +200,25 @@ export default function ProjectDetailPage() {
     [id, qc],
   );
 
+  /** Stop whatever is running. Also the escape hatch for a project that
+   *  only LOOKS busy because the server was killed mid-stage. */
+  const abort = useCallback(() => {
+    setNotice("Aborting…");
+    api
+      .abort(id)
+      .then((r) => {
+        setNotice(
+          r.aborted
+            ? "Abort requested. The stage stops at its next checkpoint."
+            : r.reconciled
+              ? "No run was in flight; cleared the stale running state."
+              : "Nothing was running.",
+        );
+        void qc.invalidateQueries({ queryKey: ["project", id] });
+      })
+      .catch((e: unknown) => setNotice(`Could not abort: ${String(e)}`));
+  }, [id, qc]);
+
   useEffect(() => {
     if (!notice) return;
     const t = setTimeout(() => setNotice(""), 6000);
@@ -236,7 +255,9 @@ export default function ProjectDetailPage() {
                   ? "border-accent/40 bg-accent/10 text-accent"
                   : p.status === "failed"
                     ? "border-err/40 bg-err/10 text-err"
-                    : "border-white/10 bg-white/5 text-muted")
+                    : p.status === "aborted"
+                      ? "border-warn/40 bg-warn/10 text-warn"
+                      : "border-white/10 bg-white/5 text-muted")
               }
             >
               {busy ? `running · ${stageName(p.current_stage)}` : p.status}
@@ -274,6 +295,22 @@ export default function ProjectDetailPage() {
             disabled={busy}
             onPick={(s) => start({ resume_from: s }, `resume from ${stageName(s)}`)}
           />
+          <button
+            className={
+              busy
+                ? "ptv-button border-warn/40 text-warn"
+                : "ptv-button cursor-not-allowed opacity-40"
+            }
+            disabled={!busy}
+            title={
+              busy
+                ? "Stop the running stage now. Requests already sent to a provider cannot be recalled, but their artifacts are kept and a Resume will reuse them."
+                : "Nothing is running"
+            }
+            onClick={abort}
+          >
+            Abort
+          </button>
           <button
             className={
               canLaunch

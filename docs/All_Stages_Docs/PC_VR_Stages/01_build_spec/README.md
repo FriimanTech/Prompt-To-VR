@@ -39,7 +39,7 @@ This is called **schema-first development**: you define a data shape once (`pack
 
 - **Schema** — A formal description of allowed JSON fields and types. Pydantic models in `packages/schemas/ptv_schemas/` are the source of truth; JSON Schema files are exported for LLM structured output.
 - **Structured output** — The LLM must return JSON matching the schema, not free-form text. Claude receives the schema and validates the response before saving.
-- **`target_device`** — Either `pcvr` (Windows `.exe` over Quest Link) or `quest` (standalone Android APK). Set here and used at stage 16 to pick the build path.
+- **`target_device`** — Either `pcvr` (Windows `.exe` over Quest Link) or `quest` (standalone Android APK). **Not** an LLM decision: the value comes from the New Project toggle on `ProjectState.target_device`, and this stage overwrites whatever the model returned with it. The system prompt names the target so the rest of the plan is budgeted for the right GPU. Stage 16 branches on it.
 - **`prompt_id`** — A short slug derived from the prompt text (e.g. `green-lantern-vr`). Used to namespace generated files.
 
 ### End-to-end flow (plain language)
@@ -96,14 +96,14 @@ No repair loop, no parallelism, no disk skip — every successful run re-calls t
 
 `pipeline/llm.py` wraps Anthropic + OpenAI. BuildSpec uses the **hard** model (`settings.claude_hard_model` → `claude-opus-4-7`). The model must return JSON matching the exported Pydantic schema — not markdown, not prose.
 
-If the Anthropic key is missing or the API errors, the client transparently falls back to OpenAI (`openai_hard_model`). From this stage's perspective both paths look identical: `generate_json()` → dict → `model_validate()`.
+If the Anthropic key is missing or the API errors, the client transparently falls back to OpenAI (`openai_hard_model`, `gpt-5.6-sol` at `openai_hard_reasoning_effort` = `high`). From this stage's perspective both paths look identical: `generate_json()` → dict → `model_validate()`.
 
 ### BuildSpec fields and who reads them
 
 | Field | Downstream consumer |
 |-------|---------------------|
 | `prompt_id` | npc_plan, namespaces in `engine/generated/` |
-| `target_device` | Orchestrator picks `_PCVR_TAIL` vs `_QUEST_TAIL` at stage 16 |
+| `target_device` | Mirror of `ProjectState.target_device`; the orchestrator picks `_PCVR_TAIL` vs `_QUEST_TAIL` at stage 16 from the project state |
 | `title` | scene.json, Windows exe name (`PTV_APP_NAME`), Quest app label |
 | `scenes[]` | scene_spec (one composer per scene), scene_compile |
 | `mechanics[]` | mechanic_plan (must align 1:1 by id) |

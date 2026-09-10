@@ -80,7 +80,7 @@ configure-and-builds in parallel are cheap.
 The steps, per environment:
 
 1. Build the **world architect** agent (`world_agent.py`) via the OpenAI Agents
-   SDK: model `world_model` (default `gpt-5.5`), `ModelSettings(reasoning=
+   SDK: model `world_model` (default `gpt-5.6-sol`), `ModelSettings(reasoning=
    Reasoning(effort=world_reasoning_effort))` (default `high`), `WebSearchTool`
    enabled, a per-environment `Session`, `max_turns = world_agent_max_turns`.
 2. Hand it `engine/world_author_guide.md` (the "understand the engine" input),
@@ -262,8 +262,8 @@ Source: `engine/worldgen/samples/starter_city.cpp`.
 
 `apps/orchestrator/ptv_orchestrator/settings.py`:
 
-- `world_model` (default `gpt-5.5`)
-- `world_reasoning_effort` (default `high`; one of none|minimal|low|medium|high|xhigh;
+- `world_model` (default `gpt-5.6-sol`)
+- `world_reasoning_effort` (default `high`; gpt-5.6 accepts none|low|medium|high|xhigh|max;
   keep at `high`/`xhigh` — `medium` risks first-try compile failures in the generated C++)
 - `world_max_repair_rounds` (default 6, **per environment**)
 - `world_agent_max_turns` (default 80)

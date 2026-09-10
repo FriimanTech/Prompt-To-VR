@@ -1,15 +1,23 @@
 """OpenAIClient: ChatGPT fallback for Claude.
 
-Verified April 2026:
-    * Best code-gen model: ``gpt-5.3-codex`` (Responses API only).
-    * Broadly-available hard model via Chat Completions: ``gpt-5`` (400K
-      context, reasoning model, supports Structured Outputs).
-    * Broadly-available light model via Chat Completions: ``gpt-5-mini``.
+Verified September 2026:
+    * Both tiers are ``gpt-5.6-sol``: the GPT-5.6 flagship, ~1.05M context
+      and 128K max output. The tiers differ by REASONING EFFORT rather than
+      by model -- ``hard_reasoning_effort`` for the Opus-equivalent path and
+      ``light_reasoning_effort`` for the Sonnet-equivalent one.
+    * ``reasoning.effort`` on 5.6 accepts ``none | low | medium (default) |
+      high | xhigh | max``. ``minimal`` was valid on gpt-5 and is GONE in
+      5.6, so passing it now returns a 400.
     * Python SDK: ``openai`` (``pip install openai``).
     * Structured outputs: we use ``response_format={"type": "json_object"}``
       plus the JSON Schema embedded in the system prompt. The caller
       re-validates with Pydantic, which matches how the Anthropic client
       behaves.
+
+This client talks to **Chat Completions**, which is fine for 5.6 because we
+send no tools. OpenAI's 5.6 guidance is that reasoning combined with
+*function tools* requires the Responses API; the tool-using stages
+(world generation, codegen) go through the Agents SDK, which uses Responses.
 
 Reasoning models (``gpt-5``, ``gpt-5-mini``, ``gpt-5-nano``, ``o1``, ``o3``,
 ``o4*``, and ``gpt-5-codex``) REJECT the following sampling parameters when
@@ -65,8 +73,16 @@ def is_reasoning_model(model: str | None) -> bool:
 @dataclass(frozen=True)
 class OpenAIConfig:
     api_key: str | None = None
-    hard_model: str = "gpt-5"
-    light_model: str = "gpt-5-mini"
+    hard_model: str = "gpt-5.6-sol"
+    light_model: str = "gpt-5.6-sol"
+
+    # Per-tier reasoning effort. With both tiers on the same model this is
+    # what actually distinguishes them, so it is not optional bookkeeping.
+    # ``light`` is ``medium`` rather than ``low`` because the light tier
+    # serves asset_manifest, the call that decides which assets get rigged
+    # and animated -- i.e. the one that spends Tripo credits.
+    hard_reasoning_effort: str = "high"
+    light_reasoning_effort: str = "medium"
 
     # Reasoning models (gpt-5, o1/o3/o4, gpt-5-codex, ...) spend tokens on
     # invisible "reasoning" output BEFORE they emit the final answer.
@@ -82,9 +98,9 @@ class OpenAIConfig:
     max_tokens: int = 96_000
 
     # Hard upper bound on the auto-retry doubling logic in
-    # ``OpenAIClient._call_with_length_retry``. ``gpt-5`` supports up to
-    # ~128K output tokens; the ceiling guards against runaway costs and
-    # respects the model's hard limit.
+    # ``OpenAIClient._call_with_length_retry``. 128K is exactly
+    # ``gpt-5.6-sol``'s documented max output, so the ceiling guards against
+    # runaway costs and matches the model's hard limit.
     max_tokens_ceiling: int = 128_000
 
     # Per-request timeout in seconds, passed to ``openai.OpenAI(timeout=...)``.
@@ -114,8 +130,14 @@ class OpenAIConfig:
     def from_env(cls) -> "OpenAIConfig":
         return cls(
             api_key=os.environ.get("OPENAI_API_KEY"),
-            hard_model=os.environ.get("OPENAI_HARD_MODEL", "gpt-5"),
-            light_model=os.environ.get("OPENAI_LIGHT_MODEL", "gpt-5-mini"),
+            hard_model=os.environ.get("OPENAI_HARD_MODEL", "gpt-5.6-sol"),
+            light_model=os.environ.get("OPENAI_LIGHT_MODEL", "gpt-5.6-sol"),
+            hard_reasoning_effort=os.environ.get(
+                "OPENAI_HARD_REASONING_EFFORT", "high"
+            ),
+            light_reasoning_effort=os.environ.get(
+                "OPENAI_LIGHT_REASONING_EFFORT", "medium"
+            ),
             max_tokens=_int_env("OPENAI_MAX_TOKENS", 96_000),
             max_tokens_ceiling=_int_env(
                 "OPENAI_MAX_TOKENS_CEILING", 128_000
@@ -177,11 +199,12 @@ class OpenAIClient:
         Caller is expected to re-validate the returned ``data`` against a
         Pydantic model, which catches any drift in practice.
 
-        ``reasoning_effort`` (``minimal`` | ``low`` | ``medium`` | ``high``)
-        is passed through only for reasoning models that accept it. A lower
-        effort dramatically cuts wall-clock on mapping-style tasks (where the
-        model does not need deep chain-of-thought), which is the main lever
-        against timeouts on large structured outputs.
+        ``reasoning_effort`` (on gpt-5.6: ``none`` | ``low`` | ``medium`` |
+        ``high`` | ``xhigh`` | ``max``) is passed through only for reasoning
+        models that accept it. A lower effort dramatically cuts wall-clock on
+        mapping-style tasks (where the model does not need deep
+        chain-of-thought), which is the main lever against timeouts on large
+        structured outputs.
         """
 
         self._ensure_sdk()
@@ -232,8 +255,15 @@ class OpenAIClient:
         model: str | None = None,
         max_tokens: int | None = None,
         temperature: float = 0.1,
+        reasoning_effort: str | None = None,
     ) -> StructuredCall:
-        """Free-form text / code call (no schema)."""
+        """Free-form text / code call (no schema).
+
+        ``reasoning_effort`` behaves exactly as in :meth:`generate_json`.
+        It matters more here, not less: writing code is the workload that
+        benefits most from reasoning, and omitting the parameter leaves the
+        model on its own default.
+        """
 
         self._ensure_sdk()
         client = self._make_client()
@@ -248,6 +278,8 @@ class OpenAIClient:
         }
         if not is_reasoning_model(used_model):
             kwargs["temperature"] = temperature
+        elif reasoning_effort:
+            kwargs["reasoning_effort"] = reasoning_effort
 
         resp = self._call_with_length_retry(
             client,

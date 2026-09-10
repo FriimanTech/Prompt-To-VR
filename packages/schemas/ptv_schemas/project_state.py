@@ -55,6 +55,11 @@ class ProjectStatus(str, Enum):
     paused = "paused"
     succeeded = "succeeded"
     failed = "failed"
+    # The user pressed Abort, or the orchestrator was restarted mid-run.
+    # Distinct from ``failed`` because nothing is broken: the project is
+    # immediately re-runnable, and the UI says so instead of showing an
+    # error the user has to interpret.
+    aborted = "aborted"
 
 
 class StageRecord(StrictModel):

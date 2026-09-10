@@ -33,15 +33,16 @@ VR game into a **native C++ executable** (PC VR over Quest Link) or a
 ## Pipeline summary (17 runnable stages)
 
 Shared stages **1–15** are identical for `pcvr` and `quest`. Only **stage 16**
-branches on `BuildSpec.target_device`.
+branches on the device, read from `ProjectState.target_device` (the create-time
+toggle, mirrored into `BuildSpec.target_device`).
 
 ```
 prompt
   →  1. BuildSpec (Claude Opus)
   →  2. AssetManifest (Claude Sonnet)     # objects only; environment is C++
-  →  3. NPC plan (OpenAI gpt-5.5)         # animate vs slide; factions; reconciles manifest
-  →  4. MechanicPlan (OpenAI gpt-5.5)      # reuse-first; CodeTask DAG
-  →  5. SceneSpec (OpenAI gpt-5.5, per scene)
+  →  3. NPC plan (OpenAI gpt-5.6-sol)     # animate vs slide; factions; reconciles manifest
+  →  4. MechanicPlan (OpenAI gpt-5.6-sol)  # reuse-first; CodeTask DAG
+  →  5. SceneSpec (OpenAI gpt-5.6-sol, per scene)
   →  6. Reference images (Gemini)
   →  7. Tripo image-to-3D (textured + PBR)
   →  8. Auto-rigging (Tripo rig-check + rig)

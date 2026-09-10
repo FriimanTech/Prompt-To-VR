@@ -55,7 +55,7 @@ Each mechanic entry has a **classification**, optional config params, optional `
 
 1. Load BuildSpec, manifest, npc_plan.
 2. Append live **engine catalog** text to the planner prompt.
-3. Run **MechanicPlanner** (OpenAI Agents SDK, `gpt-5.5`).
+3. Run **MechanicPlanner** (OpenAI Agents SDK, `gpt-5.6-sol`).
 4. Validate bindings with `validate_bindings()`.
 5. Fail loudly on hard binding conflicts; emit advisory warnings otherwise.
 6. Save `mechanic_plan.json` with reuse vs generate counts.
@@ -109,7 +109,7 @@ Reads build_spec, manifest, npc_plan; writes `mechanic_plan.json`.
 
 ### Settings
 
-`mechanic_plan_model` (gpt-5.5), `mechanic_plan_reasoning_effort` (medium), `mechanic_plan_agent_max_turns`
+`mechanic_plan_model` (gpt-5.6-sol), `mechanic_plan_reasoning_effort` (high), `mechanic_plan_verbosity` (medium), `mechanic_plan_agent_max_turns`, `mechanic_plan_max_retries`
 
 ### Hub mechanics and DAG
 

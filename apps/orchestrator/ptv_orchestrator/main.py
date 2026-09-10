@@ -2,11 +2,40 @@
 
 from __future__ import annotations
 
+import sys
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from .api.routes import router
+from .runs import reconcile_interrupted_runs
 from .settings import get_settings
+from .storage import ProjectStore
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    """Repair projects the previous process left mid-run.
+
+    ``ProjectState.status`` lives on disk while the in-flight run registry
+    lives in memory, so Ctrl+C during a stage used to leave ``running``
+    persisted with nothing running -- and the web panel disables every
+    button while a project claims to be running, locking the user out of
+    their own project until they hand-edited the JSON. A process that has
+    just started owns no runs, so anything still marked running is by
+    definition a leftover.
+    """
+    settings = get_settings()
+    repaired = reconcile_interrupted_runs(ProjectStore(settings.projects_dir))
+    if repaired:
+        print(
+            "[startup] cleared interrupted run state for "
+            f"{len(repaired)} project(s): {', '.join(repaired)}",
+            file=sys.stderr,
+        )
+    yield
+
 
 app = FastAPI(
     title="Prompt-To-Native-VR orchestrator",
@@ -16,6 +45,7 @@ app = FastAPI(
         " Runs Claude planning, Imagen/Gemini image generation, Tripo"
         " image-to-3D, deterministic scene compile, and CMake builds."
     ),
+    lifespan=lifespan,
 )
 
 _settings = get_settings()

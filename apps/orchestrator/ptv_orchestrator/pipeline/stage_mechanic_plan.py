@@ -1,6 +1,6 @@
 """Stage 3: BuildSpec + AssetManifest -> MechanicPlan (OpenAI Agents SDK).
 
-The planner is an agent (gpt-5.5 + WebSearchTool), not a single LLM call.
+The planner is an agent (gpt-5.6-sol, no tools), not a single LLM call.
 It is reuse-first: at runtime we append the engine catalog (built-in
 mechanics + mechanics promoted from past games) so the agent classifies
 each mechanic against that catalog before flagging anything as "generate".
@@ -40,7 +40,7 @@ from .mechanic_plan_agent import (
     MechanicPlanner,
     build_planner_message,
 )
-from .prompts import MECHANIC_PLAN_SYSTEM
+from .prompts import mechanic_plan_system
 
 
 def run(ctx: PipelineContext) -> StageResult:
@@ -70,11 +70,16 @@ def run_with_planner(
 
     if planner is None:
         planner = MechanicPlanner(
-            instructions=MECHANIC_PLAN_SYSTEM,
+            instructions=mechanic_plan_system(state.target_device),
             model=ctx.settings.mechanic_plan_model,
             reasoning_effort=ctx.settings.mechanic_plan_reasoning_effort,
+            verbosity=ctx.settings.mechanic_plan_verbosity,
             max_turns=ctx.settings.mechanic_plan_agent_max_turns,
             session_id=f"ptv-mechanic-plan-{ctx.project_id}",
+            max_retries=ctx.settings.mechanic_plan_max_retries,
+            log=lambda text: ctx.store.append_log(
+                ctx.project_id, "mechanic_plan", text
+            ),
         )
 
     npc_plan = ctx.npc_plan or ctx.store.load_npc_plan(ctx.project_id)

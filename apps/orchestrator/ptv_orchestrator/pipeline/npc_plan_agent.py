@@ -15,6 +15,12 @@ from typing import Callable, Optional
 
 from ptv_schemas import NpcPlan
 
+from .agent_output_capture import (
+    MAX_LOGGED_OUTPUT_CHARS,
+    diagnose_output_failure,
+    make_capturing_schema,
+)
+
 
 @dataclass
 class NpcPlanAgentInput:
@@ -33,9 +39,23 @@ class NpcPlanAgentInput:
 
 RunnerFn = Callable[[str], NpcPlan]
 
+LogFn = Callable[[str], None]
+"""Sink for per-attempt diagnostics (the stage writes logs/npc_plan.log)."""
+
 
 class NpcPlanAgentError(RuntimeError):
     """Raised when the agent run fails or returns an unusable result."""
+
+
+class NpcPlanOutputError(NpcPlanAgentError):
+    """The model produced output that did not validate."""
+
+    def __init__(
+        self, message: str, *, issues: list[str], truncated: bool = False
+    ) -> None:
+        super().__init__(message)
+        self.issues = issues
+        self.truncated = truncated
 
 
 class NpcDirector:
@@ -45,35 +65,67 @@ class NpcDirector:
         self,
         *,
         instructions: str,
-        model: str = "gpt-5.5",
+        model: str = "gpt-5.6-sol",
         reasoning_effort: str = "high",
+        verbosity: str = "medium",
         max_turns: int = 30,
         session_id: str = "ptv-npc-plan",
         runner: Optional[RunnerFn] = None,
+        log: Optional[LogFn] = None,
+        max_retries: int = 1,
     ) -> None:
         self.instructions = instructions
         self.model = model
         self.reasoning_effort = reasoning_effort
+        self.verbosity = verbosity
         self.max_turns = max_turns
         self.session_id = session_id
+        self.log = log
+        self.max_retries = max_retries
         self._runner = runner
+
+    def _log(self, text: str) -> None:
+        if self.log is not None:
+            self.log(text)
 
     def run(self, message: str) -> NpcPlan:
         if self._runner is None:
             self._runner = self._build_default_runner()
-        result = self._runner(message)
-        if not isinstance(result, NpcPlan):
-            raise NpcPlanAgentError(
-                f"runner returned {type(result).__name__}, expected NpcPlan"
-            )
-        return result
+
+        attempts = max(0, int(self.max_retries)) + 1
+        last: NpcPlanAgentError | None = None
+        for attempt in range(attempts):
+            msg = message
+            if attempt > 0 and isinstance(last, NpcPlanOutputError):
+                bullets = "\n".join(f"- {i}" for i in last.issues) or "- (unspecified)"
+                msg = (
+                    "Your previous answer did not match the schema. Fix ALL "
+                    "of these and return the COMPLETE NpcPlan:\n"
+                    f"{bullets}\n\n{message}"
+                )
+                self._log(f"retry {attempt}/{attempts - 1} after: {last}")
+            elif attempt > 0:
+                self._log(f"retry {attempt}/{attempts - 1} (re-sending brief)")
+            try:
+                result = self._runner(msg)
+            except NpcPlanAgentError as exc:
+                last = exc
+                continue
+            if not isinstance(result, NpcPlan):
+                raise NpcPlanAgentError(
+                    f"runner returned {type(result).__name__}, expected NpcPlan"
+                )
+            return result
+
+        assert last is not None  # the loop only exits here after a failure
+        raise last
 
     # ------------------------------------------------------------------
     def _build_default_runner(self) -> RunnerFn:
         try:
+            import agents as agents_mod  # type: ignore
             from agents import (  # type: ignore
                 Agent,
-                AgentOutputSchema,
                 ModelSettings,
                 Runner,
             )
@@ -85,9 +137,10 @@ class NpcDirector:
                 "apps/orchestrator`."
             ) from exc
 
-        # max_length constraints on the nested lists are incompatible with
-        # OpenAI strict JSON schema mode; Pydantic still validates the result.
-        output_schema = AgentOutputSchema(NpcPlan, strict_json_schema=False)
+        # ``NpcPlan`` is not strict-schema compatible, so Pydantic is what
+        # validates the result; the capturing wrapper keeps the raw output
+        # around so a failure can name the offending field.
+        output_schema = make_capturing_schema(agents_mod, NpcPlan, strict=False)
 
         agent = Agent(
             name=f"ptv-npc-director-{self.session_id}",
@@ -95,24 +148,43 @@ class NpcDirector:
             model=self.model,
             model_settings=ModelSettings(
                 reasoning=Reasoning(effort=self.reasoning_effort),
-                verbosity="medium",
+                verbosity=self.verbosity,
             ),
             output_type=output_schema,
         )
 
         def _run(message: str) -> NpcPlan:
+            output_schema.reset()
+            self._log(
+                f"turn: model={self.model} effort={self.reasoning_effort} "
+                f"message={len(message)} chars"
+            )
             try:
                 run_result = Runner.run_sync(
                     agent, message, max_turns=self.max_turns
                 )
+                plan = run_result.final_output_as(NpcPlan)
             except Exception as exc:  # pragma: no cover - live SDK
-                raise NpcPlanAgentError(f"Agents SDK run failed: {exc}") from exc
-            try:
-                return run_result.final_output_as(NpcPlan)
-            except Exception as exc:  # pragma: no cover - live SDK
-                raise NpcPlanAgentError(
-                    f"Agents SDK returned non-conforming output: {exc}"
-                ) from exc
+                raw = output_schema.last_raw
+                if raw is not None:
+                    self._log(
+                        f"FAILED; raw model output ({len(raw)} chars) follows:\n"
+                        f"{raw[:MAX_LOGGED_OUTPUT_CHARS]}"
+                    )
+                diagnosis = diagnose_output_failure(raw, exc, NpcPlan)
+                self._log(f"FAILED: {diagnosis.message}")
+                for issue in diagnosis.issues:
+                    self._log(f"  issue: {issue}")
+                if diagnosis.repairable:
+                    raise NpcPlanOutputError(
+                        diagnosis.message,
+                        issues=diagnosis.issues,
+                        truncated=diagnosis.truncated,
+                    ) from exc
+                raise NpcPlanAgentError(diagnosis.message) from exc
+
+            self._log(f"ok: {len(plan.npcs)} npc(s)")
+            return plan
 
         return _run
 

@@ -3,6 +3,17 @@
 Every entry below has been triggered at least once while bringing up this
 repo on a fresh Windows 11 + VS 2026 box.
 
+## The UI says a stage is running, but nothing is running
+
+This happened when the orchestrator was killed (Ctrl+C, or a `--reload`
+restart) while a stage was in flight: `ProjectState.status` is persisted while
+the in-flight run registry is not, so the project claimed to be busy forever
+and the panel disabled every button.
+
+The orchestrator now reconciles this at startup, so restarting the server
+clears it. The **Abort** button does the same thing on demand. See
+[`run-lifecycle.md`](run-lifecycle.md).
+
 ## CMake says "Visual Studio 18 2026 could not find any instance"
 
 - Confirm VS Community 2026 is installed (not just 2022).
