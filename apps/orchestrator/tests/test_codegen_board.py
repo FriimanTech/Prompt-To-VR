@@ -320,3 +320,108 @@ def test_files_written_and_exports_persisted(tmp_path: Path) -> None:
     assert row2 is not None
     assert row2["files_written"] == ["engine/generated/mechanics/proj/a.cpp"]
     assert row2["exports"] == {"registered_mechanic_id": "generated.a"}
+
+# ---------------------------------------------------------------------------
+# Socket-contract invalidation
+#
+# The board is what makes a resume cheap, and it is also what made a FIX
+# invisible: with every task ``done``, re-running code_generation claimed
+# nothing and the socket-blind C++ survived.
+# ---------------------------------------------------------------------------
+
+
+def _finish(board: CodegenBoard, task_id: str, repo_root: Path, body: str):
+    """Claim + complete ``task_id``, writing ``body`` as its generated C++."""
+    board.atomic_claim_next_pending("worker-0")
+    rel = f"engine/generated/mechanics/proj/{task_id}.cpp"
+    path = repo_root / rel
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(body, encoding="utf-8")
+    board.mark_done(task_id, files_written=[rel])
+
+
+def test_unchanged_socket_contract_resets_nothing(tmp_path: Path) -> None:
+    """The order the stage actually uses: fingerprint first, then generate."""
+    repo = tmp_path / "repo"
+    board = CodegenBoard.load_or_init(tmp_path, _plan(("a", [])))
+    sockets = {"pistol": ["grip", "muzzle"]}
+    board.invalidate_on_socket_change(sockets, repo)
+    _finish(board, "a", repo, "ctx.sockets->socket_world(self, \"muzzle\");")
+
+    # A resume against the same contract must stay cheap.
+    assert board.invalidate_on_socket_change(sockets, repo) == []
+    assert board.task("a")["status"] == "done"
+
+
+def test_changed_socket_contract_resets_only_socket_readers(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    board = CodegenBoard.load_or_init(tmp_path, _plan(("shoot", []), ("hud", [])))
+    board.invalidate_on_socket_change({}, repo)
+    _finish(board, "shoot", repo, "ctx.sockets->socket_world(weapon, \"muzzle\");")
+    _finish(board, "hud", repo, "draw_score_panel();")
+
+    reset = board.invalidate_on_socket_change({"pistol": ["muzzle"]}, repo)
+
+    # The HUD never touched a socket, so it cannot have been written
+    # differently because of one -- re-billing it would be waste.
+    assert reset == ["shoot"]
+    assert board.task("shoot")["status"] == "pending"
+    assert board.task("hud")["status"] == "done"
+
+
+def test_declared_required_sockets_counts_even_without_source(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    plan = _plan(("recoil", []))
+    plan.items[0].code_task.required_sockets = ["grip"]
+    board = CodegenBoard.load_or_init(tmp_path, plan)
+    board.invalidate_on_socket_change({}, repo)
+    _finish(board, "recoil", repo, "// no socket calls in this file")
+
+    assert board.invalidate_on_socket_change({"rifle": ["grip"]}, repo) == [
+        "recoil"
+    ]
+
+
+def test_dependents_of_a_reset_task_are_reset_and_reblocked(tmp_path: Path) -> None:
+    """A task written against an export that is about to change has to be
+    rewritten too, and must wait its turn in the DAG."""
+    repo = tmp_path / "repo"
+    board = CodegenBoard.load_or_init(
+        tmp_path, _plan(("hub", []), ("profile", ["hub"]))
+    )
+    board.invalidate_on_socket_change({}, repo)
+    _finish(board, "hub", repo, "ctx.sockets->has_socket(weapon, \"muzzle\");")
+    _finish(board, "profile", repo, "use_hub_api();")
+
+    reset = board.invalidate_on_socket_change({"pistol": ["muzzle"]}, repo)
+
+    assert reset == ["hub", "profile"]
+    assert board.task("hub")["status"] == "pending"
+    assert board.task("profile")["status"] == "blocked"
+
+
+def test_legacy_board_without_a_fingerprint_is_invalidated(tmp_path: Path) -> None:
+    """The case that motivated all of this: sixteen done tasks generated
+    against an EMPTY contract, and no record that they ever saw one."""
+    repo = tmp_path / "repo"
+    board = CodegenBoard.load_or_init(tmp_path, _plan(("shoot", [])))
+    _finish(board, "shoot", repo, "ctx.sockets->socket_world(weapon, \"muzzle\");")
+    assert "socket_fingerprint" not in board.snapshot()
+
+    assert board.invalidate_on_socket_change({"pistol": ["muzzle"]}, repo) == [
+        "shoot"
+    ]
+    assert board.has_remaining_work()
+
+
+def test_deleted_generated_file_is_treated_as_a_socket_reader(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    board = CodegenBoard.load_or_init(tmp_path, _plan(("a", [])))
+    board.invalidate_on_socket_change({}, repo)
+    _finish(board, "a", repo, "no sockets here")
+    (repo / "engine/generated/mechanics/proj/a.cpp").unlink()
+
+    # Unverifiable, and regenerating is the cheap side of that bet.
+    assert board.invalidate_on_socket_change({"pistol": ["muzzle"]}, repo) == [
+        "a"
+    ]

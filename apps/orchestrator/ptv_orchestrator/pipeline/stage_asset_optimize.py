@@ -43,6 +43,80 @@ from ptv_schemas import (
 )
 
 from .context import PipelineContext, StageResult
+from .stage_asset_normalize import (
+    glb_rig_summary,
+    is_lod_output,
+    pick_primary_glb,
+)
+
+
+def _decimation_source(info: dict[str, Any], repo_root: Path) -> str:
+    """The mesh to decimate for one asset, never one of our own outputs.
+
+    Earlier runs of this stage recorded ``glb_source`` by copying whatever was
+    in ``glb_path`` at the time, which on a resume was already LOD0. Those
+    reports are on disk in real projects, so trusting the field blindly would
+    keep re-decimating a previous output. A path that appears in ``lod_paths``
+    is by definition ours, so when both fields point at our own output we
+    recover the authored mesh sitting in the asset directory instead.
+    """
+    lods = {str(p) for p in (info.get("lod_paths") or [])}
+
+    def is_ours(rel: str) -> bool:
+        # ``lod_paths`` is the precise answer, but a report written by an
+        # interrupted run can carry a LOD in ``glb_path`` without the list.
+        # The filename shape catches that too.
+        return rel in lods or is_lod_output(Path(rel))
+
+    candidate = info.get("glb_source")
+    if candidate and not is_ours(str(candidate)):
+        return str(candidate)
+    path = str(info["glb_path"])
+    if is_ours(path):
+        recovered = _authored_glb_beside(path, repo_root)
+        if recovered is not None:
+            return recovered
+    return path
+
+
+def _authored_glb_beside(rel_lod_path: str, repo_root: Path) -> str | None:
+    """The authored mesh in the same directory as a LOD file.
+
+    Defers to the normalizer's own precedence rather than re-listing candidate
+    filenames here, so a stage that has lost track of its input recovers
+    exactly the mesh the normalizer would have handed it -- including layouts
+    a hard-coded list would miss (``*_pbr.glb``, nested directories). LOD
+    outputs are excluded, or the recovery could hand back the very file it is
+    recovering from.
+    """
+    rel_dir = Path(rel_lod_path).parent
+    found = pick_primary_glb(repo_root / rel_dir, exclude_lods=True)
+    if found is None:
+        return None
+    try:
+        return str(found.relative_to(repo_root)).replace("\\", "/")
+    except ValueError:
+        return str(rel_dir / found.name).replace("\\", "/")
+
+
+def _source_fingerprint(source: Path, repo_root: Path) -> dict[str, Any]:
+    """Identity of the mesh a LOD chain was built from.
+
+    Path alone is not enough: ``asset_rigging`` and ``asset_animation`` write
+    ``model_rigged.glb`` / ``model_animated.glb`` beside ``model.glb`` and the
+    primary pick changes, while a re-rig of the same asset changes the bytes
+    under an unchanged name.
+    """
+    try:
+        st = source.stat()
+        size, mtime_ns = st.st_size, st.st_mtime_ns
+    except OSError:
+        size, mtime_ns = 0, 0
+    try:
+        rel = str(source.relative_to(repo_root)).replace("\\", "/")
+    except ValueError:
+        rel = source.name
+    return {"path": rel, "size": size, "mtime_ns": mtime_ns}
 
 
 def run(ctx: PipelineContext) -> StageResult:
@@ -117,9 +191,30 @@ def run(ctx: PipelineContext) -> StageResult:
     for asset_id in usable:
         ctx.raise_if_cancelled()
         info = report[asset_id]
-        src = ctx.settings.repo_root / info["glb_path"]
+        # ``glb_source`` is the authored mesh; ``glb_path`` is whatever the last
+        # run left behind, which on a resume is LOD0. Decimating that would
+        # rebuild LOD0 from itself -- and because the tool's skinned path is
+        # chosen by probing the INPUT for a skin, one such round trip turns a
+        # rigged avatar into a static mesh permanently.
+        source_rel = _decimation_source(info, ctx.settings.repo_root)
+        src = ctx.settings.repo_root / source_rel
         if not src.exists():
-            info["optimization"] = {"status": "missing_source"}
+            # Name the path and what IS in that directory. The bare
+            # "missing_source" this used to record gave a reader nothing to
+            # act on, and the usual cause -- a report pointing at a deleted
+            # LOD -- is obvious the moment the directory listing is visible.
+            present = sorted(
+                p.name for p in src.parent.glob("*.glb")
+            ) if src.parent.is_dir() else []
+            reason = (
+                f"source GLB not found: {source_rel}. GLBs present in that "
+                f"directory: {present or 'none'}"
+            )
+            info["optimization"] = {
+                "status": "missing_source",
+                "reason": reason,
+            }
+            ctx.emit(stage, "warning", f"{asset_id}: {reason}")
             failed += 1
             continue
 
@@ -150,7 +245,13 @@ def run(ctx: PipelineContext) -> StageResult:
         # The scene compiler resolves meshes through ``glb_path``; point it at
         # LOD0 so an un-decimated 500k-triangle mesh can never reach the
         # headset. The untouched source stays on disk under ``glb_source``.
-        info["glb_source"] = info["glb_path"]
+        #
+        # Record the mesh we ACTUALLY decimated, which repairs the field as
+        # well as setting it. A report written before this stage was
+        # idempotent has ``glb_source`` pointing at LOD0; leaving that in
+        # place means every future run has to re-derive the recovery, and any
+        # other stage reading the field still gets a wrong answer.
+        info["glb_source"] = source_rel
         info["glb_path"] = lod_info["lod_paths"][0]
         info["lod_paths"] = lod_info["lod_paths"]
         info["triangle_counts"] = lod_info["triangle_counts"]
@@ -216,14 +317,24 @@ def _build_lod_chain(
     targets = [
         max(1, int(round(budget * ratio))) for ratio in profile.lod_ratios
     ]
+    fingerprint = _source_fingerprint(source, repo_root)
 
     if stamp_path.exists():
         try:
             prev = json.loads(stamp_path.read_text(encoding="utf-8"))
         except Exception:  # noqa: BLE001 - corrupt stamp, just rebuild
             prev = {}
-        if prev.get("targets") == targets and all(
-            (repo_root / p).exists() for p in prev.get("lod_paths", [])
+        # The source has to match, not just the targets. ``asset_rigging`` and
+        # ``asset_animation`` REPLACE the primary GLB with a rigged/animated
+        # one beside it, leaving the budget untouched -- so a targets-only
+        # check reuses the chain built from the un-rigged mesh and the
+        # skeleton never reaches the scene.
+        if (
+            prev.get("targets") == targets
+            and prev.get("source") == fingerprint
+            and all(
+                (repo_root / p).exists() for p in prev.get("lod_paths", [])
+            )
         ):
             prev["reused"] = True
             return prev
@@ -281,8 +392,24 @@ def _build_lod_chain(
             str(out_file.relative_to(repo_root)).replace("\\", "/")
         )
 
+    # A rigged source that produced an un-rigged chain means the skeleton was
+    # dropped somewhere in decimation. Recording that as ``skinned: false``
+    # would be believed by every stage downstream: the scene compiler omits
+    # ``mesh.skinned``, the loader attaches no CSkeleton, and builtin.avatar_body
+    # / character_locomotion decline to pose the mesh -- a static statue where
+    # an animated character should be, with every stage reporting success.
+    rig = glb_rig_summary(source)
+    if rig["num_skins"] > 0 and not skinned:
+        raise RuntimeError(
+            f"{asset_id}: source {source.name} has {rig['num_skins']} skin(s) "
+            f"and {rig['joint_count']} joint(s), but the generated LOD chain "
+            "has none -- the skeleton was stripped during decimation. Refusing "
+            "to record an un-rigged chain for a rigged asset."
+        )
+
     stamp = {
         "targets": targets,
+        "source": fingerprint,
         "lod_paths": lod_paths,
         "triangle_counts": triangle_counts,
         "source_triangles": source_triangles,

@@ -53,6 +53,8 @@ This stage is also the **socket validator**: it is the only place that sees both
 - **World + gameplay layers** — `_merge_world_into_scene()` adds environment under gameplay entities.
 - **Asset safety-net** — `_default_entity_for_asset()` spawns manifest assets the SceneSpec agent forgot.
 - **SocketContractError** — Hard fail if a mechanic requires `"muzzle"` but contract lacks it.
+- **EquipSlotContractError** — Hard fail if a `builtin.equip` binding names a slot nothing declares.
+- **SceneAssetMismatchError** — Hard fail if a mesh names an asset absent from the manifest.
 - **Performance block** — `max_animated_agents`, LOD distances, AI tick rates forwarded to runtime.
 
 ### End-to-end flow (plain language)
@@ -91,6 +93,8 @@ This stage is also the **socket validator**: it is the only place that sees both
 | `_mesh_render_fields()` | Attach `lod_paths`, `skinned`, `animations`, `animation_speeds` |
 | `_sockets_in_meters()` | Scale unit-space contract by `target_scale_meters` |
 | `_check_required_sockets()` | Read codegen sidecars `required_sockets` vs contract — **SocketContractError** lists ALL violations |
+| `_check_equip_slots()` | Every `builtin.equip` binding names a slot some entity declares — **EquipSlotContractError** |
+| `_equip_slot_json()` | Flatten `EquipSlotSpec` into the `equip_slots[]` the runtime parses into `CEquipSlots` |
 | Materialize bindings | Copy mechanic_plan controller bindings + params into scene entities |
 
 ### Socket validator (hard fail)
@@ -119,6 +123,28 @@ For each entity with a bound mechanic that has a `code_task`:
 4. After all entities scanned, if any violations → raise `SocketContractError` with **full list**
 
 This is the only pipeline point that sees both halves of the socket contract.
+
+**Entities with no mesh are checked differently.** A shooting hub is bound to the player's hand, and a hand has no mesh by design — it reads the muzzle off whatever weapon is held *at runtime*, guarded by `ctx.sockets->has_socket(weapon, "muzzle")`. Demanding the socket sit on the bound entity's own asset turned every correctly written hub into a build failure. So:
+
+| Bound entity | Rule |
+|--------------|------|
+| has a mesh | the socket must exist on **that asset**, or hard fail (the original protection, unchanged) |
+| has no mesh | the socket must exist on **some asset referenced by the scene** — satisfied emits a `warning` naming the providers, unsatisfiable is still a hard fail |
+
+The guarantee "this socket exists somewhere in this game" survives; the false positive does not. `MECHANIC_PLAN_SYSTEM` states the matching rule for planners: `required_sockets` means sockets read on `self`, and a hub that resolves its target at runtime leaves it empty.
+
+### Equip slots (`_check_equip_slots()`)
+
+An equip **slot** is a place *on a wearer* (`hip_holster_r` on the player rig); a **socket** is a point *on an item* (`grip` on the pistol). They are not interchangeable, and the slot never belongs to the holster prop — the holster is set dressing, the slot is on the body.
+
+SceneSpec entities carry `equip_slots[]`, which this stage copies into `scene.json` and `SceneLoader` turns into `CEquipSlots`. Without that, `EquipMechanic::pick_slot_near()` finds no candidate and an authored holster silently accepts nothing. Two hard failures guard it:
+
+- a `builtin.equip` binding whose `params.slots` names a slot no entity in the scene declares
+- two entities declaring the same slot name
+
+### Meshes must name a real asset
+
+A mesh whose `asset_id` is absent from the current `AssetManifest` used to fall through to the SceneSpec's own `glb_path` and emit a dangling path into `scene.json`. That is now a `SceneAssetMismatchError` naming the offending `scene_spec.<scene_id>.json`, because the usual cause is a scene composed against a **previous** manifest.
 
 ### Asset safety-net (`_default_entity_for_asset`)
 

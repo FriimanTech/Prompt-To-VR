@@ -65,7 +65,7 @@ export const STAGE_GROUPS: { id: StageGroup; label: string; blurb: string }[] = 
     id: "assets",
     label: "Make the assets",
     blurb:
-      "Images, 3D models, rigs and animations. This is where the credits go.",
+      "Images, 3D models, rigs, animations, then normalization and sockets. Credits are spent here.",
   },
   {
     id: "build",
@@ -76,7 +76,8 @@ export const STAGE_GROUPS: { id: StageGroup; label: string; blurb: string }[] = 
   {
     id: "compile",
     label: "Optimize and compose",
-    blurb: "Deterministic. Fits the scene inside the device's budget.",
+    blurb:
+      "Deterministic. Decimate to LODs, then merge environments and gameplay into scene.json.",
   },
   {
     id: "ship",
@@ -165,10 +166,11 @@ const STAGES: StageMeta[] = [
   {
     id: "asset_normalization",
     step: 10,
-    label: "Asset validation",
+    label: "Asset normalization",
     group: "assets",
     cost: "free",
-    blurb: "Header, scale and collision checks. Changes no geometry.",
+    blurb:
+      "Validates every GLB (header, scale, collision, skinned flag) and writes asset_normalization.json. Changes no geometry.",
   },
   {
     id: "asset_contract",

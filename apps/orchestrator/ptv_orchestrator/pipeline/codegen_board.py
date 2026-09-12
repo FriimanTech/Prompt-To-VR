@@ -33,6 +33,7 @@ need an OS-level file lock here.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import threading
@@ -45,6 +46,29 @@ from ptv_schemas import MechanicPlan
 
 _VALID_STATES = {"pending", "blocked", "in_progress", "done", "failed"}
 
+# Source-level fingerprints of a task having consumed the socket contract.
+# A task whose generated C++ never mentions any of these cannot have been
+# written differently because of a socket, so a contract change leaves it
+# alone -- which is the difference between re-billing one mechanic and
+# re-billing sixteen.
+_SOCKET_API_MARKERS = ("ctx.sockets", "socket_world", "has_socket")
+
+
+def socket_fingerprint(sockets_by_asset: dict[str, list[str]]) -> str:
+    """Stable digest of "which asset offers which sockets".
+
+    Exactly the map the codegen agent is shown (see
+    ``CodegenAgentInput.sockets_by_asset``), so the digest changes precisely
+    when the agent's socket context would change.
+    """
+    payload = {
+        asset_id: sorted(names)
+        for asset_id, names in (sockets_by_asset or {}).items()
+        if names
+    }
+    blob = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:16]
+
 
 def _iso_now() -> str:
     return datetime.now(tz=timezone.utc).isoformat()
@@ -53,6 +77,29 @@ def _iso_now() -> str:
 def _deep_copy(value: Any) -> Any:
     """JSON round-trip copy: cheap, deterministic, no shared mutable state."""
     return json.loads(json.dumps(value))
+
+
+def _row_reads_sockets(row: dict[str, Any], repo_root: Path) -> bool:
+    """Did this task's generated C++ consume the socket contract?
+
+    Two sources, either sufficient: the CodeTask declared
+    ``required_sockets``, or the source the worker actually wrote mentions
+    the socket API. A file that has since been deleted counts as reading
+    them -- unverifiable, and regenerating is the cheap side of that bet.
+    """
+    if row.get("required_sockets"):
+        return True
+    for rel in row.get("files_written") or []:
+        path = Path(rel)
+        if not path.is_absolute():
+            path = repo_root / path
+        try:
+            text = path.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            return True
+        if any(marker in text for marker in _SOCKET_API_MARKERS):
+            return True
+    return False
 
 
 class CodegenBoard:
@@ -141,6 +188,9 @@ class CodegenBoard:
             # generate tasks. The board only tracks codegen tasks; a
             # planner dep on a builtin is a no-op for ordering.
             depends = [d for d in depends_raw if d in plan_codegen_ids and d != task_id]
+            required_sockets = list(
+                getattr(item.code_task, "required_sockets", None) or []
+            )
 
             if task_id not in seen_order:
                 order.append(task_id)
@@ -152,6 +202,7 @@ class CodegenBoard:
                     "mechanic_plan_item_id": item.id,
                     "status": "pending" if not depends else "blocked",
                     "depends_on": depends,
+                    "required_sockets": required_sockets,
                     "agent_id": None,
                     "claimed_at": None,
                     "completed_at": None,
@@ -165,6 +216,7 @@ class CodegenBoard:
             # terminal or in-flight task.
             row["mechanic_plan_item_id"] = item.id
             row["depends_on"] = depends
+            row["required_sockets"] = required_sockets
             if row.get("status") not in ("done", "failed", "in_progress"):
                 row["status"] = "pending" if not depends else "blocked"
 
@@ -372,6 +424,82 @@ class CodegenBoard:
             if reset:
                 self._save_locked()
             return reset
+
+    def invalidate_on_socket_change(
+        self,
+        sockets_by_asset: dict[str, list[str]],
+        repo_root: Path,
+    ) -> list[str]:
+        """Reset ``done`` tasks whose C++ depended on a socket map that moved.
+
+        The board is what makes a resume cheap, and it is also what makes a
+        FIX invisible: with all sixteen tasks ``done``, re-running
+        code_generation claims nothing and the stage no-ops, so socket-blind
+        C++ survives forever. Fingerprinting the contract into the board is
+        what turns "fix asset_contract, re-run codegen" into the thing it
+        looks like.
+
+        Only tasks that actually read sockets are reset -- by their declared
+        ``required_sockets`` or by their generated source mentioning the
+        socket API. A task that never touched a socket cannot have been
+        written differently because of one.
+
+        Returns the reset task ids, in ``task_order``.
+        """
+        fingerprint = socket_fingerprint(sockets_by_asset)
+        with self._lock:
+            previous = self._data.get("socket_fingerprint")
+            self._data["socket_fingerprint"] = fingerprint
+            if previous == fingerprint:
+                return []
+
+            # ``previous is None`` means the board predates this check, so
+            # there is no evidence those tasks ever saw this contract -- and
+            # in the case that motivated this, they had seen an EMPTY one.
+            tasks = self._data["tasks"]
+            order = list(self._data.get("task_order", []))
+
+            invalid = {
+                tid
+                for tid in order
+                if (tasks.get(tid) or {}).get("status") == "done"
+                and _row_reads_sockets(tasks[tid], repo_root)
+            }
+            # Transitive closure over ``depends_on``: a task written against
+            # an export that is about to change has to be rewritten too.
+            growing = True
+            while growing:
+                growing = False
+                for tid in order:
+                    row = tasks.get(tid)
+                    if row is None or tid in invalid:
+                        continue
+                    if row.get("status") != "done":
+                        continue
+                    if any(d in invalid for d in row.get("depends_on", [])):
+                        invalid.add(tid)
+                        growing = True
+
+            for tid in invalid:
+                tasks[tid].update(
+                    status="pending",
+                    agent_id=None,
+                    claimed_at=None,
+                    completed_at=None,
+                    error=None,
+                )
+            # Anything now waiting on a dep that is no longer done goes back
+            # to blocked, so the DAG order is preserved on the re-run.
+            done_ids = {
+                tid for tid, row in tasks.items() if row.get("status") == "done"
+            }
+            for tid in invalid:
+                row = tasks[tid]
+                if not all(d in done_ids for d in row.get("depends_on", [])):
+                    row["status"] = "blocked"
+
+            self._save_locked()
+            return [tid for tid in order if tid in invalid]
 
     def reset_failed(self) -> list[str]:
         """Reset ``failed`` tasks back to ``pending`` (or ``blocked`` if

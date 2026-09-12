@@ -177,7 +177,26 @@ def _claimed_run(
         # Swallowed deliberately: the user asked for this, and a traceback
         # in the server log would imply something went wrong.
     except Exception as exc:
-        _stamp(ctx, ProjectStatus.failed, str(exc)[:1000])
+        _stamp(ctx, ProjectStatus.failed, _describe(exc))
+        raise
+    except BaseException as exc:
+        # KeyboardInterrupt, SystemExit and asyncio.CancelledError derive from
+        # BaseException, not Exception, so a process teardown used to escape
+        # the arm above and leave a stage stamped with whatever the generic
+        # handler managed -- in practice an EMPTY message, which is
+        # indistinguishable from a real failure with a blank error.
+        #
+        # ``uvicorn --reload`` does exactly this on every .py edit: it kills
+        # the worker mid-stage while the build's own child process (a Gradle
+        # daemon, say) carries on and finishes. Saying so is the difference
+        # between "my pipeline is broken" and "re-run that stage".
+        _stamp(
+            ctx,
+            ProjectStatus.aborted,
+            f"interrupted: the server process was terminated mid-stage "
+            f"({_describe(exc)}). A dev-server reload does this on any code "
+            f"edit. Nothing is wrong with the project -- re-run the stage.",
+        )
         raise
     else:
         _settle(ctx)
@@ -186,16 +205,34 @@ def _claimed_run(
         registry.finish(project_id)
 
 
+def _describe(exc: BaseException) -> str:
+    """A message that is never empty, however the exception was raised.
+
+    ``str(exc)`` is blank for anything constructed without arguments --
+    ``SystemExit()``, ``CancelledError()``, a bare ``RuntimeError()`` -- and a
+    stage stamped ``failed`` with an empty message tells a reader nothing at
+    all. The type name alone is enough to separate a build error from a
+    process teardown.
+    """
+    text = str(exc).strip()
+    if text:
+        return f"{type(exc).__name__}: {text}"[:1000]
+    return type(exc).__name__
+
+
 def _stamp(ctx: PipelineContext, status: ProjectStatus, message: str) -> None:
     """Record a terminal status against whatever stage was current.
 
     Never raises: this runs while handling another exception, and losing the
     original error to a bookkeeping failure would be the worse outcome.
     """
+    text = (message or "").strip() or f"{status.value} (no detail reported)"
     try:
         state = ctx.store.load_state(ctx.project_id)
-        ctx.store.record_stage(state, state.current_stage, status, message=message)
-        ctx.emit(state.current_stage, status.value, message[:300])
+        ctx.store.record_stage(
+            state, state.current_stage, status, message=text[:1000]
+        )
+        ctx.emit(state.current_stage, status.value, text[:300])
     except Exception:  # pragma: no cover - defensive
         pass
 

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Dict, List, Optional
 
-from pydantic import Field
+from pydantic import Field, model_validator
 
 from .common import IdStr, QuatXYZW, StrictModel, Vec3
 
@@ -62,6 +62,25 @@ class PhysicsProps(StrictModel):
     collision_shape: str = Field(default="aabb", max_length=32)
     restitution: float = Field(default=0.2, ge=0.0, le=1.0)
     friction: float = Field(default=0.5, ge=0.0, le=2.0)
+
+    @model_validator(mode="after")
+    def _movable_bodies_need_mass(self) -> "PhysicsProps":
+        """A body that can move must weigh something.
+
+        ``mass_kg`` stays ``ge=0`` because 0 is meaningful on a static body --
+        it simply is not used. On a ``dynamic`` or ``kinematic`` body the
+        physics engine divides by it to build an inverse inertia tensor, and
+        Jolt asserts on the division. That assert is a breakpoint, which on a
+        Quest is SIGTRAP: three kinematic targets authored with mass 0 killed
+        a shipped APK during scene load with no error shown anywhere.
+
+        Lifted rather than rejected because 0 is an easy and reasonable thing
+        to write for a kinematic body -- it does mean "no force moves this" --
+        and the correct expression of that intent is the kind, not the mass.
+        """
+        if self.kind in ("dynamic", "kinematic") and self.mass_kg <= 0.0:
+            self.mass_kg = 1.0
+        return self
 
 
 class AttachmentRef(StrictModel):
@@ -124,6 +143,82 @@ class FactionProps(StrictModel):
     hostile_to: List[str] = Field(default_factory=list, max_length=8)
 
 
+class EquipSlotSpec(StrictModel):
+    """One place something can be equipped ON THIS ENTITY.
+
+    Mirrors the runtime ``ptv::EquipSlot`` field for field. The distinction
+    that matters: a mesh SOCKET is a point on an item ("the muzzle of this
+    rifle"), while an equip SLOT is a place on a WEARER that an item can go
+    ("the holster on this player's right hip"). Holstering is therefore
+    declared on the player or the NPC, never on the holster prop.
+
+    ``builtin.equip`` reads these to decide where a released item can snap,
+    and its ``params.slots`` filters by ``name``. A wearer with no declared
+    slots offers no candidates, so an equip binding on such an entity can
+    never fire -- which is why the scene compiler fails the build for it.
+    """
+
+    name: str = Field(
+        ...,
+        max_length=64,
+        description=(
+            "Slot name gameplay refers to, e.g. 'hand_r', 'hip_holster_r',"
+            " 'sword_sheath_l'. Must be unique on this entity."
+        ),
+    )
+    body_slot: str = Field(
+        default="",
+        max_length=64,
+        description=(
+            "Canonical body slot this sits on: 'hand_r', 'hand_l', 'waist',"
+            " 'wrist_l', 'wrist_r', 'chest', 'back', 'head'. Leave empty"
+            " ONLY when the slot is hosted by another equipped item."
+        ),
+    )
+    host_item_slot: str = Field(
+        default="",
+        max_length=64,
+        description=(
+            "Name of the slot whose equipped ITEM hosts this slot, for gear"
+            " that mounts on other gear (a mask hose on a back tank). Empty"
+            " for an ordinary body slot."
+        ),
+    )
+    host_socket: str = Field(
+        default="",
+        max_length=64,
+        description="Socket on the hosting item. Empty for a body slot.",
+    )
+    local_position: Vec3 = Field(
+        default_factory=Vec3,
+        description="Offset from the body slot or host socket, in metres.",
+    )
+    local_rotation: QuatXYZW = Field(default_factory=QuatXYZW)
+    snap_radius_m: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=2.0,
+        description=(
+            "How close a released item must be to snap in. 0 means proximity"
+            " is not required (menu- or script-driven equipping). Use"
+            " 0.15-0.25 for a hip holster the player reaches for."
+        ),
+    )
+    exclusive: bool = Field(
+        default=True,
+        description="One item at a time; equipping replaces the incumbent.",
+    )
+    accepts_tags: List[str] = Field(
+        default_factory=list,
+        max_length=8,
+        description=(
+            "Item tags this slot accepts, matched against the item entity's"
+            " 'tags'. Empty accepts anything, which is how a sword ends up"
+            " holstered just because it brushed the player's hip."
+        ),
+    )
+
+
 class EntitySpec(StrictModel):
     id: IdStr
     name: str = Field(..., max_length=128)
@@ -152,6 +247,16 @@ class EntitySpec(StrictModel):
             "Parent this entity to a point on another one. Its transform is"
             " then driven by the parent every frame, so the authored"
             " 'transform' above is only its pose before the first update."
+        ),
+    )
+    equip_slots: List[EquipSlotSpec] = Field(
+        default_factory=list,
+        max_length=24,
+        description=(
+            "Places items can be equipped ON THIS ENTITY. Declare these on"
+            " the WEARER (the player rig or an NPC), not on the holster,"
+            " sheath or rack prop. Required for 'builtin.equip' to have"
+            " anywhere to put anything."
         ),
     )
 

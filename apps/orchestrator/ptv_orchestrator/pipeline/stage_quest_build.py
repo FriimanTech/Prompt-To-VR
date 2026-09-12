@@ -20,6 +20,7 @@ to need on-device iteration; see engine/android/README.md.
 
 from __future__ import annotations
 
+import hashlib
 import shutil
 from pathlib import Path
 
@@ -38,6 +39,23 @@ _TOKENISED = (
     "app/src/main/AndroidManifest.xml",
     "app/src/main/res/values/strings.xml",
 )
+
+
+def _native_staging_dir(ctx: PipelineContext) -> Path:
+    """A short, per-project home for the CMake/.cxx tree.
+
+    Windows' 260-character MAX_PATH is still enforced by ninja, and the
+    default ``<project>/builds/quest/app/.cxx`` sits ~104 characters deep
+    before CMake appends a FetchContent stamp path of its own (another ~145).
+    Timestamped project ids leave no headroom: switching the native config
+    name from ``Debug`` to ``RelWithDebInfo`` was enough to break configure.
+
+    Keyed on a digest of the project id rather than the id itself, because the
+    id is 35 characters and the whole point is to be short. Lives beside the
+    engine build tree so ``git clean`` treats it like any other build output.
+    """
+    digest = hashlib.sha256(ctx.project_id.encode("utf-8")).hexdigest()[:8]
+    return ctx.settings.repo_root / ".cxx" / digest
 
 
 def _app_label(ctx: PipelineContext) -> str:
@@ -228,7 +246,10 @@ def run(ctx: PipelineContext) -> StageResult:
 
     s = ctx.settings
     package = quest_package_name(s.android_package_prefix, ctx.project_id)
+    cxx_dir = _native_staging_dir(ctx)
+    cxx_dir.mkdir(parents=True, exist_ok=True)
     tokens = {
+        "@PTV_CXX_DIR@": str(cxx_dir).replace("\\", "/"),
         "@PTV_PACKAGE@": package,
         "@PTV_APP_LABEL@": _app_label(ctx),
         "@PTV_ENGINE_DIR@": str(s.engine_dir).replace("\\", "/"),

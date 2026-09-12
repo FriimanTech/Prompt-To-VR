@@ -32,7 +32,7 @@ Running **before codegen** gives agents the contract in context. Running **befor
 |--------|----------|
 | Socket contract | `asset_contract.json` |
 
-Per asset: socket name → position + orientation in unit space; `unsatisfied_hints` when geometry cannot support a requested socket.
+Per asset: socket name → position + orientation in unit space; `unsatisfied_hints` when geometry cannot support a requested socket; `reason` when no sockets were derived on purpose.
 
 ### Where output goes next
 
@@ -48,10 +48,11 @@ Per asset: socket name → position + orientation in unit space; `unsatisfied_hi
 
 ### End-to-end flow (plain language)
 
-1. For each resolvable asset, run `ptv_glb_sockets` subprocess on source GLB.
-2. Collect requested hints from manifest.
-3. Record satisfied sockets + unsatisfied hints.
-4. Save `asset_contract.json`.
+1. For each resolvable asset, decide whether it can carry sockets at all (see **Which assets get sockets** below).
+2. For each one that can, run `ptv_glb_sockets` subprocess on the source GLB.
+3. Collect requested hints from the manifest.
+4. Record satisfied sockets, unsatisfied hints, or the reason no sockets were derived.
+5. Save `asset_contract.json`, then **fail the stage** if any socket gameplay depends on could not be derived.
 
 ---
 
@@ -81,9 +82,36 @@ Scene compile multiplies by `target_scale_meters` to metres.
 | Geometry → unit positions | **this stage** |
 | Codegen requires + compile validates | scene_compile `_check_required_sockets()` |
 
+### Which assets get sockets
+
+A socket is a point on a **mesh**. Not every asset attaches to anything that way, and deriving sockets nothing reads just fills the artifact with noise, so the implicit `muzzle` + `grip` fallback is limited to **`prop`** assets:
+
+| Category | Implicit fallback | Why |
+|----------|-------------------|-----|
+| `prop` | `muzzle`, `grip` | Weapons and held items are what sockets are for. |
+| `character` | none | Characters attach via rig joints and the `BodySlots` taxonomy (`hand_r`, `waist`, `wrist_l`). |
+| `ui` | none | A HUD attaches to a body slot and is driven by `IInteractive`. |
+| `fx` | none | FX are spawned *at* another asset's socket; the socket belongs to the emitter. |
+
+Explicit `socket_hints` **always win**, whatever the category — the manifest is allowed to know something the category does not. When nothing is derived on purpose, the entry records a `reason` so the artifact explains itself instead of showing a bare `{}`.
+
+### Paths, and why they are resolved against the repo root
+
+`asset_normalization.json` records `glb_path` **relative to the repo root**. Resolving those against the process working directory silently produced a non-existent path whenever the orchestrator was started from anywhere but the repo root (`apps/web`, for instance) — every asset came back "GLB missing", every contract was empty, and the run continued to codegen as if that were a normal answer. Two rules follow:
+
+- Resolve every artifact path against `ctx.settings.repo_root`, never `Path.cwd()`. A test walks the whole `pipeline/` package's AST and fails on any `cwd()` / `getcwd()` call.
+- If normalization vouched for a GLB and it is not readable here, that is a **contradiction between two artifacts**, not a missing optional extra.
+
 ### Failure modes
 
-Cannot build/find tool → RuntimeError. Per-asset derive error → `status: failed` in report entry; stage may still succeed.
+Cannot build/find tool → `RuntimeError`.
+
+The stage now **fails loudly** (`AssetContractError`), after writing `asset_contract.json` so the evidence survives, when:
+
+- a GLB `asset_normalization.json` vouched for is not on disk (`status: missing`), or
+- an asset carrying explicit `socket_hints` failed to derive them (`status: failed`).
+
+A derive failure on an asset with no hints is recorded and tolerated: nothing was going to read it.
 
 ### SSE
 

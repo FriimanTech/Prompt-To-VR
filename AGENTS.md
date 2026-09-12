@@ -111,7 +111,12 @@ orchestrator and a reusable Vulkan + OpenXR engine core.
 
 1. Prompt → **BuildSpec** (Claude Opus, structured output).
 2. BuildSpec → **AssetManifest** (Claude Sonnet, structured output). Only
-   OBJECTS (characters, props, fx, ui) — the environment is not a GLB.
+   OBJECTS (characters, props, fx, ui) — the environment is not a GLB, and
+   neither is a SOUND. Every item costs a reference image plus a paid Tripo
+   call, so a `pistol_shot_audio` item buys a picture of a gunshot, a mesh of
+   that picture, and a silent blob in the scene. Both prompts forbid audio
+   entries and a deterministic reconcile drops any that survive, naming them
+   — unless dropping would empty the manifest, which is the worse failure.
 2b. Prompt + BuildSpec + AssetManifest → **NpcPlan** (`npc_plan`, OpenAI
    Agents SDK agent, `gpt-5.6-sol` @ reasoning `high`, no tools). Decides per character: role,
    faction and who it fights, `movement_style`, behaviours, and which
@@ -190,7 +195,18 @@ orchestrator and a reusable Vulkan + OpenXR engine core.
    codegen agent needs the socket NAMES in context — it writes
    `ctx.sockets->socket_world(self, "muzzle")` and must never hard-code an
    offset it cannot know. Which sockets to derive comes from
-   `AssetItem.socket_hints`.
+   `AssetItem.socket_hints`, plus an implicit `muzzle` + `grip` fallback for
+   **`prop`** assets only: a socket is a point on a mesh, and characters
+   attach via rig joints and the `BodySlots` taxonomy, UI attaches to a body
+   slot, and FX spawn AT another asset's socket. Explicit hints override the
+   category either way, and an asset with no sockets records a `reason`
+   rather than a bare `{}`. Every artifact path resolves against
+   `Settings.repo_root`, never `Path.cwd()` — resolving against the process
+   directory silently emptied every contract when the server was started from
+   `apps/web`, and the run continued to codegen as if that were normal. The
+   stage now fails loudly when a GLB `asset_normalization.json` vouched for
+   is unreadable, or when an asset carrying explicit hints cannot derive
+   them.
 8. CodeTasks from MechanicPlan → Claude Opus → C++ files (`.cpp` + optional
    `.h`/`.hpp` headers) in `engine/generated/{mechanics,ai,dialogue}/`.
    After all tasks are written, a **compile-verify + repair loop** builds
@@ -241,6 +257,19 @@ orchestrator and a reusable Vulkan + OpenXR engine core.
    stage that sees both a CodeTask's `required_sockets` and the asset's
    derived sockets, so a mechanic requiring a socket its asset cannot supply
    fails the build loudly, with every violation listed at once.
+   `required_sockets` means sockets read on `self`, so the hard failure
+   applies when the bound entity HAS a mesh; a mesh-less bound entity (a
+   shooting hub on the player's hand, resolving the weapon at runtime and
+   guarding with `has_socket`) only needs SOME asset in the scene to provide
+   the socket, and warns instead. It also emits and validates
+   **`equip_slots`**: a slot is a place on a WEARER (a hip holster) as
+   opposed to a socket, which is a point on an ITEM. `SceneSpec` declares
+   them, `scene_compile` writes them into `scene.json`, and `SceneLoader`
+   emplaces `CEquipSlots` — the component existed for a long time with
+   nothing ever populating it, so every authored holster silently accepted
+   nothing. A `builtin.equip` binding naming a slot nothing declares, a
+   duplicate slot name, or a mesh naming an asset absent from the manifest
+   all fail the stage.
 10. Build (branches on `ProjectState.target_device`, the create-time UI toggle
    that is the single source of truth and is mirrored into
    `BuildSpec.target_device`; every planning prompt names the target too, so a

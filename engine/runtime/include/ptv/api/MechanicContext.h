@@ -740,6 +740,19 @@ public:
      *  want -- moving a joint off its rig position stretches the mesh. */
     virtual void set_joint_translation(std::uint32_t entity, int joint,
                                        const Vec3& translation) = 0;
+    /** Override one joint's local scale for this frame.
+     *
+     *  Scaling a joint to 0 collapses it and everything below it to a point,
+     *  which is how a subtree is HIDDEN without a second mesh or a material
+     *  swap: the vertices weighted to it land on the joint's own origin. Unlike
+     *  ``CSelfViewHide`` this applies in every view, including a mirror, so it
+     *  is the right tool when the geometry is being REPLACED rather than
+     *  merely kept out of the player's own camera -- an avatar whose rig ends
+     *  at the wrist, whose hand is drawn by the engine's finger-rigged
+     *  fixture instead. The joint's origin does not move, so an attachment or
+     *  socket resolved against it still lands in the right place. */
+    virtual void set_joint_scale(std::uint32_t entity, int joint,
+                                 const Vec3& scale) = 0;
 
     /** Start a clip by semantic intent. Returns false when the asset has no
      *  clip for it. Restarts from zero if it is already the active clip.

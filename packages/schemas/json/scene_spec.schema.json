@@ -47,6 +47,15 @@
           "default": null,
           "description": "Parent this entity to a point on another one. Its transform is then driven by the parent every frame, so the authored 'transform' above is only its pose before the first update."
         },
+        "equip_slots": {
+          "description": "Places items can be equipped ON THIS ENTITY. Declare these on the WEARER (the player rig or an NPC), not on the holster, sheath or rack prop. Required for 'builtin.equip' to have anywhere to put anything.",
+          "items": {
+            "$ref": "#/$defs/EquipSlotSpec"
+          },
+          "maxItems": 24,
+          "title": "Equip Slots",
+          "type": "array"
+        },
         "faction": {
           "anyOf": [
             {
@@ -128,6 +137,74 @@
         "name"
       ],
       "title": "EntitySpec",
+      "type": "object"
+    },
+    "EquipSlotSpec": {
+      "additionalProperties": false,
+      "description": "One place something can be equipped ON THIS ENTITY.\n\nMirrors the runtime ``ptv::EquipSlot`` field for field. The distinction\nthat matters: a mesh SOCKET is a point on an item (\"the muzzle of this\nrifle\"), while an equip SLOT is a place on a WEARER that an item can go\n(\"the holster on this player's right hip\"). Holstering is therefore\ndeclared on the player or the NPC, never on the holster prop.\n\n``builtin.equip`` reads these to decide where a released item can snap,\nand its ``params.slots`` filters by ``name``. A wearer with no declared\nslots offers no candidates, so an equip binding on such an entity can\nnever fire -- which is why the scene compiler fails the build for it.",
+      "properties": {
+        "accepts_tags": {
+          "description": "Item tags this slot accepts, matched against the item entity's 'tags'. Empty accepts anything, which is how a sword ends up holstered just because it brushed the player's hip.",
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 8,
+          "title": "Accepts Tags",
+          "type": "array"
+        },
+        "body_slot": {
+          "default": "",
+          "description": "Canonical body slot this sits on: 'hand_r', 'hand_l', 'waist', 'wrist_l', 'wrist_r', 'chest', 'back', 'head'. Leave empty ONLY when the slot is hosted by another equipped item.",
+          "maxLength": 64,
+          "title": "Body Slot",
+          "type": "string"
+        },
+        "exclusive": {
+          "default": true,
+          "description": "One item at a time; equipping replaces the incumbent.",
+          "title": "Exclusive",
+          "type": "boolean"
+        },
+        "host_item_slot": {
+          "default": "",
+          "description": "Name of the slot whose equipped ITEM hosts this slot, for gear that mounts on other gear (a mask hose on a back tank). Empty for an ordinary body slot.",
+          "maxLength": 64,
+          "title": "Host Item Slot",
+          "type": "string"
+        },
+        "host_socket": {
+          "default": "",
+          "description": "Socket on the hosting item. Empty for a body slot.",
+          "maxLength": 64,
+          "title": "Host Socket",
+          "type": "string"
+        },
+        "local_position": {
+          "$ref": "#/$defs/Vec3",
+          "description": "Offset from the body slot or host socket, in metres."
+        },
+        "local_rotation": {
+          "$ref": "#/$defs/QuatXYZW"
+        },
+        "name": {
+          "description": "Slot name gameplay refers to, e.g. 'hand_r', 'hip_holster_r', 'sword_sheath_l'. Must be unique on this entity.",
+          "maxLength": 64,
+          "title": "Name",
+          "type": "string"
+        },
+        "snap_radius_m": {
+          "default": 0.0,
+          "description": "How close a released item must be to snap in. 0 means proximity is not required (menu- or script-driven equipping). Use 0.15-0.25 for a hip holster the player reaches for.",
+          "maximum": 2.0,
+          "minimum": 0.0,
+          "title": "Snap Radius M",
+          "type": "number"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "title": "EquipSlotSpec",
       "type": "object"
     },
     "FactionProps": {

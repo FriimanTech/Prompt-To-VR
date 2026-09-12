@@ -211,6 +211,32 @@ start-up: any row left `in_progress` by a previous crashed run is
 reset to `pending` (or `blocked` if its deps are no longer satisfied)
 so a fresh worker can claim it again.
 
+### Socket-contract invalidation
+
+"Never demote a `done` row" is what makes resume cheap, and it is also
+what made a fix to `asset_contract` invisible: every task was `done`, so
+re-running the stage generated nothing and the same socket-less C++ went
+to the compiler.
+
+`board.invalidate_on_socket_change(sockets_by_asset, repo_root)` closes
+that hole without giving up idempotency. It stores a sha256 fingerprint
+of the asset → socket-names map in the ledger. When the fingerprint is
+unchanged it does nothing at all. When it moves, it resets exactly two
+groups:
+
+1. Tasks that **read sockets** — the CodeTask declares `required_sockets`,
+   or a written source file mentions `ctx.sockets`, `socket_world` or
+   `has_socket`. A file that cannot be read counts as a reader; "unknown"
+   is not "unaffected".
+2. The **transitive dependents** of those tasks, which consume their
+   exports.
+
+Reset rows go to `pending`, or `blocked` when their dependencies are no
+longer `done`. The stage emits an `info` event listing the task ids, so
+the re-billing is visible rather than inferred. The same
+`_sockets_by_asset()` helper feeds both the fingerprint and the agent
+context, so the thing being hashed is the thing the agent saw.
+
 ## OpenAI Agents SDK driver
 
 `pipeline/codegen_agent.py` wraps the [OpenAI Agents SDK]

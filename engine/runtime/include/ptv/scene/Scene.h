@@ -180,6 +180,27 @@ struct MechanicBinding {
     Json params{Json::object()};
 };
 
+/** One place something can be equipped on this entity, as authored.
+ *
+ * The document-side mirror of ``ptv::EquipSlot`` (ptv/ecs/World.h), kept
+ * separate for the same reason ``HealthProps`` is separate from ``CHealth``:
+ * the scene document is plain data that the offline tools read, and it must
+ * not drag the ECS (and entt) in behind it. ``SceneLoader`` converts.
+ *
+ * A holster is declared on the WEARER, never on the holster prop -- a slot
+ * is a place ON a body, while a socket is a point ON an item. */
+struct EquipSlotSpec {
+    std::string name;
+    std::string body_slot;
+    std::string host_item_slot;
+    std::string host_socket;
+    Vec3 local_position{0.0f};
+    Quat local_rotation{1.0f, 0.0f, 0.0f, 0.0f};
+    float snap_radius_m{0.0f};
+    bool exclusive{true};
+    std::vector<std::string> accepts_tags;
+};
+
 struct EntitySpec {
     std::string id;
     std::string name;
@@ -193,6 +214,11 @@ struct EntitySpec {
     std::optional<HealthProps> health;
     std::optional<FactionProps> faction;
     std::optional<AttachmentRef> attached_to;
+    /** Places items may be equipped ON THIS ENTITY, straight from the scene
+     *  document. Populated into ``CEquipSlots`` at load. A wearer with none
+     *  offers ``builtin.equip`` no candidate slot at all, so this is what
+     *  makes an authored holster work. */
+    std::vector<EquipSlotSpec> equip_slots;
 };
 
 struct LightSpec {

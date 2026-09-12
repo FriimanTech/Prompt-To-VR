@@ -61,6 +61,7 @@ from .mechanic_plan import (
 from .scene_spec import (
     SceneSpec,
     EntitySpec,
+    EquipSlotSpec,
     Transform,
     MeshRef,
     MechanicBinding,
@@ -125,6 +126,7 @@ __all__ = [
     "ControllerHand",
     "SceneSpec",
     "EntitySpec",
+    "EquipSlotSpec",
     "Transform",
     "MeshRef",
     "MechanicBinding",

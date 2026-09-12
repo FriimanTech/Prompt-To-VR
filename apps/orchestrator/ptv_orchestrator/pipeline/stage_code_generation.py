@@ -97,6 +97,36 @@ _KIND_DIR: dict[CodeTaskKind, str] = {
 CompileVerifier = Callable[[], "tuple[bool, str]"]
 
 
+# Substrings that mark an agent failure as a TRANSPORT problem rather than a
+# disagreement about the task. Matched on the message because the Agents SDK
+# flattens provider exceptions into ``CodegenAgentError``, so the type is the
+# same either way. Kept deliberately narrow: retrying a schema violation just
+# pays twice for the same refusal.
+_TRANSIENT_AGENT_ERRORS = (
+    "request timed out",
+    "timeout",
+    "connection error",
+    "connection reset",
+    "temporarily unavailable",
+    "server error",
+    "internal server error",
+    "bad gateway",
+    "service unavailable",
+    "rate limit",
+    "overloaded",
+    " 429",
+    " 500",
+    " 502",
+    " 503",
+    " 504",
+)
+
+
+def _is_transient(exc: Exception) -> bool:
+    text = str(exc).lower()
+    return any(marker in text for marker in _TRANSIENT_AGENT_ERRORS)
+
+
 # ---------------------------------------------------------------------------
 # Public entry point (matches the StageFn signature in orchestrator.py)
 # ---------------------------------------------------------------------------
@@ -170,6 +200,21 @@ def run_with_runner(
             ProjectStage.code_generation,
             "info",
             f"reset stuck in_progress tasks from previous run: {','.join(reset)}",
+        )
+
+    # A changed socket contract invalidates the C++ that read it. Without
+    # this, "fix the asset_contract stage, then re-run code_generation" is a
+    # no-op: every task is already ``done``, no worker claims anything, and
+    # the socket-blind code ships.
+    socket_resets = board.invalidate_on_socket_change(
+        _sockets_by_asset(project_dir), repo_root
+    )
+    if socket_resets:
+        ctx.emit(
+            ProjectStage.code_generation,
+            "info",
+            "asset socket contract changed since these tasks were generated; "
+            f"regenerating: {','.join(socket_resets)}",
         )
 
     # Also retry previously failed tasks. A failure may have been caused by
@@ -502,6 +547,30 @@ def _load_world_context(ctx: PipelineContext) -> str:
     return json.dumps(envs, indent=2, sort_keys=True)
 
 
+def _sockets_by_asset(project_dir: Path) -> dict[str, list[str]]:
+    """``asset_id -> sorted socket names`` from ``asset_contract.json``.
+
+    The agent's whole view of the socket contract, and the thing the codegen
+    board fingerprints, so both read it through here and cannot disagree
+    about what "the contract changed" means.
+    """
+    out: dict[str, list[str]] = {}
+    contract_path = project_dir / "asset_contract.json"
+    if not contract_path.exists():
+        return out
+    try:
+        contract = json.loads(contract_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        # No contract is a valid state (projects predating the stage); the
+        # agent then simply sees no sockets and uses no sockets.
+        return out
+    for asset_id, entry in (contract or {}).items():
+        names = sorted((entry or {}).get("sockets") or {})
+        if names:
+            out[asset_id] = names
+    return out
+
+
 def _load_static_context(ctx: PipelineContext) -> _StaticContext:
     """Load BuildSpec + every scene_spec*.json on disk. Missing files
     are tolerated -- the agent simply sees the available context."""
@@ -529,20 +598,6 @@ def _load_static_context(ctx: PipelineContext) -> _StaticContext:
                 f"failed to parse {p.name}; skipping in agent context",
             )
 
-    sockets_by_asset: dict[str, list[str]] = {}
-    contract_path = project_dir / "asset_contract.json"
-    if contract_path.exists():
-        try:
-            contract = json.loads(contract_path.read_text(encoding="utf-8"))
-            for asset_id, entry in (contract or {}).items():
-                names = sorted((entry or {}).get("sockets") or {})
-                if names:
-                    sockets_by_asset[asset_id] = names
-        except (OSError, json.JSONDecodeError):
-            # No contract is a valid state (projects predating the stage);
-            # the agent then simply sees no sockets and uses no sockets.
-            pass
-
     npc_plan_json = ""
     try:
         npc_plan = ctx.store.load_npc_plan(ctx.project_id)
@@ -557,7 +612,7 @@ def _load_static_context(ctx: PipelineContext) -> _StaticContext:
         build_spec=build_spec,
         scene_specs=scene_specs,
         scene_files=scene_files,
-        sockets_by_asset=sockets_by_asset,
+        sockets_by_asset=_sockets_by_asset(project_dir),
         target_device=ctx.store.load_state(ctx.project_id).target_device,
         npc_plan_json=npc_plan_json,
         world_context_json=_load_world_context(ctx),
@@ -605,6 +660,49 @@ class _StageRuntime:
 
         self.produced: list[str] = []
         self._produced_lock = threading.Lock()
+
+    # ------------------------------------------------------------------
+    # Agent call
+    # ------------------------------------------------------------------
+    def _run_agent_with_retry(
+        self, task_id: str, inp: CodegenAgentInput
+    ) -> CodegenAgentResult:
+        """One agent call, retried on a transport-level failure.
+
+        A timeout or a 5xx here does not just lose the task: every task
+        that declares it in ``depends_on`` stays blocked, and the stage
+        fails after all the OTHER tasks have already been paid for. One
+        in-process retry is what a human would do anyway, and it costs a
+        re-run of a single task rather than the stage.
+
+        A malformed RESULT is not retried -- that is the agent
+        disagreeing with the schema, and it would disagree again.
+        """
+        attempts = max(1, int(self.ctx.settings.codegen_max_task_attempts))
+        last: Exception | None = None
+        for attempt in range(1, attempts + 1):
+            try:
+                return run_codegen_agent(
+                    inp,
+                    model=self.model_id,
+                    reasoning_effort=self.reasoning_effort,
+                    verbosity=self.verbosity,
+                    request_timeout_seconds=(
+                        self.ctx.settings.codegen_request_timeout_seconds
+                    ),
+                    runner=self.agent_runner,
+                )
+            except CodegenAgentError as exc:
+                last = exc
+                if attempt >= attempts or not _is_transient(exc):
+                    raise
+                self.ctx.emit(
+                    ProjectStage.code_generation,
+                    "info",
+                    f"{task_id}: agent call failed ({exc}); "
+                    f"retrying (attempt {attempt + 1}/{attempts})",
+                )
+        raise last  # type: ignore[misc]  # unreachable: loop returns or raises
 
     # ------------------------------------------------------------------
     # Worker loop
@@ -740,13 +838,7 @@ class _StageRuntime:
             extra_instructions=extra,
         )
 
-        result = run_codegen_agent(
-            inp,
-            model=self.model_id,
-            reasoning_effort=self.reasoning_effort,
-            verbosity=self.verbosity,
-            runner=self.agent_runner,
-        )
+        result = self._run_agent_with_retry(task.id, inp)
 
         # Headers produced by this task's declared dependency tasks. They live
         # in the same project directory and the board guarantees they are

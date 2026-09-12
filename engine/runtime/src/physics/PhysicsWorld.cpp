@@ -32,7 +32,9 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdarg>
 #include <cstdint>
+#include <cstdio>
 #include <vector>
 
 namespace ptv {
@@ -133,6 +135,53 @@ JPH::ShapeRefC build_inline_mesh_shape(const CInlineMesh& im) {
  * height, so a measured X extent would produce a capsule wide enough to wedge
  * the NPC in any doorway. 0.17 puts a 1.8 m humanoid at a 0.31 m radius,
  * which matches the shoulder width that actually has to fit through gaps. */
+/** Forward Jolt's own diagnostics into the engine log.
+ *
+ *  This used to be set to nullptr, which silenced Jolt entirely AND left a
+ *  function pointer Jolt is documented to call -- so the first trace would
+ *  have jumped to address zero. */
+void jolt_trace(const char* fmt, ...) {
+    if (fmt == nullptr) return;
+    char buf[1024];
+    va_list args;
+    va_start(args, fmt);
+    const int n = std::vsnprintf(buf, sizeof(buf), fmt, args);
+    va_end(args);
+    if (n > 0) PTV_WARN("Jolt: {}", buf);
+}
+
+#ifdef JPH_ENABLE_ASSERTS
+/** Report a failed Jolt precondition instead of halting the process.
+ *
+ *  JPH_ASSERT only executes JPH_BREAKPOINT when this returns true, so
+ *  returning false downgrades every Jolt assert to a logged error. That
+ *  distinction is the difference between a generated game that reports a bad
+ *  body and one that vanishes: on a headset a breakpoint is SIGTRAP, the
+ *  process dies inside android_main before any window exists, and the user
+ *  sees the home environment reappear with no error at all.
+ *
+ *  Continuing is the right call for this engine specifically. Every scene it
+ *  loads was authored by a language model, so a precondition violation is an
+ *  expected data defect rather than a logic error in code we control, and the
+ *  guards at each use site already substitute safe values. */
+bool jolt_assert_failed(const char* expression, const char* message,
+                        const char* file, JPH::uint line) {
+    PTV_ERROR("Jolt assert failed: {} ({}:{}){}{}",
+              expression != nullptr ? expression : "?",
+              file != nullptr ? file : "?", line,
+              message != nullptr ? " -- " : "",
+              message != nullptr ? message : "");
+    return false;  // do NOT breakpoint
+}
+#endif
+
+/** Mass to substitute when a movable body was authored without one.
+ *
+ *  1 kg keeps a dynamic body's response in a plausible range for the
+ *  hand-sized props this usually hits, and is unobservable on a kinematic
+ *  body, which is driven by its transform rather than by forces. */
+constexpr float kFallbackMassKg = 1.0f;
+
 JPH::ShapeRefC build_capsule_shape(float height_m) {
     const float height = std::max(0.20f, height_m);
     const float radius = std::clamp(0.17f * height, 0.05f, 0.45f * height);
@@ -176,7 +225,8 @@ PhysicsWorld::~PhysicsWorld() { shutdown(); }
 bool PhysicsWorld::initialize() {
     if (impl_) return true;
     JPH::RegisterDefaultAllocator();
-    JPH::Trace = nullptr;
+    JPH::Trace = jolt_trace;
+    JPH_IF_ENABLE_ASSERTS(JPH::AssertFailed = jolt_assert_failed;)
     JPH::Factory::sInstance = new JPH::Factory();
     JPH::RegisterTypes();
 
@@ -317,7 +367,30 @@ bool PhysicsWorld::add_body_for(World& world, std::uint32_t entity_id) {
     bcs.mRestitution = p.restitution;
     bcs.mFriction = p.friction;
     if (motion != JPH::EMotionType::Static) {
-        bcs.mMassPropertiesOverride.mMass = p.mass_kg;
+        // Same class of hazard as the transform above, and the one that
+        // actually shipped: a scene author writing mass 0 for a KINEMATIC body
+        // is describing "nothing pushes this around", which is true and
+        // reasonable -- but CalculateInertia divides by the mass, and Jolt
+        // asserts mass > 0 inside MotionProperties::SetMassProperties. In the
+        // Quest debug APK that assert is a breakpoint, so three zero-mass
+        // popup targets killed the process during scene load with no message
+        // anywhere: the headset simply returned to the home environment.
+        //
+        // Substituting a value is safe precisely BECAUSE the author meant
+        // "immovable": a kinematic body is driven by its transform and never
+        // accelerated by a force, so its mass is not observable. A dynamic
+        // body with no mass is a contradiction, and 1 kg is a better guess
+        // than a crash.
+        float mass_kg = p.mass_kg;
+        if (!std::isfinite(mass_kg) || mass_kg <= 0.0f) {
+            PTV_WARN(
+                "Physics: entity {} is '{}' with mass {} kg; using {} kg. A "
+                "movable body needs a positive mass -- use kind 'static' for "
+                "something that never moves.",
+                entity_id, p.kind, p.mass_kg, kFallbackMassKg);
+            mass_kg = kFallbackMassKg;
+        }
+        bcs.mMassPropertiesOverride.mMass = mass_kg;
         bcs.mOverrideMassProperties =
             JPH::EOverrideMassProperties::CalculateInertia;
     }
@@ -371,8 +444,11 @@ void PhysicsWorld::overlapping(std::uint32_t entity_id,
     settings.mMaxSeparationDistance = 0.0f;
 
     JPH::AllHitCollisionCollector<JPH::CollideShapeCollector> collector;
+    // sReplicate(1) rather than sOne(): Jolt 5.2.0 (the version the Android
+    // NDK build fetches) dropped sOne, and desktop vcpkg still has it, so
+    // sOne compiles here and breaks only the Quest APK.
     impl_->system.GetNarrowPhaseQuery().CollideShape(
-        shape, JPH::Vec3::sOne(), com_transform, settings,
+        shape, JPH::Vec3::sReplicate(1.0f), com_transform, settings,
         com_transform.GetTranslation(), collector, {}, {},
         JPH::IgnoreSingleBodyFilter(it->second));
 
@@ -414,6 +490,48 @@ bool PhysicsWorld::has_body(std::uint32_t entity) const {
     return impl_->entity_to_body.find(entity) != impl_->entity_to_body.end();
 }
 
+bool PhysicsWorld::recreate_body_movable(std::uint32_t entity,
+                                         int motion_type_raw) {
+    // Replace a static body with an otherwise identical movable one. Jolt
+    // decides at creation whether to allocate MotionProperties, so the motion
+    // type of an existing body can only be changed within the movable family.
+    if (!impl_) return false;
+    auto it = impl_->entity_to_body.find(entity);
+    if (it == impl_->entity_to_body.end()) return false;
+
+    auto& bi = impl_->system.GetBodyInterface();
+    const JPH::BodyID old_id = it->second;
+    const auto motion = static_cast<JPH::EMotionType>(motion_type_raw);
+
+    JPH::ShapeRefC shape = bi.GetShape(old_id);
+    if (shape.GetPtr() == nullptr) return false;
+    JPH::RVec3 pos{};
+    JPH::Quat rot{};
+    bi.GetPositionAndRotation(old_id, pos, rot);
+    const float friction = bi.GetFriction(old_id);
+    const float restitution = bi.GetRestitution(old_id);
+
+    remove_body(entity);
+
+    // MOVING layer, or the new body keeps colliding by static rules.
+    JPH::BodyCreationSettings bcs(shape, pos, rot, motion, Layers::MOVING);
+    bcs.mFriction = friction;
+    bcs.mRestitution = restitution;
+    bcs.mMassPropertiesOverride.mMass = kFallbackMassKg;
+    bcs.mOverrideMassProperties = JPH::EOverrideMassProperties::CalculateInertia;
+
+    const JPH::BodyID id = bi.CreateAndAddBody(bcs, JPH::EActivation::Activate);
+    if (id.IsInvalid()) {
+        PTV_WARN("Physics: could not recreate entity {} as a movable body",
+                 entity);
+        return false;
+    }
+    impl_->entity_to_body[entity] = id;
+    impl_->body_to_entity[id.GetIndexAndSequenceNumber()] = entity;
+    PTV_INFO("Physics: entity {} promoted from static to a movable body", entity);
+    return true;
+}
+
 void PhysicsWorld::set_kinematic(std::uint32_t entity, bool kinematic) {
     if (!impl_) return;
     auto it = impl_->entity_to_body.find(entity);
@@ -421,6 +539,24 @@ void PhysicsWorld::set_kinematic(std::uint32_t entity, bool kinematic) {
     auto& bi = impl_->system.GetBodyInterface();
     const JPH::EMotionType target = kinematic ? JPH::EMotionType::Kinematic
                                               : JPH::EMotionType::Dynamic;
+
+    // A static body has no MotionProperties -- Jolt allocates them only for
+    // movable bodies -- so SetMotionType cannot promote one. It walks
+    // straight into the null pointer: ActivateBodies dereferences it and the
+    // process takes a SIGSEGV at offset 0x80, during scene load, with nothing
+    // logged. (A shipped APK died exactly this way, on a generated mechanic
+    // calling set_kinematic on a static target to raise and lower it.)
+    //
+    // Recreating the body is the honest fix. Refusing would be safe but would
+    // silently break the mechanic, and "this prop should start moving now" is
+    // a reasonable thing for generated gameplay code to decide about scenery
+    // the scene author had no reason to mark movable.
+    if (bi.GetMotionType(it->second) == JPH::EMotionType::Static) {
+        if (!recreate_body_movable(entity, static_cast<int>(target))) return;
+        it = impl_->entity_to_body.find(entity);
+        if (it == impl_->entity_to_body.end()) return;
+    }
+
     bi.SetMotionType(it->second, target, JPH::EActivation::Activate);
     if (!kinematic) {
         // When returning to Dynamic after a grab, zero any residual
@@ -438,6 +574,23 @@ void PhysicsWorld::move_kinematic(std::uint32_t entity, const Vec3& pos,
     if (it == impl_->entity_to_body.end()) return;
     if (dt <= 0.0f) dt = 1.0f / 90.0f;
     auto& bi = impl_->system.GetBodyInterface();
+    // Same null-MotionProperties trap as set_kinematic: MoveKinematic reads
+    // the motion properties a static body does not have. Callers reach here
+    // through generated code, so refuse rather than fault.
+    // Same null-MotionProperties trap as set_kinematic, and the same answer:
+    // promote the body rather than fault or refuse. A caller asking to sweep
+    // something to a new pose has said plainly that it should move, and
+    // generated mechanics reach here without necessarily having called
+    // set_kinematic first. Promotion happens once; afterwards this is a
+    // straight MoveKinematic.
+    if (bi.GetMotionType(it->second) == JPH::EMotionType::Static) {
+        if (!recreate_body_movable(
+                entity, static_cast<int>(JPH::EMotionType::Kinematic))) {
+            return;
+        }
+        it = impl_->entity_to_body.find(entity);
+        if (it == impl_->entity_to_body.end()) return;
+    }
     bi.MoveKinematic(it->second,
                      JPH::RVec3{pos.x, pos.y, pos.z},
                      JPH::Quat{rot.x, rot.y, rot.z, rot.w},
@@ -498,8 +651,9 @@ Vec3 PhysicsWorld::slide_character(const Vec3& center, float height,
 
         const JPH::RMat44 start = JPH::RMat44::sTranslation(
             JPH::RVec3{origin.x, origin.y, origin.z});
+        // sReplicate(1), not sOne -- see the note in overlapping() above.
         const JPH::RShapeCast cast = JPH::RShapeCast::sFromWorldTransform(
-            shape, JPH::Vec3::sOne(), start,
+            shape, JPH::Vec3::sReplicate(1.0f), start,
             JPH::Vec3{remaining.x, remaining.y, remaining.z});
 
         JPH::ClosestHitCollisionCollector<JPH::CastShapeCollector> collector;

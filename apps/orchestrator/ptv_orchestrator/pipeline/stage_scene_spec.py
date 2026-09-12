@@ -199,11 +199,31 @@ def run_with_composer_factory(
     # from scratch, which can take 15-25 minutes on a large BuildSpec.
     # ------------------------------------------------------------------
     project_dir = ctx.store.dir_for(ctx.project_id)
+    manifest: AssetManifest = (
+        ctx.asset_manifest or ctx.store.load_asset_manifest(ctx.project_id)
+    )
+    # Reuse is only safe against the CURRENT manifest. A scene composed for an
+    # earlier, differently-named asset set validates against the schema
+    # perfectly and is still worthless: its meshes point at GLBs that were
+    # never generated, and the assets that DO exist end up referenced by
+    # nothing. That is exactly what happened to the shooting-range project,
+    # where a reused 11-asset scene named eight assets the 14-asset manifest
+    # had never heard of.
+    known_asset_ids = {a.id for a in manifest.items}
+
     existing: dict[int, SceneSpec] = {}
     for i, scene_entry in enumerate(build_spec.scenes):
-        loaded = _try_load_existing_scene_spec(project_dir, scene_entry.id)
+        loaded, rejected = _try_load_existing_scene_spec(
+            project_dir, scene_entry.id, known_asset_ids
+        )
         if loaded is not None:
             existing[i] = loaded
+        elif rejected is not None:
+            ctx.emit(
+                ProjectStage.scene_spec,
+                "info",
+                f"{scene_entry.id}: recomposing, {rejected}",
+            )
     if len(existing) == total:
         return _finalize_all_existing(ctx, state, build_spec, existing)
 
@@ -218,9 +238,6 @@ def run_with_composer_factory(
     # ------------------------------------------------------------------
     # Slow path: at least one scene needs to be composed via LLM.
     # ------------------------------------------------------------------
-    manifest: AssetManifest = (
-        ctx.asset_manifest or ctx.store.load_asset_manifest(ctx.project_id)
-    )
     plan: MechanicPlan = (
         ctx.mechanic_plan or ctx.store.load_mechanic_plan(ctx.project_id)
     )
@@ -370,31 +387,52 @@ def run_with_composer_factory(
 
 
 def _try_load_existing_scene_spec(
-    project_dir: Path, scene_id: str
-) -> Optional[SceneSpec]:
-    """Load ``scene_spec.<scene_id>.json`` if it exists and validates.
+    project_dir: Path,
+    scene_id: str,
+    known_asset_ids: set[str] | None = None,
+) -> tuple[Optional[SceneSpec], Optional[str]]:
+    """``(scene, rejection_reason)`` for ``scene_spec.<scene_id>.json``.
 
-    Returns ``None`` if the file is missing, malformed, or fails Pydantic
-    validation -- in which case the caller should re-generate the scene
-    via the LLM. We never raise here: a half-written file from a crashed
-    prior run is recoverable by re-composing that ONE scene rather than
-    blowing up the whole stage.
+    The scene is ``None`` if the file is missing, malformed, fails Pydantic
+    validation, or belongs to a different asset set -- in which case the
+    caller should re-generate that ONE scene via the LLM. We never raise
+    here: a half-written file from a crashed prior run is recoverable.
+
+    ``rejection_reason`` is set only when a file was actually present and
+    rejected, so the caller can say why it is spending an LLM call. A missing
+    file needs no explanation.
+
+    Schema validity is NOT enough to reuse a scene. Asset ids change whenever
+    the manifest is re-planned, and a scene composed against the old set is
+    still perfectly valid JSON -- it just describes a different game. Passing
+    ``known_asset_ids`` is what turns that into a re-compose instead of a
+    build full of dangling GLB paths.
     """
 
     path = project_dir / f"scene_spec.{scene_id}.json"
     if not path.exists():
-        return None
+        return None, None
     try:
         raw = path.read_text(encoding="utf-8")
         data = json.loads(raw)
         scene = SceneSpec.model_validate(data)
     except Exception:
-        return None
+        return None, "the file on disk is malformed or fails validation"
     # Sanity check: the embedded scene_id must match. A stale file from
     # before a scene id rename should be regenerated.
     if scene.scene_id != scene_id:
-        return None
-    return scene
+        return None, f"it declares scene_id '{scene.scene_id}'"
+    if known_asset_ids is not None:
+        referenced = {
+            e.mesh.asset_id for e in scene.entities if e.mesh is not None
+        }
+        unknown = sorted(referenced - known_asset_ids)
+        if unknown:
+            return None, (
+                f"it references {len(unknown)} asset(s) absent from the"
+                f" current AssetManifest: {unknown}"
+            )
+    return scene, None
 
 
 def _ensure_entrypoint_canonical(
@@ -873,10 +911,16 @@ def _compress_build_spec_meta(build_spec: BuildSpec) -> dict[str, Any]:
 
 
 def _compress_asset(asset: Any) -> dict[str, Any]:
+    role = getattr(asset, "character_role", None)
     return {
         "id": asset.id,
         "name": asset.name,
         "category": asset.category.value if hasattr(asset.category, "value") else str(asset.category),
+        # The manifest states outright whether a character is the player's own
+        # body, an NPC or set dressing. Omitting it left the composer guessing
+        # from ``style_notes`` prose, which is how a player avatar ends up
+        # placed as an NPC standing next to the player.
+        "character_role": getattr(role, "value", None) or str(role or "none"),
         "style_notes": _truncate(asset.style_notes, 400),
         "target_scale_meters": asset.target_scale_meters,
         "collision_shape": asset.collision_shape,

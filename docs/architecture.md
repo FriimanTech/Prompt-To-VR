@@ -144,6 +144,27 @@ join point (writing `mesh.sockets` in metres) and the validator: a mechanic
 requiring a socket its asset cannot supply fails the build with every
 violation listed at once.
 
+The validator distinguishes two cases, because `required_sockets` means
+"sockets this mechanic reads on `self`". A bound entity that HAS a mesh must
+supply every one of them, or the build fails -- that is the original
+protection. A bound entity with NO mesh cannot be reading `self`: a shooting
+hub bound to the player's hand resolves the weapon at runtime and guards with
+`ctx.sockets->has_socket(weapon, "muzzle")`. For those, the requirement is
+that *some asset referenced by the scene* provides the socket -- satisfied
+emits a warning naming the providers, unsatisfiable is still a hard failure.
+The guarantee "this socket exists somewhere in this game" survives; the false
+positive that failed every correctly written hub does not.
+
+Which assets get sockets at all is decided by category. The implicit
+`muzzle` + `grip` fallback applies to **`prop`** assets only, because a
+socket is a point on a mesh: characters attach via rig joints and the
+`BodySlots` taxonomy, UI attaches to a body slot, and FX are spawned *at*
+another asset's socket. Explicit `socket_hints` override the category in
+either direction. An asset with no sockets records a `reason` rather than a
+bare `{}`, and `asset_contract` fails loudly when a socket gameplay depends
+on could not be derived -- silently empty contracts are what let a broken
+build reach the headset.
+
 Socket positions are stored in `asset_contract.json` in **unit space**
 (normalised by the mesh's longest-axis extent) and converted to metres at
 compile time by multiplying `target_scale_meters` -- the same convention
@@ -257,6 +278,38 @@ lands the same way no matter how it was reached for. An asset with no `grip`
 socket keeps the old relative hold, and `snap_to_grip: false` opts out for
 things with no correct orientation (a ball, a rock). This is the socket
 system paying off a second time, with no new stage and no new schema field.
+
+## Equip slots: the other half of attachment
+
+A **socket** is a point on an item ("the pistol's grip is here"). An **equip
+slot** is a place on a wearer ("a holster hangs at the right hip"). Holstering
+needs both, and only one of them existed as authored data.
+
+`CEquipSlots` and `EquipMechanic::pick_slot_near()` shipped in the runtime,
+but nothing ever populated the component from `scene.json`, so every wearer in
+every generated game offered zero candidate slots and an authored holster
+silently accepted nothing. The chain is now declared end to end:
+
+| Link | Where |
+|---|---|
+| planner is told a slot belongs on the WEARER, never on the holster prop | `SCENE_SPEC_SYSTEM` |
+| the agent can actually emit one | `EquipSlotSpec` in `scene_spec.py` **and** mirrored in the strict wire model |
+| slots reach the runtime document | `scene_compile` writes `entity.equip_slots[]` |
+| the document becomes a component | `SceneLoader` emplaces `CEquipSlots` |
+
+The wire mirror is load-bearing rather than duplication: strict structured
+output permits only the declared surface, so a field the wire schema omits is
+one the agent is physically unable to produce.
+
+`scene_compile` fails loudly on the two ways this goes wrong quietly -- a
+`builtin.equip` binding naming a slot nothing declares, and two entities
+declaring the same slot name.
+
+On the engine side, `Scene.h` carries its own plain-data `EquipSlotSpec`
+rather than including `ptv/ecs/World.h`, and `SceneLoader.cpp` converts. That
+is the same split `HealthProps` / `CHealth` already uses, and it exists
+because the scene document is also parsed by `ptv_worldgen`, which links no
+ECS.
 
 ## Threading
 

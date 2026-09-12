@@ -48,9 +48,15 @@ FetchContent_Declare(tinygltf GIT_REPOSITORY https://github.com/syoyo/tinygltf.g
 # compile with the NDK's modern clang: bundled fmt's FMT_STRING triggers "call
 # to consteval function ... is not a constant expression" (fixed in fmt 11.2.0).
 FetchContent_Declare(spdlog GIT_REPOSITORY https://github.com/gabime/spdlog.git GIT_TAG v1.15.3)
+# Must track the joltphysics version vcpkg resolves for the desktop build
+# (currently 5.5.0, see JPH_VERSION_MAJOR/MINOR in its Jolt/Core/Core.h).
+# When the two drift, desktop compiles engine code that the NDK rejects, and
+# the only signal is a Quest-only build failure: v5.2.0 here predated
+# Vec3::sOne, which desktop had, so PhysicsWorld.cpp built everywhere except
+# the APK.
 FetchContent_Declare(JoltPhysics
   GIT_REPOSITORY https://github.com/jrouwe/JoltPhysics.git
-  GIT_TAG v5.2.0
+  GIT_TAG v5.5.0
   SOURCE_SUBDIR Build)
 
 set(TINYGLTF_HEADER_ONLY ON CACHE BOOL "" FORCE)
@@ -113,6 +119,19 @@ set(PTV_INCLUDE_DIRS
   "${PTV_RUNTIME_DIR}/src"
   "${tinygltf_SOURCE_DIR}")
 
+# Warnings we refuse to hear from vendored headers.
+#
+# The NDK's clang wants EVERY pointer in a header annotated once any of them
+# is, so VMA's vk_mem_alloc.h alone emits well over two thousand
+# -Wnullability-completeness lines per translation unit that includes it.
+# There is nothing to fix in a vendored header, and the noise is actively
+# harmful: a one-line compile error sat invisible in a 2,377-line build log,
+# and diagnosing the build that produced it needed the APK timestamp rather
+# than the log. Silencing the pair here keeps real diagnostics findable.
+set(PTV_COMPILE_OPTS
+  -Wno-nullability-completeness
+  -Wno-nullability-extension)
+
 # Third-party usage requirements shared by the runtime and generated code.
 # NOTE: JoltPhysics via FetchContent exposes the plain target name "Jolt" (the
 # namespaced "Jolt::Jolt" alias only exists in the vcpkg package used on
@@ -138,6 +157,7 @@ if(PTV_GENERATED_SOURCES)
   add_library(ptv_generated STATIC ${PTV_GENERATED_SOURCES})
   target_include_directories(ptv_generated PRIVATE ${PTV_INCLUDE_DIRS})
   target_compile_definitions(ptv_generated PRIVATE ${PTV_COMPILE_DEFS})
+  target_compile_options(ptv_generated PRIVATE ${PTV_COMPILE_OPTS})
   target_link_libraries(ptv_generated PRIVATE ${PTV_THIRDPARTY_LIBS})
 endif()
 
@@ -145,6 +165,7 @@ add_library(${PTV_APP_LIB_NAME} SHARED ${PTV_RUNTIME_SOURCES})
 
 target_include_directories(${PTV_APP_LIB_NAME} PRIVATE ${PTV_INCLUDE_DIRS})
 target_compile_definitions(${PTV_APP_LIB_NAME} PRIVATE ${PTV_COMPILE_DEFS})
+target_compile_options(${PTV_APP_LIB_NAME} PRIVATE ${PTV_COMPILE_OPTS})
 
 # native_app_glue is whole-archived so ANativeActivity_onCreate (the
 # NativeActivity entry point, referenced only by the Android framework via

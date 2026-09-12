@@ -22,6 +22,9 @@ vrvenv/
 # C++ / CMake / vcpkg
 build/
 builds/
+# Android NDK staging, relocated here so FetchContent stamp paths stay under
+# Windows' 260-character MAX_PATH (see engine/android/app/build.gradle).
+.cxx/
 out/
 cmake-build-*/
 CMakeCache.txt

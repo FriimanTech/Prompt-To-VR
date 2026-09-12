@@ -274,6 +274,13 @@ _BUILTINS: tuple[CatalogEntry, ...] = (
             "the skull, while a mirror still shows a complete avatar. The "
             "engine binds this automatically whenever a scene places an "
             "entity tagged 'player_avatar', so a scene never has to ask. "
+            "It also decides which hands the player sees, from the rig "
+            "itself: an auto-rigged avatar ends at the wrist and has no "
+            "finger bones, so its rigid hand is hidden and the engine's "
+            "finger-rigged hand model is placed on the avatar's solved wrist "
+            "instead -- the hand reads as the end of that arm and still curls "
+            "on trigger and grip. An avatar that does have finger bones uses "
+            "its own hands and the engine's are hidden. Nothing to configure. "
             "Fingers belong to builtin.hand_pose; never write finger curl "
             "here, and never move the avatar by writing CTransform."
         ),

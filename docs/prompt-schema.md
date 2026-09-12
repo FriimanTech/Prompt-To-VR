@@ -93,6 +93,30 @@ Note that asset COUNT is never the limiting factor: a bigger project simply
 gets a smaller per-asset budget plus more aggressive runtime culling and LOD.
 See `docs/rendering.md` for the tier table.
 
+## Equip slots on `SceneSpec.EntitySpec` (optional)
+
+An `EntitySpec` may declare up to 24 `equip_slots`. Each `EquipSlotSpec` names
+a place **on the wearer** where `builtin.equip` can snap an item -- a hip
+holster, a back sheath, a wrist mount. It is not the same thing as a mesh
+socket: a socket is a point on the ITEM (`grip` on the pistol), a slot is a
+place on the BODY. A holster prop in the scene is set dressing; the slot goes
+on the rig.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `name` | `IdStr` | Slot id gameplay refers to, e.g. `hip_holster_r` |
+| `body_slot` | `str` | `hand_r`, `hand_l`, `waist`, `wrist_l`, `wrist_r`, `back`, `chest`, `head` |
+| `host_item_slot` / `host_socket` | `str` | For a slot carried on an already-equipped item |
+| `local_position` | `Vec3` | Offset from the body slot, e.g. `[0.16, -0.05, 0.02]` from `waist` |
+| `local_rotation` | `QuatXYZW` | Orientation of the slot |
+| `snap_radius_m` | `float` 0..2 | How near an item must come; 0.15-0.25 for a holster |
+| `exclusive` | `bool` | One item at a time (default `true`) |
+| `accepts_tags` | `List[str]` | Which items fit; empty lets a rifle into a pistol holster |
+
+`scene_compile` copies these into `scene.json` and `SceneLoader` turns them
+into `CEquipSlots`. It hard-fails when a `builtin.equip` binding names a slot
+no entity declares, or when two entities declare the same slot name.
+
 ## Built-in mechanic ids (reuse these)
 
 ```

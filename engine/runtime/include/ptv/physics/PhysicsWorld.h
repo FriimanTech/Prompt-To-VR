@@ -121,6 +121,16 @@ public:
                  std::uint32_t& out_entity) const;
 
 private:
+    /** Replace a static body with an identical movable one.
+     *
+     *  Jolt allocates MotionProperties at creation, so a static body cannot be
+     *  promoted in place -- ``SetMotionType`` dereferences the null pointer
+     *  and crashes. ``motion_type_raw`` is a ``JPH::EMotionType`` as an int to
+     *  keep Jolt out of this header. Returns false if the body could not be
+     *  rebuilt, in which case the original is already gone.
+     */
+    bool recreate_body_movable(std::uint32_t entity, int motion_type_raw);
+
     struct Impl;
     std::unique_ptr<Impl> impl_;
 };

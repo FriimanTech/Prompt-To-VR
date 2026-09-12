@@ -88,13 +88,21 @@ const SlotTable& table() {
         // Waist is the same joint as hips on every rig this pipeline sees;
         // it exists as a separate slot because "belt", "tool belt" and
         // "holster" read as waist, not as hips.
-        add(s, "waist", {"Hips", "pelvis", "spine_01", "Spine", "hip"});
-        add(s, "spine", {"Spine", "spine_01", "spine1", "Spine1", "abdomen"});
+        // Tripo's ``Waist`` is a real separate bone above the pelvis, listed
+        // last so rigs that do have a pelvis keep resolving to it -- a hip
+        // holster belongs at the hips, not at the navel.
+        add(s, "waist",
+            {"Hips", "pelvis", "spine_01", "Spine", "hip", "Waist"});
+        add(s, "spine", {"Spine", "spine_01", "spine1", "Spine1", "abdomen",
+                         "Spine01"});
         add(s, "chest", {"Spine2", "chest", "spine_03", "UpperChest", "Spine1",
-                         "upperchest", "ribcage"});
+                         "upperchest", "ribcage", "Spine02"});
         // A backpack mounts on the upper back, which is the chest joint.
-        add(s, "back", {"Spine2", "chest", "spine_03", "UpperChest", "Spine1"});
-        add(s, "neck", {"Neck", "neck_01", "neck1", "Neck1"});
+        add(s, "back", {"Spine2", "chest", "spine_03", "UpperChest", "Spine1",
+                        "Spine02"});
+        // Tripo splits the neck into two twist bones; the lower one is the
+        // base of the neck, which is what a head-driving mechanic wants.
+        add(s, "neck", {"Neck", "neck_01", "neck1", "Neck1", "NeckTwist01"});
         add(s, "head", {"Head", "head_01", "headtop", "Bip01_Head"});
         // Face, nose and ears have no bones on any rig the pipeline produces.
         // They resolve to the head so that "glasses sit on the nose" still
@@ -108,40 +116,51 @@ const SlotTable& table() {
         add_sided(s, "ear", {"{L}Ear", "ear_{s}", "{L}_ear", "Head"});
 
         // --- Arms -------------------------------------------------------
+        //
+        // Tripo's auto-rigger sides a bone with a SHORT PREFIX and no side
+        // word -- ``L_Upperarm``, ``R_Forearm``, ``L_Hand`` -- which is why
+        // every limb slot below carries a ``{s}_`` pattern alongside the
+        // Mixamo / Unreal / Unity ones. Without them a Tripo character
+        // resolves only ``head``, and builtin.avatar_body's arm IK, neck
+        // tracking and leg posing all silently no-op on the very rigs this
+        // pipeline generates.
         add_sided(s, "shoulder",
                   {"{L}Shoulder", "clavicle_{s}", "shoulder_{s}",
-                   "{L}Clavicle"});
+                   "{L}Clavicle", "{s}_Clavicle"});
         add_sided(s, "upper_arm",
                   {"{L}Arm", "upperarm_{s}", "{L}UpperArm", "upper_arm_{s}",
-                   "arm_{s}", "{L}_arm"});
+                   "arm_{s}", "{L}_arm", "{s}_Upperarm"});
         // Mixamo has no elbow bone: the elbow is where the forearm starts, so
         // both slots deliberately resolve to the same joint.
         const std::vector<std::string> kForearm = {
             "{L}ForeArm", "lowerarm_{s}", "{L}LowerArm", "forearm_{s}",
-            "lower_arm_{s}", "elbow_{s}", "{L}_forearm"};
+            "lower_arm_{s}", "elbow_{s}", "{L}_forearm", "{s}_Forearm"};
         add_sided(s, "elbow", kForearm);
         add_sided(s, "forearm", kForearm);
         const std::vector<std::string> kHand = {
-            "{L}Hand", "hand_{s}", "{L}_hand", "wrist_{s}", "{L}Wrist"};
+            "{L}Hand", "hand_{s}", "{L}_hand", "wrist_{s}", "{L}Wrist",
+            "{s}_Hand"};
         add_sided(s, "wrist", kHand);
         add_sided(s, "hand", kHand);
 
         // --- Legs -------------------------------------------------------
         add_sided(s, "thigh",
                   {"{L}UpLeg", "thigh_{s}", "{L}UpperLeg", "upleg_{s}",
-                   "upper_leg_{s}", "{L}_thigh"});
+                   "upper_leg_{s}", "{L}_thigh", "{s}_Thigh"});
         // Same collapse as the elbow: the knee is the origin of the shin.
         const std::vector<std::string> kShin = {
             "{L}Leg", "calf_{s}", "{L}LowerLeg", "shin_{s}", "lower_leg_{s}",
-            "leg_{s}", "knee_{s}", "{L}_shin"};
+            "leg_{s}", "knee_{s}", "{s}_Calf", "{L}_shin"};
         add_sided(s, "knee", kShin);
         add_sided(s, "shin", kShin);
         const std::vector<std::string> kFoot = {
-            "{L}Foot", "foot_{s}", "{L}_foot", "ankle_{s}", "{L}Ankle"};
+            "{L}Foot", "foot_{s}", "{L}_foot", "ankle_{s}", "{L}Ankle",
+            "{s}_Foot"};
         add_sided(s, "ankle", kFoot);
         add_sided(s, "foot", kFoot);
         add_sided(s, "toes",
-                  {"{L}ToeBase", "ball_{s}", "toe_{s}", "toes_{s}",
+                  {"{L}ToeBase", "{s}_ToeBase", "ball_{s}", "toe_{s}",
+                   "toes_{s}",
                    "{L}Toes", "{L}_toe"});
 
         // --- Fingers ----------------------------------------------------

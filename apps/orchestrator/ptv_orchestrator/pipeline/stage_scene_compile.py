@@ -27,7 +27,8 @@ glb is never silently dropped.
 from __future__ import annotations
 
 import json
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -120,29 +121,71 @@ class SocketContractError(RuntimeError):
     """
 
 
+class EquipSlotContractError(RuntimeError):
+    """Something binds ``builtin.equip`` and no wearer offers it a slot.
+
+    Raised at scene-compile time for the same reason the socket error is:
+    this is the only stage that sees both the mechanic bindings (with the
+    MechanicPlan config merged in) and every entity's declared slots. The
+    runtime symptom is an item that simply refuses to holster, with no error
+    anywhere.
+    """
+
+
+class SceneAssetMismatchError(RuntimeError):
+    """The SceneSpec describes assets this project does not have.
+
+    Always the same cause: a ``scene_spec.<id>.json`` left over from a run
+    with a different AssetManifest. It validates against the schema, so
+    nothing upstream objects; it just describes a different game. Compiling
+    it anyway emits meshes pointing at GLBs that were never generated.
+    """
+
+
+@dataclass(frozen=True)
+class _SocketNeed:
+    """A required-socket check that cannot be answered entity-locally.
+
+    The entity binding the mechanic has no mesh, so the mechanic is not
+    reading the socket off ``self`` -- it resolves a held or spawned item at
+    runtime. Whether that is satisfiable depends on the WHOLE scene, which is
+    not known until every entity has been compiled.
+    """
+
+    entity_id: str
+    mechanic_id: str
+    sockets: tuple[str, ...]
+
+
 def _check_required_sockets(
     entity: Any,
     plan_item: Any,
     mesh: dict[str, Any] | None,
     contracts: dict[str, dict[str, Any]],
-) -> list[str]:
-    """Violations for one entity/mechanic pair. Empty list when satisfied.
+) -> tuple[list[str], _SocketNeed | None]:
+    """Violations for one entity/mechanic pair, plus any deferred check.
 
     Mechanics with no ``code_task``, or a code task that declares no
     ``required_sockets``, are skipped entirely -- so this is inert for every
     project generated before sockets existed.
+
+    When the bound entity HAS a mesh, that mesh must carry every required
+    socket: the mechanic is bound to this entity, so ``self`` is what it will
+    read, and a missing socket is a hard failure. When the entity has NO mesh
+    -- a hand, a spawn marker, a rig node -- there is no ``self`` geometry to
+    read, so the mechanic must be resolving its target at runtime. That case
+    is deferred to :func:`_check_deferred_socket_needs`, which asks the much
+    weaker but still meaningful question "can anything in this game supply
+    that socket?".
     """
     task = getattr(plan_item, "code_task", None)
     required = list(getattr(task, "required_sockets", None) or [])
     if not required:
-        return []
+        return [], None
 
     mechanic_id = getattr(task, "id", None) or getattr(plan_item, "id", "?")
     if mesh is None:
-        return [
-            f"entity '{entity.id}' binds '{mechanic_id}' which requires"
-            f" sockets {required}, but the entity has no mesh to carry them"
-        ]
+        return [], _SocketNeed(entity.id, mechanic_id, tuple(required))
 
     asset_id = mesh.get("asset_id", "?")
     available = sorted((mesh.get("sockets") or {}).keys())
@@ -160,7 +203,162 @@ def _check_required_sockets(
             f"entity '{entity.id}' binds '{mechanic_id}' which requires socket"
             f" '{name}', but asset '{asset_id}' provides {available}{detail}"
         )
+    return out, None
+
+
+def _equip_slot_json(slot: Any) -> dict[str, Any]:
+    """One ``EquipSlotSpec`` in the shape ``SceneLoader`` reads.
+
+    Vectors and quaternions are flattened to arrays like every other
+    transform in ``scene.json``, so the C++ side needs no new parsing idiom.
+    """
+    return {
+        "name": slot.name,
+        "body_slot": slot.body_slot,
+        "host_item_slot": slot.host_item_slot,
+        "host_socket": slot.host_socket,
+        "local_position": [
+            slot.local_position.x,
+            slot.local_position.y,
+            slot.local_position.z,
+        ],
+        "local_rotation": [
+            slot.local_rotation.x,
+            slot.local_rotation.y,
+            slot.local_rotation.z,
+            slot.local_rotation.w,
+        ],
+        "snap_radius_m": slot.snap_radius_m,
+        "exclusive": slot.exclusive,
+        "accepts_tags": list(slot.accepts_tags),
+    }
+
+
+@dataclass(frozen=True)
+class _EquipNeed:
+    """An equip binding and the slot names it insists on."""
+
+    entity_id: str
+    mechanic_id: str
+    slots: tuple[str, ...]
+
+
+def _equip_need(
+    entity: Any, binding: Any, resolved: dict[str, Any], plan_item: Any
+) -> _EquipNeed | None:
+    """``_EquipNeed`` when this binding equips things, else ``None``.
+
+    Three ways a binding can be the equip mechanic, and all three need
+    ``CEquipSlots`` on a wearer to work: the scene naming ``builtin.equip``
+    directly, a ``builtin+config`` item resolving to it, and a
+    ``builtin+config_code_edit`` copy of its source (which still reads
+    ``params.slots`` the same way, being an edit of the same file).
+    """
+    is_equip = (
+        binding.mechanic_id == "builtin.equip"
+        or resolved.get("builtin_id") == "builtin.equip"
+        or (
+            plan_item is not None
+            and getattr(plan_item, "base_builtin_id", None) == "builtin.equip"
+        )
+    )
+    if not is_equip:
+        return None
+    wanted = (resolved.get("params") or {}).get("slots") or []
+    return _EquipNeed(
+        entity.id, binding.mechanic_id, tuple(str(s) for s in wanted)
+    )
+
+
+def _check_equip_slots(
+    entities: list[dict[str, Any]], needs: Iterable[_EquipNeed]
+) -> list[str]:
+    """Violations for equip bindings that have nowhere to put anything.
+
+    ``EquipMechanic::pick_slot_near`` returns no candidate at all when the
+    wearer has no ``CEquipSlots``, so a scene that binds ``builtin.equip``
+    without declaring a slot anywhere produces a game where the item simply
+    never attaches -- silently, with every stage green. Holstering is usually
+    something the prompt asked for by name, so shipping a build that cannot
+    holster is worse than failing here.
+
+    Deliberately scene-wide rather than per-entity: the binding sits on the
+    ITEM (the pistol carries ``builtin.equip``) while the slot is declared on
+    the WEARER, so "does this entity have slots" is the wrong question.
+    """
+    declared: dict[str, list[str]] = {}
+    for e in entities:
+        for slot in e.get("equip_slots") or []:
+            declared.setdefault(slot["name"], []).append(e["id"])
+
+    out: list[str] = [
+        f"equip slot '{name}' is declared by {owners}; slot names must be"
+        " unique across the scene or params.slots cannot address them"
+        for name, owners in sorted(declared.items())
+        if len(owners) > 1
+    ]
+
+    for need in needs:
+        if not declared:
+            out.append(
+                f"entity '{need.entity_id}' binds '{need.mechanic_id}' but no"
+                " entity in the scene declares any equip_slots, so there is"
+                " nowhere for it to be equipped. Declare the slot on the"
+                " WEARER (the player rig, avatar or NPC) through"
+                " EntitySpec.equip_slots -- not on the holster prop."
+            )
+            continue
+        missing = [name for name in need.slots if name not in declared]
+        if missing:
+            out.append(
+                f"entity '{need.entity_id}' binds '{need.mechanic_id}' with"
+                f" params.slots={list(need.slots)}, but {missing} are declared"
+                f" by no entity. Declared slots: {sorted(declared)}"
+            )
     return out
+
+
+def _check_deferred_socket_needs(
+    needs: Iterable[_SocketNeed],
+    contracts: dict[str, dict[str, Any]],
+    referenced_asset_ids: set[str],
+) -> tuple[list[str], list[str]]:
+    """``(violations, warnings)`` for mechanics bound to mesh-less entities.
+
+    A shooting hub bound to the player's right hand is the canonical case. The
+    hand has no mesh, and the generated C++ correctly reads the muzzle off the
+    weapon it resolves at runtime, guarded by ``has_socket``. Demanding the
+    socket sit on the hand is a false positive that fails a correct build.
+
+    What is still worth guaranteeing is that the socket exists SOMEWHERE in
+    the game: if no asset in the scene can supply a "muzzle", every shot will
+    take the suppression branch and the mechanic is dead code. So a satisfied
+    need warns (naming which assets provide it, which is the useful debugging
+    fact) and an unsatisfiable one fails.
+    """
+    providers: dict[str, list[str]] = {}
+    for asset_id in sorted(referenced_asset_ids):
+        for name in sorted((contracts.get(asset_id) or {}).get("sockets") or {}):
+            providers.setdefault(name, []).append(asset_id)
+
+    violations: list[str] = []
+    warnings: list[str] = []
+    for need in needs:
+        for name in need.sockets:
+            supplied = providers.get(name) or []
+            if supplied:
+                warnings.append(
+                    f"entity '{need.entity_id}' binds '{need.mechanic_id}'"
+                    f" requiring socket '{name}' but has no mesh of its own;"
+                    f" satisfied at runtime by {supplied}"
+                )
+            else:
+                violations.append(
+                    f"entity '{need.entity_id}' binds '{need.mechanic_id}'"
+                    f" which requires socket '{name}', and no asset in the"
+                    " scene provides it"
+                )
+    return violations, warnings
 
 
 def _default_entity_for_asset(
@@ -331,6 +529,67 @@ def _default_entity_for_asset(
     }
 
 
+def bind_avatar_body(
+    entities: list[dict[str, Any]],
+    build_spec: BuildSpec,
+    on_warning: Callable[[str], None] | None = None,
+) -> int:
+    """Bind ``builtin.avatar_body`` to the player's body with its BuildSpec.
+
+    The engine binds this mechanic on its own whenever a scene places an
+    entity tagged ``player_avatar``, so the body is never left unposed. But an
+    auto-bind has no params, which means it runs on defaults -- and the
+    BuildSpec agent already made every one of those decisions from the prompt.
+    ``leg_animation: false`` ("the avatar should just slide") and
+    ``head_visibility: toggleable`` ("let me see my own face in the mirror")
+    were being decided, written down, and then silently discarded here.
+
+    An explicit binding wins over the auto-bind, so emitting one is the whole
+    fix. Returns how many entities were bound.
+
+    Also strips ``attached_to`` from the avatar: the mechanic plants the body
+    on the XR rig every frame, and attachments are resolved AFTER mechanics
+    run, so a parented avatar gets pinned to its parent's authored transform
+    instead of following the player. The engine drops the attachment too, but
+    doing it here means the compiled scene says what will actually happen.
+    """
+    spec = getattr(build_spec, "player_avatar", None)
+    if spec is None:
+        return 0
+
+    params = {
+        "coverage": spec.coverage.value,
+        "head_visibility": spec.head_visibility.value,
+        "leg_animation": bool(spec.leg_animation),
+    }
+
+    bound = 0
+    for entity in entities:
+        if "player_avatar" not in (entity.get("tags") or []):
+            continue
+        bindings = entity.setdefault("mechanic_bindings", [])
+        if any(
+            isinstance(b, dict) and b.get("id") == "builtin.avatar_body"
+            for b in bindings
+        ):
+            continue
+        bindings.append(
+            {
+                "id": "builtin.avatar_body",
+                "builtin_id": "builtin.avatar_body",
+                "params": dict(params),
+            }
+        )
+        bound += 1
+        if entity.pop("attached_to", None) is not None and on_warning:
+            on_warning(
+                f"entity '{entity.get('id')}' is the player avatar and was"
+                " attached to another entity; dropped the attachment so"
+                " builtin.avatar_body can plant it on the XR rig"
+            )
+    return bound
+
+
 def _mesh_render_fields(
     norm: dict[str, Any],
     target_scale_meters: float,
@@ -488,12 +747,16 @@ def compile_scene_json(
     scene: SceneSpec,
     normalization_report: dict[str, dict[str, Any]] | None = None,
     asset_contract: dict[str, dict[str, Any]] | None = None,
+    on_warning: Callable[[str], None] | None = None,
 ) -> dict[str, Any]:
     """Pure function: produce the engine-loadable scene JSON dict.
 
     Raises ``SocketContractError`` when a bound mechanic declares a
     ``required_sockets`` entry the asset's contract cannot supply -- see
-    :func:`_validate_required_sockets`.
+    :func:`_check_required_sockets`.
+
+    ``on_warning`` receives findings that are worth saying out loud but must
+    not fail the build, so the caller can route them to the event bus.
     """
 
     asset_by_id = {a.id: a for a in manifest.items}
@@ -509,6 +772,34 @@ def compile_scene_json(
     contracts = asset_contract or {}
     referenced_asset_ids: set[str] = set()
     socket_violations: list[str] = []
+    # Deferred until every entity (including the auto-instantiated safety-net
+    # ones) is known, because the question is about the whole scene.
+    socket_needs: list[_SocketNeed] = []
+    # Same reason: the equip binding is on the item, the slot is on the
+    # wearer, and the wearer may be authored later in the list.
+    equip_needs: list[_EquipNeed] = []
+
+    # A mesh naming an asset the manifest has never heard of used to fall
+    # through to ``e.mesh.glb_path``, emitting a path to a GLB that was never
+    # generated -- an engine-side load failure at launch, from a stage that
+    # reported success. The only way that happens is a SceneSpec composed
+    # against a different manifest, so say so here and stop.
+    unknown_meshes = sorted(
+        {
+            e.mesh.asset_id
+            for e in scene.entities
+            if e.mesh is not None and e.mesh.asset_id not in asset_by_id
+        }
+    )
+    if unknown_meshes:
+        raise SceneAssetMismatchError(
+            f"scene '{scene.scene_id}' references {len(unknown_meshes)}"
+            f" asset(s) that are not in the AssetManifest: {unknown_meshes}."
+            "\n\nThis is a SceneSpec composed against an older asset set."
+            f" Delete projects/<id>/scene_spec.{scene.scene_id}.json and"
+            " re-run the scene_spec stage to recompose it against the"
+            " current manifest."
+        )
 
     entities_out: list[dict[str, Any]] = []
     for e in scene.entities:
@@ -561,9 +852,15 @@ def compile_scene_json(
                     resolved["params"].setdefault(
                         "hand", item.binding.hand.value
                     )
-                socket_violations.extend(
-                    _check_required_sockets(e, item, mesh, contracts)
+                violations, deferred = _check_required_sockets(
+                    e, item, mesh, contracts
                 )
+                socket_violations.extend(violations)
+                if deferred is not None:
+                    socket_needs.append(deferred)
+            equip_need = _equip_need(e, b, resolved, item)
+            if equip_need is not None:
+                equip_needs.append(equip_need)
             bindings.append(resolved)
         entities_out.append(
             {
@@ -620,6 +917,11 @@ def compile_scene_json(
                     if e.attached_to is not None
                     else {}
                 ),
+                **(
+                    {"equip_slots": [_equip_slot_json(s) for s in e.equip_slots]}
+                    if e.equip_slots
+                    else {}
+                ),
             }
         )
 
@@ -647,7 +949,32 @@ def compile_scene_json(
                 contracts.get(asset.id),
             )
         )
+        # An auto-instantiated asset is in the scene like any other, so it
+        # counts as a socket provider for the deferred checks below.
+        referenced_asset_ids.add(asset.id)
         auto_index += 1
+
+    bind_avatar_body(entities_out, build_spec, on_warning)
+
+    # Now that every mesh in the scene is known, answer the checks that could
+    # not be answered entity-locally.
+    deferred_violations, deferred_warnings = _check_deferred_socket_needs(
+        socket_needs, contracts, referenced_asset_ids
+    )
+    socket_violations.extend(deferred_violations)
+    if on_warning is not None:
+        for warning in deferred_warnings:
+            on_warning(warning)
+
+    equip_violations = _check_equip_slots(entities_out, equip_needs)
+    if equip_violations:
+        raise EquipSlotContractError(
+            "mechanics can equip items into slots the scene never declared:\n"
+            + "\n".join(f"  - {v}" for v in equip_violations)
+            + "\n\nAdd the slot to the wearer's `equip_slots` in the SceneSpec"
+            " (body_slot 'waist' for a hip holster, 'back' for a sling), or"
+            " drop the builtin.equip binding."
+        )
 
     # Fail loudly, and all at once. Reporting every violation in a single
     # raise means one fix-up round instead of N build-fail cycles.
@@ -717,6 +1044,54 @@ def compile_scene_json(
         # runtime falls back to safe built-in defaults.
         **({"performance": nrep["__performance__"]} if "__performance__" in nrep else {}),
     }
+
+
+def sanitize_physics(
+    entities: list[dict],
+    on_warning: Callable[[str], None] | None = None,
+) -> int:
+    """Repair physics values the engine cannot accept. Returns how many.
+
+    Applied to the FINAL entity list rather than inside
+    :func:`compile_scene_json`, because that is the only point where all three
+    sources of entities meet: the SceneSpec (schema-validated), the world
+    builder's C++ output (merged verbatim as raw dicts, so nothing has
+    validated it), and this stage's own asset safety net.
+
+    Today this enforces one rule: a ``dynamic`` or ``kinematic`` body must
+    weigh more than nothing. Jolt builds an inverse inertia tensor by dividing
+    by the mass and asserts on a non-positive one, and a failed assert is a
+    breakpoint -- SIGTRAP on a headset. Three kinematic popup targets authored
+    with ``mass_kg: 0.0`` took down a shipped Quest APK during scene load,
+    showing no error at all: the app just returned to the home environment.
+
+    The engine clamps this too. Both exist on purpose -- the engine can never
+    trust its input, and fixing it here means the compiled scene.json on disk
+    says what the game will actually do.
+    """
+    fixed = 0
+    for entity in entities:
+        physics = entity.get("physics")
+        if not isinstance(physics, dict):
+            continue
+        if physics.get("kind") not in ("dynamic", "kinematic"):
+            continue
+        try:
+            mass = float(physics.get("mass_kg", 0.0))
+        except (TypeError, ValueError):
+            mass = 0.0
+        if mass > 0.0:
+            continue
+        physics["mass_kg"] = 1.0
+        fixed += 1
+        if on_warning is not None:
+            on_warning(
+                f"entity '{entity.get('id')}' is"
+                f" '{physics.get('kind')}' with mass_kg={mass}; raised to 1.0."
+                " A movable body needs a positive mass -- use kind 'static'"
+                " for something that never moves."
+            )
+    return fixed
 
 
 def count_animated_agents(entities: list[dict]) -> int:
@@ -1068,7 +1443,15 @@ def run(ctx: PipelineContext) -> StageResult:
             json.loads(spec_path.read_text(encoding="utf-8"))
         )
         doc = compile_scene_json(
-            build_spec, manifest, plan, scene_spec, normalization, asset_contract
+            build_spec,
+            manifest,
+            plan,
+            scene_spec,
+            normalization,
+            asset_contract,
+            on_warning=lambda m, sid=scene_entry.id: ctx.emit(
+                ProjectStage.scene_compile, "warning", f"{sid}: {m}"
+            ),
         )
         # Every scene gets its own environment now, not just the entry point.
         # Previously the other scenes compiled to gameplay entities floating
@@ -1078,6 +1461,22 @@ def run(ctx: PipelineContext) -> StageResult:
         if world_doc is not None:
             doc = _merge_world_into_scene(
                 doc, world_doc, normalization, asset_contract
+            )
+
+        # Every entity is now present -- authored, world-merged and
+        # auto-instantiated alike -- so this is the one place a physics value
+        # can be checked once for all of them.
+        repaired = sanitize_physics(
+            doc.get("entities") or [],
+            on_warning=lambda m, sid=scene_entry.id: ctx.emit(
+                ProjectStage.scene_compile, "warning", f"{sid}: {m}"
+            ),
+        )
+        if repaired:
+            ctx.store.append_log(
+                ctx.project_id,
+                "scene_compile",
+                f"{scene_entry.id}: repaired physics on {repaired} entity(ies)",
             )
 
         # Connect the declarations to the mechanics. Uniform across every

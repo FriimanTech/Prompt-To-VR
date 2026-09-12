@@ -7,9 +7,11 @@ it degrades when geometry cannot supply what gameplay asked for.
 
 from __future__ import annotations
 
+import ast
 import json
 from pathlib import Path
 
+import pytest
 from ptv_orchestrator.events import EventBus
 from ptv_orchestrator.pipeline import stage_asset_contract
 from ptv_orchestrator.pipeline.context import PipelineContext
@@ -17,6 +19,7 @@ from ptv_orchestrator.settings import Settings
 from ptv_orchestrator.storage import ProjectStore
 from ptv_schemas import AssetItem, AssetManifest, ReferenceImageRequest
 from ptv_schemas.asset_manifest import AssetCategory
+from ptv_schemas.project_state import ProjectStatus
 
 _TOOL_OUTPUT = {
     "aabb_min": [-0.1, -0.05, -0.3],
@@ -33,14 +36,16 @@ _TOOL_OUTPUT = {
 }
 
 
-def _manifest(socket_hints: list[str]) -> AssetManifest:
+def _manifest(
+    socket_hints: list[str], category: AssetCategory = AssetCategory.prop
+) -> AssetManifest:
     return AssetManifest(
         prompt_id="demo",
         items=[
             AssetItem(
                 id="blaster",
                 name="Blaster",
-                category=AssetCategory.prop,
+                category=category,
                 style_notes="alien blaster",
                 reference=ReferenceImageRequest(prompt="an alien blaster"),
                 target_scale_meters=0.35,
@@ -50,11 +55,20 @@ def _manifest(socket_hints: list[str]) -> AssetManifest:
     )
 
 
-def _ctx(tmp_path: Path, socket_hints: list[str]) -> PipelineContext:
+def _ctx(
+    tmp_path: Path,
+    socket_hints: list[str],
+    *,
+    category: AssetCategory = AssetCategory.prop,
+    relative_paths: bool = False,
+    write_glb: bool = True,
+) -> PipelineContext:
     settings = Settings(repo_root=tmp_path, projects_dir=tmp_path / "projects")
     store = ProjectStore(settings.projects_dir)
     state = store.create("Sockets", "a prompt long enough to pass validation")
-    store.save_asset_manifest(state.project_id, _manifest(socket_hints))
+    store.save_asset_manifest(
+        state.project_id, _manifest(socket_hints, category)
+    )
 
     ctx = PipelineContext(
         project_id=state.project_id,
@@ -63,14 +77,16 @@ def _ctx(tmp_path: Path, socket_hints: list[str]) -> PipelineContext:
         bus=EventBus(),
     )
     glb = ctx.project_dir / "assets" / "blaster" / "model.glb"
-    glb.parent.mkdir(parents=True, exist_ok=True)
-    glb.write_bytes(b"glTF\x02\x00\x00\x00")
+    if write_glb:
+        glb.parent.mkdir(parents=True, exist_ok=True)
+        glb.write_bytes(b"glTF\x02\x00\x00\x00")
+    recorded = glb.relative_to(tmp_path) if relative_paths else glb
     (ctx.project_dir / "asset_normalization.json").write_text(
         json.dumps(
             {
                 "blaster": {
                     "status": "ok",
-                    "glb_path": str(glb).replace("\\", "/"),
+                    "glb_path": str(recorded).replace("\\", "/"),
                     "target_scale_meters": 0.35,
                 }
             }
@@ -147,19 +163,6 @@ def test_unsatisfiable_hint_is_reported_not_dropped(tmp_path: Path, monkeypatch)
     assert entry["unsatisfied_hints"] == ["scope_mount"]
 
 
-def test_tool_failure_degrades_to_empty_sockets(tmp_path: Path, monkeypatch):
-    ctx = _ctx(tmp_path, ["muzzle"])
-    _stub_tool(monkeypatch, payload=None, rc=1)
-
-    stage_asset_contract.run(ctx)
-
-    entry = json.loads(
-        (ctx.project_dir / "asset_contract.json").read_text(encoding="utf-8")
-    )["blaster"]
-    assert entry["status"] == "failed"
-    assert entry["sockets"] == {}
-
-
 def test_asset_without_valid_glb_still_gets_an_entry(tmp_path: Path, monkeypatch):
     ctx = _ctx(tmp_path, ["muzzle"])
     (ctx.project_dir / "asset_normalization.json").write_text(
@@ -175,3 +178,162 @@ def test_asset_without_valid_glb_still_gets_an_entry(tmp_path: Path, monkeypatch
     )["blaster"]
     assert entry["status"] == "skipped"
     assert entry["sockets"] == {}
+
+
+# ---------------------------------------------------------------------------
+# Path resolution. asset_normalization.json records paths relative to the REPO
+# ROOT; resolving them against the process working directory instead made
+# every GLB "go missing" for a whole pipeline run while the stage reported
+# success, and the damage only surfaced at scene_compile.
+# ---------------------------------------------------------------------------
+
+
+def test_repo_relative_glb_resolves_against_repo_root_not_cwd(
+    tmp_path: Path, monkeypatch
+):
+    ctx = _ctx(tmp_path, ["muzzle", "grip"], relative_paths=True)
+    _stub_tool(monkeypatch)
+
+    elsewhere = tmp_path / "somewhere" / "else"
+    elsewhere.mkdir(parents=True)
+    monkeypatch.chdir(elsewhere)
+
+    stage_asset_contract.run(ctx)
+
+    entry = json.loads(
+        (ctx.project_dir / "asset_contract.json").read_text(encoding="utf-8")
+    )["blaster"]
+    assert entry["status"] == "ok"
+    assert set(entry["sockets"]) == {"muzzle", "grip"}
+    assert entry["source_glb"].startswith(str(tmp_path).replace("\\", "/"))
+
+
+def test_missing_hinted_glb_fails_the_stage(tmp_path: Path, monkeypatch):
+    """Reporting "0 with sockets, 1 skipped" as success is what hid the bug."""
+    ctx = _ctx(tmp_path, ["muzzle"], write_glb=False)
+    _stub_tool(monkeypatch)
+
+    with pytest.raises(stage_asset_contract.AssetContractError) as excinfo:
+        stage_asset_contract.run(ctx)
+
+    assert "not on disk" in str(excinfo.value)
+    entry = json.loads(
+        (ctx.project_dir / "asset_contract.json").read_text(encoding="utf-8")
+    )["blaster"]
+    assert entry["status"] == "missing"
+
+    state = ctx.store.load_state(ctx.project_id)
+    latest = [r for r in state.stages if r.stage == stage_asset_contract._STAGE][-1]
+    assert latest.status == ProjectStatus.failed
+
+
+def test_tool_failure_on_hinted_asset_fails_the_stage(tmp_path: Path, monkeypatch):
+    ctx = _ctx(tmp_path, ["muzzle"])
+    _stub_tool(monkeypatch, payload=None, rc=1)
+
+    with pytest.raises(stage_asset_contract.AssetContractError):
+        stage_asset_contract.run(ctx)
+
+
+def test_tool_failure_without_hints_is_not_blocking(tmp_path: Path, monkeypatch):
+    """No hints means nothing in the game asked for a socket here."""
+    ctx = _ctx(tmp_path, [])
+    _stub_tool(monkeypatch, payload=None, rc=1)
+
+    stage_asset_contract.run(ctx)  # does not raise
+
+    entry = json.loads(
+        (ctx.project_dir / "asset_contract.json").read_text(encoding="utf-8")
+    )["blaster"]
+    assert entry["status"] == "failed"
+
+
+# ---------------------------------------------------------------------------
+# Socket policy. Geometry can only ever derive "muzzle" and "grip", and those
+# two names only mean something on a held or mounted object. Publishing them
+# on a character or a HUD panel is a number nothing reads.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "category",
+    [AssetCategory.character, AssetCategory.ui, AssetCategory.fx],
+)
+def test_non_prop_without_hints_gets_no_sockets_and_says_why(
+    tmp_path: Path, monkeypatch, category: AssetCategory
+):
+    ctx = _ctx(tmp_path, [], category=category)
+    _stub_tool(monkeypatch)
+
+    stage_asset_contract.run(ctx)
+
+    entry = json.loads(
+        (ctx.project_dir / "asset_contract.json").read_text(encoding="utf-8")
+    )["blaster"]
+    assert entry["sockets"] == {}
+    assert entry["status"] == "skipped"
+    # An empty socket map must explain itself; a bare {} reads exactly like
+    # the path bug did.
+    assert "no sockets derived" in entry["reason"]
+
+
+def test_prop_without_hints_keeps_the_implicit_fallback(
+    tmp_path: Path, monkeypatch
+):
+    ctx = _ctx(tmp_path, [])
+    _stub_tool(monkeypatch)
+
+    stage_asset_contract.run(ctx)
+
+    entry = json.loads(
+        (ctx.project_dir / "asset_contract.json").read_text(encoding="utf-8")
+    )["blaster"]
+    assert set(entry["sockets"]) == {"muzzle", "grip"}
+
+
+@pytest.mark.parametrize(
+    "category",
+    [AssetCategory.character, AssetCategory.ui, AssetCategory.fx],
+)
+def test_explicit_hints_win_for_any_category(
+    tmp_path: Path, monkeypatch, category: AssetCategory
+):
+    """The manifest asking for a socket is gameplay stating a requirement; the
+    category is only a default for what to do when it stays silent."""
+    ctx = _ctx(tmp_path, ["muzzle"], category=category)
+    _stub_tool(monkeypatch)
+
+    stage_asset_contract.run(ctx)
+
+    entry = json.loads(
+        (ctx.project_dir / "asset_contract.json").read_text(encoding="utf-8")
+    )["blaster"]
+    assert entry["status"] == "ok"
+    assert set(entry["sockets"]) == {"muzzle"}
+
+
+def test_no_pipeline_stage_resolves_paths_against_cwd():
+    """Artifact paths are repo-root-relative, always.
+
+    A grep guard rather than a behavioural test because the failure mode is
+    invisible: the stage still runs, still writes a file, still says
+    "succeeded". Parsed with ``ast`` so prose about the old bug in a docstring
+    does not trip it.
+    """
+    pipeline_dir = Path(stage_asset_contract.__file__).parent
+    offenders: list[str] = []
+    for path in sorted(pipeline_dir.rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            if isinstance(func, ast.Attribute) and func.attr in (
+                "cwd",
+                "getcwd",
+            ):
+                offenders.append(f"{path.name}:{node.lineno} {func.attr}()")
+    assert offenders == [], (
+        "pipeline stages must resolve artifact paths against"
+        f" settings.repo_root, not the process cwd: {offenders}"
+    )

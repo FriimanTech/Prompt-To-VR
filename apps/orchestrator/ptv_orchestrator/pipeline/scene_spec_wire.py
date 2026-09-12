@@ -18,9 +18,16 @@ open-ended dicts, which strict mode forbids because it requires
   ``(key, value_json)`` pairs.
 
 Everything else (``Transform``, ``Vec3``, ``QuatXYZW``, ``PhysicsProps``,
-``AttachmentRef``, ``HealthProps``, ``FactionProps``, ``LightSpec``,
-``PlayerSpawn``) is already strict-compatible and is reused verbatim, so
-there is one definition of a transform rather than two that drift.
+``AttachmentRef``, ``HealthProps``, ``FactionProps``, ``EquipSlotSpec``,
+``LightSpec``, ``PlayerSpawn``) is already strict-compatible and is reused
+verbatim, so there is one definition of a transform rather than two that
+drift.
+
+Anything the wire schema does not declare, the agent CANNOT EMIT -- strict
+mode permits exactly the declared surface and nothing else. So a new
+``EntitySpec`` field is not optional work here: leaving it out silently makes
+the field unreachable for every future game, not just the one in front of
+you.
 
 For the record, the strict-mode subset does allow ``pattern``, ``maxLength``,
 ``minItems``/``maxItems`` and numeric bounds for non-fine-tuned models -- only
@@ -45,6 +52,7 @@ from ptv_schemas.common import IdStr, StrictModel
 from ptv_schemas.scene_spec import (
     AttachmentRef,
     EntitySpec,
+    EquipSlotSpec,
     FactionProps,
     HealthProps,
     LightSpec,
@@ -118,6 +126,9 @@ class WireEntity(StrictModel):
     health: Optional[HealthProps] = None
     faction: Optional[FactionProps] = None
     attached_to: Optional[AttachmentRef] = None
+    equip_slots: List[EquipSlotSpec] = Field(
+        default_factory=list, max_length=24
+    )
 
 
 class WireSceneSpec(StrictModel):
@@ -186,6 +197,7 @@ def to_scene_spec(wire: WireSceneSpec) -> SceneSpec:
             health=e.health,
             faction=e.faction,
             attached_to=e.attached_to,
+            equip_slots=list(e.equip_slots),
         )
         for e in wire.entities
     ]

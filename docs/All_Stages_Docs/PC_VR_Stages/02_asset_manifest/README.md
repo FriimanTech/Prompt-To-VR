@@ -38,6 +38,7 @@ Each item includes: `id`, `category`, `strategy` (`image_to_3d` or `text_to_3d`)
 
 - **AssetItem** — One row in the manifest; maps 1:1 to a folder under `projects/<id>/assets/<asset_id>/`.
 - **Environment category** — Items tagged `environment` are **dropped** if any non-environment items exist. The world is built in C++ (`world_generation`), not as a Tripo GLB.
+- **Audio items** — Items naming a *sound* (`pistol_shot_audio`, "Audio: UI Click") are **dropped** the same way. Sound has no shape, so a Tripo call for one buys a silent blob.
 - **Rigging / animations** — Initial hints only; `npc_plan` reconciles them before credits are spent on Tripo rigging.
 
 ### End-to-end flow (plain language)
@@ -45,7 +46,7 @@ Each item includes: `id`, `category`, `strategy` (`image_to_3d` or `text_to_3d`)
 1. Load BuildSpec JSON.
 2. Call **Claude Sonnet** with `ASSET_MANIFEST_SYSTEM` and the BuildSpec embedded in the user message.
 3. Validate response as `AssetManifest`.
-4. Post-filter: remove stray `environment` items when other objects exist.
+4. Post-filter: remove stray `environment` items and any item naming a sound, when other objects survive.
 5. Save manifest and succeed.
 
 ---
@@ -62,20 +63,29 @@ Each item includes: `id`, `category`, `strategy` (`image_to_3d` or `text_to_3d`)
 | 4 | Embed full BuildSpec JSON in user message | Instructs model to emit AssetManifest |
 | 5 | `generate_json(..., model=claude_light_model, system=ASSET_MANIFEST_SYSTEM)` | **Sonnet**, not Opus — cheaper planning pass |
 | 6 | `AssetManifest.model_validate()` | Schema enforcement |
-| 7 | **Environment post-filter** | See below |
+| 7 | **Reconcile: environment + audio post-filter** | See below |
 | 8 | `save_asset_manifest()` | Writes disk; caches on `ctx.asset_manifest` |
 | 9 | Success message | Includes dropped environment count if any |
 
-### Environment filter (deterministic, after LLM)
+### Reconcile filter (deterministic, after LLM)
 
-```python
-env_items = [i for i in manifest.items if i.category == environment]
-non_env = [i for i in manifest.items if i.category != environment]
-if env_items and non_env:
-    manifest = manifest with items=non_env only
-```
+`_partition()` splits the model's answer into three buckets and keeps only the first, but **only when the first is non-empty** — `AssetManifest` requires ≥1 item, so emptying it would turn a wasted API call into a crashed pipeline.
 
-The VR **environment** is authored in C++ (`world_generation`), not Tripo. The LLM prompt discourages environment GLBs, but this filter is belt-and-suspenders. If the manifest would become empty (only environment items), Pydantic may fail — that is a real failure mode.
+| Bucket | Rule | Why it cannot be a GLB |
+|--------|------|------------------------|
+| kept | everything else | — |
+| environment | `category == environment` | The VR environment is authored in C++ by `world_generation`. |
+| audio | `is_audio_item()` | Sound has no shape. |
+
+Both are belt-and-suspenders behind `ASSET_MANIFEST_SYSTEM`, which forbids each of them outright. The prompt is advice; a fallback model may not take it, and every surviving item costs a reference image plus a paid Tripo call.
+
+#### `is_audio_item()`
+
+Three real runs planned audio as geometry: `pistol_shot_audio` / `rifle_shot_audio` / `target_impact_audio` as `fx`, and nine `Audio: …` items as `ui` — which is how they got past a category-only check. Each one generated a picture of a gunshot, a mesh of that picture, and a silent blob in the scene.
+
+The matcher is whole-token over `id` and `name`, so `soundproof_panel` and `Audiotorium Seats` survive. It stands down entirely when the item also names a physical sound-**making** object (speaker, radio, alarm bell, klaxon, jukebox): those are props with silhouettes, and the failure directions are not symmetric — a wrong drop deletes geometry the game needs, a wrong keep costs one call. Near-misses that name real geometry are deliberately excluded from the audio vocabulary: `stinger` (a missile), `ambient` (lighting), `horn`, `track`.
+
+Audio the prompt asks for belongs in the mechanic that triggers it, not the asset list. `BUILD_SPEC_SYSTEM` now says the same thing one stage earlier, since that is where the `Audio` entries originated.
 
 ### Per-AssetItem contract for downstream stages
 
@@ -101,7 +111,7 @@ The VR **environment** is authored in C++ (`world_generation`), not Tripo. The L
 
 ### SSE events
 
-`running` → `succeeded` with `"N assets"` or `"N assets (dropped M environment asset(s); world is C++-generated)"`.
+`running` → optional `info` naming any dropped audio ids → `succeeded` with `"N assets"`, plus a parenthesised note per bucket, e.g. `"N assets (dropped 1 environment asset(s); world is C++-generated; dropped 3 audio asset(s) (pistol_shot_audio, …); the manifest describes geometry only)"`.
 
 ### Resume / idempotency
 

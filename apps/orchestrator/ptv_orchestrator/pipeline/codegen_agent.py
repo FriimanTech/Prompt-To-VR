@@ -184,6 +184,7 @@ def run_codegen_agent(
     model: str = "gpt-5.6-sol",
     reasoning_effort: str = "high",
     verbosity: str = "medium",
+    request_timeout_seconds: float = 1800.0,
     runner: Optional[RunnerFn] = None,
 ) -> CodegenAgentResult:
     """Run one OpenAI Agents SDK session for one claimed CodeTask.
@@ -207,6 +208,11 @@ def run_codegen_agent(
         on the hardest C++ generation in the pipeline.
     verbosity:
         ``text.verbosity`` for the run.
+    request_timeout_seconds:
+        Per-request HTTP timeout handed to the SDK's OpenAI client. The
+        SDK's own default is 600s, which a large CodeTask at effort
+        ``high`` can exceed -- and the failure lands after ~25 minutes of
+        retries, taking the task, its dependents and the stage with it.
     runner:
         Optional injection point for tests. If supplied, the SDK is not
         imported and the callable is invoked directly with
@@ -228,7 +234,11 @@ def run_codegen_agent(
         return result
 
     return _default_sdk_runner(
-        inp, model, reasoning_effort=reasoning_effort, verbosity=verbosity
+        inp,
+        model,
+        reasoning_effort=reasoning_effort,
+        verbosity=verbosity,
+        request_timeout_seconds=request_timeout_seconds,
     )
 
 
@@ -243,6 +253,7 @@ def _default_sdk_runner(
     *,
     reasoning_effort: str = "high",
     verbosity: str = "medium",
+    request_timeout_seconds: float = 1800.0,
 ) -> CodegenAgentResult:
     """Production runner. Imports the SDK lazily so unit tests that
     inject a stub don't need the dependency installed."""
@@ -255,9 +266,11 @@ def _default_sdk_runner(
             Agent,
             AgentOutputSchema,
             ModelSettings,
+            OpenAIResponsesModel,
             Runner,
             WebSearchTool,
         )
+        from openai import AsyncOpenAI  # type: ignore
         from openai.types.shared import Reasoning  # type: ignore
     except ImportError as exc:  # pragma: no cover - exercised only in real runs
         raise CodegenAgentError(
@@ -277,10 +290,20 @@ def _default_sdk_runner(
         CodegenAgentResult, strict_json_schema=False
     )
 
+    # Explicit client, for the timeout only. The SDK's shared default
+    # client caps a request at 600s; a large CodeTask at effort ``high``
+    # runs past that, and the SDK's two retries turn one slow task into
+    # ~25 wasted minutes and a dead stage. Everything else (api key,
+    # base_url) still comes from the environment exactly as before.
+    agent_model = OpenAIResponsesModel(
+        model=model,
+        openai_client=AsyncOpenAI(timeout=request_timeout_seconds),
+    )
+
     agent = Agent(
         name=f"ptv-codegen-{inp.task_id}",
         instructions=inp.instructions,
-        model=model,
+        model=agent_model,
         # Explicit, and it has to be. When an Agent is constructed without
         # model settings, the SDK back-fills them from the model NAME:
         #

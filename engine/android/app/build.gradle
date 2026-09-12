@@ -47,6 +47,25 @@ android {
         cmake {
             path 'src/main/cpp/CMakeLists.txt'
             version '3.22.1+'
+
+            // Relocate the .cxx tree to a SHORT absolute path.
+            //
+            // Windows still enforces MAX_PATH (260) in ninja, and the default
+            // location is already about 104 characters deep before CMake adds
+            // anything:
+            //   <repo>/projects/<project-id>/builds/quest/app/.cxx/
+            // FetchContent then appends its own
+            //   <config>/<hash>/<abi>/_deps/<pkg>-subbuild/<pkg>-populate-prefix/
+            //   src/<pkg>-populate-stamp/<pkg>-populate-install
+            // which lands at roughly 250 characters for 'Debug'. Renaming the
+            // config to 'RelWithDebInfo' added nine characters and pushed
+            // nlohmann_json's stamp file over the limit, failing configure
+            // with "Filename longer than 260 characters".
+            //
+            // Project ids are timestamped and long, so this has no headroom
+            // by default. A short staging dir buys back ~85 characters and
+            // makes the build independent of how deep the project lives.
+            buildStagingDirectory '@PTV_CXX_DIR@'
         }
     }
 
@@ -57,6 +76,27 @@ android {
         debug {
             debuggable true
             jniDebuggable true
+
+            // The APK is debug-signed, but the ENGINE is compiled optimized.
+            //
+            // AGP otherwise configures CMake as Debug for this build type,
+            // which is -O0 for the whole renderer, physics, skinning and
+            // scene load. A Quest 3 has to present stereo at 72-90 Hz, and
+            // unoptimized native code does not get close -- the APK installs
+            // and launches and is still unplayable.
+            //
+            // RelWithDebInfo keeps -g, so a tombstone still symbolizes, and
+            // it also compiles out Jolt's asserts (JPH_ENABLE_ASSERTS is tied
+            // to JPH_DEBUG). Those asserts are breakpoints, i.e. SIGTRAP on
+            // device: a bad mass in a generated scene used to kill the
+            // process during load with nothing reported. The engine-side
+            // guards and the Jolt assert handler cover the debug desktop
+            // build; this makes the shipped APK immune by construction.
+            externalNativeBuild {
+                cmake {
+                    arguments '-DCMAKE_BUILD_TYPE=RelWithDebInfo'
+                }
+            }
         }
         release {
             minifyEnabled false

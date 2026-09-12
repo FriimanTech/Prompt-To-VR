@@ -793,6 +793,45 @@ static int case_body_slots() {
         return fail("forearm_r misses Unity Humanoid");
     }
 
+    // The rigs this pipeline actually generates. Tripo sides a bone with a
+    // short PREFIX and no side word, which no other convention here does, so
+    // the table used to cover every naming scheme except its own -- leaving
+    // arm IK, neck tracking and leg posing dead on every generated character.
+    // These are the literal joint names out of a Tripo biped auto-rig.
+    struct TripoJoint {
+        const char* slot;
+        const char* joint;
+    };
+    static const TripoJoint kTripoRig[] = {
+        {"shoulder_l", "L_Clavicle"},  {"shoulder_r", "R_Clavicle"},
+        {"upper_arm_l", "L_Upperarm"}, {"upper_arm_r", "R_Upperarm"},
+        {"forearm_l", "L_Forearm"},    {"forearm_r", "R_Forearm"},
+        {"hand_l", "L_Hand"},          {"hand_r", "R_Hand"},
+        {"thigh_l", "L_Thigh"},        {"thigh_r", "R_Thigh"},
+        {"shin_l", "L_Calf"},          {"shin_r", "R_Calf"},
+        {"foot_l", "L_Foot"},          {"foot_r", "R_Foot"},
+        {"toes_l", "L_ToeBase"},       {"toes_r", "R_ToeBase"},
+        {"neck", "NeckTwist01"},       {"head", "Head"},
+        {"spine", "Spine01"},          {"chest", "Spine02"},
+        {"hips", "Pelvis"},            {"root", "Root"},
+    };
+    for (const auto& [slot, joint] : kTripoRig) {
+        const auto& cands = ptv::body_slot_candidates(slot);
+        if (!has(cands, ptv::normalize_joint_name(joint).c_str())) {
+            std::printf("[fail] slot '%s' does not accept Tripo joint '%s'\n",
+                        slot, joint);
+            return 1;
+        }
+    }
+
+    // Tripo also emits twist bones beside the real ones. Those must NOT
+    // satisfy a limb slot: driving L_ForearmTwist01 instead of L_Forearm
+    // rolls the wrist where the elbow should bend.
+    if (has(ptv::body_slot_candidates("forearm_l"),
+            ptv::normalize_joint_name("L_ForearmTwist01").c_str())) {
+        return fail("forearm_l must not accept a Tripo twist bone");
+    }
+
     // Mixamo has no elbow or knee bone, so these deliberately alias.
     if (ptv::body_slot_candidates("elbow_r") != forearm) {
         return fail("elbow_r must resolve to the same joint as forearm_r");
@@ -1660,6 +1699,91 @@ static int case_equip_semantics() {
 
     return ok("equip semantics: protection, removable and re-equippable are "
               "three independent runtime flags");
+}
+
+// Slots have to come from the SCENE, not from a test. CEquipSlots existed and
+// nothing ever populated it from scene.json, so EquipMechanic::pick_slot_near
+// returned no candidate on every wearer in every generated game and an
+// authored holster silently accepted nothing. This asserts the whole path:
+// JSON -> SceneDoc -> CEquipSlots.
+static int case_scene_declared_equip_slots() {
+    const char* doc = R"({
+        "version": 1,
+        "prompt_id": "smoke",
+        "scene_id": "holster",
+        "name": "Holster",
+        "entities": [
+          {"id": "player_rig", "name": "Player",
+           "transform": {"position": [0,0,0], "rotation": [0,0,0,1], "scale": 1.0},
+           "tags": ["player"],
+           "equip_slots": [
+             {"name": "hip_holster_r", "body_slot": "waist",
+              "local_position": [0.16, -0.05, 0.02],
+              "local_rotation": [0,0,0,1],
+              "snap_radius_m": 0.2, "exclusive": true,
+              "accepts_tags": ["pistol"]},
+             {"name": "unnamed_is_dropped", "body_slot": "back"}
+           ]},
+          {"id": "bench", "name": "Bench",
+           "transform": {"position": [1,0,0], "rotation": [0,0,0,1], "scale": 1.0},
+           "tags": []}
+        ]
+    })";
+    const char* path = "ptv_smoke_equip_scene.json";
+    std::FILE* f = std::fopen(path, "wb");
+    if (f == nullptr) return fail("equip slots: could not write temp scene");
+    std::fwrite(doc, 1, std::strlen(doc), f);
+    std::fclose(f);
+
+    const ptv::SceneDoc loaded = ptv::LoadSceneJson(path);
+    if (loaded.entities.size() != 2) {
+        return fail("equip slots: scene did not parse");
+    }
+    if (loaded.entities[0].equip_slots.size() != 2) {
+        return fail("equip slots: equip_slots did not survive the parse");
+    }
+
+    ptv::World world;
+    ptv::ApplySceneToWorld(loaded, world);
+
+    const auto rig = world.find("player_rig");
+    if (rig == entt::null || !world.registry().all_of<ptv::CEquipSlots>(rig)) {
+        return fail("equip slots: the wearer got no CEquipSlots, so "
+                    "builtin.equip would offer no candidate slot at all");
+    }
+    const auto& slots = world.registry().get<ptv::CEquipSlots>(rig).slots;
+    if (slots.size() != 2) return fail("equip slots: wrong slot count");
+
+    const auto& holster = slots[0];
+    if (holster.name != "hip_holster_r" || holster.body_slot != "waist") {
+        return fail("equip slots: name / body_slot did not round-trip");
+    }
+    if (std::abs(holster.local_position.x - 0.16f) > 1e-5f ||
+        std::abs(holster.local_position.y + 0.05f) > 1e-5f) {
+        return fail("equip slots: local_position did not round-trip");
+    }
+    if (std::abs(holster.snap_radius_m - 0.2f) > 1e-5f) {
+        return fail("equip slots: snap_radius_m did not round-trip");
+    }
+    if (holster.accepts_tags.size() != 1 ||
+        holster.accepts_tags[0] != "pistol") {
+        return fail("equip slots: accepts_tags did not round-trip -- an empty "
+                    "list would let a rifle into a pistol holster");
+    }
+    // Defaults hold for a slot that declares only the essentials.
+    if (!slots[1].exclusive || slots[1].snap_radius_m != 0.0f) {
+        return fail("equip slots: defaults did not apply");
+    }
+
+    // An entity that declares no slots must not get the component: a bench is
+    // not a wearer, and an empty CEquipSlots would make it look like one.
+    const auto bench = world.find("bench");
+    if (bench == entt::null || world.registry().all_of<ptv::CEquipSlots>(bench)) {
+        return fail("equip slots: a slot-less entity became a wearer");
+    }
+
+    std::remove(path);
+    return ok("scene-declared equip slots reach CEquipSlots on the wearer");
 }
 
 // A reflection is an IMPROPER transform, and that single fact drives the
@@ -2686,6 +2810,7 @@ public:
     }
     void set_joint_rotation(std::uint32_t, int, const ptv::Quat&) override {}
     void set_joint_translation(std::uint32_t, int, const ptv::Vec3&) override {}
+    void set_joint_scale(std::uint32_t, int, const ptv::Vec3&) override {}
     bool play_clip(std::uint32_t, const char* name, bool, float) override {
         if (name == nullptr) return false;
         ++play_calls;
@@ -3316,6 +3441,7 @@ int main(int argc, char** argv) {
     if (what == "two_bone_ik") return case_two_bone_ik();
     if (what == "mirror_reflection") return case_mirror_reflection();
     if (what == "equip_semantics") return case_equip_semantics();
+    if (what == "equip_slots") return case_scene_declared_equip_slots();
     if (what == "interactive_persistence") {
         return case_interactive_persistence();
     }

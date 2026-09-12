@@ -434,6 +434,27 @@ SceneDoc LoadSceneJson(const std::string& path) {
         for (const auto& t : e.value("tags", Json::array())) {
             es.tags.push_back(t.get<std::string>());
         }
+        // Places items may be equipped ON this entity. Declared on the
+        // wearer, so a holster prop carries none of these and the player rig
+        // carries them all.
+        for (const auto& sj : e.value("equip_slots", Json::array())) {
+            if (!sj.is_object()) continue;
+            EquipSlotSpec slot{};
+            slot.name = sj.value("name", "");
+            if (slot.name.empty()) continue;  // unaddressable; drop it
+            slot.body_slot = sj.value("body_slot", "");
+            slot.host_item_slot = sj.value("host_item_slot", "");
+            slot.host_socket = sj.value("host_socket", "");
+            slot.local_position =
+                read_vec3(sj.value("local_position", Json::array()), Vec3(0.0f));
+            slot.local_rotation = read_quat(sj.value("local_rotation", Json::array()));
+            slot.snap_radius_m = sj.value("snap_radius_m", 0.0f);
+            slot.exclusive = sj.value("exclusive", true);
+            for (const auto& t : sj.value("accepts_tags", Json::array())) {
+                if (t.is_string()) slot.accepts_tags.push_back(t.get<std::string>());
+            }
+            es.equip_slots.push_back(std::move(slot));
+        }
         d.entities.push_back(std::move(es));
     }
 
@@ -520,6 +541,27 @@ void ApplySceneToWorld(const SceneDoc& doc, World& world,
         }
         if (!es.tags.empty()) {
             world.registry().emplace<CTag>(e, CTag{es.tags});
+        }
+        // Without this, builtin.equip finds no candidate slot on any wearer
+        // (EquipMechanic::pick_slot_near returns {} when CEquipSlots is
+        // absent) and an authored holster silently never accepts anything.
+        if (!es.equip_slots.empty()) {
+            CEquipSlots slots{};
+            slots.slots.reserve(es.equip_slots.size());
+            for (const auto& s : es.equip_slots) {
+                EquipSlot out{};
+                out.name = s.name;
+                out.body_slot = s.body_slot;
+                out.host_item_slot = s.host_item_slot;
+                out.host_socket = s.host_socket;
+                out.local_position = s.local_position;
+                out.local_rotation = s.local_rotation;
+                out.snap_radius_m = s.snap_radius_m;
+                out.exclusive = s.exclusive;
+                out.accepts_tags = s.accepts_tags;
+                slots.slots.push_back(std::move(out));
+            }
+            world.registry().emplace<CEquipSlots>(e, std::move(slots));
         }
         // AFTER the authored tags, and appending rather than replacing: the
         // authored path emplaces a fresh CTag, so adding the nesting tag

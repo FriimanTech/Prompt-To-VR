@@ -2526,6 +2526,18 @@ public:
         anim->joint_overridden[static_cast<size_t>(joint)] = 1u;
     }
 
+    void set_joint_scale(std::uint32_t entity, int joint,
+                         const Vec3& scale) override {
+        CSkeleton* sk = nullptr;
+        CAnimator* anim = nullptr;
+        if (!resolve(entity, joint, &sk, &anim)) return;
+        // Negative scale would mirror the subtree and invert its winding,
+        // which reads as inside-out geometry rather than as an error.
+        sk->local_pose[static_cast<size_t>(joint)].scale =
+            glm::max(scale, Vec3(0.0f));
+        anim->joint_overridden[static_cast<size_t>(joint)] = 1u;
+    }
+
     bool play_clip(std::uint32_t entity, const char* clip_name, bool looping,
                    float fade_s) override {
         if (clip_name == nullptr || !has_skeleton(entity)) return false;

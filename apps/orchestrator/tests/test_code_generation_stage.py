@@ -27,6 +27,7 @@ import pytest
 from ptv_orchestrator.events import EventBus
 from ptv_orchestrator.pipeline import stage_code_generation
 from ptv_orchestrator.pipeline.codegen_agent import (
+    CodegenAgentError,
     CodegenAgentInput,
     CodegenAgentResult,
     GeneratedFile,
@@ -539,6 +540,95 @@ def test_failure_stamps_board_and_propagates(tmp_path: Path) -> None:
     assert board["tasks"]["good"]["status"] == "done"
     assert board["tasks"]["bad"]["status"] == "failed"
     assert "synthetic agent failure" in board["tasks"]["bad"]["error"]
+
+
+def _ok_result(inp: CodegenAgentInput) -> CodegenAgentResult:
+    return CodegenAgentResult(
+        files=[
+            GeneratedFile(
+                path=(
+                    f"engine/generated/mechanics/{inp.project_id}/{inp.task_id}.cpp"
+                ),
+                contents=_minimal_cpp(inp.task_id, "only"),
+            )
+        ],
+        exports={"registered_mechanic_id": f"generated.{inp.task_id}"},
+    )
+
+
+def test_a_timed_out_agent_call_is_retried_in_process(tmp_path: Path) -> None:
+    """A timeout is not a verdict on the task.
+
+    The real cost is not the lost task: every dependent stays blocked and
+    the stage fails AFTER all the other tasks have been paid for. One real
+    run lost three downstream tasks to a single "Request timed out".
+    """
+    plan = MechanicPlan(prompt_id="demo", items=[_generate_item("flaky")])
+    store, pid, settings = _seed(tmp_path, plan)
+    ctx = PipelineContext(
+        project_id=pid, settings=settings, store=store, bus=EventBus()
+    )
+
+    calls = {"n": 0}
+
+    def runner(inp: CodegenAgentInput, model: str) -> CodegenAgentResult:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise CodegenAgentError(
+                "Agents SDK run failed for task 'flaky': Request timed out."
+            )
+        return _ok_result(inp)
+
+    stage_code_generation.run_with_runner(ctx, agent_runner=runner)
+
+    assert calls["n"] == 2
+    board = json.loads(
+        (store.dir_for(pid) / "codegen_board.json").read_text(encoding="utf-8")
+    )
+    assert board["tasks"]["flaky"]["status"] == "done"
+
+
+def test_a_schema_disagreement_is_not_retried(tmp_path: Path) -> None:
+    # The agent would disagree again, so a retry just pays twice for the
+    # same refusal.
+    plan = MechanicPlan(prompt_id="demo", items=[_generate_item("wrong")])
+    store, pid, settings = _seed(tmp_path, plan)
+    ctx = PipelineContext(
+        project_id=pid, settings=settings, store=store, bus=EventBus()
+    )
+
+    calls = {"n": 0}
+
+    def runner(inp: CodegenAgentInput, model: str) -> CodegenAgentResult:
+        calls["n"] += 1
+        raise CodegenAgentError(
+            "Agents SDK returned non-conforming output for 'wrong': bad field"
+        )
+
+    with pytest.raises(RuntimeError, match="failed task"):
+        stage_code_generation.run_with_runner(ctx, agent_runner=runner)
+
+    assert calls["n"] == 1
+
+
+def test_the_retry_budget_is_finite(tmp_path: Path) -> None:
+    plan = MechanicPlan(prompt_id="demo", items=[_generate_item("dead")])
+    store, pid, settings = _seed(tmp_path, plan)
+    settings = settings.model_copy(update={"codegen_max_task_attempts": 3})
+    ctx = PipelineContext(
+        project_id=pid, settings=settings, store=store, bus=EventBus()
+    )
+
+    calls = {"n": 0}
+
+    def runner(inp: CodegenAgentInput, model: str) -> CodegenAgentResult:
+        calls["n"] += 1
+        raise CodegenAgentError("Request timed out.")
+
+    with pytest.raises(RuntimeError, match="failed task"):
+        stage_code_generation.run_with_runner(ctx, agent_runner=runner)
+
+    assert calls["n"] == 3
 
 
 def test_four_step_agent_context_is_wired(tmp_path: Path) -> None:

@@ -117,6 +117,7 @@ add_test(NAME ptv_smoke_body_slots COMMAND ptv_smoke body_slots)
 add_test(NAME ptv_smoke_two_bone_ik COMMAND ptv_smoke two_bone_ik)
 add_test(NAME ptv_smoke_mirror_reflection COMMAND ptv_smoke mirror_reflection)
 add_test(NAME ptv_smoke_equip_semantics COMMAND ptv_smoke equip_semantics)
+add_test(NAME ptv_smoke_equip_slots COMMAND ptv_smoke equip_slots)
 add_test(NAME ptv_smoke_interactive_persistence
          COMMAND ptv_smoke interactive_persistence)
 add_test(NAME ptv_smoke_affordance_state COMMAND ptv_smoke affordance_state)

@@ -92,7 +92,12 @@ function ResumeFromMenu({
                     <span className="mono w-5 shrink-0 text-right text-xs text-muted">
                       {s.step}
                     </span>
-                    <span className="min-w-0 flex-1 truncate">{s.label}</span>
+                    <span className="min-w-0 flex-1 truncate">
+                      {s.label}
+                      <span className="mono ml-2 text-[0.65rem] text-muted">
+                        {s.id}
+                      </span>
+                    </span>
                     {s.cost === "credits" && (
                       <span
                         className="ptv-pill shrink-0 border-warn/40 bg-warn/10 text-warn"

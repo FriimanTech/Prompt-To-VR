@@ -4,14 +4,25 @@ import { api } from "../api/client";
 /** Human labels for the known log files. Unknown logs fall back to their raw
  *  name so nothing is ever hidden from the operator. */
 const LOG_LABELS: Record<string, string> = {
-  cmake: "CMake (configure + build)",
-  world: "World generation",
+  scene_spec: "SceneSpec",
   reference_images: "Reference images",
   tripo_models: "Tripo 3D",
+  world: "World generation",
+  codegen_verify: "Codegen verify",
+  cmake: "CMake (configure + build)",
+  gradle: "Quest Gradle / NDK",
 };
 
 /** Order we prefer to surface logs in; anything not listed is appended. */
-const PREFERRED_ORDER = ["world", "cmake", "reference_images", "tripo_models"];
+const PREFERRED_ORDER = [
+  "scene_spec",
+  "reference_images",
+  "tripo_models",
+  "world",
+  "codegen_verify",
+  "cmake",
+  "gradle",
+];
 
 function logLabel(name: string): string {
   return LOG_LABELS[name] ?? name;
@@ -82,8 +93,8 @@ export function LogsViewer({ projectId }: { projectId: string }) {
   if (available.length === 0) {
     return (
       <div className="ptv-card p-4 text-muted">
-        No logs yet. Logs are written as the pipeline runs (world generation,
-        CMake, reference images, Tripo).
+        No logs yet. Logs appear as stages run (SceneSpec, reference images,
+        Tripo, world generation, codegen verify, CMake / Gradle).
       </div>
     );
   }

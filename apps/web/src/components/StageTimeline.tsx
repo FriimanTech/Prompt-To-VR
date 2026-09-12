@@ -86,6 +86,9 @@ function StageRow({
       <div className="min-w-0">
         <div className="flex flex-wrap items-center gap-2">
           <span className="text-sm font-medium">{meta.label}</span>
+          <span className="mono text-[0.65rem] text-muted/80" title="Backend stage id">
+            {meta.id}
+          </span>
           <CostBadge cost={meta.cost} />
           {duration && (
             <span className="mono text-xs text-muted">{duration}</span>
@@ -210,6 +213,32 @@ export function StageTimeline({
             style={{ width: `${(done / rows.length) * 100}%` }}
           />
         </div>
+        {/* Compact id strip so every backend stage is visible even when a
+            group is scrolled off-screen. Matches orchestrator order. */}
+        <ol className="mt-3 flex flex-wrap gap-1.5">
+          {rows.map((r) => {
+            const tone = statusTone(r.status);
+            const chip =
+              tone === "ok"
+                ? "border-ok/40 bg-ok/10 text-ok"
+                : tone === "busy"
+                  ? "border-accent/40 bg-accent/10 text-accent"
+                  : tone === "err"
+                    ? "border-err/40 bg-err/10 text-err"
+                    : tone === "warn"
+                      ? "border-warn/40 bg-warn/10 text-warn"
+                      : "border-white/10 bg-white/5 text-muted";
+            return (
+              <li
+                key={r.meta.id}
+                className={"ptv-pill mono text-[0.65rem] " + chip}
+                title={`${r.meta.step}. ${r.meta.label} (${r.meta.id}) · ${r.status}`}
+              >
+                {r.meta.step}.{r.meta.id}
+              </li>
+            );
+          })}
+        </ol>
       </div>
 
       <div className="grid gap-4 xl:grid-cols-[minmax(0,1.15fr)_minmax(0,1fr)]">

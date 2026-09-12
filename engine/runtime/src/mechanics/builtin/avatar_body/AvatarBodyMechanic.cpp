@@ -78,6 +78,13 @@ constexpr const char* kAvatarTag = "player_avatar";
 constexpr float kPoleDown = -1.0f;
 constexpr float kPoleBack = 0.45f;
 
+/** Scale that hides a joint's geometry. Not 0: a zero-scale joint leaves a
+ *  palette matrix with no usable rotation basis, and anything resolved against
+ *  it -- an equipped weapon, a socket -- reads NaN out of it. A thousandth
+ *  puts a 180 mm hand at 0.18 mm, which is invisible at any focal distance a
+ *  headset can present, while the basis stays well conditioned. */
+constexpr float kHiddenScale = 0.001f;
+
 class AvatarBodyMechanic : public BuiltinMechanicBase<AvatarBodyMechanic> {
 public:
     static constexpr const char* kId = "builtin.avatar_body";
@@ -121,8 +128,13 @@ public:
 
         plant_on_rig(world, avatar, ctx, dt);
         if (head_tracking_) drive_head(avatar, input, ctx);
+        // Cleared every frame: a wrist target is only meaningful for the frame
+        // its solve produced it, and a stale one would strand the hand fixture
+        // where the arm used to be after tracking drops out.
+        wrist_ = {};
         if (arm_ik_) drive_arms(avatar, input, ctx);
         if (leg_animation_) drive_legs(world, avatar, ctx, dt);
+        drive_hands(world, avatar, input, ctx);
         apply_head_visibility(world, avatar, ctx);
     }
 
@@ -151,6 +163,22 @@ private:
     }
 
     void resolve(World& world, std::uint32_t avatar, MechanicContext& ctx) {
+        // This mechanic plants the avatar on the rig every frame, so nothing
+        // else may own its transform. An attachment does: tick_attachments
+        // runs AFTER the Simulate phase, so a scene that parented the avatar
+        // to its player-rig entity wins the write and pins the body to that
+        // entity's authored transform -- which is a static point in the scene,
+        // metres from wherever the player actually spawned. Dropping the
+        // attachment here is the only place that can see the conflict.
+        const auto e = static_cast<entt::entity>(avatar);
+        if (world.registry().all_of<CAttachment>(e)) {
+            world.registry().remove<CAttachment>(e);
+            PTV_WARN(
+                "builtin.avatar_body: the player avatar was attached to "
+                "another entity; dropping the attachment so the body follows "
+                "the XR rig. Tag the avatar and leave attached_to unset.");
+        }
+
         if (!ctx.skeleton->has_skeleton(avatar)) {
             // A coverage that has no rig is legitimate (hands_only), so this
             // is not an error -- but a full body without a skeleton cannot be
@@ -189,6 +217,16 @@ private:
             }
         }
 
+        // Does this rig have fingers? Tripo's biped auto-rig -- what this
+        // pipeline generates for every character -- stops at the wrist, so
+        // its hand is ONE rigid bone that cannot close around a grip or pull
+        // a trigger. An imported Mixamo-style avatar does have them. The
+        // answer decides which of the two hand strategies runs, and it is a
+        // property of the asset, not something a prompt should have to state.
+        avatar_has_fingers_ =
+            ctx.skeleton->joint_for_slot(avatar, "index_1_l") >= 0 ||
+            ctx.skeleton->joint_for_slot(avatar, "index_1_r") >= 0;
+
         // Cache the head subtree once so the per-frame path is a component
         // write rather than a hierarchy walk.
         if (head_ >= 0) {
@@ -212,6 +250,12 @@ private:
 
         const Vec3 previous = t.position;
         t.position = rig;
+        // Rigs disagree about whether the head joint sits at the base of the
+        // skull or between the eyes, and the camera is the headset either way,
+        // so the only thing we can move is the body. Raising or lowering it
+        // lines its eyes up with the view. Vertical only, which is why the
+        // speed measurement below can ignore it.
+        t.position.y += eye_height_offset_;
         t.rotation = glm::angleAxis(yaw, Vec3(0.0f, 1.0f, 0.0f));
 
         // Speed the body ACHIEVED, which is what the gait selection needs. A
@@ -272,6 +316,13 @@ private:
                                                 pole);
             if (!sol.valid) continue;
 
+            // Where the avatar's wrist actually ended up. Equal to the
+            // controller while the target is in reach, and short of it when
+            // the arm is at full extension -- which is exactly the case the
+            // hand fixture has to follow, or it detaches from the arm and
+            // floats.
+            wrist_[static_cast<size_t>(h)] = {true, sol.wrist};
+
             // Rotate each bone from where the rig has it to where the solve
             // wants it. Writing rotations rather than joint translations
             // keeps the mesh from stretching.
@@ -298,6 +349,91 @@ private:
         if (glm::length(from) < 1.0e-5f || glm::length(to) < 1.0e-5f) return;
         const Quat delta = two_bone_ik::rotation_between(from, to);
         ctx.skeleton->set_joint_rotation(avatar, joint, delta);
+    }
+
+    /** Which hand geometry the player actually sees on their wrists.
+     *
+     *  The engine owns a pair of finger-rigged hand GLBs and
+     *  builtin.hand_pose curls them from trigger/grip. A generated avatar
+     *  brings its own hands, but on a Tripo rig each one is a single rigid
+     *  bone. Drawing both gives the player two overlapping hands; drawing
+     *  only the avatar's costs every finger animation in the game.
+     *
+     *  So when the avatar has no fingers: keep the fixture, hide the avatar's
+     *  rigid hand behind it, and move the fixture onto the avatar's SOLVED
+     *  wrist rather than the raw controller pose. Those two agree while the
+     *  target is in reach and diverge exactly when the arm is at full
+     *  extension, which is the case where a controller-positioned hand
+     *  detaches from the arm and floats.
+     *
+     *  When the avatar does have fingers there is nothing to compromise: hide
+     *  the fixture and let hand_pose drive the real hand, which it already
+     *  resolves through the same body slots. */
+    void drive_hands(World& world, std::uint32_t avatar,
+                     const InputSnapshot& input, MechanicContext& ctx) {
+        if (coverage_ == Coverage::HandsOnly) return;
+        if (!ctx.skeleton->has_skeleton(avatar)) return;
+
+        for (int h = 0; h < 2; ++h) {
+            const std::uint32_t fixture =
+                ctx.hands != nullptr
+                    ? ctx.hands->hand_entity(h)
+                    : InputSnapshot::kInvalidEntity;
+
+            if (avatar_has_fingers_) {
+                collapse_all_joints(fixture, ctx);
+                continue;
+            }
+
+            const auto& arm = arms_[static_cast<size_t>(h)];
+            if (arm.hand < 0) continue;
+
+            // Rotation first, then the collapse. The rotation is not for the
+            // eye -- the joint is about to be invisible -- it is so that a
+            // socket or attachment resolved against this hand lands at the
+            // angle the player is holding their controller.
+            if (input.hands[h].hand_valid) {
+                const Quat rig_yaw = glm::angleAxis(
+                    ctx.locomotion->yaw_radians(), Vec3(0, 1, 0));
+                ctx.skeleton->set_joint_rotation(
+                    avatar, arm.hand,
+                    glm::inverse(rig_yaw) * input.hands[h].hand_rotation);
+            }
+            ctx.skeleton->set_joint_scale(avatar, arm.hand, Vec3(kHiddenScale));
+
+            place_fixture_at_wrist(world, fixture, h);
+        }
+    }
+
+    /** Put the engine's hand fixture on the avatar's solved wrist.
+     *
+     *  Position only: the fixture's rotation is already the controller's,
+     *  written by the platform layer before the Simulate phase, and that IS
+     *  the orientation the player's real hand has. */
+    void place_fixture_at_wrist(World& world, std::uint32_t fixture, int hand) {
+        if (fixture == InputSnapshot::kInvalidEntity) return;
+        const auto& w = wrist_[static_cast<size_t>(hand)];
+        if (!w.valid) return;
+        const auto e = static_cast<entt::entity>(fixture);
+        if (!world.registry().valid(e) ||
+            !world.registry().all_of<CTransform>(e)) {
+            return;
+        }
+        world.registry().get<CTransform>(e).t.position = w.position;
+    }
+
+    /** Shrink an entire rig to nothing, in every view.
+     *
+     *  Every joint rather than just the root because a hand fixture's root is
+     *  not guaranteed to be joint 0 or to carry a resolvable slot name, and
+     *  16 writes on a hand is cheaper than being wrong about the hierarchy. */
+    void collapse_all_joints(std::uint32_t entity, MechanicContext& ctx) const {
+        if (entity == InputSnapshot::kInvalidEntity) return;
+        if (!ctx.skeleton->has_skeleton(entity)) return;
+        const int n = ctx.skeleton->joint_count(entity);
+        for (int j = 0; j < n; ++j) {
+            ctx.skeleton->set_joint_scale(entity, j, Vec3(kHiddenScale));
+        }
     }
 
     void drive_legs(World& world, std::uint32_t avatar, MechanicContext& ctx,
@@ -355,6 +491,14 @@ private:
     int head_{-1};
     std::vector<int> head_subtree_;
     std::array<Arm, 2> arms_{};
+
+    /** Where arm IK actually put each wrist this frame. */
+    struct WristTarget {
+        bool valid{false};
+        Vec3 position{0.0f};
+    };
+    bool avatar_has_fingers_{false};
+    std::array<WristTarget, 2> wrist_{};
 
     float speed_{0.0f};
     locomotion_clips::Tunables tune_{};

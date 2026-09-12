@@ -137,6 +137,15 @@ for an asset, the ``summary`` MUST quote / paraphrase that block so the
 AssetManifest stage can pass it to Gemini. Up to 4 000 chars per asset
 summary; spend them on visual details the image generator will need.
 
+ASSETS ARE VISUAL. An AssetEntry becomes a reference image and then a
+paid image-to-3D call, so it must be a thing with a shape. Do NOT emit
+an AssetEntry for a SOUND -- no gunshot, impact, footstep, UI click,
+voice line, ambience bed, music track or sound pack, whatever ``kind``
+you would give it. Those entries are dropped downstream. Audio the
+prompt asks for belongs in the mechanic that triggers it, not in the
+asset list. A loudspeaker or an alarm bell IS an asset; the sound it
+makes is not.
+
 CAPTURE SCENES THE PROMPT DESCRIBES. For each location named in the
 prompt (e.g. "Central Battery Plaza", "Training Arena", "Asteroid
 Mining Outpost"), emit one SceneEntry. The ``summary`` should describe
@@ -246,6 +255,10 @@ into the AssetManifest (same id), then add ANY missing assets the
 prompt also describes. The downstream scene composer materialises
 every item as an entity, so omitting an asset removes it from the
 game.
+
+Two exceptions, both below: SKIP any BuildSpec entry that is an
+environment, and SKIP any that is a sound. Echoing is not a licence to
+forward an entry this stage is forbidden to emit.
 
 REFERENCE IMAGE PROMPTS -- USE PROMPT-PROVIDED TEXT WHEN GIVEN.
 
@@ -368,6 +381,18 @@ Almost every rigged asset should include ``idle``: it is what the engine
 plays by default, and without it an enemy stands frozen in its bind pose
 until some mechanic starts a clip.
 
+THE PLAYER'S OWN BODY IS NOT AN EXCEPTION. An asset with
+``character_role: player_avatar`` MUST be ``rigged: true`` and MUST ask
+for at least ``["idle", "walk", "run"]``. This is easy to skip, because
+the player avatar does not "behave" like an NPC and the NPC director
+never reviews it -- so nothing downstream will add the clips back.
+
+Without a rig the engine cannot pose the body at all: the player looks
+down at a mannequin welded into a T-pose, its arms ignore the
+controllers, and its legs do not move when the player walks. Without
+``walk`` and ``run`` the body slides across the floor feet-first. Ask for
+``turn`` as the fourth intent when the game has snap turn.
+
 STYLE CONSISTENCY. ``style_notes`` should keep every asset in the same
 art language so the generated concepts feel like one game. Echo the
 prompt's art-direction phrases (palette, mood, era, material language)
@@ -401,6 +426,23 @@ C++). Focus on the discrete objects the game needs: the specific named
 pickups, fx). If the prompt says "the user spawns in a generated city",
 the CITY is built by the world-generation stage in C++ -- you only
 produce the objects inside it (cars, crates, NPCs, etc.).
+
+THE MANIFEST DESCRIBES GEOMETRY ONLY -- NEVER SOUND. Every item here
+becomes a reference image and then a paid Tripo image-to-3D call, so an
+item is only valid if it is a THING WITH A SHAPE. Sound has no shape.
+
+Never emit an item for a gunshot, an impact sound, footsteps, a UI
+click, a voice line, an ambience bed, a music track or a sound pack --
+not as ``fx``, not as ``ui``, not under any category. There is no
+category that makes audio work: a "Pistol Shot Audio" item generates a
+picture of a gunshot and a mesh of that picture, which then sits in the
+scene as a silent blob. Any item that names a sound will be dropped
+before generation, and the prompt's audio intent is carried by the
+gameplay mechanics instead.
+
+Do keep the OBJECT that makes a sound when the prompt asks for one: a
+loudspeaker, a radio, an alarm bell and a klaxon are real props with
+real silhouettes. It is the sound itself that is not an asset.
 """
 
 
@@ -582,17 +624,44 @@ instead it reads a NAMED socket via
 ``ctx.sockets->socket_world(entity, "muzzle")``, and a deterministic
 pipeline stage supplies the per-asset transform.
 
-When a ``code_task`` reads a socket, list the names in
-``code_task.required_sockets`` (e.g. ``["muzzle"]``). Also add the same
-names to the matching ``AssetItem.socket_hints`` in the AssetManifest,
-so the asset_contract stage knows to derive them. The scene compiler
-FAILS THE BUILD when a bound entity's asset cannot supply a required
-socket, so a mismatch surfaces as a clear error rather than as a
+``required_sockets`` MEANS SOCKETS READ ON THE ENTITY THE MECHANIC IS
+BOUND TO -- that is, on ``self``. Populate it only when the mechanic is
+bound to the very entity carrying the mesh, e.g. a `weapon_recoil`
+mechanic bound to the rifle itself. Also add the same names to the
+matching ``AssetItem.socket_hints`` in the AssetManifest, so the
+asset_contract stage knows to derive them. The scene compiler FAILS THE
+BUILD when a bound entity's asset cannot supply a socket its mechanic
+requires, so a mismatch surfaces as a clear error rather than as a
 projectile spawning inside the player's palm.
+
+A HUB THAT RESOLVES ITS TARGET AT RUNTIME MUST LEAVE
+``required_sockets`` EMPTY. A shooting hub is bound to the player's HAND
+(which has no mesh at all) and reads the muzzle off whichever weapon is
+held at that instant. It cannot name that asset in the plan, so it must
+leave ``required_sockets`` empty and guard every read:
+
+    if (!ctx.sockets->has_socket(weapon, "muzzle")) return;
+    const Mat4 m = ctx.sockets->socket_world(weapon, "muzzle");
+
+Put the socket names on the WEAPON's ``AssetItem.socket_hints`` instead,
+which is what makes the muzzle exist for the hub to find.
 
 Available names today are ``muzzle`` (business end / emit point) and
 ``grip`` (where a hand holds it). Leave ``required_sockets`` empty for
 mechanics with no spatial anchor -- timers, health, AI, HUD.
+
+EQUIP SLOTS ARE NOT SOCKETS. A socket is a point on an ITEM ("the muzzle
+of this rifle"); an equip SLOT is a place on a WEARER an item can go
+("the holster on this player's right hip"). ``builtin.equip``'s
+``params.slots`` and ``params.rest_slots`` are filters over slot NAMES,
+and those names must be slots the scene declares on the wearer via
+``EntitySpec.equip_slots``. Name them in lowercase snake_case and keep
+them stable, because the scene composer has to use the SAME names --
+``params.slots: ["hip_holster_r"]`` matches a slot called
+``hip_holster_r`` and nothing else. Leave ``slots`` empty to accept any
+slot the wearer offers, which is usually the right choice for a single
+wearable. Prefer ``builtin.equip`` + config over generating an equip
+mechanic: holstering, sheathing and wearing are all the same built-in.
 
 CODE-TASK DESCRIPTIONS MUST BE COMPLETE. Each ``code_task.description``
 can be up to 10 000 characters. Use that room. A good description
@@ -667,6 +736,27 @@ must have a clear in-game purpose -- do not pad with decorative filler
 (that is the world architect's job, and a scene large enough to run out
 of output tokens is a scene that fails to build at all).
 
+THE PLAYER. Exactly three things represent the player, and two of them
+you author:
+
+  * ONE ``player_rig`` entity: no mesh, no physics, at the player spawn.
+    This is what locomotion, comfort and save/settings mechanics bind to,
+    and it is the WEARER that carries ``equip_slots`` for holsters and
+    wrist panels.
+  * ONE entity tagged ``player_avatar`` when the manifest has a
+    ``character_role: player_avatar`` asset -- the visible body. See the
+    asset mapping below.
+  * The HANDS, which you DO NOT author. The engine owns a pair of
+    finger-rigged hand models and keeps them on the tracked controllers
+    itself. Never emit a hand mesh, and never reference a hand asset --
+    the auto-rigger cannot rig a disembodied hand, so any "hand" asset
+    you point at would render as a static lump.
+
+You MAY still emit mesh-less marker entities named for the hands to hang
+hand-driven mechanic bindings on (a weapon hub, a grab mechanic). Give
+them no mesh and no ``attached_to``; those mechanics read the live
+controller state from ``input.hands[]``, not from the entity's transform.
+
 Asset-to-entity mapping (HARD REQUIREMENT). Every AssetItem in the
 AssetManifest MUST appear at least once in ``entities`` with an
 appropriate ``mesh`` block, and the entity's role MUST honour the
@@ -678,10 +768,18 @@ prompt's stated purpose for that asset. Use ``AssetItem.category`` plus
     at position [0,0,0] with rotation identity, ``physics.kind =
     "static"``, ``physics.collision_shape = "mesh"``, and tags
     ``["environment"]``.
-  * ``character`` whose ``style_notes`` describes the player body
-    (Superman, Iron Man, Master Chief, etc.) -> attach to the player
-    rig at [0, 0, 0] with tags ``["player_avatar"]`` and no physics
-    body of its own; the rig drives it.
+  * ``character`` whose ``character_role`` is ``player_avatar`` (or whose
+    ``style_notes`` describes the player's own body -- Superman, Iron
+    Man, Master Chief) -> ONE entity at position [0, 0, 0], rotation
+    identity, tags ``["player_avatar"]``, no physics, and NO
+    ``attached_to``. The engine binds ``builtin.avatar_body`` to this
+    tag automatically and that mechanic OWNS the entity's transform: it
+    plants the body on the XR rig, drives the neck and head from the
+    headset, runs arm IK toward the controllers and animates the legs
+    from the speed the rig achieved. Parenting it to the player rig
+    entity instead pins the body to that entity's authored transform --
+    a fixed point in the scene, nowhere near where the player spawns --
+    because attachments are resolved after mechanics run.
   * ``character`` whose ``style_notes`` describes a hostile/enemy ->
     dynamic capsule, tags include ``["enemy", "target"]``, placed at
     engagement distance from spawn (>= 3 m).
@@ -707,6 +805,12 @@ Rules:
  * Keep the scene deterministic (no random positions).
  * Reasonable scale: tables ~0.9 m tall, door frames ~2.1 m tall.
  * Every entity with a mesh must include physics (static by default).
+ * ``physics.kind`` decides who moves the body, and ``mass_kg`` must be
+   POSITIVE for ``dynamic`` and ``kinematic``. Never write 0 to mean
+   "immovable" -- that is what ``static`` is for. A kinematic body is not
+   massless: it is one a mechanic moves by setting its transform, and the
+   physics engine still needs a mass to build its inertia. Use a real
+   weight (a pistol ~0.8 kg, a rifle ~3.2 kg, a popup target ~2 kg).
  * Wire mechanic_bindings onto the entity that "owns" the mechanic --
    movement / locomotion mechanics bind to the player rig entity;
    construct / weapon mechanics bind to the player's hand entity;
@@ -723,6 +827,38 @@ Rules:
    ``0.35``, ``true``, ``[0,1,0]``, or a quoted string like ``"right"``.
  * Sockets are derived from geometry by the asset_contract stage and
    filled in by the scene compiler -- you do not emit them.
+
+EQUIPPING, HOLSTERING, SHEATHING, WEARING, STOWING. When the prompt asks
+that anything be holstered, sheathed, worn, strapped on, slung, stowed or
+docked, you MUST declare the place it goes as an ``equip_slots`` entry on
+the WEARER -- the player rig entity, the player avatar, or the NPC that
+carries it. This is the single most commonly missed field, and missing it
+is silent: ``builtin.equip`` offers no candidate slots on an entity that
+declares none, so the item simply never attaches and nothing reports an
+error.
+
+The slot goes on the wearer, NEVER on the holster/sheath/rack prop. A
+holster prop is scenery; "the pistol holsters at the player's right hip"
+is a slot on the player.
+
+Each entry needs:
+ * ``name`` -- lowercase snake_case, unique on that entity, and the SAME
+   name any ``builtin.equip`` binding names in its ``params.slots``
+   (e.g. ``hip_holster_r``, ``sword_sheath_l``, ``back_sling``).
+ * ``body_slot`` -- one of ``hand_r``, ``hand_l``, ``waist``, ``wrist_l``,
+   ``wrist_r``, ``chest``, ``back``, ``head``. A hip holster is ``waist``;
+   a wrist HUD is ``wrist_l``; a slung rifle is ``back``.
+ * ``local_position`` -- offset from that body slot in metres. A right-hip
+   holster is roughly ``[0.16, -0.05, 0.02]`` from ``waist``; a left-hip
+   sheath mirrors the x. Keep it anatomically plausible.
+ * ``snap_radius_m`` -- 0.15-0.25 for something the player physically
+   reaches for; 0 for menu- or script-driven equipping.
+ * ``accepts_tags`` -- the tags of the items allowed in, matching the item
+   entity's own ``tags`` (e.g. ``["pistol"]`` so a rifle cannot go into a
+   pistol holster). Leave empty only when anything may go there.
+
+Use ``host_item_slot`` + ``host_socket`` instead of ``body_slot`` only for
+gear that mounts on OTHER gear (a mask hose on a back-mounted tank).
 """
 
 
@@ -1308,11 +1444,19 @@ That exact code is correct on every weapon. The per-asset transforms are
 derived from geometry by the deterministic ``asset_contract`` pipeline stage
 and arrive as data in ``scene.json``.
 
-Declare every socket you read in the CodeTask's ``required_sockets`` (e.g.
-``["muzzle"]``). The scene compiler fails the build if a bound entity's asset
-cannot supply one, so a typo surfaces as a clear error instead of a projectile
-from nowhere. Common names: ``muzzle`` (business end / emit point) and
-``grip`` (where a hand holds it).
+The CodeTask's ``required_sockets`` covers sockets you read on ``self``, and
+the scene compiler fails the build if the bound entity's asset cannot supply
+one -- so a typo surfaces as a clear error instead of a projectile from
+nowhere. Common names: ``muzzle`` (business end / emit point) and ``grip``
+(where a hand holds it).
+
+When you read a socket off an entity you resolved AT RUNTIME (the weapon
+currently held, an item just spawned) rather than off ``self``, the plan
+cannot have declared it, so GUARD THE READ:
+
+    if (!ctx.sockets->has_socket(weapon, "muzzle")) { /* skip the shot */ }
+
+That is the correct shape for a hub bound to the player's hand.
 
 An unknown socket does not crash -- it falls back to the front of the
 entity's bounding sphere -- but that is a safety net, not a design.

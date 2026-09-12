@@ -75,7 +75,7 @@ Three cooperating layers:
 |-------|----------------|
 | Init | Filter mechanic_plan items with non-null `code_task`; empty → succeed immediately |
 | Board | `CodegenBoard.load_or_init(project_dir, plan, max_agents)` |
-| Resume hygiene | `reset_stuck_in_progress()` + `reset_failed()` → emit `info` |
+| Resume hygiene | `invalidate_on_socket_change()` + `reset_stuck_in_progress()` + `reset_failed()` → emit `info` |
 | Context | `_load_static_context()`: BuildSpec, all `scene_spec*.json`, `asset_contract.json`, npc_plan |
 | Workers | Each runs `_StageRuntime.worker_loop()` until no claimable tasks |
 | Verify | If `codegen_verify_compile` and no hard failures: `_default_verify_compile()` loop |
@@ -188,6 +188,18 @@ blocked ──(all deps done)──► pending ──(atomic claim)──► in_
 - `pending → in_progress`: exactly one worker wins the lock
 - `in_progress → pending`: only via `reset_stuck_in_progress()` on resume after crash
 - `failed → pending`: via `reset_failed()` at stage start (retry transient errors)
+- `done → pending`: via `invalidate_on_socket_change()` when the socket contract moved under a task that reads it
+
+### Socket-contract fingerprint (`invalidate_on_socket_change`)
+
+Every task was `done`, so re-running the stage after fixing `asset_contract` did **nothing** — the board is idempotent by design, and it had no way to know its inputs had changed. It now records a sha256 fingerprint of the asset → socket-names map alongside the rows.
+
+When the fingerprint moves, the stage resets the tasks that could actually be affected, and only those:
+
+1. **Socket readers** — a task whose CodeTask declares `required_sockets`, or whose written source mentions `ctx.sockets` / `socket_world` / `has_socket`. A task whose file cannot be read counts as a reader, since "unknown" is not "unaffected".
+2. **Their transitive dependents** — a task that consumes a reader's exports has to be rebuilt against the new version.
+
+Everything else stays `done`. On a real 16-task board, three tasks read sockets and the cascade reached five — the other eleven were not re-billed. Reset dependents whose dependencies are no longer `done` go back to `blocked`, so the DAG order survives.
 
 ### Four-step agent process (mandatory per task)
 

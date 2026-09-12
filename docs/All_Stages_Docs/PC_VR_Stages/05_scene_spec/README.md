@@ -45,7 +45,8 @@ Without schema validation here, the codegen agent and scene compiler would see i
 - **Validate-and-repair loop** — After the agent emits a SceneSpec, deterministic checks run (asset coverage, valid mechanic binding ids). Problems are fed back to the **same agent session** for repair, up to `scene_spec_max_repair_rounds`. There is no "environment presence" check: the environment is authored in C++ by the world architect and merged in by the scene compiler.
 - **Parallel workers** — Multiple scenes compose concurrently via `ThreadPoolExecutor` (capped by `scene_spec_max_parallel_workers`).
 - **Compressed context** — Each scene agent gets a ~5–8K token summary instead of the full multi-scene dump (~39K).
-- **Idempotent resume** — If valid `scene_spec.*.json` already exist on disk, stage may skip LLM calls.
+- **Idempotent resume** — If valid `scene_spec.*.json` already exist on disk, stage may skip LLM calls. "Valid" includes **asset coverage against the current manifest**, not just schema validity.
+- **Equip slots** — An entity can declare `equip_slots[]`: named places on a *wearer* (a hip holster, a back sheath) that `builtin.equip` snaps items into.
 
 ### End-to-end flow (plain language)
 
@@ -169,6 +170,28 @@ Missing manifest asset references, invalid mechanic binding ids, missing environ
 ### Crash-safe saves
 
 Each scene written to disk immediately after compose — resume after crash may have partial scene files; fast-path loads valid ones only.
+
+### Reuse must match the CURRENT manifest
+
+`_try_load_existing_scene_spec()` used to check only the Pydantic schema and the scene id. A scene composed against an earlier manifest therefore sailed through the fast path: one real run reported "Reused 1 scenes already on disk" for a scene naming eight assets that no longer existed, so eight meshes pointed at GLBs that were never generated and the two weapons the game *did* have appeared nowhere.
+
+Reuse now also requires every `mesh.asset_id` to exist in the current `AssetManifest`. A rejected scene is recomposed, and the reason is emitted as an `info` event naming the absent ids, so "why did it re-run" has an answer on screen instead of in a diff. `scene_compile` enforces the same invariant as a hard failure, in case a scene reaches it another way.
+
+### Equip slots (`EquipSlotSpec`)
+
+An `EntitySpec` may declare up to 24 `equip_slots`. A slot is a place **on the wearer** — never on the holster prop, which is set dressing:
+
+| Field | Meaning |
+|-------|---------|
+| `name` | Slot id gameplay refers to (`hip_holster_r`) |
+| `body_slot` | Where on the body: `hand_r`, `hand_l`, `waist`, `wrist_l`, `wrist_r`, `back`, `chest`, `head` |
+| `host_item_slot` / `host_socket` | For a slot hosted on an already-equipped item |
+| `local_position` / `local_rotation` | Offset from the body slot, e.g. `[0.16, -0.05, 0.02]` from `waist` for a right hip |
+| `snap_radius_m` | How near an item must come to snap in — 0.15–0.25 for a holster |
+| `exclusive` | One item at a time (default true) |
+| `accepts_tags` | Which items fit; an empty list lets a rifle into a pistol holster |
+
+The strict wire model (`scene_spec_wire.py`) mirrors the field verbatim. It has to: strict mode permits **only** the declared surface, so a field the wire schema omits is one the agent physically cannot emit.
 
 ---
 

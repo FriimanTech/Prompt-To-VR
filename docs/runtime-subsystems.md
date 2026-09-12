@@ -164,6 +164,19 @@ metres (`{"muzzle": {"position": [...], "rotation": [x,y,z,w]}}`) that reach
 gameplay through `ctx.sockets`. See
 [architecture.md](architecture.md#the-socket-contract).
 
+An entity may also carry `equip_slots` — places on a WEARER (a hip holster, a
+back sheath) that `builtin.equip` snaps items into, as opposed to sockets,
+which are points on an item. The loader turns them into `CEquipSlots`;
+without that component `EquipMechanic::pick_slot_near()` has no candidate and
+an authored holster accepts nothing. Entries with an empty `name` are
+skipped, and an entity declaring no slots gets no component at all — an empty
+`CEquipSlots` would make a bench look like a wearer.
+
+`Scene.h` declares its own plain-data `EquipSlotSpec` rather than reusing
+`ptv::EquipSlot` from `ptv/ecs/World.h`, and `SceneLoader.cpp` converts
+between them. Same reason `HealthProps` mirrors `CHealth`: the scene document
+must stay free of entt, because `ptv_worldgen` parses it and links no ECS.
+
 It may also carry `"skinned": true` with a `joint_count`, written by the scene
 compiler from the optimizer's report. `Application::attach_skeletons()` uses it
 to decide which entities get a `CSkeleton`, so an all-static scene never opens

@@ -855,6 +855,41 @@ def test_resume_regenerates_file_with_mismatched_scene_id(tmp_path):
     assert reg2.calls[0].scene_id == "scene_00"
 
 
+def test_resume_recomposes_scene_composed_against_a_different_manifest(tmp_path):
+    """Schema validity is not enough to reuse a scene.
+
+    The shooting-range project reused an 11-asset scene under a 14-asset
+    manifest: it validated perfectly, and named eight assets that no longer
+    existed. Eight meshes then pointed at GLBs that were never generated
+    while the assets that DID exist were referenced by nothing.
+    """
+    store, pid, settings = _seed(tmp_path, n_scenes=2)
+    ctx, _ = _ctx_with_bus(store, pid, settings)
+    reg = _Registry()
+    stage_scene_spec.run_with_composer_factory(ctx, _composer_factory(reg))
+
+    proj_dir = store.dir_for(pid)
+    stale = store.load_scene_spec(pid, filename="scene_spec.scene_00.json")
+    # Rename one mesh's asset to something the manifest has never heard of,
+    # exactly as a re-planned manifest would.
+    stale.entities[0].mesh = MeshRef(
+        asset_id="weapon_bench", glb_path="assets/weapon_bench.glb"
+    )
+    (proj_dir / "scene_spec.scene_00.json").write_text(
+        stale.model_dump_json(indent=2, by_alias=True), encoding="utf-8"
+    )
+
+    ctx2, bus2 = _ctx_with_bus(store, pid, settings)
+    reg2 = _Registry()
+    stage_scene_spec.run_with_composer_factory(ctx2, _composer_factory(reg2))
+
+    assert [c.scene_id for c in reg2.calls] == ["scene_00"]
+    # And it says why, naming the offending asset, so the reason for an
+    # unexpected LLM call is never a mystery.
+    info_msgs = [e.message for e in bus2.published if e.status == "info"]
+    assert any("weapon_bench" in m for m in info_msgs), info_msgs
+
+
 def test_fast_finish_records_succeeded_without_llm_call(tmp_path):
     """The "all on disk" fast path must stamp ProjectStatus.succeeded
     on the state file. Without that stamp the next Resume would re-run

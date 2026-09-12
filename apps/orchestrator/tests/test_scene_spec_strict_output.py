@@ -279,3 +279,73 @@ def test_issues_are_capped() -> None:
         assert len(issues) <= 13, issues  # 12 + the "omitted" note
     else:  # pragma: no cover
         pytest.fail("expected a ValidationError")
+
+
+# ---------------------------------------------------------------------------
+# equip_slots must be reachable through the wire schema.
+#
+# Strict mode permits exactly the declared surface, so a field the wire model
+# omits is a field the agent CANNOT emit -- silently, for every future game.
+# ---------------------------------------------------------------------------
+
+
+def _wearer_payload() -> dict:
+    transform = {
+        "position": {"x": 0.0, "y": 0.0, "z": 0.0},
+        "rotation": {"x": 0.0, "y": 0.0, "z": 0.0, "w": 1.0},
+        "scale": 1.0,
+    }
+    payload = _payload()
+    payload["entities"].append(
+        {
+            "id": "player_rig",
+            "name": "Player",
+            "transform": transform,
+            "mesh": None,
+            "physics": None,
+            "mechanic_bindings": [],
+            "tags": ["player"],
+            "health": None,
+            "faction": None,
+            "attached_to": None,
+            "equip_slots": [
+                {
+                    "name": "hip_holster_r",
+                    "body_slot": "waist",
+                    "host_item_slot": "",
+                    "host_socket": "",
+                    "local_position": {"x": 0.16, "y": -0.05, "z": 0.02},
+                    "local_rotation": {"x": 0.0, "y": 0.0, "z": 0.0, "w": 1.0},
+                    "snap_radius_m": 0.2,
+                    "exclusive": True,
+                    "accepts_tags": ["pistol"],
+                }
+            ],
+        }
+    )
+    return payload
+
+
+def test_equip_slots_survive_the_wire_round_trip() -> None:
+    spec = to_scene_spec(WireSceneSpec.model_validate(_wearer_payload()))
+
+    wearer = next(e for e in spec.entities if e.id == "player_rig")
+    slot = wearer.equip_slots[0]
+    assert slot.name == "hip_holster_r"
+    assert slot.body_slot == "waist"
+    assert (slot.local_position.x, slot.local_position.z) == (0.16, 0.02)
+    assert slot.snap_radius_m == 0.2
+    assert slot.accepts_tags == ["pistol"]
+    # An item entity that declares none stays empty rather than inheriting.
+    assert spec.entities[0].equip_slots == []
+
+
+def test_equip_slots_are_in_the_strict_wire_schema() -> None:
+    agents = pytest.importorskip("agents")
+
+    rendered = agents.AgentOutputSchema(
+        WireSceneSpec, strict_json_schema=True
+    ).json_schema()
+    text = json.dumps(rendered)
+    assert "equip_slots" in text
+    assert "EquipSlotSpec" in text

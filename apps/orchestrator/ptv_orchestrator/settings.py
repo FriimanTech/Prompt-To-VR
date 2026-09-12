@@ -158,6 +158,24 @@ class Settings(BaseSettings):
     # the engine API, and every avoidable error burns a repair round.
     codegen_reasoning_effort: str = "high"
     codegen_verbosity: str = "medium"
+    # Per-request HTTP timeout for the Agents SDK client, in seconds.
+    #
+    # This exists because the SDK's default client caps a request at 600s
+    # and retries twice, and a large CodeTask at effort ``high`` can exceed
+    # that: the run burns ~25 minutes and then dies with a bare "Request
+    # timed out", which fails the task, blocks every dependent, and fails
+    # the whole stage after every other task has already been paid for.
+    # 1800s is chosen to be longer than any single task has ever taken
+    # rather than to be tight -- the cost of waiting is time, the cost of
+    # cutting a task off is the stage.
+    codegen_request_timeout_seconds: float = Field(
+        default=1800.0, ge=60.0, le=7200.0
+    )
+    # Retries for a task whose agent call raised. A timeout, a 500 and a
+    # transient connection reset are all worth one more attempt in-process:
+    # the alternative is failing the stage and re-running it by hand, which
+    # is what a human would do anyway.
+    codegen_max_task_attempts: int = Field(default=2, ge=1, le=5)
 
     # --- MechanicPlan stage (Stage 3, agentic) ---------------------------
     # The mechanic planner is an OpenAI Agents SDK agent with no tools

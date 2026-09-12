@@ -279,6 +279,8 @@ def test_codegen_agent_gets_explicit_high_effort(
     this stage effort 'none' (see the probe test above)."""
     from ptv_orchestrator.pipeline import codegen_agent
 
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+
     s = _settings(tmp_path)
     cap = _AgentCapture()
     cap.install(monkeypatch)
@@ -313,13 +315,72 @@ def test_codegen_agent_gets_explicit_high_effort(
             verbosity=s.codegen_verbosity,
         )
 
-    assert cap.kwargs["model"] == EXPECTED_MODEL
+    # Codegen hands the Agent an explicit model object rather than a bare
+    # id, so it can give the client a timeout longer than the SDK's 600s
+    # default. The model id still has to be the one settings chose.
+    model_arg = cap.kwargs["model"]
+    assert getattr(model_arg, "model", model_arg) == EXPECTED_MODEL
     assert cap.effort == "high", (
         "codegen lost its explicit reasoning effort; the SDK will infer "
         "'none' for gpt-5.6-sol"
     )
     assert cap.verbosity == s.codegen_verbosity
     assert cap.kwargs["tools"], "codegen lost its WebSearchTool"
+
+
+def test_codegen_client_gets_a_timeout_longer_than_the_sdk_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The SDK's default client caps a request at 600s.
+
+    A large CodeTask at effort ``high`` runs past that, and the two
+    built-in retries turn one slow task into ~25 wasted minutes, a failed
+    task, every dependent blocked, and a failed stage -- after every other
+    task has already been paid for. So codegen supplies its own client.
+    """
+    import agents
+
+    from ptv_orchestrator.pipeline import codegen_agent
+
+    # The stage bridges settings.openai_api_key into os.environ before any
+    # agent runs; the SDK's client reads it from there.
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+
+    cap = _AgentCapture()
+    cap.install(monkeypatch)
+
+    class _Stop(Exception):
+        pass
+
+    class _NoRun:
+        @staticmethod
+        def run_sync(*_a: Any, **_k: Any) -> Any:
+            raise _Stop()
+
+    monkeypatch.setattr(agents, "Runner", _NoRun)
+
+    inp = codegen_agent.CodegenAgentInput(
+        project_id="p",
+        task_id="t",
+        output_subdir="engine/generated/mechanics/p",
+        task_json="{}",
+        ledger_snapshot_json="{}",
+        dep_exports_json="{}",
+        scene_context_json="[]",
+        build_spec_excerpt="(none)",
+        instructions="(test)",
+    )
+
+    with pytest.raises(codegen_agent.CodegenAgentError):
+        codegen_agent.run_codegen_agent(
+            inp, model="gpt-5.6-sol", request_timeout_seconds=1234.0
+        )
+
+    client = cap.kwargs["model"]._client
+    assert client.timeout == 1234.0, (
+        "codegen fell back to the SDK's shared client, so its 600s cap is "
+        "back and a long task dies again"
+    )
 
 
 def test_codegen_reads_its_own_settings_not_the_fallback_tier(

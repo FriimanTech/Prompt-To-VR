@@ -24,6 +24,16 @@ optimizer preserves the source coordinate system, and unit-space coordinates
 are immune to the small AABB drift decimation introduces. The scene compiler
 multiplies by ``target_scale_meters`` to get metres, exactly as it already
 does for ``bounds_radius_m``.
+
+Paths. ``asset_normalization.json`` stores GLB paths RELATIVE TO THE REPO
+ROOT, so they must be resolved against ``settings.repo_root`` -- never
+against the process working directory. This stage once used ``Path.cwd()``,
+and when the orchestrator happened to be started from ``apps/web`` every
+single lookup became ``<repo>/apps/web/projects/...``, found nothing, and
+reported SUCCESS with "0 with sockets, 14 skipped". The whole pipeline then
+ran green on top of an empty contract and only fell over at scene_compile.
+Hence two rules here: resolve against ``repo_root``, and FAIL LOUDLY when a
+GLB that normalization vouched for is not readable.
 """
 
 from __future__ import annotations
@@ -36,6 +46,7 @@ from pathlib import Path
 from typing import Any
 
 from ptv_schemas import ProjectStage, ProjectStatus
+from ptv_schemas.asset_manifest import AssetCategory
 
 from .context import PipelineContext, StageResult
 from .proc import proc_hooks
@@ -48,6 +59,16 @@ _STAGE = ProjectStage.asset_contract
 # visible in the artifact instead of surfacing as a wrong muzzle in the
 # headset.
 _DERIVED_SOCKETS = ("muzzle", "grip")
+
+
+class AssetContractError(RuntimeError):
+    """A socket the game asked for could not be derived at all.
+
+    Raised only when the failure is this stage's own -- a GLB that
+    ``asset_normalization`` vouched for is unreadable, or the derivation tool
+    errored on an asset whose ``socket_hints`` say gameplay depends on it.
+    Assets with no hints degrade quietly, as before.
+    """
 
 
 def run(ctx: PipelineContext) -> StageResult:
@@ -65,6 +86,7 @@ def run(ctx: PipelineContext) -> StageResult:
             normalization = {}
 
     hints_by_id = {item.id: list(item.socket_hints) for item in manifest.items}
+    category_by_id = {item.id: item.category for item in manifest.items}
     targets = _resolvable_assets(
         normalization, hints_by_id, ctx.settings.repo_root
     )
@@ -73,16 +95,31 @@ def run(ctx: PipelineContext) -> StageResult:
     derived = 0
     skipped = 0
 
-    if targets:
-        tool = _ensure_tool(ctx)
-        for asset_id, glb_path in targets:
-            ctx.raise_if_cancelled()
-            entry = _derive(tool, glb_path, hints_by_id.get(asset_id, []))
-            report[asset_id] = entry
-            if entry.get("sockets"):
-                derived += 1
-            else:
-                skipped += 1
+    tool: Path | None = None
+    for asset_id, glb_path in targets:
+        ctx.raise_if_cancelled()
+        hints = hints_by_id.get(asset_id, [])
+        category = category_by_id.get(asset_id)
+
+        excuse = _not_socketable(category, hints)
+        if excuse is not None:
+            report[asset_id] = {
+                "status": "skipped",
+                "reason": excuse,
+                "sockets": {},
+                "socket_hints": hints,
+            }
+            skipped += 1
+            continue
+
+        if tool is None:
+            tool = _ensure_tool(ctx)
+        entry = _derive(tool, glb_path, hints)
+        report[asset_id] = entry
+        if entry.get("sockets"):
+            derived += 1
+        else:
+            skipped += 1
 
     # Assets with no usable GLB still get an entry, so the scene compiler's
     # socket validator can say "this asset has no contract" rather than
@@ -102,6 +139,28 @@ def run(ctx: PipelineContext) -> StageResult:
     out.write_text(json.dumps(report, indent=2, sort_keys=True), encoding="utf-8")
     rel = str(out.relative_to(ctx.settings.repo_root)).replace("\\", "/")
 
+    # Fail loudly, all at once. A contract full of empty socket maps is not a
+    # degraded build, it is a build where every mechanic that fires from a
+    # muzzle silently does nothing -- and the only place that used to surface
+    # was scene_compile, six stages later.
+    blocking = _blocking_failures(report, hints_by_id)
+    if blocking:
+        ctx.store.record_stage(
+            state,
+            _STAGE,
+            ProjectStatus.failed,
+            message=blocking[0],
+            artifacts=[rel],
+        )
+        ctx.emit(_STAGE, "failed", blocking[0])
+        raise AssetContractError(
+            "could not derive sockets that gameplay depends on:\n"
+            + "\n".join(f"  - {b}" for b in blocking)
+            + "\n\nasset_normalization.json records GLB paths relative to the"
+            " repo root; check that those files exist and that"
+            " ptv_glb_sockets can read them."
+        )
+
     ctx.store.record_stage(
         state,
         _STAGE,
@@ -116,6 +175,80 @@ def run(ctx: PipelineContext) -> StageResult:
 # ---------------------------------------------------------------------------
 # Derivation
 # ---------------------------------------------------------------------------
+
+
+def _not_socketable(category: Any, hints: list[str]) -> str | None:
+    """Why this asset gets no derived sockets, or ``None`` to derive them.
+
+    Explicit ``socket_hints`` always win: if the manifest says an asset needs
+    a named point, we try, whatever the category. Absent hints, only ``prop``
+    assets get the implicit ``muzzle``+``grip`` fallback, because those are
+    the only two names geometry can derive and they are only ever meaningful
+    on a held or mounted object. Everything else in the engine attaches by a
+    different mechanism entirely, so a derived "muzzle" on a character or a
+    HUD panel is a number nothing will ever read -- and one that makes the
+    contract look like it says something it does not.
+
+    The returned string is written into the artifact as ``reason``, so
+    ``asset_contract.json`` explains an empty socket map instead of leaving a
+    bare ``{}`` that reads exactly like the path bug did.
+    """
+    if hints:
+        return None
+
+    name = getattr(category, "value", str(category))
+    if category == AssetCategory.prop:
+        return None
+    if category == AssetCategory.character:
+        return (
+            "no sockets derived: characters attach via rig joints and the"
+            " BodySlots taxonomy (hand_r, waist, wrist_l), not mesh sockets"
+        )
+    if category == AssetCategory.ui:
+        return (
+            "no sockets derived: UI attaches to a body slot (wrist_l) and is"
+            " driven by IInteractive, not by a mesh socket"
+        )
+    if category == AssetCategory.fx:
+        return (
+            "no sockets derived: effects are spawned AT another asset's"
+            " socket; the socket belongs to the emitting asset"
+        )
+    return (
+        f"no sockets derived: {name} assets have no socket_hints and only"
+        " prop assets get the implicit muzzle/grip fallback"
+    )
+
+
+def _blocking_failures(
+    report: dict[str, dict[str, Any]],
+    hints_by_id: dict[str, list[str]],
+) -> list[str]:
+    """Failures that must sink the stage rather than be reported as skips.
+
+    Two kinds:
+
+    * ``missing`` -- ``asset_normalization`` said this asset had a good GLB and
+      the file is not where it said it was. That is a broken workspace no
+      matter what the asset is for, so it blocks unconditionally.
+    * ``failed`` -- the derivation tool errored. Only blocking when the asset
+      carries ``socket_hints``, because that is gameplay stating in the
+      manifest that it needs a named point on this mesh.
+    """
+    out: list[str] = []
+    for asset_id in sorted(report):
+        entry = report[asset_id]
+        status = entry.get("status")
+        reason = entry.get("reason") or "no reason recorded"
+        if status == "missing":
+            out.append(f"asset '{asset_id}': {reason}")
+        elif status == "failed" and hints_by_id.get(asset_id):
+            hints = hints_by_id[asset_id]
+            out.append(
+                f"asset '{asset_id}' needs sockets {hints} but socket"
+                f" derivation failed: {reason}"
+            )
+    return out
 
 
 def _resolvable_assets(
@@ -155,9 +288,15 @@ def _derive(tool: Path, glb_path: Path, hints: list[str]) -> dict[str, Any]:
     ``glb_path`` is already absolute: see :func:`_resolvable_assets`.
     """
     if not glb_path.exists():
+        # NOT a skip: we only get here for assets asset_normalization marked
+        # ok, so the file is supposed to be there. See _blocking_failures.
+        shown = str(glb_path).replace("\\", "/")
         return {
-            "status": "skipped",
-            "reason": f"GLB not found: {glb_path}",
+            "status": "missing",
+            "reason": (
+                "asset_normalization vouched for this GLB but it is not on"
+                f" disk: {shown}"
+            ),
             "sockets": {},
             "socket_hints": hints,
         }
@@ -185,9 +324,10 @@ def _derive(tool: Path, glb_path: Path, hints: list[str]) -> dict[str, Any]:
         raw = json.loads(report_file.read_text(encoding="utf-8"))
 
     sockets = raw.get("sockets") or {}
-    # Only publish sockets this asset actually asked for. A prop with no hints
-    # gets the full derived set: harmless, and it means a mechanic bound late
-    # still finds a muzzle to fire from.
+    # Only publish sockets this asset actually asked for. A hint-less asset
+    # reaching this point is a prop (see :func:`_not_socketable`) and gets the
+    # full derived set: harmless on a held or mounted object, and it means a
+    # mechanic bound late still finds a muzzle to fire from.
     if hints:
         wanted = {h for h in hints if h in sockets}
         sockets = {k: v for k, v in sockets.items() if k in wanted}
