@@ -67,6 +67,24 @@
           "title": "Collision Shape",
           "type": "string"
         },
+        "hold_rotation_offset_deg": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "number"
+              },
+              "maxItems": 3,
+              "minItems": 3,
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional XYZ Euler correction (degrees) to how this asset sits in the hand when grabbed by its grip socket. Leave unset: the grip socket already points the business end where the controller aims. Only for an asset that is known to hold wrong.",
+          "title": "Hold Rotation Offset Deg"
+        },
         "id": {
           "description": "Snake-case identifier, max 64 chars.",
           "pattern": "^[a-z0-9][a-z0-9_.\\-]{0,63}$",
@@ -140,6 +158,10 @@
         },
         "tripo": {
           "$ref": "#/$defs/TripoRequest"
+        },
+        "wearable_region": {
+          "$ref": "#/$defs/WearableRegion",
+          "default": "none"
         }
       },
       "required": [
@@ -306,6 +328,20 @@
         "detailed"
       ],
       "title": "TripoTextureQuality",
+      "type": "string"
+    },
+    "WearableRegion": {
+      "description": "Which part of the PLAYER'S body an item is designed to be worn on.\n\nDescriptive only today. In a Hands Only game an item marked ``hands`` or\n``forearms`` (a glove, a gauntlet) is still generated and placed as an\nordinary prop -- the player cannot yet wear it AS their hands, because\nnothing rigs a standalone hand model. The label is what lets a future\nhand-rigging update find those items without re-planning the game.",
+      "enum": [
+        "none",
+        "hands",
+        "forearms",
+        "head",
+        "torso",
+        "legs",
+        "feet"
+      ],
+      "title": "WearableRegion",
       "type": "string"
     }
   },

@@ -176,7 +176,7 @@ def test_scene_compile_resolves_builtin_and_mesh():
     assert doc["version"] == 1
     assert doc["scene_id"] == "room"
     assert doc["player"]["height_meters"] == 1.7
-    ents = doc["entities"]
+    ents = [e for e in doc["entities"] if e["id"] != "player_rig"]
     assert len(ents) == 1
     e = ents[0]
     assert e["mesh"]["asset_id"] == "cube"
@@ -432,7 +432,7 @@ def test_scene_compile_skips_unreferenced_assets_without_glb():
     doc = compile_scene_json(
         _build_spec(), manifest, _plan(), empty_scene, normalization_report={}
     )
-    assert doc["entities"] == []
+    assert [e["id"] for e in doc["entities"]] == ["player_rig"]
 
 
 # ---------------------------------------------------------------------------

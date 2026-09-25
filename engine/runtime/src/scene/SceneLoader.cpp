@@ -84,8 +84,18 @@ SceneDoc LoadSceneJson(const std::string& path) {
         d.player_height_meters = p.value("height_meters", 1.7f);
         d.locomotion = p.value("locomotion", std::string("teleport"));
         d.comfort = p.value("comfort", std::string("comfort"));
-        d.locomotion_menu_enabled = p.value("locomotion_menu", true);
+        d.locomotion_menu_enabled = p.value("locomotion_menu", false);
         d.default_locomotion_mode = p.value("default_locomotion_mode", std::string{});
+        d.default_turn_mode = p.value("default_turn_mode", std::string("snap"));
+        if (p.contains("hands") && p["hands"].is_object()) {
+            const auto& hj = p["hands"];
+            d.hands_source = hj.value("source", std::string("default"));
+            d.hands_scale_m =
+                std::clamp(hj.value("scale_m", 0.20f), 0.08f, 0.5f);
+            d.hands_grip_trim_deg =
+                read_vec3(hj.value("grip_trim_deg", Json::array()), Vec3(0.0f));
+            d.hands_debug_axes = hj.value("debug_axes", false);
+        }
         d.slide_max_speed_mps = p.value("slide_max_speed_mps", 1.5f);
         d.slide_accel_tau_s = p.value("slide_accel_tau_s", 0.12f);
         d.slide_decel_tau_s = p.value("slide_decel_tau_s", 0.18f);
@@ -320,6 +330,7 @@ SceneDoc LoadSceneJson(const std::string& path) {
             m.asset_id = e["mesh"].value("asset_id", "");
             m.glb_path = e["mesh"].value("glb_path", "");
             m.target_scale_meters = e["mesh"].value("target_scale_meters", 1.0f);
+            m.unit_scale = std::max(0.0f, e["mesh"].value("unit_scale", 0.0f));
             m.collision_shape = e["mesh"].value("collision_shape", "aabb");
             // Decimated LOD chain + culling radius from asset_optimization.
             // Absent on scenes compiled before that stage: the renderer then
@@ -502,7 +513,7 @@ void ApplySceneToWorld(const SceneDoc& doc, World& world,
                          es.mesh->target_scale_meters, es.mesh->lod_paths,
                          es.mesh->bounds_radius_m, es.mesh->sockets,
                          es.mesh->skinned, es.mesh->animations,
-                         es.mesh->animation_speeds});
+                         es.mesh->animation_speeds, es.mesh->unit_scale});
         }
         if (es.primitive.has_value()) {
             world.registry().emplace<CPrimitive>(

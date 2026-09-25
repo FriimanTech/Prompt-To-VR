@@ -169,6 +169,36 @@ Entry-point scene only:
 - Applies `_repoint_world_meshes_to_lods()` so world props use `_lod0.glb` paths from optimization
 - Gameplay entities from SceneSpec remain authoritative for id conflicts on gameplay layer
 
+### Player roles (`pipeline/player_bindings.py`)
+
+`bind_player_roles()` runs after the asset safety net:
+
+- Hands Only removes every `player_avatar` entity.
+- Each required role gets exactly one binding: `role:body` on the
+  `player_avatar` entity (with the BuildSpec's coverage / head visibility /
+  leg animation), everything else on `player_rig` (created meshless and tagged
+  `player_system` when the SceneSpec has none). Plan config and controller
+  bindings carry through.
+- The same mechanic bound twice collapses to one (warning). Two DIFFERENT
+  mechanics for one role, counted across ALL entities, or a locomotion / turn
+  role the BuildSpec `movement` block does not allow, raise
+  `PlayerRoleError` -- hard fail.
+- The `player` block gains `hands.source` (`avatar` only when a body is
+  bound), `default_locomotion_mode`, `default_turn_mode` and
+  `locomotion_menu: false`.
+
+### Sizes, grips and world copies
+
+- `_mesh_render_fields()` writes `unit_scale = target_scale_meters /
+  lod0_longest_axis` for every optimized mesh.
+- `_repoint_world_meshes_to_lods()` takes `target_scale_meters` from the
+  manifest, so a world-placed copy matches the gameplay one.
+- `reconcile_world_copies()` gives a world copy of an interactive asset the
+  gameplay entity's bindings, physics and interaction tags, and drops a copy
+  within 0.5 m of the gameplay entity (the same object placed twice).
+- `_apply_hold_offsets()` forwards the manifest's `hold_rotation_offset_deg`
+  into that asset's `builtin.grab` params.
+
 ---
 
 ## Extend this folder

@@ -228,9 +228,10 @@ def test_meshless_binding_passes_when_another_asset_supplies_the_socket():
     assert doc["entities"][0]["id"] == "player_right_hand"
     # Not silent: the compile says which asset will satisfy it at runtime,
     # which is the fact you need when the gun turns out not to fire.
-    assert len(warnings) == 1
-    assert "player_right_hand" in warnings[0]
-    assert "blaster" in warnings[0]
+    socket_warnings = [w for w in warnings if "socket" in w]
+    assert len(socket_warnings) == 1
+    assert "player_right_hand" in socket_warnings[0]
+    assert "blaster" in socket_warnings[0]
 
 
 def test_meshless_binding_fails_when_no_asset_supplies_the_socket():

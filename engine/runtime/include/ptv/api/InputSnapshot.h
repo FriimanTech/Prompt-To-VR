@@ -54,6 +54,15 @@ struct InputSnapshot {
         bool thumbrest_touched{false};
         bool prev_trigger_touched{false};
         bool prev_thumbrest_touched{false};
+        // Thumb resting on the thumbstick. This is where a Touch player's
+        // thumb sits nearly all the time, so it is the default signal for
+        // lowering the virtual thumb.
+        bool thumbstick_touched{false};
+        bool prev_thumbstick_touched{false};
+        // Thumb resting on either face button of THIS controller (A/B on the
+        // right, X/Y on the left).
+        bool face_button_touched{false};
+        bool prev_face_button_touched{false};
 
         // Grip ("hand") pose: palm-centric. Use for "where is the hand".
         // Valid only when ``hand_valid`` is true.
@@ -138,6 +147,15 @@ struct InputSnapshot {
     bool thumbrest_touching(Hand h) const { return hands[h].thumbrest_touched; }
     bool thumbrest_touch_started(Hand h) const {
         return hands[h].thumbrest_touched && !hands[h].prev_thumbrest_touched;
+    }
+    bool thumbstick_touching(Hand h) const {
+        return hands[h].thumbstick_touched;
+    }
+    bool thumbstick_touch_started(Hand h) const {
+        return hands[h].thumbstick_touched && !hands[h].prev_thumbstick_touched;
+    }
+    bool face_button_touching(Hand h) const {
+        return hands[h].face_button_touched;
     }
 
     // Face-button current-state helpers.

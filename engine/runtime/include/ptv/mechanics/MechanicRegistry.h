@@ -88,6 +88,8 @@ private:
     void attach_one(World& world, std::uint32_t entity, MechanicContext& ctx);
     /** Recompute ``player_scoped_`` after ``instances_`` is reordered. */
     void reindex_player_scoped();
+    /** Stable-sort instances by ``IMechanic::order`` and reindex. */
+    void sort_by_order();
 
     std::vector<std::pair<std::uint32_t, MechanicInstance>> instances_;
     /** Player-scoped mechanic id -> index into ``instances_``. Persisted

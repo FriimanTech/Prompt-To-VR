@@ -4,6 +4,7 @@
 // tested and re-used (a "teleport but in slow motion" variant only needs to
 // change the launch speed it passes in).
 
+#include <cstdint>
 #include <vector>
 
 #include "ptv/api/MechanicContext.h"
@@ -20,6 +21,10 @@ struct ArcParams {
     /** Surfaces steeper than this are walls, not landing spots.
      *  ``normal.y`` below the cutoff is rejected. */
     float min_ground_normal_y{0.4f};
+    /** Bodies the arc passes through: the player's own capsule and whatever
+     *  is in their hands. An arc that starts inside the pistol the player is
+     *  holding must not "land" on it. */
+    std::vector<std::uint32_t> ignore_entities;
 };
 
 struct ArcResult {
@@ -41,6 +46,33 @@ struct ArcResult {
  */
 void solve_arc(const Vec3& origin, const Vec3& forward, const ArcParams& p,
                IPhysicsAccess* physics, ArcResult& out);
+
+/** How far the arc should reach for a given controller pitch.
+ *
+ *  Monotonic by construction: tilting the controller up ALWAYS reaches
+ *  farther and tilting it down always lands closer. A plain fixed-speed
+ *  projectile does not have that property -- its range peaks at 45 degrees
+ *  and falls again above it, so raising the controller past that point
+ *  pulls the landing spot back toward the player, which reads as broken. */
+float distance_for_pitch(float pitch_rad, float min_distance_m,
+                         float max_distance_m);
+
+/** Clamp ``distance_m`` to what an arc fired at ``pitch_rad`` from
+ *  ``height_m`` can reach. Aiming down, a projectile can land no further
+ *  than roughly where the aim line meets the ground; asking for more has no
+ *  ballistic solution. Monotonic in pitch, like ``distance_for_pitch``. */
+float reachable_distance(float pitch_rad, float distance_m, float height_m);
+
+/** Launch speed that lands a projectile fired at ``pitch_rad`` from
+ *  ``height_m`` above the landing plane at ``distance_m`` horizontally.
+ *  Returns a small positive speed when the geometry has no ballistic
+ *  solution (aiming steeply down at a point behind the drop). */
+float launch_speed_for(float pitch_rad, float distance_m, float height_m,
+                       float gravity_mps2);
+
+/** Pitch range the aim is clamped to, radians. */
+inline constexpr float kMinAimPitch = -1.047f;  // -60 degrees
+inline constexpr float kMaxAimPitch = 0.611f;   // +35 degrees
 
 }  // namespace teleport
 }  // namespace ptv

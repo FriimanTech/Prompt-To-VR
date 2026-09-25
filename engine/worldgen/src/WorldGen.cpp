@@ -195,16 +195,29 @@ public:
     }
 
     void place_object(const ObjectPlacement& d) override {
+        // An asset map entry is either a bare GLB path (older pipelines) or
+        // {"glb_path", "target_scale_meters"}. The scale MUST come from the
+        // asset manifest: hard-coding 1.0 here made every world-placed
+        // pistol a metre long while the gameplay copy of the same pistol was
+        // 24 cm, and which size a player saw depended on which copy's mesh
+        // streamed in first.
         std::string glb;
+        float scale_m = 1.0f;
         if (asset_map_.is_object() && asset_map_.contains(d.asset_id)) {
-            glb = asset_map_.at(d.asset_id).get<std::string>();
+            const auto& entry = asset_map_.at(d.asset_id);
+            if (entry.is_string()) {
+                glb = entry.get<std::string>();
+            } else if (entry.is_object()) {
+                glb = entry.value("glb_path", std::string{});
+                scale_m = entry.value("target_scale_meters", 1.0f);
+            }
         }
         nlohmann::json e = base_entity(d.name.empty() ? d.asset_id : d.name, d.tags);
         e["transform"] = transform_json(d.transform);
         e["mesh"] = nlohmann::json{
             {"asset_id", d.asset_id},
             {"glb_path", glb},
-            {"target_scale_meters", 1.0f},
+            {"target_scale_meters", scale_m},
             {"collision_shape", "mesh"},
         };
         e["physics"] = physics_json(Collision::Mesh);

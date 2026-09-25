@@ -29,6 +29,10 @@
 #include <Jolt/Physics/Collision/NarrowPhaseQuery.h>
 
 #include <Jolt/Physics/Collision/CollideShape.h>
+#include <Jolt/Physics/Collision/Shape/RotatedTranslatedShape.h>
+#include <Jolt/Physics/Collision/BroadPhase/BroadPhaseLayer.h>
+#include <Jolt/Physics/Collision/ObjectLayer.h>
+#include <Jolt/Physics/Character/CharacterVirtual.h>
 
 #include <algorithm>
 #include <cmath>
@@ -189,6 +193,35 @@ JPH::ShapeRefC build_capsule_shape(float height_m) {
     return new JPH::CapsuleShape(half_cylinder, radius);
 }
 
+bool is_finite_vec(const Vec3& v) {
+    return std::isfinite(v.x) && std::isfinite(v.y) && std::isfinite(v.z);
+}
+
+/** Body filter that skips a set of bodies. */
+class IgnoreBodiesFilter final : public JPH::BodyFilter {
+public:
+    std::vector<JPH::BodyID> ids;
+    bool ShouldCollide(const JPH::BodyID& id) const override {
+        return std::find(ids.begin(), ids.end(), id) == ids.end();
+    }
+    bool ShouldCollideLocked(const JPH::Body& body) const override {
+        return !body.IsSensor();
+    }
+};
+
+/** Capsule with its origin at the FEET, which is what a player body is
+ *  positioned by. */
+JPH::ShapeRefC build_feet_capsule(float height, float radius) {
+    const float h = std::max(2.0f * radius + 0.05f, height);
+    const float half_cyl = std::max(0.01f, 0.5f * h - radius);
+    JPH::RotatedTranslatedShapeSettings settings(
+        JPH::Vec3(0.0f, 0.5f * h, 0.0f), JPH::Quat::sIdentity(),
+        new JPH::CapsuleShape(half_cyl, radius));
+    JPH::ShapeSettings::ShapeResult res = settings.Create();
+    if (res.HasError()) return {};
+    return res.Get();
+}
+
 /** Height to build a character capsule from, or 0 when unknown. */
 float capsule_height_for(const World& world, entt::entity entity,
                          const Transform& t) {
@@ -217,6 +250,24 @@ struct PhysicsWorld::Impl {
     // mechanic that needs to know WHAT it shot. Keyed on the BodyID's packed
     // index+sequence rather than BodyID itself, which has no std::hash.
     std::unordered_map<std::uint32_t, std::uint32_t> body_to_entity{};
+
+    // --- Player character ---
+    JPH::Ref<JPH::CharacterVirtual> character;
+    float character_height{1.7f};
+    float character_radius{0.25f};
+    float character_vertical_speed{0.0f};
+    std::vector<std::uint32_t> character_ignored;
+    IgnoreBodiesFilter character_filter;
+
+    void refresh_character_filter() {
+        character_filter.ids.clear();
+        for (const std::uint32_t e : character_ignored) {
+            const auto it = entity_to_body.find(e);
+            if (it != entity_to_body.end()) {
+                character_filter.ids.push_back(it->second);
+            }
+        }
+    }
 };
 
 PhysicsWorld::PhysicsWorld() = default;
@@ -682,15 +733,252 @@ Vec3 PhysicsWorld::slide_character(const Vec3& center, float height,
         if (!std::isfinite(n_len) || n_len < 1.0e-5f) break;
         n /= n_len;
 
+        // Already touching and moving AWAY: the contact is behind us, so it
+        // must not stop the move. This is what keeps a wedged mover able to
+        // step back out without ever letting it push further in.
+        if (frac <= 0.002f && glm::dot(remaining, n) >= 0.0f) {
+            moved += remaining;
+            break;
+        }
+
         const Vec3 leftover = remaining * (1.0f - safe);
         remaining = leftover - n * glm::dot(leftover, n);
     }
 
-    // Fail open. If we resolved to almost nothing the mover is probably
-    // wedged inside geometry, and in VR being frozen in place is a worse
-    // failure than clipping through a wall for one frame.
-    if (glm::length(moved) < 0.02f * want) return delta;
+    // Fail closed: whatever the sweep resolved is the answer, even if it is
+    // nothing. The move that was refused pointed into a wall.
+    (void)want;
     return moved;
+}
+
+// ---------------------------------------------------------------------------
+// Player character
+// ---------------------------------------------------------------------------
+
+void PhysicsWorld::create_player_character(const Vec3& feet, float height,
+                                           float radius) {
+    if (!impl_) return;
+    impl_->character = nullptr;
+    impl_->character_height = std::clamp(height, 0.5f, 2.6f);
+    impl_->character_radius =
+        std::clamp(radius, 0.08f, 0.45f * impl_->character_height);
+    impl_->character_vertical_speed = 0.0f;
+
+    JPH::ShapeRefC shape =
+        build_feet_capsule(impl_->character_height, impl_->character_radius);
+    if (shape.GetPtr() == nullptr) return;
+
+    JPH::Ref<JPH::CharacterVirtualSettings> settings =
+        new JPH::CharacterVirtualSettings();
+    settings->mShape = shape;
+    settings->mUp = JPH::Vec3::sAxisY();
+    settings->mMaxSlopeAngle = JPH::DegreesToRadians(50.0f);
+    // Only contacts on the lower hemisphere count as standing on something.
+    settings->mSupportingVolume =
+        JPH::Plane(JPH::Vec3::sAxisY(), -impl_->character_radius);
+    // Collide with BOTH faces of every triangle. Generated worlds are full of
+    // single-sided meshes, and a one-sided wall is exactly a wall the player
+    // can walk through from behind.
+    settings->mBackFaceMode = JPH::EBackFaceMode::CollideWithBackFaces;
+    settings->mCharacterPadding = 0.02f;
+    settings->mPenetrationRecoverySpeed = 1.0f;
+    settings->mPredictiveContactDistance = 0.1f;
+    settings->mMass = 70.0f;
+    settings->mMaxStrength = 100.0f;
+
+    impl_->character = new JPH::CharacterVirtual(
+        settings, JPH::RVec3(feet.x, feet.y, feet.z), JPH::Quat::sIdentity(),
+        0, &impl_->system);
+}
+
+void PhysicsWorld::destroy_player_character() {
+    if (!impl_) return;
+    impl_->character = nullptr;
+}
+
+bool PhysicsWorld::has_player_character() const {
+    return impl_ && impl_->character != nullptr;
+}
+
+void PhysicsWorld::set_player_character_ignored(
+    const std::vector<std::uint32_t>& entities) {
+    if (!impl_) return;
+    impl_->character_ignored = entities;
+}
+
+Vec3 PhysicsWorld::move_player_character(const Vec3& displacement,
+                                         bool grounded, float jump_speed,
+                                         float dt, bool apply_gravity) {
+    if (!impl_ || impl_->character == nullptr) return displacement;
+    if (!std::isfinite(dt) || dt <= 1.0e-5f) dt = 1.0f / 72.0f;
+    auto& ch = *impl_->character;
+    impl_->refresh_character_filter();
+
+    const JPH::RVec3 before = ch.GetPosition();
+    const JPH::Vec3 gravity = impl_->system.GetGravity();
+
+    JPH::Vec3 velocity;
+    if (grounded && !apply_gravity) {
+        // A second, purely horizontal pass in the same frame (the body
+        // following the head). Vertical motion was already integrated.
+        velocity = JPH::Vec3(displacement.x / dt, 0.0f, displacement.z / dt);
+    } else if (grounded) {
+        float vy = impl_->character_vertical_speed;
+        const bool on_ground =
+            ch.GetGroundState() == JPH::CharacterBase::EGroundState::OnGround;
+        if (on_ground && vy <= 0.0f) vy = 0.0f;
+        if (on_ground && jump_speed > 0.0f) vy = jump_speed;
+        vy += gravity.GetY() * dt;
+        // Terminal velocity: a fall through a gap in the level should not
+        // accelerate forever before the floor clamp catches it.
+        vy = std::max(vy, -30.0f);
+        velocity = JPH::Vec3(displacement.x / dt, vy, displacement.z / dt);
+        if (on_ground) velocity += ch.GetGroundVelocity();
+    } else {
+        velocity = JPH::Vec3(displacement.x / dt, displacement.y / dt,
+                             displacement.z / dt);
+    }
+    ch.SetLinearVelocity(velocity);
+
+    JPH::CharacterVirtual::ExtendedUpdateSettings ext;
+    const bool rising = grounded && velocity.GetY() > 0.0f;
+    ext.mStickToFloorStepDown =
+        (grounded && !rising) ? JPH::Vec3(0.0f, -0.5f, 0.0f)
+                              : JPH::Vec3::sZero();
+    ext.mWalkStairsStepUp =
+        grounded ? JPH::Vec3(0.0f, 0.35f, 0.0f) : JPH::Vec3::sZero();
+
+    ch.ExtendedUpdate(
+        dt, grounded ? gravity : JPH::Vec3::sZero(), ext,
+        impl_->system.GetDefaultBroadPhaseLayerFilter(Layers::MOVING),
+        impl_->system.GetDefaultLayerFilter(Layers::MOVING),
+        impl_->character_filter, {}, impl_->temp);
+
+    if (grounded && !apply_gravity) {
+        // Leave the integrated vertical speed alone.
+    } else if (grounded) {
+        const bool supported = ch.IsSupported();
+        const float vy = ch.GetLinearVelocity().GetY();
+        impl_->character_vertical_speed = (supported && vy <= 0.0f) ? 0.0f : vy;
+    } else {
+        impl_->character_vertical_speed = 0.0f;
+    }
+
+    const JPH::RVec3 after = ch.GetPosition();
+    return Vec3(static_cast<float>(after.GetX() - before.GetX()),
+                static_cast<float>(after.GetY() - before.GetY()),
+                static_cast<float>(after.GetZ() - before.GetZ()));
+}
+
+void PhysicsWorld::teleport_player_character(const Vec3& feet) {
+    if (!impl_ || impl_->character == nullptr) return;
+    impl_->character->SetPosition(JPH::RVec3(feet.x, feet.y, feet.z));
+    impl_->character->SetLinearVelocity(JPH::Vec3::sZero());
+    impl_->character_vertical_speed = 0.0f;
+}
+
+bool PhysicsWorld::resize_player_character(float height) {
+    if (!impl_ || impl_->character == nullptr) return false;
+    const float h = std::clamp(height, 0.5f, 2.6f);
+    if (std::abs(h - impl_->character_height) < 1.0e-3f) return true;
+    JPH::ShapeRefC shape = build_feet_capsule(h, impl_->character_radius);
+    if (shape.GetPtr() == nullptr) return false;
+    impl_->refresh_character_filter();
+    const bool ok = impl_->character->SetShape(
+        shape, 1.5f * impl_->character->GetCharacterPadding(),
+        impl_->system.GetDefaultBroadPhaseLayerFilter(Layers::MOVING),
+        impl_->system.GetDefaultLayerFilter(Layers::MOVING),
+        impl_->character_filter, {}, impl_->temp);
+    if (ok) impl_->character_height = h;
+    return ok;
+}
+
+PhysicsWorld::CharacterState PhysicsWorld::player_character_state() const {
+    CharacterState s;
+    if (!impl_ || impl_->character == nullptr) return s;
+    const auto& ch = *impl_->character;
+    const JPH::RVec3 p = ch.GetPosition();
+    s.feet = Vec3(static_cast<float>(p.GetX()), static_cast<float>(p.GetY()),
+                  static_cast<float>(p.GetZ()));
+    s.grounded = ch.IsSupported();
+    const JPH::Vec3 n = ch.GetGroundNormal();
+    s.ground_normal = Vec3(n.GetX(), n.GetY(), n.GetZ());
+    s.vertical_speed = impl_->character_vertical_speed;
+    s.height = impl_->character_height;
+    return s;
+}
+
+Vec3 PhysicsWorld::resolve_head(const Vec3& from, const Vec3& to,
+                                float radius) const {
+    if (!impl_) return to;
+    if (!is_finite_vec(from) || !is_finite_vec(to)) return to;
+    const float r = std::clamp(radius, 0.03f, 0.5f);
+    JPH::ShapeRefC sphere = new JPH::SphereShape(r);
+
+    const JPH::SpecifiedBroadPhaseLayerFilter bp_filter(BPLayers::STATIC);
+    const JPH::SpecifiedObjectLayerFilter obj_filter(Layers::STATIC);
+
+    // 1) Sweep, so a fast head movement cannot tunnel through a thin wall.
+    Vec3 pos = from;
+    const Vec3 delta = to - from;
+    if (glm::length(delta) > 1.0e-5f) {
+        const JPH::RShapeCast cast = JPH::RShapeCast::sFromWorldTransform(
+            sphere, JPH::Vec3::sReplicate(1.0f),
+            JPH::RMat44::sTranslation(JPH::RVec3(from.x, from.y, from.z)),
+            JPH::Vec3(delta.x, delta.y, delta.z));
+        JPH::ShapeCastSettings settings;
+        settings.mBackFaceModeTriangles = JPH::EBackFaceMode::CollideWithBackFaces;
+        settings.mBackFaceModeConvex = JPH::EBackFaceMode::CollideWithBackFaces;
+        JPH::ClosestHitCollisionCollector<JPH::CastShapeCollector> collector;
+        impl_->system.GetNarrowPhaseQuery().CastShape(
+            cast, settings, JPH::RVec3(from.x, from.y, from.z), collector,
+            bp_filter, obj_filter);
+        if (collector.HadHit() && collector.mHit.mFraction > 0.0f) {
+            const float frac =
+                std::clamp(collector.mHit.mFraction - 0.01f, 0.0f, 1.0f);
+            pos = from + delta * frac;
+            // Slide the rest along the wall, so brushing a wall does not
+            // pin the head in place.
+            const JPH::Vec3 axis = collector.mHit.mPenetrationAxis.Normalized();
+            Vec3 n(-axis.GetX(), -axis.GetY(), -axis.GetZ());
+            if (glm::length(n) > 1.0e-5f) {
+                n = glm::normalize(n);
+                Vec3 rest = delta * (1.0f - frac);
+                rest -= n * glm::dot(rest, n);
+                pos += rest;
+            }
+        } else if (!collector.HadHit()) {
+            pos = to;
+        } else {
+            pos = to;  // starting in contact; the push-out below handles it
+        }
+    }
+
+    // 2) Push out of anything still overlapped.
+    for (int iter = 0; iter < 3; ++iter) {
+        JPH::CollideShapeSettings cs;
+        cs.mBackFaceMode = JPH::EBackFaceMode::CollideWithBackFaces;
+        cs.mMaxSeparationDistance = 0.0f;
+        JPH::AllHitCollisionCollector<JPH::CollideShapeCollector> hits;
+        const JPH::RMat44 xf =
+            JPH::RMat44::sTranslation(JPH::RVec3(pos.x, pos.y, pos.z));
+        impl_->system.GetNarrowPhaseQuery().CollideShape(
+            sphere, JPH::Vec3::sReplicate(1.0f), xf, cs, xf.GetTranslation(),
+            hits, bp_filter, obj_filter);
+        if (hits.mHits.empty()) break;
+        const JPH::CollideShapeResult* deepest = nullptr;
+        for (const auto& h : hits.mHits) {
+            if (deepest == nullptr ||
+                h.mPenetrationDepth > deepest->mPenetrationDepth) {
+                deepest = &h;
+            }
+        }
+        if (deepest == nullptr || deepest->mPenetrationDepth <= 1.0e-4f) break;
+        const JPH::Vec3 axis = deepest->mPenetrationAxis.Normalized();
+        pos -= Vec3(axis.GetX(), axis.GetY(), axis.GetZ()) *
+               (deepest->mPenetrationDepth + 0.002f);
+    }
+    return pos;
 }
 
 bool PhysicsWorld::raycast(const Vec3& origin, const Vec3& dir, float max_dist,

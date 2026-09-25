@@ -11,6 +11,9 @@ class CreateProjectRequest(BaseModel):
     # Which VR target to build for: "pcvr" (Windows .exe over Quest Link) or
     # "quest" (standalone Android APK). Defaults to pcvr for back-compat.
     target_device: str = Field(default="pcvr")
+    # What the player is: "hands_only" (the engine's default rigged hands, no
+    # body) or "full_avatar" (a generated full-body GLB viewed first person).
+    player_experience: str = Field(default="full_avatar")
 
 
 class RunStageRequest(BaseModel):

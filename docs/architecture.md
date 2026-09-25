@@ -218,12 +218,16 @@ Two rigs come from different places, and the split is not arbitrary:
   types (`biped`, `quadruped`, `hexapod`, `octopod`, `avian`, `serpentine`,
   `aquatic`) all describe a whole animal, and the free `rig-check` call gates
   the paid one.
-- **The player's hands** are generated locally by
-  [engine/tools/make_hand_fixture.py](../engine/tools/make_hand_fixture.py),
-  because a disembodied hand is not any of those rig types and Tripo would
-  refuse it. They are ordinary ECS entities carrying the rigged mesh, so the
-  same skinned pipeline draws them, and `builtin.hand_pose` curls their
+- **The player's default hands** (Hands Only games) come from
+  `Default_Models/default_rigged_hand_model.glb`, a single pre-rigged hand.
+  [engine/tools/prepare_default_hands.py](../engine/tools/prepare_default_hands.py)
+  renames its joints to the BodySlots vocabulary and mirrors it for the other
+  hand at build time. They are ordinary ECS entities carrying the rigged mesh,
+  so the same skinned pipeline draws them, and `builtin.hand_pose` curls their
   fingers from the controller.
+- **Full Player Avatar** games use the avatar's OWN hands. The engine creates
+  only invisible hand anchors, and `builtin.hand_pose` curls the avatar's
+  finger bones when its rig has them. No substitute hands are ever drawn.
 
 ## The clip contract
 

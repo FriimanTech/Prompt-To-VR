@@ -8,6 +8,10 @@
     "height_meters": 1.7,
     "locomotion": "teleport",
     "comfort": "comfort",
+    "locomotion_menu": false,
+    "default_locomotion_mode": "teleport",
+    "default_turn_mode": "snap",
+    "hands": { "source": "default" },
     "spawn": {
       "position": [0.0, 0.0, 0.0],
       "rotation": [0.0, 0.0, 0.0, 1.0]
@@ -52,6 +56,35 @@
   ],
   "entities": [
     {
+      "id": "player_rig",
+      "name": "Player Rig",
+      "transform": {
+        "position": [0.0, 0.0, 0.0],
+        "rotation": [0.0, 0.0, 0.0, 1.0],
+        "scale": 1.0
+      },
+      "mesh": null,
+      "physics": null,
+      "mechanic_bindings": [
+        {
+          "id": "builtin.hand_pose",
+          "builtin_id": "builtin.hand_pose",
+          "params": {}
+        },
+        {
+          "id": "builtin.locomotion.teleport",
+          "builtin_id": "builtin.locomotion.teleport",
+          "params": { "max_range_m": 6.0 }
+        },
+        {
+          "id": "builtin.locomotion.snap_turn",
+          "builtin_id": "builtin.locomotion.snap_turn",
+          "params": { "degrees": 30.0 }
+        }
+      ],
+      "tags": ["player_rig", "player_system"]
+    },
+    {
       "id": "floor",
       "name": "Floor",
       "transform": {
@@ -67,18 +100,7 @@
         "restitution": 0.1,
         "friction": 0.9
       },
-      "mechanic_bindings": [
-        {
-          "id": "builtin.teleport",
-          "builtin_id": "builtin.teleport",
-          "params": { "max_distance_m": 6.0 }
-        },
-        {
-          "id": "builtin.snap_turn",
-          "builtin_id": "builtin.snap_turn",
-          "params": { "degrees": 30.0 }
-        }
-      ],
+      "mechanic_bindings": [],
       "tags": ["ground", "teleport_target"]
     },
     {

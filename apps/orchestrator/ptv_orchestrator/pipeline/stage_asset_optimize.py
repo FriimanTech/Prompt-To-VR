@@ -49,6 +49,10 @@ from .stage_asset_normalize import (
     pick_primary_glb,
 )
 
+#: How far (as a fraction) an LOD's longest axis may drift from LOD0's before
+#: it is rebuilt with the topology-preserving simplifier.
+LOD_EXTENT_TOLERANCE = 0.02
+
 
 def _decimation_source(info: dict[str, Any], repo_root: Path) -> str:
     """The mesh to decimate for one asset, never one of our own outputs.
@@ -256,6 +260,7 @@ def run(ctx: PipelineContext) -> StageResult:
         info["lod_paths"] = lod_info["lod_paths"]
         info["triangle_counts"] = lod_info["triangle_counts"]
         info["bounds_radius_m"] = lod_info["bounds_radius_m"]
+        info["lod0_longest_axis"] = float(lod_info.get("lod0_longest_axis") or 0.0)
         info["triangle_budget"] = budget
         info["decimated"] = True
         info["skinned"] = bool(lod_info.get("skinned") or False)
@@ -329,9 +334,12 @@ def _build_lod_chain(
         # one beside it, leaving the budget untouched -- so a targets-only
         # check reuses the chain built from the un-rigged mesh and the
         # skeleton never reaches the scene.
+        # A stamp without ``lod0_longest_axis`` predates the size contract
+        # and is rebuilt so every mesh ships with its measured unit scale.
         if (
             prev.get("targets") == targets
             and prev.get("source") == fingerprint
+            and float(prev.get("lod0_longest_axis") or 0.0) > 0.0
             and all(
                 (repo_root / p).exists() for p in prev.get("lod_paths", [])
             )
@@ -341,12 +349,13 @@ def _build_lod_chain(
 
     lod_paths: list[str] = []
     triangle_counts: list[int] = []
+    longest_axes: list[float] = []
     source_triangles = 0
     unit_radius = 0.0
     skinned = False
     joint_count = 0
 
-    for level, target in enumerate(targets):
+    def run_level(level: int, target: int, sloppy: bool) -> dict[str, Any]:
         out_file = out_dir / f"{asset_id}_lod{level}.glb"
         report_file = out_dir / f"{asset_id}_lod{level}.report.json"
         args = [
@@ -360,6 +369,22 @@ def _build_lod_chain(
             "--report",
             str(report_file),
         ]
+        if sloppy:
+            args.append("--sloppy")
+        proc = subprocess.run(args, capture_output=True, text=True)
+        if proc.returncode != 0:
+            raise RuntimeError(
+                f"ptv_glb_optimize failed for {asset_id} lod{level}: "
+                f"{(proc.stderr or proc.stdout)[:300]}"
+            )
+        if proc.stdout:
+            on_line(proc.stdout.strip().splitlines()[-1])
+        rep = json.loads(report_file.read_text(encoding="utf-8"))
+        report_file.unlink(missing_ok=True)
+        return rep
+
+    for level, target in enumerate(targets):
+        out_file = out_dir / f"{asset_id}_lod{level}.glb"
         # The error-bounded simplifier preserves topology and can stall well
         # above very aggressive targets; allow the sloppy fallback from LOD1
         # down, where silhouette fidelity matters far less than hitting budget.
@@ -369,20 +394,25 @@ def _build_lod_chain(
         # own regardless, because sloppy simplification invents vertex
         # positions and would detach the mesh from its skeleton. Skipping it
         # here once we do know just avoids a noisy log line per LOD.
-        if level >= 1 and not skinned:
-            args.append("--sloppy")
-
-        proc = subprocess.run(args, capture_output=True, text=True)
-        if proc.returncode != 0:
-            raise RuntimeError(
-                f"ptv_glb_optimize failed for {asset_id} lod{level}: "
-                f"{(proc.stderr or proc.stdout)[:300]}"
+        sloppy = level >= 1 and not skinned
+        rep = run_level(level, target, sloppy)
+        longest = float(rep.get("longest_axis") or 0.0)
+        # Every LOD must be the same size as LOD0: the runtime scales them all
+        # by LOD0's unit scale, so a sloppy LOD that lost an extremity would
+        # visibly shrink or grow when the LOD switches.
+        if (
+            sloppy
+            and longest_axes
+            and longest_axes[0] > 0.0
+            and abs(longest - longest_axes[0]) > LOD_EXTENT_TOLERANCE * longest_axes[0]
+        ):
+            on_line(
+                f"{asset_id} lod{level}: longest axis {longest:.4f} vs LOD0"
+                f" {longest_axes[0]:.4f}; rebuilding without --sloppy"
             )
-        if proc.stdout:
-            on_line(proc.stdout.strip().splitlines()[-1])
-
-        rep = json.loads(report_file.read_text(encoding="utf-8"))
-        report_file.unlink(missing_ok=True)
+            rep = run_level(level, target, False)
+            longest = float(rep.get("longest_axis") or 0.0)
+        longest_axes.append(longest)
         source_triangles = int(rep.get("source_triangles") or 0)
         triangle_counts.append(int(rep.get("output_triangles") or 0))
         unit_radius = float(rep.get("unit_bounds_radius") or 0.0)
@@ -417,6 +447,12 @@ def _build_lod_chain(
         # axis; the runtime rescales by target_scale_meters, so the world-space
         # cull radius scales the same way.
         "bounds_radius_m": unit_radius,
+        # LOD0's longest axis in GLB units. scene_compile turns it into
+        # ``mesh.unit_scale`` (metres per GLB unit) so every LOD, and every
+        # launch, renders at exactly the manifest size instead of each file
+        # being re-measured on its own.
+        "lod0_longest_axis": longest_axes[0] if longest_axes else 0.0,
+        "lod_longest_axes": longest_axes,
         # Every LOD of a rigged asset carries an identical skeleton by
         # construction, so one flag describes the whole chain. The scene
         # compiler forwards it so the runtime knows to attach a CSkeleton and

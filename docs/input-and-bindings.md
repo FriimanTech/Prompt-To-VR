@@ -58,6 +58,8 @@ both `/interaction_profiles/oculus/touch_controller` and
 | --- | --- |
 | `/input/trigger/touch` | `hands[h].trigger_touched` |
 | `/input/thumbrest/touch` | `hands[h].thumbrest_touched` |
+| `/input/thumbstick/touch` | `hands[h].thumbstick_touched` |
+| `/input/a/touch`, `/input/b/touch` (right), `/input/x/touch`, `/input/y/touch` (left) | `hands[h].face_button_touched` |
 
 Capsense is independent of the analog value: a resting finger reports touched
 with a `trigger` of 0. Helpers: `trigger_touching(hand)`,
@@ -76,31 +78,38 @@ player's hand looks like it is permanently pointing.
 
 ### Player hand poses (`builtin.hand_pose`)
 
-The player's hands are rigged entities, not decoration: a 16-joint skinned
-mesh generated at build time by
-[`engine/tools/make_hand_fixture.py`](../engine/tools/make_hand_fixture.py)
-(Tripo cannot rig a hand -- every rig type it offers is a whole creature).
-`Application::create_hand_entities` loads them, keeps their `CTransform` on
-the `/grip/pose` each frame, and exposes them through
-`ctx.hands->hand_entity(h)`.
+Where the player's visible hands come from is set by `player.hands.source`:
 
-`builtin.hand_pose` is Player-scoped, runs in `Phase::Simulate`, and states
-the finger pose every frame from the current input:
+- `default` (Hands Only): the engine's default rigged hands, built from
+  `Default_Models/default_rigged_hand_model.glb` by
+  [`engine/tools/prepare_default_hands.py`](../engine/tools/prepare_default_hands.py)
+  (joints renamed to BodySlots names, mirrored for the left hand).
+  `Application::create_hand_entities` loads them at `player.hands.scale_m`,
+  measures each one's palm frame with `HandRig`, and keeps it on the
+  `/grip/pose` through that measured alignment every frame.
+- `avatar` (Full Player Avatar): the avatar's own hands. The engine hand
+  entities are invisible anchors, and `builtin.avatar_body` points the finger
+  targets at the avatar once it finds finger bones.
 
-| Fingers | Driver |
+`builtin.hand_pose` is Player-scoped, runs in `Phase::Simulate` after
+`builtin.avatar_body`, and curls exactly `ctx.hands->finger_target(h)`. Every
+curl is applied on top of the joint's REST rotation, about an axis measured
+from the rig itself (`HandRig`), so any finger rig closes into its palm:
+
+| Fingers | Driver (defaults) |
 |---|---|
 | Index | `trigger`; `trigger_touched` without a pull gives a resting bend |
 | Middle, ring, pinky | `grip`; pinned closed while the hand holds something |
-| Thumb | `thumbrest_touched`, or a face-button touch on that hand |
+| Thumb | `thumbstick_touched`: the thumb lowers toward the index side, as if resting on the stick. `thumb_sources` can add `thumbrest` or `face_buttons` when a prompt asks |
 
-The engine binds it automatically alongside the locomotion built-ins, so a
-generated scene never has to ask for it and generated code must never
-re-implement it. Curl is smoothed with the same exponential time constant the
-locomotion built-ins use, so fingers do not snap between frames.
+It is bound explicitly by the scene compiler in every game (`role:fingers`);
+the engine injects nothing. Curl is smoothed with the same exponential time
+constant the locomotion built-ins use, so fingers do not snap between frames.
 
-If the generated hand mesh is missing, `hand_entity` returns invalid, the
+If the default hand mesh is missing, `hand_entity` returns invalid, the
 mechanic does nothing, and the renderer falls back to the old procedural
-palm-and-wrist blocks.
+palm-and-wrist blocks. A full-body avatar whose rig stops at the wrist has no
+finger target: its hands follow the controllers but the fingers stay still.
 
 A weapon that reacts to the trigger must NOT be coupled to the hand. Both read
 the same `input.hands[h].trigger` scalar, which keeps them synchronised every

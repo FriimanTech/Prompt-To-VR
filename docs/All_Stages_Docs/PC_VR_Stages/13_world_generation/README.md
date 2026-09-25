@@ -111,6 +111,17 @@ See [`docs/world-generation.md`](../../../world-generation.md), [`docs/navigatio
 
 validate_world_includes rejects any header outside IWorldBuilder.h + std + glm before cmake — prevents generated world code from touching ECS/renderer.
 
+### Walls, sizes and gameplay-owned assets
+
+- Barriers must be `Collision::Box` solids at least 0.3 m thick that overlap
+  at corners. `_validate_barriers()` fails a floor-standing wall/barrier/fence
+  box with no collision or under 0.2 m thick (the failure goes back to the
+  builder as a repair message). Tag a wall `walkthrough` only when the prompt
+  asks for one the player passes through.
+- `place_object` receives each asset's manifest `target_scale_meters`.
+- Assets the SceneSpec already places as interactive are listed
+  `gameplay_owned: true`, and the builder must not place copies of them.
+
 ---
 
 ## Extend this folder

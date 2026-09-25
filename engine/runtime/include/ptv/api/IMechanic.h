@@ -129,6 +129,14 @@ public:
 
     /** How many instances exist. Defaults to one per bound entity. */
     virtual MechanicScope scope() const { return MechanicScope::Entity; }
+
+    /** Order within a phase: lower runs first, ties keep attach order.
+     *
+     *  Almost everything is 0. It exists for the few pairs where one
+     *  mechanic builds on another's result in the same frame --
+     *  builtin.avatar_body places the wrist that builtin.hand_pose then
+     *  curls the fingers of, so the body has to run first. */
+    virtual int order() const { return 0; }
 };
 
 using MechanicFactory = std::function<std::unique_ptr<IMechanic>()>;

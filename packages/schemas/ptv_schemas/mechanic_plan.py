@@ -79,6 +79,8 @@ BUILTIN_MECHANIC_IDS = {
     "builtin.locomotion.slide.controller_relative",
     "builtin.snap_turn",
     "builtin.locomotion.snap_turn",
+    "builtin.locomotion.smooth_turn",
+    "builtin.movement_settings_menu",
     "builtin.grab",
     "builtin.throw",
     "builtin.recoil",

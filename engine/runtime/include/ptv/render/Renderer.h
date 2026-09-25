@@ -177,6 +177,19 @@ public:
 
     const FrameStats& frame_stats() const { return stats_; }
 
+    /** Comfort vignette for the next frame(s).
+     *
+     *  ``opacity`` 0 disables it. ``clear_half_angle_deg`` is the radius of
+     *  the unobstructed view around each eye's forward axis and
+     *  ``feather_deg`` the width of the soft edge beyond it -- angles, not
+     *  screen fractions, so every headset occludes the same visual field. */
+    void set_vignette(float opacity, float clear_half_angle_deg,
+                      float feather_deg) {
+        vignette_opacity_ = opacity;
+        vignette_clear_deg_ = clear_half_angle_deg;
+        vignette_feather_deg_ = feather_deg;
+    }
+
     /** Build a list of DrawItems from the ECS.
      *
      *  Entities are frustum- and distance-culled, and each GLB entity picks
@@ -239,6 +252,7 @@ private:
     bool create_pipeline();
     bool create_skinned_pipeline();
     bool create_sky_pipeline();
+    bool create_vignette_pipeline();
     /** Append reflected copies of the avatar (and anything tagged) for the
      *  nearest active mirror. Called at the end of build_items_from_world. */
     void append_mirror_reflections(World& world, std::vector<DrawItem>& out,
@@ -278,24 +292,37 @@ private:
     // first frame for ~5 s and tripping Android's ANR watchdog.
     struct StreamRequest {
         std::string path;
+        /** Cache key: the path AND the scale it is loaded at. */
+        std::string key;
         float target_scale_meters{1.0f};
+        float unit_scale{0.0f};
         float priority{0.0f};  // distance in metres; smaller = sooner
     };
     struct StreamResult {
-        std::string path;
+        std::string key;
         std::vector<gltf_mesh_load::LitVertex> verts;
         std::vector<std::uint32_t> indices;
         bool ok{false};
     };
 
+    /** Cache key for a mesh loaded at a given scale.
+     *
+     *  Scale is part of the key because the vertices are baked at load
+     *  time. Keyed by path alone, the same GLB placed at two scales -- a
+     *  weapon the world architect placed at 1.0 and the scene placed at
+     *  0.24 -- shared whichever copy streamed in first, so the gun's size
+     *  changed from launch to launch. */
+    static std::string mesh_key(const std::string& path, float target_scale,
+                                float unit_scale);
+
     void start_stream_worker();
     void stop_stream_worker();
     void stream_worker_main();
     /** Slot for an already-resident mesh, or -1. Marks it used this frame. */
-    int resident_slot(const std::string& path);
+    int resident_slot(const std::string& key);
     /** Queue ``path`` for background loading (no-op if resident/in flight). */
     void request_stream(const std::string& path, float target_scale_meters,
-                        float priority);
+                        float unit_scale, float priority);
     /** Free least-recently-used meshes until back under the resident budget. */
     void evict_to_budget();
     void destroy_mesh_slot(GltfGpuMesh& gm);
@@ -355,6 +382,15 @@ private:
     VkPipeline sky_pipeline_{VK_NULL_HANDLE};
     VkShaderModule sky_vs_{VK_NULL_HANDLE};
     VkShaderModule sky_fs_{VK_NULL_HANDLE};
+
+    // Comfort vignette: fullscreen pass drawn after geometry each eye,
+    // reusing sky_vs_ for the fullscreen triangle.
+    VkPipelineLayout vignette_pipeline_layout_{VK_NULL_HANDLE};
+    VkPipeline vignette_pipeline_{VK_NULL_HANDLE};
+    VkShaderModule vignette_fs_{VK_NULL_HANDLE};
+    float vignette_opacity_{0.0f};
+    float vignette_clear_deg_{60.0f};
+    float vignette_feather_deg_{20.0f};
 
     VkShaderModule vs_{VK_NULL_HANDLE};
     VkShaderModule fs_{VK_NULL_HANDLE};

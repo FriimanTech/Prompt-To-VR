@@ -353,6 +353,16 @@ bool XrRuntime::create_action_set() {
                 trigger_touch_action_, true);
     make_action(XR_ACTION_TYPE_BOOLEAN_INPUT, "thumbrest_touch",
                 "Thumbrest Touch", thumbrest_touch_action_, true);
+    make_action(XR_ACTION_TYPE_BOOLEAN_INPUT, "thumbstick_touch",
+                "Thumbstick Touch", thumbstick_touch_action_, true);
+    make_action(XR_ACTION_TYPE_BOOLEAN_INPUT, "button_a_touch",
+                "Button A Touch", button_a_touch_action_, false);
+    make_action(XR_ACTION_TYPE_BOOLEAN_INPUT, "button_b_touch",
+                "Button B Touch", button_b_touch_action_, false);
+    make_action(XR_ACTION_TYPE_BOOLEAN_INPUT, "button_x_touch",
+                "Button X Touch", button_x_touch_action_, false);
+    make_action(XR_ACTION_TYPE_BOOLEAN_INPUT, "button_y_touch",
+                "Button Y Touch", button_y_touch_action_, false);
     // Haptics are an OUTPUT action. Core OpenXR -- no extension required.
     make_action(XR_ACTION_TYPE_VIBRATION_OUTPUT, "haptic", "Haptic Feedback",
                 haptic_action_, true);
@@ -384,6 +394,14 @@ bool XrRuntime::create_action_set() {
          path("/user/hand/left/input/thumbrest/touch")},
         {thumbrest_touch_action_,
          path("/user/hand/right/input/thumbrest/touch")},
+        {thumbstick_touch_action_,
+         path("/user/hand/left/input/thumbstick/touch")},
+        {thumbstick_touch_action_,
+         path("/user/hand/right/input/thumbstick/touch")},
+        {button_a_touch_action_, path("/user/hand/right/input/a/touch")},
+        {button_b_touch_action_, path("/user/hand/right/input/b/touch")},
+        {button_x_touch_action_, path("/user/hand/left/input/x/touch")},
+        {button_y_touch_action_, path("/user/hand/left/input/y/touch")},
         {haptic_action_, path("/user/hand/left/output/haptic")},
         {haptic_action_, path("/user/hand/right/output/haptic")},
     };
@@ -945,6 +963,10 @@ void XrRuntime::sync_input(InputState& out) {
     read_bool(button_b_action_, out.button_b);
     read_bool(button_x_action_, out.button_x);
     read_bool(button_y_action_, out.button_y);
+    read_bool(button_a_touch_action_, out.button_a_touch);
+    read_bool(button_b_touch_action_, out.button_b_touch);
+    read_bool(button_x_touch_action_, out.button_x_touch);
+    read_bool(button_y_touch_action_, out.button_y_touch);
 
     // Capsense. Per-hand, so unlike the face buttons these need the subaction
     // path. An inactive action (older controller, or a runtime that did not
@@ -963,6 +985,8 @@ void XrRuntime::sync_input(InputState& out) {
                        out.trigger_touch[i]);
         read_bool_hand(thumbrest_touch_action_, hand_paths_[i],
                        out.thumbrest_touch[i]);
+        read_bool_hand(thumbstick_touch_action_, hand_paths_[i],
+                       out.thumbstick_touch[i]);
     }
 }
 

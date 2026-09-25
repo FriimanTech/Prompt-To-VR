@@ -83,14 +83,25 @@ def list_projects():
 
 @router.post("/projects", status_code=201)
 def create_project(req: CreateProjectRequest):
-    from ptv_schemas import TargetDevice
+    from ptv_schemas import PlayerExperience, TargetDevice
 
     try:
         device = TargetDevice(req.target_device)
     except ValueError:
         raise HTTPException(status_code=400, detail="unknown target_device")
-    state = _store().create(req.title, req.prompt, target_device=device)
-    return {"project_id": state.project_id, "target_device": device.value}
+    try:
+        experience = PlayerExperience(req.player_experience)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="unknown player_experience")
+    state = _store().create(
+        req.title, req.prompt, target_device=device,
+        player_experience=experience,
+    )
+    return {
+        "project_id": state.project_id,
+        "target_device": device.value,
+        "player_experience": experience.value,
+    }
 
 
 @router.get("/projects/{project_id}")

@@ -68,6 +68,13 @@ struct SkyPush {
     Mat4 inv_view_proj;
 };
 
+// Push constant for the comfort vignette (matches vignette.frag).
+struct VignettePush {
+    Mat4 inv_proj;
+    Vec4 params;  // clear half-angle rad, feather rad, opacity, unused
+    Vec4 color;
+};
+
 constexpr int kMaxPointLights = 8;
 
 // Environment/lighting UBO. Layout MUST match the ``EnvUBO`` block in
@@ -307,6 +314,11 @@ bool Renderer::initialize(VulkanContext& vk,
     if (!create_pipeline()) return false;
     if (!create_skinned_pipeline()) return false;
     if (!create_sky_pipeline()) return false;
+    // Optional: a missing vignette shader costs the comfort option, not the
+    // game.
+    if (!create_vignette_pipeline()) {
+        PTV_WARN("Comfort vignette pipeline unavailable; vignettes disabled");
+    }
     if (!create_cube_mesh()) return false;
     if (!create_primitive_meshes()) return false;
     if (!create_depth_image()) return false;
@@ -918,6 +930,99 @@ bool Renderer::create_sky_pipeline() {
                                      nullptr, &sky_pipeline_) == VK_SUCCESS;
 }
 
+bool Renderer::create_vignette_pipeline() {
+    const std::string base = std::string(PTV_SHADER_DIR);
+    vignette_fs_ = make_shader(vk_->device(), base + "/vignette.frag.spv");
+    if (!sky_vs_ || !vignette_fs_) return false;
+
+    VkPipelineShaderStageCreateInfo stages[2]{};
+    stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
+    stages[0].module = sky_vs_;
+    stages[0].pName = "main";
+    stages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+    stages[1].module = vignette_fs_;
+    stages[1].pName = "main";
+
+    VkPipelineVertexInputStateCreateInfo vi{
+        VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
+    VkPipelineInputAssemblyStateCreateInfo ia{
+        VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO};
+    ia.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+    VkPipelineViewportStateCreateInfo vp{
+        VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO};
+    vp.viewportCount = 1;
+    vp.scissorCount = 1;
+    VkPipelineRasterizationStateCreateInfo rs{
+        VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO};
+    rs.polygonMode = VK_POLYGON_MODE_FILL;
+    rs.cullMode = VK_CULL_MODE_NONE;
+    rs.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+    rs.lineWidth = 1.0f;
+    VkPipelineMultisampleStateCreateInfo ms{
+        VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO};
+    ms.rasterizationSamples = samples_;
+    // Overlay on top of everything: no depth test, no depth writes.
+    VkPipelineDepthStencilStateCreateInfo ds{
+        VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO};
+    ds.depthTestEnable = VK_FALSE;
+    ds.depthWriteEnable = VK_FALSE;
+    ds.depthCompareOp = VK_COMPARE_OP_ALWAYS;
+
+    VkPipelineColorBlendAttachmentState cba{};
+    cba.blendEnable = VK_TRUE;
+    cba.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
+    cba.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+    cba.colorBlendOp = VK_BLEND_OP_ADD;
+    cba.srcAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
+    cba.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+    cba.alphaBlendOp = VK_BLEND_OP_ADD;
+    cba.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
+                         VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+    VkPipelineColorBlendStateCreateInfo cb{
+        VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO};
+    cb.attachmentCount = 1;
+    cb.pAttachments = &cba;
+
+    VkDynamicState dyn_states[]{VK_DYNAMIC_STATE_VIEWPORT,
+                                VK_DYNAMIC_STATE_SCISSOR};
+    VkPipelineDynamicStateCreateInfo dyn{
+        VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO};
+    dyn.dynamicStateCount = 2;
+    dyn.pDynamicStates = dyn_states;
+
+    VkPushConstantRange pc{};
+    pc.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+    pc.offset = 0;
+    pc.size = sizeof(VignettePush);
+    VkPipelineLayoutCreateInfo plci{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+    plci.pushConstantRangeCount = 1;
+    plci.pPushConstantRanges = &pc;
+    if (vkCreatePipelineLayout(vk_->device(), &plci, nullptr,
+                               &vignette_pipeline_layout_) != VK_SUCCESS) {
+        return false;
+    }
+
+    VkGraphicsPipelineCreateInfo gpci{
+        VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO};
+    gpci.stageCount = 2;
+    gpci.pStages = stages;
+    gpci.pVertexInputState = &vi;
+    gpci.pInputAssemblyState = &ia;
+    gpci.pViewportState = &vp;
+    gpci.pRasterizationState = &rs;
+    gpci.pMultisampleState = &ms;
+    gpci.pDepthStencilState = &ds;
+    gpci.pColorBlendState = &cb;
+    gpci.pDynamicState = &dyn;
+    gpci.layout = vignette_pipeline_layout_;
+    gpci.renderPass = render_pass_;
+    gpci.subpass = 0;
+    return vkCreateGraphicsPipelines(vk_->device(), VK_NULL_HANDLE, 1, &gpci,
+                                     nullptr, &vignette_pipeline_) == VK_SUCCESS;
+}
+
 int Renderer::create_mesh_slot(const std::vector<gltf_mesh_load::LitVertex>& verts,
                                const std::vector<std::uint32_t>& indices) {
     return create_mesh_slot_impl(verts.data(), verts.size(), sizeof(verts[0]),
@@ -1078,11 +1183,11 @@ void Renderer::stream_worker_main() {
         }
 
         StreamResult result;
-        result.path = req.path;
+        result.key = req.key;
         std::string err;
         result.ok = gltf_mesh_load::load_glb_merged(
             req.path, req.target_scale_meters, result.verts, result.indices,
-            err);
+            err, req.unit_scale);
         if (!result.ok) {
             PTV_WARN("stream: GLB load failed ({}): {}", req.path, err);
         }
@@ -1093,33 +1198,47 @@ void Renderer::stream_worker_main() {
     }
 }
 
-int Renderer::resident_slot(const std::string& path) {
-    auto it = gltf_path_to_slot_.find(path);
+std::string Renderer::mesh_key(const std::string& path, float target_scale,
+                               float unit_scale) {
+    char buf[40];
+    if (unit_scale > 1e-8f) {
+        std::snprintf(buf, sizeof(buf), "|u%.7g", unit_scale);
+    } else {
+        std::snprintf(buf, sizeof(buf), "|t%.5g", target_scale);
+    }
+    return path + buf;
+}
+
+int Renderer::resident_slot(const std::string& key) {
+    auto it = gltf_path_to_slot_.find(key);
     if (it == gltf_path_to_slot_.end()) return -1;
     gltf_meshes_[static_cast<size_t>(it->second)].last_used_frame = frame_index_;
     return it->second;
 }
 
 void Renderer::request_stream(const std::string& path,
-                              float target_scale_meters, float priority) {
+                              float target_scale_meters, float unit_scale,
+                              float priority) {
     if (path.empty()) return;
-    if (gltf_path_to_slot_.count(path)) return;
-    if (stream_failed_.count(path)) return;  // don't retry a broken asset forever
+    const std::string key = mesh_key(path, target_scale_meters, unit_scale);
+    if (gltf_path_to_slot_.count(key)) return;
+    if (stream_failed_.count(key)) return;  // don't retry a broken asset forever
 
     std::lock_guard<std::mutex> lock(stream_mutex_);
-    if (stream_inflight_.count(path)) {
+    if (stream_inflight_.count(key)) {
         // Already queued: keep the most urgent priority seen this frame so the
         // nearest object still wins if the player turns around.
         for (auto& q : stream_queue_) {
-            if (q.path == path) {
+            if (q.key == key) {
                 q.priority = std::min(q.priority, priority);
                 break;
             }
         }
         return;
     }
-    stream_inflight_.insert(path);
-    stream_queue_.push_back(StreamRequest{path, target_scale_meters, priority});
+    stream_inflight_.insert(key);
+    stream_queue_.push_back(StreamRequest{path, key, target_scale_meters,
+                                          unit_scale, priority});
     stream_cv_.notify_one();
 }
 
@@ -1143,22 +1262,22 @@ void Renderer::pump_streaming() {
             if (stream_done_.empty()) break;
             result = std::move(stream_done_.back());
             stream_done_.pop_back();
-            stream_inflight_.erase(result.path);
+            stream_inflight_.erase(result.key);
         }
 
         if (result.ok) {
             const int slot = create_mesh_slot(result.verts, result.indices);
             if (slot >= 0) {
                 auto& gm = gltf_meshes_[static_cast<size_t>(slot)];
-                gm.path = result.path;
+                gm.path = result.key;
                 gm.evictable = true;
                 gm.last_used_frame = frame_index_;
-                gltf_path_to_slot_[result.path] = slot;
+                gltf_path_to_slot_[result.key] = slot;
             } else {
-                stream_failed_.insert(result.path);
+                stream_failed_.insert(result.key);
             }
         } else {
-            stream_failed_.insert(result.path);
+            stream_failed_.insert(result.key);
         }
         ++uploaded;
 
@@ -1586,6 +1705,23 @@ void Renderer::draw_frame(const std::array<EyeTarget, 2>& eyes,
                 vkCmdDrawIndexed(cmd_, cube_index_count_, 1, 0, 0, 0);
             }
         }
+
+        // ---- Comfort vignette: last, over everything --------------------
+        if (vignette_pipeline_ != VK_NULL_HANDLE && vignette_opacity_ > 0.002f) {
+            vkCmdBindPipeline(cmd_, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                              vignette_pipeline_);
+            constexpr float kDeg = 3.14159265f / 180.0f;
+            VignettePush vpc{};
+            vpc.inv_proj = glm::inverse(eye.projection);
+            vpc.params = Vec4(vignette_clear_deg_ * kDeg,
+                              vignette_feather_deg_ * kDeg,
+                              std::clamp(vignette_opacity_, 0.0f, 1.0f), 0.0f);
+            vpc.color = Vec4(0.0f, 0.0f, 0.0f, 1.0f);
+            vkCmdPushConstants(cmd_, vignette_pipeline_layout_,
+                               VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(vpc),
+                               &vpc);
+            vkCmdDraw(cmd_, 3, 1, 0, 0);
+        }
         vkCmdEndRenderPass(cmd_);
     }
     vkEndCommandBuffer(cmd_);
@@ -1666,7 +1802,8 @@ int Renderer::load_glb_skinned(const std::string& resolved_path,
         return -1;
     }
 
-    auto it = gltf_path_to_slot_.find(resolved_path);
+    const std::string key = mesh_key(resolved_path, target_scale_meters, 0.0f);
+    auto it = gltf_path_to_slot_.find(key);
     if (it != gltf_path_to_slot_.end()) {
         gltf_meshes_[static_cast<size_t>(it->second)].last_used_frame =
             frame_index_;
@@ -1676,12 +1813,12 @@ int Renderer::load_glb_skinned(const std::string& resolved_path,
     const int slot = create_mesh_slot_skinned(verts, indices);
     if (slot < 0) return -1;
     auto& gm = gltf_meshes_[static_cast<size_t>(slot)];
-    gm.path = resolved_path;
+    gm.path = key;
     gm.last_used_frame = frame_index_;
     // Not evictable: the skeleton on the entity would outlive the geometry and
     // the entity would silently stop drawing with no way to recover it.
     gm.evictable = false;
-    gltf_path_to_slot_[resolved_path] = slot;
+    gltf_path_to_slot_[key] = slot;
     return slot;
 }
 
@@ -1695,7 +1832,8 @@ int Renderer::ensure_gltf_mesh(const std::string& resolved_path,
         PTV_WARN("GLB not found via asset source: {}", resolved_path);
         return -1;
     }
-    auto it = gltf_path_to_slot_.find(resolved_path);
+    const std::string key = mesh_key(resolved_path, target_scale_meters, 0.0f);
+    auto it = gltf_path_to_slot_.find(key);
     if (it != gltf_path_to_slot_.end()) return it->second;
 
     std::vector<gltf_mesh_load::LitVertex> verts;
@@ -1710,13 +1848,13 @@ int Renderer::ensure_gltf_mesh(const std::string& resolved_path,
 
     const int slot = create_mesh_slot(verts, indices);
     if (slot < 0) return -1;
-    // Synchronous path (menu icons / explicit load_glb). Pinned: these are not
-    // driven by entity visibility, so the LRU has no signal to keep them.
+    // Synchronous path (explicit load_glb). Pinned: these are not driven by
+    // entity visibility, so the LRU has no signal to keep them.
     auto& gm = gltf_meshes_[static_cast<size_t>(slot)];
-    gm.path = resolved_path;
+    gm.path = key;
     gm.evictable = false;
     gm.last_used_frame = frame_index_;
-    gltf_path_to_slot_[resolved_path] = slot;
+    gltf_path_to_slot_[key] = slot;
     return slot;
 }
 
@@ -2002,15 +2140,23 @@ void Renderer::build_items_from_world(World& world, std::vector<DrawItem>& out,
                 // scene loader uploads skinned meshes up front instead.
                 const CSkeleton* skel =
                     world.registry().try_get<CSkeleton>(entity);
-                int slot = resident_slot(wanted);
+                // Skinned meshes are uploaded by target scale at scene load;
+                // static ones stream with the asset's single unit scale when
+                // the pipeline provided one.
+                const float unit = skel ? 0.0f : cm.unit_scale;
+                auto key_of = [&](const std::string& p) {
+                    return mesh_key(p, cm.target_scale_meters, unit);
+                };
+                int slot = resident_slot(key_of(wanted));
                 if (slot < 0 && !skel) {
-                    request_stream(wanted, cm.target_scale_meters, distance);
+                    request_stream(wanted, cm.target_scale_meters, unit,
+                                   distance);
                     for (size_t i = static_cast<size_t>(desired) + 1;
                          slot < 0 && i < chain.size(); ++i) {
-                        slot = resident_slot(chain[i]);
+                        slot = resident_slot(key_of(chain[i]));
                     }
                     if (slot < 0 && !chain.empty()) {
-                        slot = resident_slot(chain[0]);
+                        slot = resident_slot(key_of(chain[0]));
                     }
                 }
                 if (slot >= 0) {
@@ -2323,6 +2469,15 @@ void Renderer::shutdown() {
     env_set_layout_ = VK_NULL_HANDLE;
     env_set_ = VK_NULL_HANDLE;
 
+    if (vignette_pipeline_)
+        vkDestroyPipeline(vk_->device(), vignette_pipeline_, nullptr);
+    if (vignette_pipeline_layout_)
+        vkDestroyPipelineLayout(vk_->device(), vignette_pipeline_layout_,
+                                nullptr);
+    if (vignette_fs_) vkDestroyShaderModule(vk_->device(), vignette_fs_, nullptr);
+    vignette_pipeline_ = VK_NULL_HANDLE;
+    vignette_pipeline_layout_ = VK_NULL_HANDLE;
+    vignette_fs_ = VK_NULL_HANDLE;
     if (sky_pipeline_) vkDestroyPipeline(vk_->device(), sky_pipeline_, nullptr);
     if (sky_pipeline_layout_)
         vkDestroyPipelineLayout(vk_->device(), sky_pipeline_layout_, nullptr);

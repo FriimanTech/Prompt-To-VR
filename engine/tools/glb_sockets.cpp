@@ -261,6 +261,88 @@ int main(int argc, char** argv) {
     const bool grip_is_positive = mean_sprawl_pos > mean_sprawl_neg;
     if (grip_is_positive) axis = -axis;
 
+    // --- Refine the barrel direction ----------------------------------------
+    // PCA over a whole pistol averages the barrel with the handle hanging off
+    // it, so the principal axis comes out tilted ~20 degrees from the barrel.
+    // The MUZZLE half is a comparatively bare slide or tube, so its own
+    // principal axis is the barrel line. (Snapping to model axes does not
+    // work: generated GLBs often carry a node rotation, so the barrel is not
+    // aligned with any model axis at all.)
+    {
+        glm::dvec3 fsum(0.0);
+        std::size_t fn = 0;
+        for (const auto& v : verts) {
+            const glm::vec3 p(v.pos[0], v.pos[1], v.pos[2]);
+            if (glm::dot(p - centroid, axis) > 0.0f) {
+                fsum += glm::dvec3(p);
+                ++fn;
+            }
+        }
+        if (fn >= 16) {
+            const glm::vec3 fc(fsum / static_cast<double>(fn));
+            glm::mat3 fcov(0.0f);
+            for (const auto& v : verts) {
+                const glm::vec3 p(v.pos[0], v.pos[1], v.pos[2]);
+                if (glm::dot(p - centroid, axis) <= 0.0f) continue;
+                const glm::vec3 d = p - fc;
+                for (int r = 0; r < 3; ++r) {
+                    for (int c = 0; c < 3; ++c) fcov[c][r] += d[r] * d[c];
+                }
+            }
+            const Eigen3 fe = jacobi_eigen(fcov);
+            glm::vec3 barrel = fe.vectors[0];
+            if (glm::dot(barrel, axis) < 0.0f) barrel = -barrel;
+            // Only trust it when the front half really is elongated along
+            // something close to the whole-object axis.
+            if (fe.values[0] > 2.0f * fe.values[1] &&
+                glm::dot(barrel, axis) > std::cos(glm::radians(35.0f))) {
+                axis = glm::normalize(barrel);
+            }
+        }
+    }
+
+    auto snap_to_axis = [](const glm::vec3& v, float max_angle_cos) {
+        const glm::vec3 axes[3] = {glm::vec3(1, 0, 0), glm::vec3(0, 1, 0),
+                                   glm::vec3(0, 0, 1)};
+        glm::vec3 best = v;
+        float best_dot = max_angle_cos;
+        for (const auto& a : axes) {
+            const float d = glm::dot(v, a);
+            if (std::fabs(d) > best_dot) {
+                best_dot = std::fabs(d);
+                best = d > 0.0f ? a : -a;
+            }
+        }
+        return best;
+    };
+
+    // --- Which way is up? ----------------------------------------------------
+    // A weapon's handle, magazine and trigger guard hang BELOW the barrel, so
+    // the grip half's mass sits off the barrel line on the underside. That
+    // is a far better "up" than assuming the model's +Y -- a model exported
+    // lying on its side still gets an upright hold.
+    glm::vec3 up_hint(0.0f, 1.0f, 0.0f);
+    {
+        glm::dvec3 below(0.0);
+        std::size_t n_below = 0;
+        for (const auto& v : verts) {
+            const glm::vec3 d =
+                glm::vec3(v.pos[0], v.pos[1], v.pos[2]) - centroid;
+            if (glm::dot(d, axis) >= 0.0f) continue;  // grip half only
+            below += glm::dvec3(d - axis * glm::dot(d, axis));
+            ++n_below;
+        }
+        if (n_below > 0) {
+            const glm::vec3 off(below / static_cast<double>(n_below));
+            if (glm::length(off) > 0.02f * longest) {
+                glm::vec3 up = -glm::normalize(off);
+                up = glm::normalize(
+                    snap_to_axis(up, std::cos(glm::radians(30.0f))));
+                if (std::fabs(glm::dot(up, axis)) < 0.5f) up_hint = up;
+            }
+        }
+    }
+
     // --- Place the sockets --------------------------------------------------
     // Muzzle: mean of the outermost slice of vertices along +axis. Averaging a
     // slice rather than taking the single farthest vertex keeps a stray spike
@@ -302,8 +384,7 @@ int main(int argc, char** argv) {
     // Unit space: divide by the longest-axis extent. The scene compiler
     // multiplies by target_scale_meters, mirroring bounds_radius_m.
     const float inv_longest = 1.0f / longest;
-    const glm::quat forward_rot =
-        rotation_from_forward(axis, glm::vec3(0.0f, 1.0f, 0.0f));
+    const glm::quat forward_rot = rotation_from_forward(axis, up_hint);
 
     nlohmann::json doc;
     doc["input"] = opt.input;

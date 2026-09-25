@@ -44,6 +44,7 @@ from . import (
     stage_world_generation,
 )
 from .context import PipelineContext, StageResult
+from .player_experience import sync_build_spec_experience
 from .target_device import sync_build_spec_device
 
 
@@ -268,17 +269,30 @@ def _reconcile_build_spec_device(ctx: PipelineContext) -> None:
         spec = ctx.store.load_build_spec(ctx.project_id)
     except (FileNotFoundError, ValueError):
         return  # not planned yet, or unreadable: the stage will rewrite it
-    spec, changed = sync_build_spec_device(spec, state.target_device)
-    if not changed:
+    spec, device_changed = sync_build_spec_device(spec, state.target_device)
+    # The experience choice is mirrored the same way. Hands Only also pins
+    # the avatar coverage; the manifest and scene stages drop the body.
+    spec, experience_changed = sync_build_spec_experience(
+        spec, state.player_experience
+    )
+    if not (device_changed or experience_changed):
         return
     ctx.build_spec = spec
     ctx.store.save_build_spec(ctx.project_id, spec)
-    ctx.emit(
-        ProjectStage.build_spec,
-        "info",
-        f"build_spec.target_device re-stamped to the project's "
-        f"{state.target_device.value!r}",
-    )
+    if device_changed:
+        ctx.emit(
+            ProjectStage.build_spec,
+            "info",
+            f"build_spec.target_device re-stamped to the project's "
+            f"{state.target_device.value!r}",
+        )
+    if experience_changed:
+        ctx.emit(
+            ProjectStage.build_spec,
+            "info",
+            f"build_spec.player_experience re-stamped to the project's "
+            f"{state.player_experience.value!r}",
+        )
 
 
 def _mark_running(ctx: PipelineContext) -> None:

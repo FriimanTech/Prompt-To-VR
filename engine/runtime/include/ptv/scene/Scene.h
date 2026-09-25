@@ -18,6 +18,9 @@ struct MeshRef {
     std::string asset_id;
     std::string glb_path;
     float target_scale_meters{1.0f};
+    /** Metres per source unit, measured once from LOD0 (see CMesh). 0 means
+     *  per-file normalization to ``target_scale_meters``. */
+    float unit_scale{0.0f};
     std::string collision_shape{"aabb"};
     /** Decimated level-of-detail chain produced by the ``asset_optimization``
      * pipeline stage, coarsest last. ``lod_paths[0]`` is the same mesh as
@@ -317,13 +320,32 @@ struct SceneDoc {
     std::string locomotion{"teleport"};
     std::string comfort{"comfort"};
     PlayerSpawn spawn{};
-    /** When true (default), Application shows the Meta-style movement picker
-     * on first run. When false, ``default_locomotion_mode`` is used and the
-     * menu is skipped (arcade / seated titles). */
-    bool locomotion_menu_enabled{true};
-    /** Used only when ``locomotion_menu_enabled`` is false. One of:
-     * ``teleport``, ``slide_head_relative``, ``slide_controller_relative``. */
+    /** Legacy field, parsed so old scenes still load. The engine no longer
+     *  shows a movement picker of its own: a game that wants one binds
+     *  ``builtin.movement_settings_menu``. */
+    bool locomotion_menu_enabled{false};
+    /** Which locomotion mode is active at start. One of ``teleport``,
+     *  ``slide_head_relative``, ``slide_controller_relative``. When the scene
+     *  binds only one mode that one is used regardless. */
     std::string default_locomotion_mode{};
+    /** ``snap`` or ``smooth``: which turn mode owns the right stick at start
+     *  when the scene binds both. */
+    std::string default_turn_mode{"snap"};
+    /** Where the player's visible hands come from:
+     *    * ``default`` -- the engine's rigged default hands (Hands Only);
+     *    * ``avatar``  -- the player avatar's own hands (Full Player Avatar),
+     *      so the engine creates only invisible hand anchors.
+     */
+    std::string hands_source{"default"};
+    /** Longest-axis size of the default hand mesh, metres. */
+    float hands_scale_m{0.20f};
+    /** Extra rotation (XYZ Euler, degrees) applied in the grip frame on top
+     *  of the measured palm alignment, for tuning how a hand sits on a
+     *  particular controller. Also applied to an avatar's wrists. */
+    Vec3 hands_grip_trim_deg{0.0f};
+    /** Draw the grip frame and the hand's palm frame, for calibrating the
+     *  alignment on a headset. */
+    bool hands_debug_axes{false};
     /** Tunables for Application.cpp (override hardcoded defaults). */
     float slide_max_speed_mps{1.5f};
     float slide_accel_tau_s{0.12f};

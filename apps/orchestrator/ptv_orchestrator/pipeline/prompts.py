@@ -198,9 +198,11 @@ modelled head does NOT mean the camera is inside the skull.
     player does not control; ``inside_head_piloted`` when the player is
     inside the host but normal VR controls drive it (the giant-robot
     case).
-  * ``player_avatar.coverage`` -- ``full_body`` by DEFAULT, including a
-    head. Only use ``neck_down`` when the prompt explicitly asks for a
-    body-only avatar ("just the suit from the feet to the neck"). A head
+  * ``player_avatar.coverage`` -- ``hands_only`` whenever
+    ``player_experience`` is ``hands_only``. Otherwise ``full_body`` by
+    DEFAULT, including a head. Only use ``neck_down`` when the prompt
+    explicitly asks for a body-only avatar ("just the suit from the feet
+    to the neck"). A head
     that exists can be hidden at runtime; a head that was never generated
     can never be shown.
   * ``player_avatar.head_visibility`` -- ``hidden_in_self_view`` by
@@ -227,12 +229,65 @@ promoted into the catalog. Bias the BuildSpec toward features the
 catalog already covers; emit a NEW mechanic entry only when the
 prompt truly needs capability the catalog does not have yet.
 
-LOCOMOTION RULE. Every BuildSpec for a game with player movement should
-include a locomotion menu (let the player pick at runtime). The runtime
-already implements three modes -- teleport, sliding head-relative, and
-sliding controller-relative -- plus snap turn. Mention all three slide
-modes in the mechanics list unless the prompt locks the game to one,
-and call out comfort-level rules in ``constraints``.
+PLAYER EXPERIENCE. ``player_experience`` is chosen by the user and given
+to you in the message; copy it exactly.
+
+  * ``hands_only`` -- the player is a pair of hands (the engine's own
+    rigged hands). Set ``player_avatar.coverage`` to ``hands_only`` and
+    plan NO player-body asset. Hand-shaped gameplay props (gloves,
+    gauntlets, a power fist) are still ordinary prop assets.
+  * ``full_avatar`` -- the player has a generated full-body avatar seen in
+    first person; the rules under PLAYER PERSPECTIVE AND BODY apply, and
+    its own hands are the player's hands.
+
+MOVEMENT. The ``movement`` block decides how the player travels and turns.
+It is the ONLY place this is decided -- the pipeline adds exactly the
+movement mechanics it lists and removes any others. Decide it from the
+prompt AND its context:
+
+  * ``modes`` -- any of ``teleport``, ``slide_head`` (move where you look),
+    ``slide_controller`` (move where the left controller points). MAY BE
+    EMPTY: a stationary game has no artificial locomotion (a rhythm game
+    like Beat Saber, a fixed-position archery range, a turret). The player
+    still moves physically in their playspace either way.
+  * ``default_mode`` -- which mode is active at start; set it only when
+    ``modes`` has two or more entries.
+  * ``turning`` -- any of ``snap``, ``smooth``; may be empty (the player
+    turns their real body). ``default_turn`` when both are listed.
+  * ``vignette`` -- the comfort tunnel-vision effect, ``{slide,
+    smooth_turn, user_toggle}``. ALL FALSE unless the prompt asks for
+    comfort options. It only ever applies to sliding and smooth turning;
+    teleport and snap turn never get one. Never ask for a blink, fade,
+    flash or black-out on ANY movement or turn -- the engine does not do
+    them, and a dark frame on every snap is the flicker players hate.
+  * ``settings_menu`` -- true when the prompt asks for a settings or
+    comfort menu, or the game offers a choice (two or more modes, or both
+    turn styles). The menu only shows options that exist, and a game with
+    nothing to choose never gets one.
+
+How to decide:
+  * Infer whether the game needs travel at all. Honour explicit
+    restrictions exactly: "completely stationary" means ``modes: []``;
+    "teleport only" means ``modes: [teleport]``.
+  * Only when the game clearly involves travelling AND the prompt is
+    silent on how, default to ``modes: [teleport, slide_head,
+    slide_controller]``, ``turning: [snap]``, ``settings_menu: true``.
+
+Examples:
+  * Beat Saber style rhythm game: ``modes: []``, ``turning: []``,
+    ``settings_menu: false``.
+  * "A stationary bow and arrow game; let me choose snap or smooth turn in
+    the settings menu": ``modes: []``, ``turning: [snap, smooth]``,
+    ``default_turn: snap``, ``settings_menu: true``.
+  * The same bow game but "teleport only": ``modes: [teleport]``,
+    ``turning: [snap, smooth]``, ``settings_menu: true`` (the menu offers
+    turning only, because there is one locomotion mode).
+  * An open-world exploration game that says nothing about movement: the
+    travelling default above.
+
+Also set the legacy ``locomotion`` field consistently (``stationary`` for
+no modes, ``teleport`` for teleport only, ``smooth`` for slides only,
+``mixed`` otherwise), and call out any comfort rules in ``constraints``.
 
 ACCEPTANCE TESTS. Emit one acceptance test per major mechanic / scene.
 There is no upper cap; the count should scale with the size of the
@@ -285,7 +340,10 @@ asset, because ``category`` alone cannot answer what the thing is FOR:
 
   * ``npc`` -- an actor that moves, patrols, fights or otherwise behaves
     in the world.
-  * ``player_avatar`` -- the body the player loads into.
+  * ``player_avatar`` -- the body the player loads into. ONLY when the
+    BuildSpec ``player_experience`` is ``full_avatar``. A ``hands_only``
+    game has NO player-avatar item at all: the engine supplies the
+    player's hands, and any body item would be generated for nothing.
   * ``none`` -- everything else, INCLUDING a creature the game only uses
     as a grabbable prop or set dressing. A duck the player picks up off a
     shelf is ``none``; a duck that chases the player is ``npc``.
@@ -310,6 +368,18 @@ explicitly asks for a body-only avatar ("just the suit from the feet to
 the neck"). Default to generating a head even when the game hides it:
 a head that exists can be hidden at runtime, but a head that was never
 generated can never be shown.
+
+WEARABLE REGION. Set ``wearable_region`` on any prop designed to be worn
+on the player's body: ``hands`` (gloves, a gauntlet, a power fist),
+``forearms`` (bracers, a wrist launcher), ``head``, ``torso``, ``legs``,
+``feet``. Leave it ``none`` for everything else. It is descriptive: the
+item is still generated, placed and equipped as a normal prop -- in a
+Hands Only game a gauntlet is a gauntlet the player picks up, not a
+replacement for their hands.
+
+``hold_rotation_offset_deg`` is an optional ``[x, y, z]`` Euler correction
+(degrees) for a grabbable item whose derived grip sits wrong in the hand.
+Leave it unset; it exists for manual fixes after testing.
 
 TRIPO DEFAULTS (REQUIRED). Every asset intended for image-to-3D MUST
 set ``texture=true``, ``pbr=true``, and
@@ -700,13 +770,31 @@ non-trivial mechanics.
 The code generator has NO access to the user's prompt; the description
 IS the spec it works from. Be exhaustive.
 
-LOCOMOTION. If the BuildSpec calls for player movement and the prompt
-isn't locked to a single style, emit THREE plan items (one each for
-``builtin.locomotion.teleport``,
-``builtin.locomotion.slide.head_relative``, and
-``builtin.locomotion.slide.controller_relative``) plus
-``builtin.locomotion.snap_turn``. The runtime menu lets the player
-choose; you do not need a custom menu mechanic.
+PLAYER ROLES. The player's own mechanics are planned explicitly -- the
+engine adds none on its own. Each fills one ROLE, and a game has exactly
+one mechanic per role it needs and none for the rest:
+
+  * ``builtin.hand_pose`` (fingers) -- every game.
+  * ``builtin.avatar_body`` (body) -- only when ``player_experience`` is
+    ``full_avatar``.
+  * ``builtin.locomotion.teleport``, ``builtin.locomotion.slide.head_relative``,
+    ``builtin.locomotion.slide.controller_relative`` -- one per entry in
+    the BuildSpec ``movement.modes``, and NONE when it is empty (a
+    stationary game is valid).
+  * ``builtin.locomotion.snap_turn``, ``builtin.locomotion.smooth_turn`` --
+    one per entry in ``movement.turning``.
+  * ``builtin.movement_settings_menu`` -- when the game offers a choice
+    (two or more modes, both turn styles, or a vignette switch).
+
+The exact list for THIS game is appended to the instructions below as
+"PLAYER ROLES". Plan these as ``builtin`` or ``builtin+config`` -- never
+``builtin+config_code_edit`` unless the prompt needs behaviour their
+params cannot express, and never two mechanics for one role. Comfort
+vignette settings go in the slide / smooth-turn ``config`` as
+``vignette: {enabled, user_toggle}``, and only when the BuildSpec
+``movement.vignette`` asks for them; teleport and snap turn never get one.
+A deterministic pass enforces all of this after you, so a plan that
+disagrees is corrected, not honoured.
 
 TEST FILES ARE UNUSED. ``code_task.test_files[]`` is intentionally
 ignored by the orchestrator. Leave it empty. Do not draft test stubs.
@@ -739,18 +827,28 @@ of output tokens is a scene that fails to build at all).
 THE PLAYER. Exactly three things represent the player, and two of them
 you author:
 
-  * ONE ``player_rig`` entity: no mesh, no physics, at the player spawn.
-    This is what locomotion, comfort and save/settings mechanics bind to,
-    and it is the WEARER that carries ``equip_slots`` for holsters and
-    wrist panels.
-  * ONE entity tagged ``player_avatar`` when the manifest has a
-    ``character_role: player_avatar`` asset -- the visible body. See the
-    asset mapping below.
-  * The HANDS, which you DO NOT author. The engine owns a pair of
-    finger-rigged hand models and keeps them on the tracked controllers
-    itself. Never emit a hand mesh, and never reference a hand asset --
-    the auto-rigger cannot rig a disembodied hand, so any "hand" asset
-    you point at would render as a static lump.
+  * ONE ``player_rig`` entity: no mesh, no physics, at the player spawn,
+    tagged ``["player_rig"]``. It hosts the player's own mechanics from the
+    MechanicPlan: ``builtin.hand_pose`` and whichever locomotion, turning
+    and ``builtin.movement_settings_menu`` items the plan contains (bind
+    exactly those -- a stationary game has none, and that is correct). It
+    is also the WEARER that carries ``equip_slots`` for holsters and wrist
+    panels.
+  * ONE entity tagged ``player_avatar`` ONLY in a Full Player Avatar game
+    whose manifest has a ``character_role: player_avatar`` asset -- the
+    visible body, binding ``builtin.avatar_body`` itself (never on
+    ``player_rig``). See the asset mapping below. A Hands Only game
+    (BuildSpec ``player_experience: hands_only``) has NO avatar entity and
+    no head mesh.
+  * The HANDS, which you DO NOT author. In Hands Only the engine loads its
+    own finger-rigged hand models onto the tracked controllers; in Full
+    Player Avatar the avatar's own hands are the player's hands. Never
+    emit a hand mesh, and never reference a hand asset -- the auto-rigger
+    cannot rig a disembodied hand, so any "hand" asset you point at would
+    render as a static lump.
+
+Never bind a player mechanic twice, and never bind a locomotion or turn
+mechanic the MechanicPlan does not list: the compiler rejects both.
 
 You MAY still emit mesh-less marker entities named for the hands to hang
 hand-driven mechanic bindings on (a weapon hub, a grab mechanic). Give
@@ -772,8 +870,10 @@ prompt's stated purpose for that asset. Use ``AssetItem.category`` plus
     ``style_notes`` describes the player's own body -- Superman, Iron
     Man, Master Chief) -> ONE entity at position [0, 0, 0], rotation
     identity, tags ``["player_avatar"]``, no physics, and NO
-    ``attached_to``. The engine binds ``builtin.avatar_body`` to this
-    tag automatically and that mechanic OWNS the entity's transform: it
+    ``attached_to``. Bind ``builtin.avatar_body`` on THIS entity (the
+    compiler adds it if you forget, with the BuildSpec's avatar settings;
+    the engine never adds it on its own). That mechanic OWNS the entity's
+    transform: it
     plants the body on the XR rig, drives the neck and head from the
     headset, runs arm IK toward the controllers and animates the legs
     from the speed the rig achieved. Parenting it to the player rig
@@ -1282,15 +1382,43 @@ than breaking the player out of the world.
 
   ctx.locomotion   // move the player rig (the stage origin in world space)
     ->position() / ->yaw_radians()
-    ->translate(Vec3 delta) / ->rotate_yaw(float radians)
-    ->teleport_to(Vec3 position)
+    ->body_position()  // the player's FEET under the headset
+    ->head_position() / ->head_rotation()   // the headset in world space
+    ->move_horizontal(Vec3 delta)  // walk: Y is ignored; the engine's
+                     // character controller keeps the player on the ground,
+                     // steps up stairs, slides along walls and never climbs
+                     // a wall. Use this for EVERY walking/sliding move.
+    ->translate(Vec3 delta)        // same contract: horizontal only while
+                     // the vertical mode is Grounded (the default)
+    ->is_grounded()
+    ->jump(float speed_mps)        // upward launch; gravity brings them down
+    ->set_vertical_mode(VerticalMode::Grounded | VerticalMode::Free)
+                     // Free = flying / swimming, where translate() Y counts.
+                     // Only when the prompt asks for flight; restore Grounded.
+    ->rotate_yaw(float radians)    // turns about the player's head
+    ->teleport_to(Vec3 position)   // puts the player's FEET at position
     ->active_mode() / ->set_active_mode(LocomotionMode)  // Teleport |
                      // SlideHeadRelative | SlideControllerRelative
-    ->input_locked()   // true while the locomotion menu owns the sticks;
-                       // locomotion mechanics MUST NOT move on those frames
+    ->turn_mode() / ->set_turn_mode(TurnMode::Snap | TurnMode::Smooth)
+    ->input_locked()   // true while a menu owns the sticks; locomotion
+                       // mechanics MUST NOT move or turn on those frames
+    ->set_input_lock(const char* owner, bool locked)  // a menu claims the
+                       // sticks while open and MUST release them on close
     ->tunables()       // scene-authored comfort values -- default to these
                        // (slide_max_speed_mps, teleport_max_horizontal_m,
                        //  snap_turn_degrees, accel/decel taus, ...)
+  NEVER feed a vertical component into a walking move (a look-direction
+  vector with Y left in makes the player climb walls or sink). Flatten it:
+  ``Vec3 fwd = head_fwd; fwd.y = 0; fwd = glm::normalize(fwd);``
+
+  ctx.comfort      // comfort vignette for CONTINUOUS motion only
+    ->offer_vignette(ComfortChannel::Movement | ::Turning, enabled, toggle)
+    ->request_vignette(channel, strength, inner_fov_deg, feather_deg)
+                     // call each frame while sliding / smooth turning; the
+                     // engine smooths it and ignores it when disabled
+  NEVER draw a blink, fade, flash or black-out marker for snap turns or
+  teleports, and never fake a vignette with geometry or a HUD quad.
+  Teleport and snap turn are already the comfort options.
 
   ctx.physics      // narrow facade; do NOT include ptv/physics/ or Jolt
     ->raycast(origin, dir, max_dist, PhysicsRayHit& out) -> bool
@@ -1707,7 +1835,7 @@ the macro called EXACTLY ONCE across the entire file set).
 
     namespace ptv {
 
-    class ExampleBlink : public IMechanic {
+    class ExamplePulse : public IMechanic {
     public:
         void on_attach(World&, std::uint32_t, const nlohmann::json& p,
                        MechanicContext&) override {
@@ -1724,13 +1852,13 @@ the macro called EXACTLY ONCE across the entire file set).
             tr.scale = 1.0f + 0.1f * std::sin(6.2831853f * t_ / period_);
         }
         void on_detach(World&, std::uint32_t) override {}
-        std::string id() const override { return "generated.example_blink"; }
+        std::string id() const override { return "generated.example_pulse"; }
     private:
         float t_{0.0f};
         float period_{1.0f};
     };
 
-    PTV_REGISTER_MECHANIC("generated.example_blink", ExampleBlink)
+    PTV_REGISTER_MECHANIC("generated.example_pulse", ExamplePulse)
 
     }  // namespace ptv
 
@@ -1870,6 +1998,29 @@ REQUIREMENTS FOR A WORKING WORLD:
   ground and clear of geometry.
 - Give walls / buildings / obstacles real collision (Box or Mesh). Leave open
   walkable floor where the player should move. Human scale (player ~1.7 m).
+- WALLS ARE SOLID FROM EVERY SIDE. The player must never walk, slide, lean or
+  put their head through a wall:
+    * Every wall, barrier, fence and partition is a ``spawn_primitive`` BOX
+      with ``collision = Collision::Box`` -- a solid block, never a plane,
+      never a one-sided ``add_mesh`` sheet.
+    * At least 0.3 m thick. Anything under 0.2 m fails validation.
+    * Walls OVERLAP at corners (extend each wall by half the other's
+      thickness) so there is no gap to squeeze through. No gaps along a wall
+      except the openings you mean (doorways, which get a ``nav_link``).
+    * Decorative trim, posters, panels and signs sit ON a solid wall; they are
+      never the wall.
+    * ``Collision::None`` on a barrier ONLY when the prompt asks for something
+      the player passes through (a hologram, a curtain, a ghost wall); tag
+      that barrier ``walkthrough`` so validation knows it is deliberate.
+- OBJECTS KEEP THEIR SIZE. ``place_object`` takes each asset's
+  ``target_scale_meters`` from the asset list; do not rescale placed assets,
+  so the same asset is the same size wherever it appears.
+- GAMEPLAY-OWNED ASSETS ARE NOT YOURS TO PLACE. An asset listed with
+  ``gameplay_owned: true`` is already placed by the gameplay scene as
+  something the player uses (the pistols they pick up, the targets they
+  shoot, the racks those sit on). Do NOT place copies of it, decorative or
+  otherwise: a second, non-interactive rifle beside the real one is how a
+  player ends up grabbing at a prop. Build the room around them instead.
 - DECLARE THE WALKABLE SPACE with ``nav_region(...)`` and ``nav_link(...)``.
   You are the only one who knows this level's layout -- you just built it --
   and NPCs cannot infer it. Without a declaration they fall back to local

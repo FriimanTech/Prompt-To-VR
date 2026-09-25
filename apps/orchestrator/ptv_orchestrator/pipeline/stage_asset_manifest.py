@@ -19,11 +19,18 @@ import json
 import re
 from typing import Iterable, List
 
-from ptv_schemas import AssetCategory, AssetManifest, ProjectStage, ProjectStatus
+from ptv_schemas import (
+    AssetCategory,
+    AssetManifest,
+    PlayerExperience,
+    ProjectStage,
+    ProjectStatus,
+)
 from ptv_schemas.asset_manifest import AssetItem
 
 from .context import PipelineContext, StageResult
 from .llm import make_llm
+from .player_experience import is_player_avatar_item
 from .prompts import ASSET_MANIFEST_SYSTEM
 
 # Words that only ever describe a SOUND. Matched as whole tokens against the
@@ -133,6 +140,13 @@ def run(ctx: PipelineContext) -> StageResult:
             "BuildSpec (JSON):\n"
             + json.dumps(build_spec.model_dump(mode="json"), indent=2)
             + "\n\nProduce an AssetManifest JSON object for the assets above."
+            + (
+                "\n\nplayer_experience is 'hands_only': plan NO player-avatar"
+                " / player-body item. Hand-shaped props (gloves, gauntlets)"
+                " are ordinary props with wearable_region set."
+                if build_spec.player_experience == PlayerExperience.hands_only
+                else ""
+            )
         ),
         schema=AssetManifest.model_json_schema(by_alias=True),
         system=ASSET_MANIFEST_SYSTEM,
@@ -163,6 +177,24 @@ def run(ctx: PipelineContext) -> StageResult:
                 "info",
                 "Sound has no shape, so these items would have cost a"
                 f" reference image and a Tripo call for nothing: {ids}",
+            )
+
+    # Hands Only has no body: a player-avatar item would cost a reference
+    # image, a Tripo mesh, a rig and animations for something never shown.
+    if build_spec.player_experience == PlayerExperience.hands_only:
+        bodies = [i for i in manifest.items if is_player_avatar_item(i)]
+        rest = [i for i in manifest.items if not is_player_avatar_item(i)]
+        if bodies and rest:
+            manifest = manifest.model_copy(update={"items": rest})
+            ids = ", ".join(i.id for i in bodies)
+            notes.append(
+                f"dropped {len(bodies)} player-avatar asset(s) ({ids});"
+                " Hands Only uses the engine's default hands"
+            )
+            ctx.emit(
+                ProjectStage.asset_manifest,
+                "info",
+                f"Hands Only: no player body is generated ({ids})",
             )
 
     ctx.asset_manifest = manifest

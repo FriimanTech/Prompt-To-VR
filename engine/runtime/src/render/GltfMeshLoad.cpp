@@ -172,7 +172,8 @@ bool load_glb_merged(const std::string& path,
                      float target_scale_meters,
                      std::vector<LitVertex>& out_verts,
                      std::vector<uint32_t>& out_indices,
-                     std::string& err) {
+                     std::string& err,
+                     float unit_scale) {
     out_verts.clear();
     out_indices.clear();
     tinygltf::Model model;
@@ -367,8 +368,14 @@ bool load_glb_merged(const std::string& path,
         err = "degenerate bounds";
         return false;
     }
+    // A precomputed unit scale wins: it was measured once, from LOD0, so
+    // every LOD of the asset gets the same factor. Re-measuring each file
+    // lets a coarse level whose bounds shifted come out a different size.
     const float scale =
-        (target_scale_meters > 1e-4f) ? (target_scale_meters / max_e) : 1.0f;
+        (unit_scale > 1e-8f)
+            ? unit_scale
+            : ((target_scale_meters > 1e-4f) ? (target_scale_meters / max_e)
+                                             : 1.0f);
     uniform_scale_positions(out_verts, scale);
 
     PTV_INFO("GLB loaded: {} verts, {} tris, scale {:.3f} (target {:.2f} m)",

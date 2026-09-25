@@ -11,51 +11,31 @@
 #include <vector>
 
 // ---------------------------------------------------------------------------
-// Locomotion + startup menu (lives entirely in this file).
+// The player: rig, body and motor.
 //
 // Terminology matches Meta's "Locomotion Types" design guide:
 //   * Teleport -- discrete: aim arc + commit.
-//   * Sliding (Meta's term for thumbstick continuous motion). We expose
-//     two flavours per Meta's input-map guidance:
-//       - SlideHeadRelative: stick steers along the HMD gaze direction.
-//       - SlideControllerRelative: stick steers along the left controller's
-//         pointing direction (head-independent).
+//   * Sliding (Meta's term for thumbstick continuous motion), head- or
+//     controller-relative.
 // References:
 //   https://developers.meta.com/horizon/design/locomotion-types/
-//   https://developers.meta.com/horizon/design/locomotion-types/#artificial-locomotion-types
 //   https://developers.meta.com/horizon/design/locomotion-input-maps/
 //
-// Flow:
-//  * On session start ``menu_.page == Root``. A 3D panel with two option
-//    pads ("TELEPORT" / "SLIDING") is drawn directly via Renderer::DrawItem
-//    at a world-space anchor placed in front of the user's spawn pose.
-//  * Each frame we cast a ray from the left controller along its forward
-//    direction and find which option pad the ray is closest to; the hit
-//    pad is highlighted, and a pulsing green confirm quad appears next
-//    to it. Pulling the left trigger (edge transition) commits the
-//    selection.
-//  * Choosing TELEPORT closes the menu with ``LocomotionMode::Teleport``.
-//    Choosing SLIDING flips the menu to ``SlidingSubmenu`` which shows
-//    two new pads: HEAD-RELATIVE (yellow HMD-shape) and CONTROLLER-RELATIVE
-//    (purple controller-shape). A second confirm closes the menu with the
-//    matching ``LocomotionMode``.
-//  * Until the menu closes, normal locomotion is disabled so the user
-//    can't accidentally fly away while deciding.
-//  * After the menu closes:
-//      - Teleport:               Left stick magnitude > threshold => aim a cyan
-//                                parabolic arc from the left controller down to
-//                                the floor; release => rig.pos_xz snaps to the target.
-//      - SlideHeadRelative:      Left stick => slide along the HMD's forward
-//                                vector projected onto the XZ floor plane;
-//                                turning the head re-steers in real time.
-//      - SlideControllerRelative: Left stick => slide along the left controller's
-//                                 -Z (pointing) vector projected onto XZ,
-//                                 independent of head yaw.
-//    Right-stick snap turn remains always-on.
+// Nothing about movement is implied here. Every locomotion, turning and
+// settings-menu behaviour is a mechanic the scene binds explicitly; a scene
+// that binds none is a stationary game (a rhythm game, a turret) and that is
+// complete and valid. The engine used to inject teleport, both slides and
+// snap turn into every scene and open a hard-coded locomotion menu at start;
+// a game that also generated its own copies ran both, which is where the
+// double teleport arc and the double snap came from.
 //
-// Comfort: we apply a circular deadzone (per Meta's input map guidance)
-// and a small acceleration / deceleration ramp on the slide speed so the
-// user doesn't snap from rest to full velocity in a single frame.
+// What this file does own is the player MOTOR (step_player_motor): mechanics
+// only request movement, and the motor resolves it against the world through
+// a Jolt CharacterVirtual. Stick movement is swept through the body, so walls
+// stop it from any direction; physical walking is followed by the body and
+// the head is pushed back out of walls; and the rig's floor tracks the
+// ground under the body, so sliding over terrain follows it instead of
+// accumulating height.
 //
 // OpenXR reference spaces (https://registry.khronos.org/OpenXR/specs/1.1/
 // html/xrspec.html#reference-spaces):
@@ -75,6 +55,7 @@
 #include <glm/gtc/quaternion.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 
+#include "mechanics/builtin/HandRig.h"
 #include "ptv/api/BodySlots.h"
 #include "ptv/core/Logger.h"
 #include "ptv/ecs/Skeleton.h"
@@ -199,38 +180,6 @@ static void resolve_project_mesh_paths(World& w, const std::string& scene_path) 
     });
 }
 
-// Locate the repository's ``3D_Objects/`` directory by walking up from
-// the running executable. Returns an empty string if we can't find one
-// within ten parents (in which case the locomotion menu falls back to
-// procedural icons).
-//
-// Desktop-only: it depends on the Win32 ``GetModuleFileNameW`` to find the
-// exe, and the ``3D_Objects/`` tree only exists in the desktop repo layout.
-// On Quest the menu icons are packaged differently (and fall back to
-// procedural icons), so this returns ``{}`` on Android.
-static std::string find_3d_objects_dir() {
-#if defined(__ANDROID__)
-    return {};
-#else
-    namespace fs = std::filesystem;
-    wchar_t buf[MAX_PATH] = {};
-    DWORD n = GetModuleFileNameW(nullptr, buf, MAX_PATH);
-    if (n == 0 || n == MAX_PATH) return {};
-    fs::path dir = fs::path(std::wstring(buf, n)).parent_path();
-    std::error_code ec;
-    for (int i = 0; i < 12 && !dir.empty(); ++i) {
-        fs::path candidate = dir / "3D_Objects";
-        if (fs::is_directory(candidate, ec)) {
-            return fs::absolute(candidate, ec).string();
-        }
-        const fs::path parent = dir.parent_path();
-        if (parent == dir) break;
-        dir = parent;
-    }
-    return {};
-#endif
-}
-
 // ---------------------------------------------------------------------------
 // Procedural hand visual: palm + wrist stub.
 //
@@ -322,147 +271,6 @@ static entt::entity find_grabbable(World& world, const Vec3& pos,
 }
 
 // ---------------------------------------------------------------------------
-// Locomotion menu + teleport aim helpers
-//
-// The menu is rendered as hand-authored 3D primitives so it doesn't depend on
-// a font atlas or on GLB loading. Shape + colour carry the semantics:
-//
-//   TELEPORT pad -> a blue ring/torus (8 cubes arranged in a circle)
-//                   sitting above a pale violet backdrop pad.
-//   SLIDING pad  -> a green "person mid-stride" stack on a pale violet
-//                   backdrop pad. (Meta's term for thumbstick continuous
-//                   motion; what most players still call "walking").
-//   HEAD-RELATIVE pad      -> a yellow wide-cuboid "HMD" silhouette.
-//   CONTROLLER-RELATIVE pad -> a purple vertical stick with a ball at the top.
-//
-// Each pad has a 0.6m wide, 0.6m tall clickable region. The confirm button
-// is drawn as a bright green cube next to the highlighted pad; it pulses
-// using time so the user understands it's the action target.
-// ---------------------------------------------------------------------------
-
-static void push_cube(std::vector<Renderer::DrawItem>& out,
-                      const Mat4& parent,
-                      const Vec3& local_pos,
-                      const Vec3& local_scale,
-                      const Vec4& color,
-                      float material_id = 1.0f) {
-    Renderer::DrawItem item;
-    Mat4 local = glm::translate(Mat4(1.0f), local_pos) *
-                 glm::scale(Mat4(1.0f), local_scale);
-    item.model = parent * local;
-    item.color = color;
-    item.material_id = material_id;
-    out.push_back(item);
-}
-
-// Build a rotation matrix that faces +Z along ``fwd`` in the XZ plane.
-static Mat4 yaw_only_matrix(const Vec3& pos, float yaw_rad) {
-    Mat4 m = glm::translate(Mat4(1.0f), pos);
-    return glm::rotate(m, yaw_rad, Vec3(0, 1, 0));
-}
-
-// Draw a teleport / walking option pad at ``local_offset`` in the menu frame.
-//
-// ``glb_slot`` is the renderer's pre-loaded mesh slot for the icon's 3D
-// model; pass -1 to fall back to the procedural cube icon selected by
-// ``procedural_icon`` (0=teleport portal, 1=person, 2=headset, 3=joystick).
-// Returns the hit-test bounding center in world space via
-// ``out_world_center`` so click detection can reuse it.
-static void push_menu_pad(std::vector<Renderer::DrawItem>& out,
-                          const Mat4& menu_world,
-                          const Vec3& local_offset,
-                          int glb_slot,
-                          int procedural_icon,
-                          bool highlighted,
-                          Vec3* out_world_center) {
-    const Vec4 backdrop_idle{0.18f, 0.14f, 0.28f, 1.0f};   // muted violet
-    const Vec4 backdrop_hi  {0.42f, 0.30f, 0.62f, 1.0f};   // vivid violet
-    const Vec4 bd = highlighted ? backdrop_hi : backdrop_idle;
-    // Backdrop quad (flat box).
-    push_cube(out, menu_world, local_offset + Vec3(0, 0, 0),
-              Vec3(0.30f, 0.30f, 0.02f), bd);
-
-    // Icon sits just in front of the backdrop so it's visible from the user.
-    const Vec3 icon_origin = local_offset + Vec3(0, 0, 0.04f);
-
-    // Preferred path: the user supplied a labelled 3D model (Walking /
-    // Teleport / Head-Relative / Controller-Relative GLB). The renderer
-    // already pre-scaled the GLB so its longest axis is ``kIconScale`` (set
-    // at load time in Application::initialize), so all four icons fit a
-    // 0.30m pad consistently.
-    if (glb_slot >= 0) {
-        Renderer::DrawItem di{};
-        Mat4 local = glm::translate(Mat4(1.0f), icon_origin);
-        di.model = menu_world * local;
-        di.mesh_slot = glb_slot;
-        // Slight highlight pop when the user is aiming at this pad so the
-        // selection cue is unmistakable in VR.
-        di.color = highlighted
-                       ? Vec4(1.10f, 1.10f, 1.10f, 1.0f)
-                       : Vec4(0.95f, 0.95f, 0.95f, 1.0f);
-        di.material_id = 0.0f;
-        out.push_back(di);
-        if (out_world_center) {
-            Vec4 p = menu_world * Vec4(local_offset, 1.0f);
-            *out_world_center = Vec3(p);
-        }
-        return;
-    }
-
-    // Procedural fallback (unchanged from earlier behaviour) -- only used
-    // if the GLB couldn't be loaded (e.g. running from a build that no
-    // longer ships the 3D_Objects/ folder).
-    const int icon = procedural_icon;
-    if (icon == 0) {
-        // TELEPORT: blue "portal" torus (8 cubes in a ring).
-        const Vec4 blue{0.30f, 0.65f, 1.00f, 1.0f};
-        for (int i = 0; i < 8; ++i) {
-            float a = static_cast<float>(i) * (6.2831853f / 8.0f);
-            Vec3 p = icon_origin + Vec3(0.10f * std::cos(a),
-                                         0.10f * std::sin(a) + 0.02f,
-                                         0.0f);
-            push_cube(out, menu_world, p, Vec3(0.035f, 0.035f, 0.035f), blue);
-        }
-    } else if (icon == 1) {
-        // SLIDING: simple green person (head + torso + 2 legs) -- Meta's
-        // term for thumbstick continuous motion.
-        const Vec4 green{0.35f, 0.85f, 0.45f, 1.0f};
-        push_cube(out, menu_world, icon_origin + Vec3(0.0f, 0.11f, 0.0f),
-                  Vec3(0.035f, 0.035f, 0.035f), green); // head
-        push_cube(out, menu_world, icon_origin + Vec3(0.0f, 0.03f, 0.0f),
-                  Vec3(0.05f, 0.07f, 0.03f), green);    // torso
-        push_cube(out, menu_world, icon_origin + Vec3(-0.025f, -0.08f, 0.0f),
-                  Vec3(0.022f, 0.09f, 0.03f), green);   // left leg
-        push_cube(out, menu_world, icon_origin + Vec3( 0.025f, -0.08f, 0.0f),
-                  Vec3(0.022f, 0.09f, 0.03f), green);   // right leg
-    } else if (icon == 2) {
-        // HEAD-based (VR headset silhouette): wide yellow cuboid.
-        const Vec4 yellow{1.00f, 0.86f, 0.25f, 1.0f};
-        push_cube(out, menu_world, icon_origin + Vec3(0.0f, 0.02f, 0.0f),
-                  Vec3(0.13f, 0.06f, 0.05f), yellow);  // visor
-        push_cube(out, menu_world, icon_origin + Vec3(-0.11f, 0.015f, 0.0f),
-                  Vec3(0.015f, 0.02f, 0.04f), yellow); // strap L
-        push_cube(out, menu_world, icon_origin + Vec3( 0.11f, 0.015f, 0.0f),
-                  Vec3(0.015f, 0.02f, 0.04f), yellow); // strap R
-    } else if (icon == 3) {
-        // JOYSTICK-based: purple stick with ball on top.
-        const Vec4 purple{0.70f, 0.40f, 1.00f, 1.0f};
-        push_cube(out, menu_world, icon_origin + Vec3(0.0f, -0.06f, 0.0f),
-                  Vec3(0.09f, 0.03f, 0.04f), purple);  // base
-        push_cube(out, menu_world, icon_origin + Vec3(0.0f, 0.01f, 0.0f),
-                  Vec3(0.018f, 0.09f, 0.018f), purple); // stem
-        push_cube(out, menu_world, icon_origin + Vec3(0.0f, 0.08f, 0.0f),
-                  Vec3(0.04f, 0.04f, 0.04f), purple);   // ball
-    }
-
-    // Cache the world-space center for hit testing.
-    if (out_world_center) {
-        Vec4 p = menu_world * Vec4(local_offset, 1.0f);
-        *out_world_center = Vec3(p);
-    }
-}
-
-// ---------------------------------------------------------------------------
 // Mechanic services
 //
 // These are the ONLY way a mechanic (built-in or generated) can move the
@@ -485,6 +293,14 @@ bool is_finite(const Quat& q) {
 // means a mechanic is misbehaving.
 constexpr float kMaxTranslatePerCall = 2.0f;    // metres
 constexpr float kMaxImpulseMagnitude = 200.0f;  // kg*m/s
+
+// The walking body. Narrower than the old contact capsule (0.17 x height)
+// because it is centred under the head rather than the torso, and a 0.3 m
+// radius stops the player well short of anything they reach for.
+constexpr float kPlayerBodyRadius = 0.22f;
+// Roughly a head: large enough that the near clip plane never pokes through
+// a wall, small enough that the player can put their face up to one.
+constexpr float kHeadRadius = 0.12f;
 
 // How long a corpse stays when the asset has no death animation to time
 // against. Long enough to read as "that one died", short enough that a wave
@@ -537,6 +353,11 @@ public:
             return;
         }
         Vec3 d = delta;
+        // Grounded is the default, and in it vertical position belongs to the
+        // ground. A slide mechanic that forwarded the Y of some sweep used to
+        // lift the player a few millimetres a frame until they reached the
+        // ceiling.
+        if (app_->vertical_mode_ == ::ptv::VerticalMode::Grounded) d.y = 0.0f;
         const float len = glm::length(d);
         if (len > kMaxTranslatePerCall) {
             PTV_WARN_CLAMP_ONCE(
@@ -544,22 +365,78 @@ public:
                 kMaxTranslatePerCall);
             d *= (kMaxTranslatePerCall / len);
         }
-        // Resolve against the world so sliding stops at walls instead of
-        // gliding through them. Teleport deliberately skips this: it already
-        // aims at a raycast landing spot, and sweeping a long arc would
-        // refuse legitimate hops over low geometry.
-        if (app_->player_entity_ != entt::null) {
-            d = app_->physics_.slide_character(
-                app_->player_capsule_center_, app_->player_capsule_height_, d,
-                static_cast<std::uint32_t>(app_->player_entity_));
+        // Requested, not applied: the motor resolves every request made this
+        // frame in one sweep, after all locomotion mechanics have run.
+        app_->pending_move_ += d;
+    }
+
+    void move_horizontal(const Vec3& delta) override {
+        translate(Vec3(delta.x, 0.0f, delta.z));
+    }
+
+    bool is_grounded() const override {
+        if (!app_->motor_active()) return true;
+        return app_->physics_.player_character_state().grounded;
+    }
+
+    void jump(float speed_mps) override {
+        if (!std::isfinite(speed_mps) || speed_mps <= 0.0f) return;
+        if (app_->vertical_mode_ != ::ptv::VerticalMode::Grounded) return;
+        app_->pending_jump_mps_ =
+            std::max(app_->pending_jump_mps_, std::min(speed_mps, 12.0f));
+    }
+
+    void set_vertical_mode(::ptv::VerticalMode mode) override {
+        app_->vertical_mode_ = mode;
+    }
+    ::ptv::VerticalMode vertical_mode() const override {
+        return app_->vertical_mode_;
+    }
+
+    Vec3 body_position() const override {
+        if (app_->motor_active()) {
+            return app_->physics_.player_character_state().feet;
         }
-        // The resolved delta is a world vector; the rig stores frame-local
-        // coordinates. Without this rotation, walking forward on a turning
-        // vehicle would curve.
-        const Vec3 local = app_->world_vector_to_frame(d);
-        app_->rig_.pos_x += local.x;
-        app_->rig_.pos_y += local.y;
-        app_->rig_.pos_z += local.z;
+        const Vec3 head = app_->current_head_world();
+        return Vec3(head.x, app_->rig_world_position().y, head.z);
+    }
+
+    Vec3 head_position() const override { return app_->current_head_world(); }
+
+    Quat head_rotation() const override {
+        const Quat yaw = glm::angleAxis(app_->rig_world_yaw(), Vec3(0, 1, 0));
+        if (!app_->head_local_valid_) return yaw;
+        return yaw * glm::quat_cast(Mat3(app_->head_local_));
+    }
+
+    ::ptv::TurnMode turn_mode() const override { return app_->turn_mode_; }
+    void set_turn_mode(::ptv::TurnMode mode) override {
+        app_->turn_mode_ = mode;
+    }
+
+    void declare_mode_available(::ptv::LocomotionMode mode) override {
+        const auto i = static_cast<size_t>(mode);
+        if (i < app_->mode_available_.size()) app_->mode_available_[i] = true;
+    }
+    bool mode_available(::ptv::LocomotionMode mode) const override {
+        const auto i = static_cast<size_t>(mode);
+        return i < app_->mode_available_.size() && app_->mode_available_[i];
+    }
+    void declare_turn_available(::ptv::TurnMode mode) override {
+        const auto i = static_cast<size_t>(mode);
+        if (i < app_->turn_available_.size()) app_->turn_available_[i] = true;
+    }
+    bool turn_available(::ptv::TurnMode mode) const override {
+        const auto i = static_cast<size_t>(mode);
+        return i < app_->turn_available_.size() && app_->turn_available_[i];
+    }
+
+    void set_input_lock(const char* owner, bool locked) override {
+        const std::string id = owner == nullptr ? std::string() : owner;
+        auto& owners = app_->input_lock_owners_;
+        const auto it = std::find(owners.begin(), owners.end(), id);
+        if (locked && it == owners.end()) owners.push_back(id);
+        if (!locked && it != owners.end()) owners.erase(it);
     }
 
     void rotate_yaw(float radians) override {
@@ -569,7 +446,18 @@ public:
         }
         // A single call should never spin more than half a turn.
         constexpr float kPi = 3.14159265358979323846f;
-        app_->rig_.yaw_rad += std::max(-kPi, std::min(kPi, radians));
+        const float r = std::max(-kPi, std::min(kPi, radians));
+        // Turn about the HEAD, not the stage origin. Rotating the rig about
+        // its origin swings a player standing a metre off-centre in their
+        // playspace through a one-metre arc on every snap -- the view jumps
+        // sideways as well as turning.
+        const Vec3 before = app_->current_head_world();
+        app_->rig_.yaw_rad += r;
+        const Vec3 after = app_->current_head_world();
+        const Vec3 fix = app_->world_vector_to_frame(
+            Vec3(before.x - after.x, 0.0f, before.z - after.z));
+        app_->rig_.pos_x += fix.x;
+        app_->rig_.pos_z += fix.z;
     }
 
     void teleport_to(const Vec3& target) override {
@@ -597,7 +485,19 @@ public:
         if (dst.y < app_->teleport_floor_y_) {
             dst.y = app_->teleport_floor_y_;
         }
-        app_->set_rig_world_position(dst);
+        // Land the player's FEET on the target. Moving the stage origin there
+        // instead leaves a player who stands off-centre in their playspace
+        // that far away from where they aimed.
+        const Vec3 head = app_->current_head_world();
+        const Vec3 rig = app_->rig_world_position();
+        const Vec3 offset(head.x - rig.x, 0.0f, head.z - rig.z);
+        app_->set_rig_world_position(
+            Vec3(dst.x - offset.x, dst.y, dst.z - offset.z));
+        app_->pending_move_ = Vec3(0.0f);
+        if (app_->motor_active()) {
+            app_->physics_.teleport_player_character(dst);
+            app_->motor_head_resolved_ = app_->current_head_world();
+        }
     }
 
     // NOTE: must be fully qualified. Inside a nested class of Application,
@@ -631,9 +531,8 @@ public:
     }
 
     bool input_locked() const override {
-        // The locomotion menu owns the sticks while it is open.
-        return app_->locomotion_menu_enabled_ &&
-               app_->menu_.page != Application::MenuPage::Closed;
+        // Whatever menu is open owns the sticks.
+        return !app_->input_lock_owners_.empty();
     }
 
     const LocomotionTunables& tunables() const override {
@@ -835,81 +734,147 @@ private:
     Application* app_;
 };
 
-void Application::ensure_player_locomotion_bindings() {
-    // The runtime locomotion menu lets the player pick teleport, head-relative
-    // slide or controller-relative slide at ANY time. Now that each of those
-    // is a real mechanic rather than a hard-coded branch, a mode with nothing
-    // bound would silently do nothing -- the player would flip to sliding and
-    // simply be unable to move.
-    //
-    // Most scenes bind only what their prompt asked for (the starter room
-    // binds teleport and snap turn), so the engine guarantees the rest here.
-    // Anything the scene DID bind is left completely alone, params included.
-    static constexpr const char* kRequired[] = {
-        "builtin.locomotion.teleport",
-        "builtin.locomotion.slide.head_relative",
-        "builtin.locomotion.slide.controller_relative",
-        "builtin.locomotion.snap_turn",
-        // Not locomotion, but the same argument: the player's own hands are
-        // engine furniture, not scene content, so posing their fingers must
-        // not depend on a generated scene remembering to ask for it. Costs
-        // nothing when the rigged hand asset is absent -- the mechanic sees
-        // no hand entity and returns immediately.
-        "builtin.hand_pose",
-        // Same argument again for the player's BODY. When a scene places an
-        // entity tagged "player_avatar", posing it is engine furniture: the
-        // camera sits at its eyes and its head has to be suppressed in the
-        // player's own view, and a generated scene forgetting to ask would
-        // leave the player staring at the inside of their own skull. Costs
-        // nothing when no avatar entity exists -- the mechanic finds none and
-        // returns immediately.
-        "builtin.avatar_body",
-    };
-    // Aliases the hand-authored sample uses for the same mechanics.
-    auto satisfies = [](const std::string& bound, const char* required) {
-        if (bound == required) return true;
-        if (bound == "builtin.teleport" &&
-            std::string(required) == "builtin.locomotion.teleport") {
-            return true;
-        }
-        if (bound == "builtin.snap_turn" &&
-            std::string(required) == "builtin.locomotion.snap_turn") {
-            return true;
-        }
-        return false;
-    };
+class Application::ComfortService final : public IComfort {
+public:
+    explicit ComfortService(Application* app) : app_(app) {}
 
-    std::vector<std::string> bound_ids;
-    for (auto e : world_.registry().view<CMechanicBinding>()) {
-        for (const auto& entry :
-             world_.registry().get<CMechanicBinding>(e).entries) {
-            bound_ids.push_back(entry.builtin_id.empty() ? entry.id
-                                                         : entry.builtin_id);
-        }
+    void offer_vignette(ComfortChannel channel, bool enabled,
+                        bool user_toggle) override {
+        auto* c = get(channel);
+        if (c == nullptr) return;
+        if (!c->offered) c->enabled = enabled;
+        c->offered = true;
+        c->toggleable = c->toggleable || user_toggle;
+    }
+    bool vignette_offered(ComfortChannel channel) const override {
+        const auto* c = get(channel);
+        return c != nullptr && c->offered;
+    }
+    bool vignette_toggleable(ComfortChannel channel) const override {
+        const auto* c = get(channel);
+        return c != nullptr && c->offered && c->toggleable;
+    }
+    bool vignette_enabled(ComfortChannel channel) const override {
+        const auto* c = get(channel);
+        return c != nullptr && c->offered && c->enabled;
+    }
+    void set_vignette_enabled(ComfortChannel channel, bool on) override {
+        auto* c = get(channel);
+        if (c != nullptr && c->offered) c->enabled = on;
     }
 
-    std::vector<std::string> missing;
-    for (const char* required : kRequired) {
-        bool found = false;
-        for (const auto& bound : bound_ids) {
-            if (satisfies(bound, required)) {
-                found = true;
-                break;
+    void request_vignette(ComfortChannel channel, float strength,
+                          float inner_fov_deg, float feather_deg) override {
+        if (!vignette_enabled(channel)) return;
+        if (!std::isfinite(strength) || !std::isfinite(inner_fov_deg) ||
+            !std::isfinite(feather_deg)) {
+            return;
+        }
+        const float s = std::clamp(strength, 0.0f, 1.0f);
+        if (s <= app_->vignette_request_) return;
+        app_->vignette_request_ = s;
+        app_->vignette_request_inner_deg_ =
+            std::clamp(inner_fov_deg, 20.0f, 100.0f);
+        app_->vignette_request_feather_deg_ =
+            std::clamp(feather_deg, 2.0f, 60.0f);
+    }
+
+    void reset() { app_->vignette_channels_ = {}; }
+
+private:
+    Application::VignetteChannel* get(ComfortChannel c) {
+        const auto i = static_cast<size_t>(c);
+        return i < app_->vignette_channels_.size()
+                   ? &app_->vignette_channels_[i]
+                   : nullptr;
+    }
+    const Application::VignetteChannel* get(ComfortChannel c) const {
+        const auto i = static_cast<size_t>(c);
+        return i < app_->vignette_channels_.size()
+                   ? &app_->vignette_channels_[i]
+                   : nullptr;
+    }
+
+    Application* app_;
+};
+
+void Application::tick_comfort_vignette(float dt) {
+    // Meta's LocomotionTunneling behaviour: follow the motion quickly, hold
+    // briefly once it stops (FadeOutWait), then fade out (FadeOutTime). A
+    // vignette that snapped off the instant the stick centred would itself
+    // be a sudden change in the visual field.
+    constexpr float kAttackTau = 0.08f;
+    constexpr float kFadeOutWait = 0.15f;
+    constexpr float kReleaseTau = 0.25f;
+    const float target = vignette_request_;
+    if (target > 0.0f) {
+        vignette_since_request_s_ = 0.0f;
+        vignette_inner_deg_ = vignette_request_inner_deg_;
+        vignette_feather_deg_ = vignette_request_feather_deg_;
+    } else {
+        vignette_since_request_s_ += dt;
+    }
+    if (target >= vignette_level_) {
+        vignette_level_ +=
+            (target - vignette_level_) * (1.0f - std::exp(-dt / kAttackTau));
+    } else if (vignette_since_request_s_ > kFadeOutWait || target > 0.0f) {
+        vignette_level_ +=
+            (target - vignette_level_) * (1.0f - std::exp(-dt / kReleaseTau));
+    }
+    if (vignette_level_ < 1e-3f) vignette_level_ = 0.0f;
+    vignette_request_ = 0.0f;
+
+    // The clear field narrows from beyond the edge of the display (no
+    // occlusion) toward the requested inner FOV as the level rises, and the
+    // edge fades in rather than popping.
+    constexpr float kOpenHalfAngle = 75.0f;
+    const float clear =
+        kOpenHalfAngle +
+        (0.5f * vignette_inner_deg_ - kOpenHalfAngle) * vignette_level_;
+    const float opacity = std::min(1.0f, vignette_level_ * 4.0f) * 0.95f;
+    renderer_.set_vignette(opacity, clear, vignette_feather_deg_);
+}
+
+void Application::check_player_mechanic_roles() const {
+    // The engine injects NOTHING. Every player mechanic -- locomotion,
+    // turning, the settings menu, hand posing, the avatar body -- is bound by
+    // the scene, and a scene that binds none of them is a stationary game.
+    //
+    // What it still does is refuse to be silent about two bindings doing the
+    // same job, which is how the double teleport arc and the double snap
+    // turn shipped. The pipeline rejects that at compile time; this is the
+    // defence in depth for hand-authored scenes.
+    static const std::pair<const char*, const char*> kRoles[] = {
+        {"builtin.locomotion.teleport", "role:teleport"},
+        {"builtin.teleport", "role:teleport"},
+        {"builtin.locomotion.slide.head_relative", "role:slide_head"},
+        {"builtin.locomotion.slide.controller_relative",
+         "role:slide_controller"},
+        {"builtin.locomotion.snap_turn", "role:snap_turn"},
+        {"builtin.snap_turn", "role:snap_turn"},
+        {"builtin.locomotion.smooth_turn", "role:smooth_turn"},
+        {"builtin.movement_settings_menu", "role:movement_settings_menu"},
+        {"builtin.hand_pose", "role:fingers"},
+        {"builtin.avatar_body", "role:body"},
+    };
+    std::unordered_map<std::string, std::vector<std::string>> by_role;
+    auto view = world_.registry().view<const CMechanicBinding>();
+    for (auto e : view) {
+        for (const auto& entry : view.get<const CMechanicBinding>(e).entries) {
+            const std::string& id =
+                entry.builtin_id.empty() ? entry.id : entry.builtin_id;
+            for (const auto& [builtin, role] : kRoles) {
+                if (id == builtin) by_role[role].push_back(id);
             }
         }
-        if (!found) missing.emplace_back(required);
     }
-    if (missing.empty()) return;
-
-    const auto holder = world_.registry().create();
-    world_.registry().emplace<CTag>(holder, CTag{{"player_locomotion"}});
-    CMechanicBinding binding;
-    for (const auto& id : missing) {
-        binding.entries.push_back(CMechanicBinding::Entry{id, id, "{}"});
+    for (const auto& [role, ids] : by_role) {
+        if (ids.size() < 2) continue;
+        PTV_ERROR(
+            "Scene binds {} mechanics for {} ({} and {}...). Only one may own "
+            "a player role; expect doubled input handling.",
+            ids.size(), role, ids[0], ids[1]);
     }
-    world_.registry().emplace<CMechanicBinding>(holder, std::move(binding));
-    PTV_INFO("Auto-bound {} locomotion mechanic(s) the scene did not declare",
-             missing.size());
 }
 
 class Application::HandsService final : public IHands {
@@ -935,6 +900,23 @@ public:
         const auto e = app_->hand_entities_[hand];
         return e == entt::null ? InputSnapshot::kInvalidEntity
                                : static_cast<std::uint32_t>(e);
+    }
+
+    std::uint32_t finger_target(int hand) const override {
+        if (hand < 0 || hand > 1) return InputSnapshot::kInvalidEntity;
+        const auto e = app_->finger_targets_[static_cast<size_t>(hand)];
+        if (e == entt::null || !app_->world_.registry().valid(e)) {
+            return InputSnapshot::kInvalidEntity;
+        }
+        return static_cast<std::uint32_t>(e);
+    }
+
+    void set_finger_target(int hand, std::uint32_t entity) override {
+        if (hand < 0 || hand > 1) return;
+        app_->finger_targets_[static_cast<size_t>(hand)] =
+            (entity == InputSnapshot::kInvalidEntity)
+                ? entt::null
+                : static_cast<entt::entity>(entity);
     }
 
     std::uint32_t player_entity() const override {
@@ -2458,25 +2440,50 @@ public:
 
     Mat4 joint_world(std::uint32_t entity, int joint) const override {
         const World& w = app_->world_;
-        if (!has_skeleton(entity) || !w.has<CTransform>(entity)) {
+        if (!valid_joint(entity, joint) || !w.has<CTransform>(entity)) {
             return Mat4(1.0f);
         }
+        // Recomputed from local_pose rather than read back out of the
+        // palette: the palette is only rebuilt by the pose system AFTER the
+        // Simulate phase, so during Simulate it describes last frame. An IK
+        // solver that wrote the upper arm and then read the forearm from the
+        // palette saw the forearm where the previous frame left it, which is
+        // the feedback loop that made avatar arms flail.
         const auto& skc = w.get<CSkeleton>(entity);
-        const auto& sk = skc.skeleton;
-        if (joint < 0 || static_cast<size_t>(joint) >= sk.inverse_bind.size() ||
-            static_cast<size_t>(joint) >= skc.palette.size()) {
-            return Mat4(1.0f);
-        }
-        // palette[j] == jointWorld[j] * inverseBind[j], so undoing the
-        // inverse bind recovers the joint's own matrix -- including the
-        // unit_scale conjugation build_joint_palette folded in, which is why
-        // this is read back out of the palette instead of recomputed from
-        // local_pose. In bind pose the palette is identity and this returns
-        // the bind world matrix, as it should.
-        const Mat4 local = skc.palette[static_cast<size_t>(joint)] *
-                           glm::inverse(sk.inverse_bind[
-                               static_cast<size_t>(joint)]);
-        return w.get<CTransform>(entity).t.matrix() * local;
+        return w.get<CTransform>(entity).t.matrix() *
+               fk_metres(skc, current_pose(skc), joint);
+    }
+
+    Mat4 joint_model(std::uint32_t entity, int joint) const override {
+        if (!valid_joint(entity, joint)) return Mat4(1.0f);
+        const auto& skc = app_->world_.get<CSkeleton>(entity);
+        return orthonormal(fk_metres(skc, current_pose(skc), joint));
+    }
+
+    Mat4 joint_bind_model(std::uint32_t entity, int joint) const override {
+        if (!valid_joint(entity, joint)) return Mat4(1.0f);
+        const auto& skc = app_->world_.get<CSkeleton>(entity);
+        return orthonormal(fk_metres(skc, skc.skeleton.bind_pose, joint));
+    }
+
+    Quat joint_bind_rotation(std::uint32_t entity, int joint) const override {
+        if (!valid_joint(entity, joint)) return Quat(1.0f, 0.0f, 0.0f, 0.0f);
+        return app_->world_.get<CSkeleton>(entity)
+            .skeleton.bind_pose[static_cast<size_t>(joint)]
+            .rotation;
+    }
+
+    Quat joint_local_rotation(std::uint32_t entity, int joint) const override {
+        if (!valid_joint(entity, joint)) return Quat(1.0f, 0.0f, 0.0f, 0.0f);
+        const auto& skc = app_->world_.get<CSkeleton>(entity);
+        return current_pose(skc)[static_cast<size_t>(joint)].rotation;
+    }
+
+    void set_joint_rotation_from_bind(std::uint32_t entity, int joint,
+                                      const Quat& delta) override {
+        if (!valid_joint(entity, joint)) return;
+        set_joint_rotation(entity, joint,
+                           joint_bind_rotation(entity, joint) * delta);
     }
 
     int joint_subtree(std::uint32_t entity, int root, int* out,
@@ -2644,6 +2651,66 @@ public:
     }
 
 private:
+    bool valid_joint(std::uint32_t entity, int joint) const {
+        if (!has_skeleton(entity)) return false;
+        const auto& sk = app_->world_.get<CSkeleton>(entity).skeleton;
+        return joint >= 0 && static_cast<size_t>(joint) < sk.joint_count();
+    }
+
+    /** The pose a joint query should read: the live local pose once the
+     *  pose system has sized it, the bind pose before that. */
+    static const std::vector<gltf_mesh_load::JointPose>& current_pose(
+        const CSkeleton& skc) {
+        return (skc.local_pose.size() == skc.skeleton.joint_count())
+                   ? skc.local_pose
+                   : skc.skeleton.bind_pose;
+    }
+
+    /** Forward kinematics from ``pose`` up to ``joint``, in metres.
+     *
+     *  Joint matrices live in the source file's units while the loader
+     *  scaled the vertices by ``unit_scale``; conjugating the whole chain by
+     *  that uniform scale reduces to scaling each local translation, which
+     *  is what ``build_joint_palette`` does to the palette as well. */
+    static Mat4 fk_metres(const CSkeleton& skc,
+                          const std::vector<gltf_mesh_load::JointPose>& pose,
+                          int joint) {
+        const auto& sk = skc.skeleton;
+        const float u = sk.unit_scale;
+        Mat4 m(1.0f);
+        int j = joint;
+        size_t guard = 0;
+        while (j >= 0 && static_cast<size_t>(j) < pose.size() &&
+               guard++ <= sk.joint_count()) {
+            gltf_mesh_load::JointPose p = pose[static_cast<size_t>(j)];
+            p.translation *= u;
+            m = p.matrix() * m;
+            j = sk.parents[static_cast<size_t>(j)];
+        }
+        return m;
+    }
+
+    /** Strip scale (and any shear) from the rotation columns. */
+    static Mat4 orthonormal(const Mat4& m) {
+        Vec3 x(m[0]), y(m[1]);
+        const float lx = glm::length(x);
+        if (lx < 1e-8f) return glm::translate(Mat4(1.0f), Vec3(m[3]));
+        x /= lx;
+        y -= x * glm::dot(x, y);
+        const float ly = glm::length(y);
+        if (ly < 1e-8f) return glm::translate(Mat4(1.0f), Vec3(m[3]));
+        y /= ly;
+        // Always right-handed, so the result is a proper rotation that
+        // quat_cast can read.
+        const Vec3 z = glm::cross(x, y);
+        Mat4 out(1.0f);
+        out[0] = Vec4(x, 0.0f);
+        out[1] = Vec4(y, 0.0f);
+        out[2] = Vec4(z, 0.0f);
+        out[3] = m[3];
+        return out;
+    }
+
     /** Intent (or raw clip name) -> index into ``CAnimator::clips``, or -1.
      *
      *  Tripo's retargeter names the clips, so a mechanic asking for "walk"
@@ -2728,29 +2795,51 @@ private:
 };
 
 void Application::create_hand_entities() {
-    // Engine-owned assets, not project assets: generated at build time from
-    // engine/tools/make_hand_fixture.py. Absolute build path on desktop, a
-    // bare APK-relative path on Quest -- same split as PTV_SHADER_DIR.
-    const std::string base = std::string(PTV_ENGINE_ASSET_DIR);
     const char* names[2] = {"hand_left", "hand_right"};
+    hand_grip_to_entity_ = {Mat4(1.0f), Mat4(1.0f)};
+    finger_targets_ = {entt::null, entt::null};
+
+    // Full Player Avatar: the avatar's own hands ARE the player's hands.
+    // Create invisible anchors only -- grab, sockets and haptics still need
+    // an entity per hand -- so a second pair of hands can never appear on
+    // top of the body's. builtin.avatar_body points the finger targets at
+    // the avatar once it has found its finger bones.
+    if (scene_.hands_source == "avatar") {
+        for (int h = 0; h < 2; ++h) {
+            const auto e = world_.create_entity(std::string("__") + names[h]);
+            world_.registry().emplace<CTransform>(e, CTransform{});
+            world_.registry().emplace<CTag>(
+                e, CTag{{"player_hand", names[h], "player_system"}});
+            hand_entities_[static_cast<size_t>(h)] = e;
+        }
+        PTV_INFO("Player hands come from the avatar; engine hands are anchors");
+        return;
+    }
+
+    // Engine-owned assets, not project assets: built from
+    // Default_Models/default_rigged_hand_model.glb by
+    // engine/tools/prepare_default_hands.py. Absolute build path on desktop,
+    // a bare APK-relative path on Quest -- same split as PTV_SHADER_DIR.
+    const std::string base = std::string(PTV_ENGINE_ASSET_DIR);
+    const char* files[2] = {"default_hand_left", "default_hand_right"};
 
     for (int h = 0; h < 2; ++h) {
-        const std::string path = base + "/" + names[h] + ".glb";
+        const std::string path = base + "/" + files[h] + ".glb";
         if (!asset_source().exists(path)) {
             PTV_WARN(
-                "rigged hand mesh not found ({}); falling back to procedural "
+                "default hand mesh not found ({}); falling back to procedural "
                 "block hands",
                 path);
             return;
         }
 
         gltf_mesh_load::SkeletonData skel;
-        // target_scale_meters = 0 keeps the authored size: the generator
-        // already works in metres against the OpenXR grip frame, so rescaling
-        // to a longest-axis target would resize a correctly-proportioned hand.
-        const int slot = renderer_.load_glb_skinned(path, 0.0f, skel);
+        // The source is authored in arbitrary units (a Sketchfab export at
+        // 100x), so normalise it to a real hand's length.
+        const float scale_m = std::clamp(scene_.hands_scale_m, 0.08f, 0.5f);
+        const int slot = renderer_.load_glb_skinned(path, scale_m, skel);
         if (slot < 0 || skel.joint_count() == 0) {
-            PTV_WARN("rigged hand mesh {} failed to load", path);
+            PTV_WARN("default hand mesh {} failed to load", path);
             return;
         }
 
@@ -2758,9 +2847,9 @@ void Application::create_hand_entities() {
         world_.registry().emplace<CTransform>(e, CTransform{});
 
         CMesh mesh{};
-        mesh.asset_id = names[h];
+        mesh.asset_id = files[h];
         mesh.glb_path = path;
-        mesh.target_scale_meters = 1.0f;
+        mesh.target_scale_meters = scale_m;
         mesh.skinned = true;
         world_.registry().emplace<CMesh>(e, std::move(mesh));
 
@@ -2778,9 +2867,24 @@ void Application::create_hand_entities() {
             e, CTag{{"player_hand", names[h]}});
 
         hand_entities_[static_cast<size_t>(h)] = e;
+
+        // Measure the mesh's own palm frame and map it onto the OpenXR grip
+        // frame, instead of assuming the asset was authored in grip space.
+        if (skeleton_svc_) {
+            const auto rig = hand_rig::analyze(
+                *skeleton_svc_, static_cast<std::uint32_t>(e), h);
+            if (rig.valid) {
+                hand_grip_to_entity_[static_cast<size_t>(h)] =
+                    rig.grip_to_entity;
+                finger_targets_[static_cast<size_t>(h)] = e;
+            } else {
+                PTV_WARN("default hand {} has no recognisable fingers",
+                         names[h]);
+            }
+        }
     }
 
-    PTV_INFO("Rigged player hands ready ({} joints each)",
+    PTV_INFO("Default rigged hands ready ({} joints each)",
              world_.registry().get<CSkeleton>(hand_entities_[0])
                  .skeleton.joint_count());
 }
@@ -2836,8 +2940,231 @@ void Application::create_player_body() {
     player_entity_ = e;
     player_capsule_center_ = ct.t.position;
     physics_.add_body_for(world_, static_cast<std::uint32_t>(e));
+
+    // The body that actually walks. Feet on the spawn point until the first
+    // headset pose moves it under the player's head.
+    physics_.create_player_character(rig_world_position(),
+                                     player_capsule_height_,
+                                     kPlayerBodyRadius);
+    motor_needs_sync_ = true;
+    motor_has_grounded_ = false;
+    motor_virtual_floor_ = false;
+    {
+        // A world with nothing to stand on under the spawn point would drop
+        // the player forever. Fall back to the flat floor plane there, which
+        // is what every scene assumed before the player had gravity.
+        const Vec3 base = rig_world_position();
+        Vec3 hit(0.0f), n(0.0f, 1.0f, 0.0f);
+        motor_virtual_floor_ = !physics_.raycast(
+            base + Vec3(0.0f, 1.5f, 0.0f), Vec3(0.0f, -1.0f, 0.0f), 50.0f, hit,
+            n);
+        if (motor_virtual_floor_) {
+            PTV_WARN(
+                "Nothing collidable under the spawn point; the player will "
+                "stand on the flat floor plane y={:.2f} instead of falling",
+                teleport_floor_y_);
+        }
+    }
     PTV_INFO("Player collision capsule ready ({:.2f} m)",
              player_capsule_height_);
+}
+
+bool Application::motor_active() const {
+    // The motor walks a human-sized body in world space. A player riding a
+    // moving frame, or shrunk to fit inside something, keeps the older
+    // frame-relative movement: sweeping a full-size capsule there would
+    // collide with the very vehicle they are standing in.
+    return physics_.has_player_character() && player_entity_ != entt::null &&
+           !has_reference_frame() && std::abs(rig_.scale - 1.0f) < 1.0e-3f;
+}
+
+Vec3 Application::current_head_world() const {
+    const Mat4 rig = rig_world_matrix();
+    if (head_local_valid_) return mat_translation(rig * head_local_);
+    // No pose yet: a standing player's eyes above the stage origin.
+    const Vec3 base = rig_world_position();
+    return base + Vec3(0.0f, 0.93f * player_capsule_height_, 0.0f);
+}
+
+void Application::apply_pending_move_legacy() {
+    Vec3 d = pending_move_;
+    pending_move_ = Vec3(0.0f);
+    pending_jump_mps_ = 0.0f;
+    if (glm::length(d) < 1.0e-7f) return;
+    if (player_entity_ != entt::null) {
+        d = physics_.slide_character(player_capsule_center_,
+                                     player_capsule_height_, d,
+                                     static_cast<std::uint32_t>(player_entity_));
+    }
+    const Vec3 local = world_vector_to_frame(d);
+    rig_.pos_x += local.x;
+    rig_.pos_y += local.y;
+    rig_.pos_z += local.z;
+}
+
+void Application::step_player_motor(float dt) {
+    const bool grounded = vertical_mode_ == ::ptv::VerticalMode::Grounded;
+    Vec3 request = pending_move_;
+    const float jump = pending_jump_mps_;
+    pending_move_ = Vec3(0.0f);
+    pending_jump_mps_ = 0.0f;
+    if (grounded) request.y = 0.0f;
+
+    // Held items and the contact capsule would otherwise block the body --
+    // picking up a rifle must not shove the player backwards.
+    {
+        std::vector<std::uint32_t> ignored;
+        ignored.push_back(static_cast<std::uint32_t>(player_entity_));
+        for (const auto& hand : hands_) {
+            if (hand.held != entt::null) {
+                ignored.push_back(static_cast<std::uint32_t>(hand.held));
+            }
+        }
+        physics_.set_player_character_ignored(ignored);
+    }
+
+    Vec3 head = current_head_world();
+    if (motor_needs_sync_ && head_local_valid_) {
+        // First real pose (or a spawn): stand the body under the head.
+        const Vec3 rig = rig_world_position();
+        physics_.teleport_player_character(Vec3(head.x, rig.y, head.z));
+        motor_head_resolved_ = head;
+        motor_needs_sync_ = false;
+    }
+
+    // --- (a) Stick movement, swept through the body --------------------
+    // Gravity and ground contact are integrated here, once per frame.
+    const Vec3 moved =
+        physics_.move_player_character(request, grounded, jump, dt);
+    {
+        const Vec3 horizontal(moved.x, grounded ? 0.0f : moved.y, moved.z);
+        const Vec3 local = world_vector_to_frame(horizontal);
+        rig_.pos_x += local.x;
+        rig_.pos_y += local.y;
+        rig_.pos_z += local.z;
+    }
+
+    // --- (b) The body follows the head's physical walking --------------
+    head = current_head_world();
+    auto st = physics_.player_character_state();
+    const Vec3 follow(head.x - st.feet.x, 0.0f, head.z - st.feet.z);
+    const float follow_len = glm::length(follow);
+    if (follow_len > 1.0e-4f) {
+        if (follow_len > 1.0f) {
+            // The player walked around an obstacle the body could not pass
+            // (a table they leaned across, say) and is now well clear of it.
+            // Stand the body back under them rather than dragging it along.
+            physics_.teleport_player_character(
+                Vec3(head.x, st.feet.y, head.z));
+        } else {
+            physics_.move_player_character(follow, true, 0.0f, dt,
+                                           /*apply_gravity=*/false);
+        }
+        st = physics_.player_character_state();
+    }
+
+    // --- (c) Keep the head out of walls ---------------------------------
+    // Static geometry only, so leaning over a crate or a table is still
+    // possible. The head sweeps from where it was last allowed to be, so
+    // even a fast lunge cannot tunnel through a thin wall.
+    if (head_local_valid_) {
+        const Vec3 allowed =
+            physics_.resolve_head(motor_head_resolved_, head, kHeadRadius);
+        const Vec3 push(allowed.x - head.x, 0.0f, allowed.z - head.z);
+        if (glm::length(push) > 1.0e-5f) {
+            const Vec3 local = world_vector_to_frame(push);
+            rig_.pos_x += local.x;
+            rig_.pos_z += local.z;
+            head += push;
+        }
+        motor_head_resolved_ = Vec3(head.x, allowed.y, head.z);
+    }
+
+    // --- (d) The floor follows the ground under the body ----------------
+    if (grounded) {
+        Vec3 feet = st.feet;
+        if (motor_virtual_floor_ && feet.y < teleport_floor_y_) {
+            feet.y = teleport_floor_y_;
+            physics_.teleport_player_character(feet);
+        }
+        if (st.grounded) {
+            motor_last_grounded_ = feet;
+            motor_has_grounded_ = true;
+        } else if (motor_has_grounded_ &&
+                   feet.y < motor_last_grounded_.y - 30.0f) {
+            // Fell out of the world through a gap in the level. Put them
+            // back where they last stood instead of falling forever.
+            PTV_WARN("Player fell out of the world; returning them to "
+                     "their last footing");
+            feet = motor_last_grounded_;
+            physics_.teleport_player_character(feet);
+        }
+        const Vec3 rig = rig_world_position();
+        set_rig_world_position(Vec3(rig.x, feet.y, rig.z));
+    }
+
+    // --- (e) Crouching resizes the body ---------------------------------
+    motor_resize_timer_s_ -= dt;
+    if (head_local_valid_ && motor_resize_timer_s_ <= 0.0f) {
+        motor_resize_timer_s_ = 0.25f;
+        const float want = std::clamp(head.y - st.feet.y + 0.10f, 0.8f,
+                                      player_capsule_height_);
+        if (std::abs(want - st.height) > 0.08f) {
+            physics_.resize_player_character(want);
+        }
+    }
+
+    // --- (f) The contact capsule rides with the body --------------------
+    st = physics_.player_character_state();
+    const Vec3 center = st.feet + Vec3(0.0f, 0.5f * player_capsule_height_, 0.0f);
+    player_capsule_center_ = center;
+    if (world_.registry().valid(player_entity_) &&
+        world_.registry().all_of<CTransform>(player_entity_)) {
+        world_.registry().get<CTransform>(player_entity_).t.position = center;
+    }
+    physics_.move_kinematic(static_cast<std::uint32_t>(player_entity_), center,
+                            Quat(1.0f, 0.0f, 0.0f, 0.0f), dt);
+}
+
+Quat Application::grip_trim_quat() const {
+    const Vec3 r = glm::radians(scene_.hands_grip_trim_deg);
+    return glm::normalize(glm::quat(r));
+}
+
+void Application::draw_hand_debug_axes(const Vec3 grip_pos[2],
+                                       const Quat grip_rot[2],
+                                       const bool valid[2]) {
+    if (!scene_.hands_debug_axes || !draw_svc_) return;
+    for (int h = 0; h < 2; ++h) {
+        if (!valid[h]) continue;
+        const Quat g = grip_rot[h] * grip_trim_quat();
+        constexpr float kLen = 0.08f;
+        // Grip frame: X red, Y green, Z blue.
+        draw_svc_->line(grip_pos[h], grip_pos[h] + g * Vec3(kLen, 0, 0),
+                        Vec4(1, 0.2f, 0.2f, 1), 0.004f);
+        draw_svc_->line(grip_pos[h], grip_pos[h] + g * Vec3(0, kLen, 0),
+                        Vec4(0.2f, 1, 0.2f, 1), 0.004f);
+        draw_svc_->line(grip_pos[h], grip_pos[h] + g * Vec3(0, 0, kLen),
+                        Vec4(0.2f, 0.4f, 1, 1), 0.004f);
+        // The aim direction the hand should agree with: -Z, longer, white.
+        draw_svc_->line(grip_pos[h], grip_pos[h] + g * Vec3(0, 0, -0.2f),
+                        Vec4(1, 1, 1, 1), 0.002f);
+    }
+}
+
+void Application::place_hand_entity(int hand, const Vec3& grip_pos,
+                                    const Quat& grip_rot) {
+    const auto he = hand_entities_[static_cast<size_t>(hand)];
+    if (he == entt::null || !world_.registry().all_of<CTransform>(he)) return;
+    // grip_to_entity maps the OpenXR grip frame onto the hand mesh's own
+    // frame, measured from the rig (HandRig) when the hands were loaded.
+    // Identity for a mesh already authored in the grip frame.
+    const Mat4 grip = glm::translate(Mat4(1.0f), grip_pos) *
+                      glm::mat4_cast(grip_rot * grip_trim_quat());
+    const Mat4 m = grip * hand_grip_to_entity_[static_cast<size_t>(hand)];
+    auto& t = world_.registry().get<CTransform>(he).t;
+    t.position = mat_translation(m);
+    t.rotation = glm::normalize(glm::quat_cast(Mat3(m)));
 }
 
 void Application::update_player_body(const Vec3& head_world_position,
@@ -3468,12 +3795,25 @@ bool Application::load_scene_at(const std::string& path,
     build_nav_graph();
     create_player_body();
     attach_skeletons();
+    // world_.clear() destroyed the hands with everything else; without this
+    // the player arrived in the next scene with no hands at all.
+    if (renderer_ready_) create_hand_entities();
     build_render_env();
     if (renderer_ready_) {
         renderer_.set_performance(scene_.performance);
         governor_.configure(scene_.performance);
     }
-    ensure_player_locomotion_bindings();
+    // The new scene's mechanics declare what they offer as they attach; the
+    // player's chosen mode survives the trip if the new scene offers it too.
+    mode_available_ = {false, false, false};
+    turn_available_ = {false, false};
+    input_lock_owners_.clear();
+    pending_move_ = Vec3(0.0f);
+    pending_jump_mps_ = 0.0f;
+    vertical_mode_ = ::ptv::VerticalMode::Grounded;
+    vignette_channels_ = {};
+    vignette_level_ = 0.0f;
+    check_player_mechanic_roles();
     mechanics_.attach_bindings(world_, mech_ctx_);
 
     PTV_INFO("transition: now in scene '{}' ({} entities)", scene_.scene_id,
@@ -4071,11 +4411,6 @@ int Application::run(const Config& cfg) {
         // Right-stick snap turn now lives in the built-in mechanic
         // ``builtin.locomotion.snap_turn`` (Input phase), not here.
 
-        // Menu debounce timer ticks regardless of page so the first
-        // frames after a page flip don't instantly consume the trigger.
-        menu_.confirm_cooldown_s =
-            std::max(0.0f, menu_.confirm_cooldown_s - dt);
-
         // The rig transforms the stage origin into the world. We need
         // this to compute world-space hand poses for grab detection and
         // for the per-frame kinematic follow.
@@ -4141,9 +4476,7 @@ int Application::run(const Config& cfg) {
             const auto he = hand_entities_[static_cast<size_t>(h)];
             if (he != entt::null && hand_valid[h] &&
                 world_.registry().all_of<CTransform>(he)) {
-                auto& t = world_.registry().get<CTransform>(he).t;
-                t.position = hand_world_pos[h];
-                t.rotation = hand_world_rot[h];
+                place_hand_entity(h, hand_world_pos[h], hand_world_rot[h]);
             }
         }
 
@@ -4197,153 +4530,22 @@ int Application::run(const Config& cfg) {
             last_head_forward_xz_ = head_forward_xz;
         }
 
-        // Put the player's collider where the player actually is before any
-        // mechanic runs. Locomotion's wall sweep reads this same centre, so
-        // it must reflect this frame's head pose, not last frame's.
-        update_player_body(head_world_pos, dt);
-
-        // ------------------------------------------------------------
-        // Startup locomotion menu.
-        //
-        // While the menu is open no locomotion fires (otherwise the user
-        // could drift off the first panel while choosing). Confirm is
-        // edge-triggered on the LEFT trigger so the user can aim with
-        // the left hand and commit without changing grip.
-        // ------------------------------------------------------------
-        const bool menu_open =
-            locomotion_menu_enabled_ && (menu_.page != MenuPage::Closed);
-
-        // Thumbstick dead zone + cardinal snap now live in the shared
-        // mechanics/builtin/StickFilter.h, applied by whichever locomotion
-        // mechanic is reading the stick.
-
-        if (menu_open) {
-            // Anchor the panel the first time we show it (and have a real
-            // HMD pose) so it appears at a comfortable spot in front of
-            // the user's eyes. Don't re-anchor on page flips -- that
-            // would jerk the panel around mid-decision.
-            //
-            // Per Meta Horizon "Head -> Comfort" guidance: place primary
-            // UI 1.5m forward, slightly below eye level (~10-15 deg below
-            // horizon) so the user's natural line of sight rests on it
-            // without neck strain. At 1.5m, 10 deg below = ~0.20m drop.
-            if (!menu_.anchor_set && last_head_pose_valid_) {
-                // Anchor relative to the freshest head pose we have.
-                const Vec3 head = head_pose_fresh ? head_world_pos
-                                                  : last_head_world_pos_;
-                const Vec3 fwd  = head_pose_fresh ? head_forward_xz
-                                                  : last_head_forward_xz_;
-                constexpr float kMenuDistance      = 1.5f;
-                constexpr float kMenuBelowEyeMeters = 0.20f;
-                menu_.world_anchor = Vec3(
-                    head.x + fwd.x * kMenuDistance,
-                    head.y - kMenuBelowEyeMeters,
-                    head.z + fwd.z * kMenuDistance);
-                // Rotate so the panel's local +Z (where the icons sit)
-                // points back toward the user. yaw_only_matrix(pos, y)
-                // rotates +Z by ``y`` around world Y; we want
-                // R(y)*(0,0,1) == -fwd, hence atan2(-fwd.x, -fwd.z).
-                menu_.yaw_rad = std::atan2(-fwd.x, -fwd.z);
-                menu_.anchor_set = true;
-                PTV_INFO(
-                    "Locomotion menu anchored at ({:.2f}, {:.2f}, {:.2f}) "
-                    "{:.2f}m forward of HMD eye (y={:.2f}m).",
-                    menu_.world_anchor.x, menu_.world_anchor.y,
-                    menu_.world_anchor.z, kMenuDistance, head.y);
-            }
-
-            // Hit-test: shoot a ray from EACH controller (the user can
-            // point with either hand) and pick whichever pad/hand pair
-            // has the closest distance below ``kHitRadius``. ``active_hand``
-            // remembers which controller drove the highlight so we can
-            // show the right confirmation hint AND so a stray trigger
-            // press from the *other* hand doesn't false-fire.
-            menu_.highlighted = -1;
-            menu_.active_hand = -1;
-            {
-                const Mat4 menu_world =
-                    yaw_only_matrix(menu_.world_anchor, menu_.yaw_rad);
-                // Compute world centers for the two pads on this page.
-                Vec4 a4 = menu_world * Vec4(-0.35f, 0.0f, 0.0f, 1.0f);
-                Vec4 b4 = menu_world * Vec4( 0.35f, 0.0f, 0.0f, 1.0f);
-                const Vec3 pad_a(a4);
-                const Vec3 pad_b(b4);
-                const float kHitRadius = 0.35f;
-                float best_dist = kHitRadius;
-
-                for (int h = 0; h < 2; ++h) {
-                    if (!hand_valid[h] || !aim_world_valid[h]) continue;
-                    Vec3 ro = hand_world_pos[h];
-                    // Aim along the controller body (/aim/pose -Z), not
-                    // the angled grip handle (/grip/pose -Z), so the
-                    // user points where the controller visually points.
-                    Vec3 rd = aim_world_rot[h] * Vec3(0, 0, -1);
-                    rd = glm::normalize(rd);
-
-                    auto ray_dist = [&](const Vec3& p) {
-                        Vec3 v = p - ro;
-                        float t = glm::dot(v, rd);
-                        if (t < 0) return 1e9f;
-                        Vec3 closest = ro + rd * t;
-                        return glm::length(closest - p);
-                    };
-                    const float da = ray_dist(pad_a);
-                    const float db = ray_dist(pad_b);
-                    const int hi = (da <= db) ? 0 : 1;
-                    const float d = (hi == 0) ? da : db;
-                    if (d < best_dist) {
-                        best_dist = d;
-                        menu_.highlighted = hi;
-                        menu_.active_hand = h;
-                    }
-                }
-            }
-
-            // Confirm: rising edge on EITHER trigger. We accept any hand's
-            // trigger so both controllers feel equally responsive (the
-            // visual highlight already tells the user which pad will fire).
-            for (int h = 0; h < 2; ++h) {
-                const float trig = input.trigger[h];
-                const bool trig_edge =
-                    (menu_.prev_trigger[h] < 0.5f) && (trig >= 0.5f);
-                if (trig_edge && menu_.highlighted >= 0 &&
-                    menu_.confirm_cooldown_s <= 0.0f) {
-                    if (menu_.page == MenuPage::Root) {
-                        // Root page layout: LEFT pad = Walking (opens the
-                        // sliding-style sub-menu), RIGHT pad = Teleport.
-                        if (menu_.highlighted == 0) {
-                            menu_.page = MenuPage::SlidingSubmenu;
-                            menu_.confirm_cooldown_s = 0.5f;
-                            PTV_INFO("Menu: sliding submenu.");
-                        } else {
-                            locomotion_ = LocomotionMode::Teleport;
-                            menu_.page = MenuPage::Closed;
-                            PTV_INFO("Locomotion: Teleport selected.");
-                        }
-                    } else if (menu_.page == MenuPage::SlidingSubmenu) {
-                        // Sub-menu: LEFT = Head-Relative, RIGHT = Controller-Relative.
-                        locomotion_ =
-                            (menu_.highlighted == 0)
-                                ? LocomotionMode::SlideHeadRelative
-                                : LocomotionMode::SlideControllerRelative;
-                        menu_.page = MenuPage::Closed;
-                        PTV_INFO(
-                            "Locomotion: Sliding ({}) selected.",
-                            (locomotion_ == LocomotionMode::SlideHeadRelative)
-                                ? "head-relative"
-                                : "controller-relative");
-                    }
-                    // Stop scanning the rest of the hands this frame --
-                    // we already committed.
-                    menu_.prev_trigger[h] = trig;
-                    for (int j = h + 1; j < 2; ++j) {
-                        menu_.prev_trigger[j] = input.trigger[j];
-                    }
-                    break;
-                }
-                menu_.prev_trigger[h] = trig;
-            }
+        // The headset pose in stage space, kept so the player motor, teleport
+        // and snap turn can recompose the head against a rig that moved
+        // earlier this frame.
+        if (input.head_valid) {
+            head_local_ = xr_pose_to_matrix(input.head.pose);
+            head_local_valid_ = true;
         }
+
+        // Without the motor (riding a vehicle, a shrunk player) the contact
+        // capsule simply follows the headset, as it always did. With it, the
+        // motor owns the capsule and moves it after locomotion has run.
+        if (!motor_active()) update_player_body(head_world_pos, dt);
+
+        // A game whose default locomotion mode is not one it binds would
+        // otherwise leave the stick doing nothing.
+        reconcile_available_modes();
 
         // ------------------------------------------------------------
         // Snapshot builder.
@@ -4355,6 +4557,11 @@ int Application::run(const Config& cfg) {
         // resolved by then, so a weapon mechanic notices it was picked up on
         // the SAME frame rather than the next one.
         // ------------------------------------------------------------
+        // How far the rig moved since the poses above were composed. Identity
+        // until the motor runs; afterwards it carries every tracked pose along
+        // with the rig, so hands and head reach Simulate-phase mechanics (the
+        // avatar's arm IK above all) where they are NOW, not a stride behind.
+        Mat4 pose_correction(1.0f);
         auto build_snapshot = [&]() {
             InputSnapshot s;
             s.dt = dt;
@@ -4370,6 +4577,16 @@ int Application::run(const Config& cfg) {
                 hs.thumbrest_touched = input.thumbrest_touch[h];
                 hs.prev_trigger_touched = prev_input_.trigger_touch[h];
                 hs.prev_thumbrest_touched = prev_input_.thumbrest_touch[h];
+                hs.thumbstick_touched = input.thumbstick_touch[h];
+                hs.prev_thumbstick_touched = prev_input_.thumbstick_touch[h];
+                hs.face_button_touched =
+                    (h == 0) ? (input.button_x_touch || input.button_y_touch)
+                             : (input.button_a_touch || input.button_b_touch);
+                hs.prev_face_button_touched =
+                    (h == 0) ? (prev_input_.button_x_touch ||
+                                prev_input_.button_y_touch)
+                             : (prev_input_.button_a_touch ||
+                                prev_input_.button_b_touch);
                 if (hand_valid[h]) {
                     hs.hand_position = hand_world_pos[h];
                     hs.hand_rotation = hand_world_rot[h];
@@ -4377,7 +4594,8 @@ int Application::run(const Config& cfg) {
                 }
                 if (aim_world_valid[h]) {
                     hs.aim_position = mat_translation(
-                        rig_mat * xr_pose_to_matrix(aim_poses[h]));
+                        pose_correction * rig_mat *
+                        xr_pose_to_matrix(aim_poses[h]));
                     hs.aim_rotation = aim_world_rot[h];
                     hs.aim_valid = true;
                 }
@@ -4444,11 +4662,51 @@ int Application::run(const Config& cfg) {
                               MechanicPhase::Input);
         }
 
+        // ------------------------------------------------------------
+        // Player motor.
+        //
+        // Locomotion mechanics only REQUESTED movement during the Input
+        // phase. Resolve it now, together with the player's physical
+        // walking, against the world: stick movement is swept through the
+        // body so walls stop it from every direction, the head is kept out
+        // of walls, and the feet are put back on the ground.
+        // ------------------------------------------------------------
+        if (motor_active()) {
+            step_player_motor(dt);
+        } else {
+            apply_pending_move_legacy();
+        }
+        {
+            const Mat4 rig_after = rig_world_matrix();
+            pose_correction = rig_after * glm::inverse(rig_mat);
+            const Quat corr_rot = glm::angleAxis(
+                matrix_yaw(rig_after) - matrix_yaw(rig_mat), Vec3(0, 1, 0));
+            for (int h = 0; h < 2; ++h) {
+                hand_world[h] = pose_correction * hand_world[h];
+                hand_world_pos[h] =
+                    Vec3(pose_correction * Vec4(hand_world_pos[h], 1.0f));
+                hand_world_rot[h] = corr_rot * hand_world_rot[h];
+                aim_world_rot[h] = corr_rot * aim_world_rot[h];
+                const auto he = hand_entities_[static_cast<size_t>(h)];
+                if (he != entt::null && hand_valid[h] &&
+                    world_.registry().all_of<CTransform>(he)) {
+                    place_hand_entity(h, hand_world_pos[h], hand_world_rot[h]);
+                }
+            }
+            if (input.head_valid) {
+                head_world_pos =
+                    Vec3(pose_correction * Vec4(head_world_pos, 1.0f));
+                head_world_rot = corr_rot * head_world_rot;
+                last_head_world_pos_ = head_world_pos;
+            }
+            draw_hand_debug_axes(hand_world_pos, hand_world_rot, hand_valid);
+        }
+
         // Left-stick SLIDE locomotion now lives in the built-in mechanics
         // builtin.locomotion.slide.head_relative and
         // builtin.locomotion.slide.controller_relative (Input phase). They
         // gate themselves on ILocomotion::active_mode() and input_locked(),
-        // so the locomotion menu still suppresses movement while it is open.
+        // so an open settings menu still suppresses movement.
 
         // Grab, throw and the kinematic follow for held objects now live in
         // the builtin.grab / builtin.throw mechanics, which ran in the Input
@@ -4477,6 +4735,10 @@ int Application::run(const Config& cfg) {
 
         mechanics_.update(world_, dt, snapshot, mech_ctx_,
                           MechanicPhase::Simulate);
+
+        // Every motion mechanic has asked for (or not asked for) a vignette
+        // this frame; turn that into what the renderer draws.
+        tick_comfort_vignette(dt);
 
         // Decay the purely visual transform offsets (recoil kick, flinch)
         // AFTER Simulate so an impulse requested this frame is drawn this
@@ -4586,70 +4848,6 @@ int Application::run(const Config& cfg) {
                 if (hovering) c = c * 1.35f + Vec4(0.08f, 0.08f, 0.08f, 0.0f);
                 c.a = 1.0f;
                 push_hand_mesh(items, hand_world[h], c);
-            }
-
-            // -------- Locomotion menu 3D panel --------
-            // We wait for ``menu_.anchor_set`` (which only flips true once
-            // a real HMD pose has been observed) before drawing so the
-            // panel never appears at the stale default position for a
-            // frame at session start -- it just pops directly into its
-            // comfortable eye-relative anchor.
-            if (locomotion_menu_enabled_ && menu_.page != MenuPage::Closed &&
-                menu_.anchor_set) {
-                const Mat4 menu_world =
-                    yaw_only_matrix(menu_.world_anchor, menu_.yaw_rad);
-
-                // Title bar (cyan slab above the pads) acts as a visual
-                // "sign" even without text rendering.
-                const Vec4 title_color =
-                    (menu_.page == MenuPage::Root)
-                        ? Vec4(0.25f, 0.85f, 1.00f, 1.0f)    // cyan = root
-                        : Vec4(1.00f, 0.55f, 0.85f, 1.0f);   // pink = sliding
-                push_cube(items, menu_world, Vec3(0.0f, 0.28f, 0.0f),
-                          Vec3(0.80f, 0.07f, 0.03f), title_color);
-
-                // Layout (matches confirm logic above):
-                //   Root page    : LEFT = Walking, RIGHT = Teleport
-                //   Sub-menu page: LEFT = Head-Relative, RIGHT = Controller-Relative
-                // Procedural fallbacks: 1=person, 0=portal, 2=headset, 3=joystick.
-                int slot_left, slot_right;
-                int proc_left, proc_right;
-                if (menu_.page == MenuPage::Root) {
-                    slot_left  = menu_icon_walking_slot_;
-                    slot_right = menu_icon_teleport_slot_;
-                    proc_left  = 1;  // green person
-                    proc_right = 0;  // blue portal
-                } else {
-                    slot_left  = menu_icon_head_relative_slot_;
-                    slot_right = menu_icon_controller_relative_slot_;
-                    proc_left  = 2;  // headset
-                    proc_right = 3;  // joystick
-                }
-                Vec3 wc_a, wc_b;
-                push_menu_pad(items, menu_world, Vec3(-0.35f, 0.0f, 0.0f),
-                              slot_left,  proc_left,
-                              menu_.highlighted == 0, &wc_a);
-                push_menu_pad(items, menu_world, Vec3( 0.35f, 0.0f, 0.0f),
-                              slot_right, proc_right,
-                              menu_.highlighted == 1, &wc_b);
-
-                // Pulsing green confirm button next to whichever pad is
-                // currently targeted. It's only visible when something
-                // is highlighted, signalling "pull trigger to confirm".
-                if (menu_.highlighted >= 0) {
-                    using clk = std::chrono::steady_clock;
-                    static const auto t0 = clk::now();
-                    float t = std::chrono::duration<float>(clk::now() - t0).count();
-                    float pulse = 0.70f + 0.30f * std::sin(t * 4.0f);
-                    Vec3 pos = (menu_.highlighted == 0)
-                                   ? Vec3(-0.35f, -0.22f, 0.0f)
-                                   : Vec3( 0.35f, -0.22f, 0.0f);
-                    push_cube(items, menu_world, pos,
-                              Vec3(0.10f, 0.06f, 0.02f),
-                              Vec4(0.15f * pulse, 0.95f * pulse,
-                                   0.25f * pulse, 1.0f),
-                              3.0f);
-                }
             }
 
             // The teleport aim arc + landing marker used to be drawn here.
@@ -4875,45 +5073,7 @@ bool Application::initialize(const Config& cfg) {
         physics_.rebuild_from_world(world_);
         build_nav_graph();
 
-        locomotion_menu_enabled_ = scene_.locomotion_menu_enabled;
-        slide_max_speed_mps_ = scene_.slide_max_speed_mps;
-        slide_accel_tau_s_ = scene_.slide_accel_tau_s;
-        slide_decel_tau_s_ = scene_.slide_decel_tau_s;
-        teleport_launch_speed_mps_ = scene_.teleport_launch_speed_mps;
-        teleport_max_horizontal_m_ = scene_.teleport_max_horizontal_m;
-        teleport_floor_y_ = scene_.teleport_floor_y;
-        snap_turn_degrees_ = scene_.snap_turn_degrees;
-        snap_turn_cooldown_s_ = scene_.snap_turn_cooldown_s;
-
-        if (!locomotion_menu_enabled_) {
-            menu_.page = MenuPage::Closed;
-            auto lower = [](std::string s) {
-                for (char& c : s) {
-                    c = static_cast<char>(
-                        std::tolower(static_cast<unsigned char>(c)));
-                }
-                return s;
-            };
-            const std::string m = lower(scene_.default_locomotion_mode);
-            if (m.find("controller") != std::string::npos) {
-                locomotion_ = LocomotionMode::SlideControllerRelative;
-            } else if (m.find("head") != std::string::npos ||
-                       m == "slide_head_relative") {
-                locomotion_ = LocomotionMode::SlideHeadRelative;
-            } else if (m.find("teleport") != std::string::npos) {
-                locomotion_ = LocomotionMode::Teleport;
-            } else if (!scene_.default_locomotion_mode.empty()) {
-                locomotion_ = LocomotionMode::Teleport;
-            } else if (scene_.locomotion == "mixed" ||
-                       scene_.locomotion == "smooth") {
-                locomotion_ = LocomotionMode::SlideHeadRelative;
-            } else if (scene_.locomotion == "teleport" ||
-                       scene_.locomotion == "stationary") {
-                locomotion_ = LocomotionMode::Teleport;
-            } else {
-                locomotion_ = LocomotionMode::SlideHeadRelative;
-            }
-        }
+        apply_player_settings_from_scene();
     } else {
         PTV_WARN("No scene.json provided. The engine will run idle.");
     }
@@ -4951,7 +5111,9 @@ bool Application::initialize(const Config& cfg) {
     persistence_svc_ = std::make_unique<PersistenceService>(this);
     transition_svc_ = std::make_unique<TransitionService>(this);
     ui_svc_ = std::make_unique<UiService>(this);
+    comfort_svc_ = std::make_unique<ComfortService>(this);
     mech_ctx_.locomotion = locomotion_svc_.get();
+    mech_ctx_.comfort = comfort_svc_.get();
     mech_ctx_.physics = physics_svc_.get();
     mech_ctx_.contacts = contacts_svc_.get();
     mech_ctx_.spawn = spawn_svc_.get();
@@ -4971,7 +5133,7 @@ bool Application::initialize(const Config& cfg) {
     mech_ctx_.transition = transition_svc_.get();
     mech_ctx_.ui = ui_svc_.get();
 
-    ensure_player_locomotion_bindings();
+    check_player_mechanic_roles();
     mechanics_.attach_bindings(world_, mech_ctx_);
     // NOTE: DebugUI is intentionally NOT initialized here. See
     // README / troubleshooting: ImGui >= 1.92 asserts on first Begin()
@@ -4998,51 +5160,71 @@ bool Application::initialize(const Config& cfg) {
     // when no scene loaded -- that is exactly the case where you want to see
     // whether tracking works.
     if (renderer_ready_) create_hand_entities();
+    return true;
+}
 
-    // Pre-load locomotion-menu icons. The four GLBs live in the repo's
-    // 3D_Objects/ folder; we walk up from the running .exe to find it so
-    // both the starter-room sample and orchestrator-built games pick up
-    // the same assets. ``kIconScale`` is the longest-axis size in metres
-    // and is chosen to fit comfortably inside the 0.30 x 0.30 m pad.
-    if (renderer_ready_) {
-        const std::string root = find_3d_objects_dir();
-        if (root.empty()) {
-            PTV_WARN(
-                "3D_Objects/ folder not found by walking up from the exe -- "
-                "locomotion menu will use procedural fallback icons.");
-        } else {
-            namespace fs = std::filesystem;
-            constexpr float kIconScale = 0.22f;
-            auto load = [&](const char* name) -> int {
-                fs::path p = fs::path(root) / name;
-                std::error_code ec;
-                if (!fs::exists(p, ec)) {
-                    PTV_WARN("Locomotion menu icon missing: {}",
-                             p.string());
-                    return -1;
-                }
-                int slot = renderer_.load_glb(p.string(), kIconScale);
-                if (slot < 0) {
-                    PTV_WARN("Failed to load locomotion menu icon: {}",
-                             p.string());
-                }
-                return slot;
-            };
-            menu_icon_walking_slot_  = load("Walking Locomotion.glb");
-            menu_icon_teleport_slot_ = load("Teleport Locomotion.glb");
-            menu_icon_head_relative_slot_ = load(
-                "Head Relative (Sub Category of Walking Locomotion).glb");
-            menu_icon_controller_relative_slot_ = load(
-                "Controller Relative (Sub Category of Walking Locomotion).glb");
-            PTV_INFO(
-                "Locomotion menu icons loaded (walking={}, teleport={}, "
-                "head-rel={}, controller-rel={}).",
-                menu_icon_walking_slot_, menu_icon_teleport_slot_,
-                menu_icon_head_relative_slot_,
-                menu_icon_controller_relative_slot_);
+void Application::apply_player_settings_from_scene() {
+    slide_max_speed_mps_ = scene_.slide_max_speed_mps;
+    slide_accel_tau_s_ = scene_.slide_accel_tau_s;
+    slide_decel_tau_s_ = scene_.slide_decel_tau_s;
+    teleport_launch_speed_mps_ = scene_.teleport_launch_speed_mps;
+    teleport_max_horizontal_m_ = scene_.teleport_max_horizontal_m;
+    teleport_floor_y_ = scene_.teleport_floor_y;
+    snap_turn_degrees_ = scene_.snap_turn_degrees;
+    snap_turn_cooldown_s_ = scene_.snap_turn_cooldown_s;
+
+    auto lower = [](std::string s) {
+        for (char& c : s) {
+            c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        }
+        return s;
+    };
+    const std::string m = lower(scene_.default_locomotion_mode);
+    if (m.find("controller") != std::string::npos) {
+        locomotion_ = LocomotionMode::SlideControllerRelative;
+    } else if (m.find("head") != std::string::npos || m.find("slide") !=
+                                                          std::string::npos) {
+        locomotion_ = LocomotionMode::SlideHeadRelative;
+    } else {
+        locomotion_ = LocomotionMode::Teleport;
+    }
+    turn_mode_ = (lower(scene_.default_turn_mode) == "smooth")
+                     ? ::ptv::TurnMode::Smooth
+                     : ::ptv::TurnMode::Snap;
+
+    // Nothing is available until a mechanic says so. A stationary game binds
+    // no locomotion at all, and that is a complete, valid game.
+    mode_available_ = {false, false, false};
+    turn_available_ = {false, false};
+    input_lock_owners_.clear();
+    vignette_channels_ = {};
+    vertical_mode_ = ::ptv::VerticalMode::Grounded;
+    pending_move_ = Vec3(0.0f);
+    pending_jump_mps_ = 0.0f;
+    motor_needs_sync_ = true;
+}
+
+void Application::reconcile_available_modes() {
+    // A game whose default mode is not one it actually binds (a teleport-only
+    // game authored with a slide default, say) would otherwise leave the stick
+    // doing nothing. Fall back to the first mode that exists.
+    const auto idx = static_cast<size_t>(locomotion_);
+    const bool any_mode =
+        mode_available_[0] || mode_available_[1] || mode_available_[2];
+    if (any_mode && !mode_available_[idx]) {
+        for (size_t i = 0; i < mode_available_.size(); ++i) {
+            if (mode_available_[i]) {
+                locomotion_ = static_cast<LocomotionMode>(i);
+                break;
+            }
         }
     }
-    return true;
+    const auto tidx = static_cast<size_t>(turn_mode_);
+    const bool any_turn = turn_available_[0] || turn_available_[1];
+    if (any_turn && !turn_available_[tidx]) {
+        turn_mode_ = turn_available_[0] ? ::ptv::TurnMode::Snap
+                                        : ::ptv::TurnMode::Smooth;
+    }
 }
 
 void Application::build_render_env() {

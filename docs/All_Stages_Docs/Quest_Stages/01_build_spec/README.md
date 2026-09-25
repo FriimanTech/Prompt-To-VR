@@ -152,6 +152,23 @@ There is no partial progress inside this stage (unlike scene_spec or codegen).
 
 Does not list Tripo assets (stage 2), assign bindings (stage 4), or place entities (stage 5). It only establishes the skeleton other planners fill in.
 
+### Player experience and the movement block
+
+`ProjectState.player_experience` (`hands_only` / `full_avatar`, picked in the UI
+under Target device) is mirrored onto `BuildSpec.player_experience` exactly like
+`target_device`: the stage overwrites whatever the model wrote
+(`pipeline/player_experience.py`), and the orchestrator re-stamps older
+projects at run start. Hands Only also pins `player_avatar.coverage` to
+`hands_only` and drops any player-body `AssetEntry`.
+
+`BuildSpec.movement` is the single decision about how the player travels:
+`modes` (`teleport` / `slide_head` / `slide_controller`, may be EMPTY for a
+stationary game), `default_mode`, `turning` (`snap` / `smooth`, may be empty),
+`default_turn`, `vignette` (`slide`, `smooth_turn`, `user_toggle`; all false
+unless the prompt asks) and `settings_menu`. The prompt carries the Beat Saber,
+stationary-bow and teleport-only-bow examples. A BuildSpec written before the
+block existed is mapped from the legacy `locomotion` field.
+
 ---
 
 ## Extend this folder

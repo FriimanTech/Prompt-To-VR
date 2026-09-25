@@ -10,11 +10,29 @@ generated code stay consistent across games.
 | `builtin.locomotion.slide.head_relative`         | Sliding  | HMD forward projected onto the floor (XZ)       | Sliding, head-relative     |
 | `builtin.locomotion.slide.controller_relative`   | Sliding  | Left-controller -Z aim projected onto the floor | Sliding, controller-relative |
 
-The starter room, and any generated game that opts into the
-`settings.locomotion.menu` flag in its BuildSpec, displays a one-time picker
-with the title **Pick your Movement Style** (Teleport / Sliding). Choosing
-"Sliding" flips the panel to **Pick your Sliding Style**
-(Head-Relative / Controller-Relative).
+Turning is its own pair of mechanics: `builtin.locomotion.snap_turn` and
+`builtin.locomotion.smooth_turn`.
+
+**Nothing is injected.** A scene binds exactly the movement mechanics its game
+has, on the `player_rig` entity, and the engine adds none. The BuildSpec
+`movement` block decides which, from the prompt:
+
+| Game | `movement` | Bound on `player_rig` |
+| ---- | ---------- | --------------------- |
+| Beat Saber style | `modes: []`, `turning: []` | `builtin.hand_pose` only |
+| Stationary bow, "choose snap or smooth" | `modes: []`, `turning: [snap, smooth]` | hand_pose, snap_turn, smooth_turn, movement_settings_menu |
+| Same bow game, "teleport only" | `modes: [teleport]`, `turning: [snap, smooth]` | + teleport (the menu offers turning only) |
+| Travelling game, prompt silent | all three modes, `turning: [snap]` | all three modes, snap_turn, movement_settings_menu |
+
+A scene with a player and no locomotion is a valid stationary game: the player
+still walks around their real playspace (grounded, kept out of walls), and the
+engine logs nothing about it.
+
+**Settings menu.** `builtin.movement_settings_menu` replaces the old hard-coded
+startup picker. It opens on a button, and its sections come from what the scene
+actually binds: locomotion mode (only with two or more modes), turn style (only
+with both), and a vignette switch (only when the prompt asked for one). A game
+with nothing to choose never gets the menu.
 
 ## Implementation notes
 
@@ -26,12 +44,22 @@ Each locomotion style is a real `IMechanic` in its own module:
 | `builtin.locomotion.slide.head_relative` | `engine/runtime/src/mechanics/builtin/slide/` |
 | `builtin.locomotion.slide.controller_relative` | `engine/runtime/src/mechanics/builtin/slide/` |
 | `builtin.locomotion.snap_turn` (alias `builtin.snap_turn`) | `engine/runtime/src/mechanics/builtin/snap_turn/` |
+| `builtin.locomotion.smooth_turn` | `engine/runtime/src/mechanics/builtin/smooth_turn/` |
+| `builtin.movement_settings_menu` | `engine/runtime/src/mechanics/builtin/movement_settings_menu/` |
 
 The shared thumbstick dead zone lives in
 `engine/runtime/src/mechanics/builtin/StickFilter.h` and the slide comfort
-ramp in `builtin/slide/SlideComfort.h`. Only the startup **menu** (its panel
-geometry and hit testing) is still in `Application.cpp`; it drives the
-mechanics through `ILocomotion::set_active_mode()`.
+ramp in `builtin/slide/SlideComfort.h`. Each movement mechanic declares
+itself available on attach (`ILocomotion::declare_mode_available` /
+`declare_turn_available`), which is how the settings menu knows what to
+offer; it switches them through `set_active_mode()` / `set_turn_mode()`.
+
+**One owner per role.** Each movement mechanic fills a role (`role:teleport`,
+`role:slide_head`, `role:slide_controller`, `role:snap_turn`,
+`role:smooth_turn`, `role:movement_settings_menu`), and a scene may bind at
+most one mechanic per role -- a generated copy of teleport REPLACES the
+built-in, it is never bound beside it. `scene_compile` fails the build on a
+second owner; the engine logs an error for hand-authored scenes that do it.
 
 All of them run in `MechanicPhase::Input` with `MechanicScope::Player`, and
 move the player exclusively through `ILocomotion` (see
@@ -41,7 +69,10 @@ never by touching the rig directly. Because each one early-outs unless
 all three and the player can switch at runtime without them fighting.
 
 **Input map.** Left thumbstick X = strafe; **+Y = forward; -Y = backward**.
-Right thumbstick X = snap turn (45° per push, 0.30 s cooldown). This
+Right thumbstick X = snap turn (45° per flick; it re-arms only after the
+stick returns below 0.3, so holding it over turns once) or smooth turn
+(continuous, with a dead zone). Only the selected turn style reacts
+(`ILocomotion::turn_mode()`). Neither ever blinks or fades the view. This
 matches the OpenXR 1.1 spec ("Standard input identifiers": *"+1 means all
 the way right for x axis or all the way up for y axis"*) and Meta's
 ["Locomotion input maps"](https://developers.meta.com/horizon/design/locomotion-input-maps/)
@@ -136,10 +167,42 @@ left-controller pose), the runtime emits one
 player isn't moving" is always traceable in the logs to a specific
 missing tracked pose rather than appearing as silent inaction.
 
-**Teleport.** Push the left stick past 0.5 to draw a cyan parabolic arc
-launched from the controller (`launch_speed = 6 m/s`, `g = 9.8 m/s²`,
-horizontal cap = 12 m). When the arc clears the floor a translucent
-landing disc appears. Releasing the stick (magnitude < 0.1) commits.
+**Teleport.** Push the left stick FORWARD (y > 0.5, within about 35° of
+straight ahead) to draw one cyan parabolic arc from the controller; pushing
+sideways or back never arms it. Distance is set by the controller's pitch:
+point up to go farther, down to land closer (pitch clamped to -60°..+35°,
+`max_range_m` caps it). A translucent landing disc marks a valid spot, and
+releasing the stick commits. The move is instant -- no fade, no blink.
+
+## The player motor
+
+The player is a Jolt `CharacterVirtual` capsule whose feet are the rig floor.
+Every frame, before any mechanic runs:
+
+1. stick movement from `ILocomotion::move_horizontal` / `translate` is
+   resolved with gravity, stick-to-floor, stair stepping and a 50° slope
+   limit -- a slide follows ramps and stairs and can never climb a wall;
+2. the player's real walking (headset XZ) is resolved the same way;
+3. the head is swept against static geometry, and any part of a lean that
+   would enter a wall is pushed back onto the rig -- the player cannot put
+   their head through a wall from any angle;
+4. the capsule height follows the real head height, so crouching works.
+
+Walls collide from both sides (`CollideWithBackFaces`), and a blocked move
+fails closed. `translate()` is horizontal-only while the vertical mode is
+`Grounded` (the default); a mechanic that really wants flight or swimming
+calls `set_vertical_mode(VerticalMode::Free)`. Jumps go through `jump(v)`.
+
+## Comfort vignette
+
+Sliding and smooth turning can darken the edges of the view while moving,
+following Meta's tunnelling guidance: defined in DEGREES of visual angle with
+a feathered edge (the same on every headset), graded by speed, eased in over
+~0.08 s and faded out ~0.25 s after a 0.15 s wait. It is OFF unless the
+prompt asks for comfort options (`movement.vignette` in the BuildSpec), set
+per binding as `"vignette": {"enabled": true, "user_toggle": true,
+"strength": 0.7, "inner_fov_deg": 55, "feather_deg": 20}`. Teleport and snap
+turn never get one.
 
 ## Source documents
 
@@ -149,25 +212,23 @@ landing disc appears. Releasing the stick (magnitude < 0.1) commits.
 
 ## Catalog IDs and the planner
 
-`apps/orchestrator/ptv_orchestrator/engine_catalog.py` exposes these three
-IDs to the mechanic-planner agent. When a prompt is ambiguous about
-locomotion (e.g. "Superman Flight Sim, the user can walk in the city"),
-the planner is instructed to add **both** sliding modes plus the menu
-binding so the player can choose at runtime, exactly the way the starter
-room does. See [`docs/engine-growth.md`](engine-growth.md) for the
+`apps/orchestrator/ptv_orchestrator/engine_catalog.py` exposes these IDs to
+the mechanic-planner agent, each with its `role:`. The planner is told which
+roles this game needs, and a deterministic reconcile
+(`pipeline/movement.py`) then makes `mechanic_plan.json` say exactly that:
+it adds the stock built-in for any missing role, collapses duplicates (a
+generated replacement beats its base built-in), and removes movement the
+BuildSpec does not allow. `scene_compile` (`pipeline/player_bindings.py`)
+binds them on `player_rig` and writes `default_locomotion_mode` /
+`default_turn_mode`. See [`docs/engine-growth.md`](engine-growth.md) for the
 catalog-and-promotion lifecycle.
 
 ## Scene tuning (`scene.json` → runtime)
 
 Mechanic bindings such as `builtin.locomotion.slide.head_relative` on the
-`systems_global` entity attach the real mechanic listed in the table above.
-
-**The engine guarantees all four are attached.** The runtime menu lets the
-player select any style at any time, so a scene that binds only some of them
-would leave the others dead. `Application::ensure_player_locomotion_bindings`
-therefore adds any missing locomotion mechanic to a `player_locomotion`
-entity at scene load. Whatever the scene DID bind is left untouched, params
-included, so scene-authored tuning always wins.
+`player_rig` entity attach the real mechanic listed in the table above. What
+the scene binds is exactly what runs; a mode the scene does not bind does not
+exist in that game, and the settings menu does not offer it.
 
 > **Engine-wide.** The starter room and every generated game share the
 > same `ptv_runtime.lib`, so a locomotion fix in the built-in modules
@@ -187,8 +248,11 @@ mechanic defaults to these and lets its own binding `params` override them:
 
 | JSON field | Default | Effect |
 | ---------- | ------- | ------ |
-| `locomotion_menu` | `true` | When `false`, the startup picker is skipped and `default_locomotion_mode` (or BuildSpec-style `locomotion` string) selects the initial mode. |
-| `default_locomotion_mode` | `""` | When the menu is off: substring match on `controller` / `head` / `teleport`, else fall back from `locomotion` (`mixed` → head-relative sliding). |
+| `locomotion_menu` | `false` | Legacy; the hard-coded startup picker is gone. Use `builtin.movement_settings_menu`. |
+| `default_locomotion_mode` | `""` | The mode active at start: substring match on `controller` / `head` / `teleport` among the bound modes, else the first bound one. |
+| `default_turn_mode` | `"snap"` | `snap` or `smooth`, when both are bound. |
+| `hands.source` | `"default"` | `default` loads the engine's rigged hands (Hands Only); `avatar` uses the player avatar's own hands and creates meshless anchors. |
+| `hands.scale_m`, `hands.grip_trim_deg`, `hands.debug_axes` | `0.20`, `[0,0,0]`, `false` | Default-hand size, a per-profile grip trim, and an axis overlay for on-device calibration. |
 | `slide_max_speed_mps` | `1.5` | Comfort cap for sliding (Meta walking pace). |
 | `slide_accel_tau_s` | `0.12` | Acceleration smoothing time constant. |
 | `slide_decel_tau_s` | `0.18` | Deceleration smoothing time constant. |
@@ -240,9 +304,8 @@ plane. The player lands on the actual generated ground / platforms / terrain at
 its real height (the commit sets the rig Y to the hit point), and near-vertical
 surfaces (walls) are rejected as landing spots. This makes agent-generated
 multi-level environments (see [`world-generation.md`](world-generation.md))
-traversable with the default comfort locomotion. Smooth (slide) locomotion is
-still free-fly on XZ; a Jolt `CharacterVirtual` capsule for wall-blocked
-sliding is a tracked follow-up.
+traversable with the default comfort locomotion. Sliding goes through the
+player motor above, so it follows the same ground and stops at the same walls.
 
 ## Reference frames: riding things that move
 

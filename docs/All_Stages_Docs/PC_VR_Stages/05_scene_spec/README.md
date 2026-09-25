@@ -193,6 +193,14 @@ An `EntitySpec` may declare up to 24 `equip_slots`. A slot is a place **on the w
 
 The strict wire model (`scene_spec_wire.py`) mirrors the field verbatim. It has to: strict mode permits **only** the declared surface, so a field the wire schema omits is one the agent physically cannot emit.
 
+### The player's bindings
+
+`player_rig` (meshless, tagged `player_rig`) hosts `builtin.hand_pose` and the
+locomotion, turning and settings-menu items the MechanicPlan lists -- nothing
+else. In Full Player Avatar the `player_avatar` entity binds
+`builtin.avatar_body` itself. A Hands Only scene has no avatar entity. The
+compiler fills in anything forgotten and rejects contradictions.
+
 ---
 
 ## Extend this folder

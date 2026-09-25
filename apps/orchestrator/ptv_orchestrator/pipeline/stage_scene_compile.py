@@ -44,7 +44,9 @@ from ptv_schemas import (
 )
 from ptv_schemas.asset_manifest import AssetCategory
 
+from ..engine_catalog import role_of
 from .context import PipelineContext, StageResult
+from .player_bindings import bind_player_roles, player_block_fields
 
 
 SCENE_JSON_VERSION = 1
@@ -529,65 +531,29 @@ def _default_entity_for_asset(
     }
 
 
-def bind_avatar_body(
-    entities: list[dict[str, Any]],
-    build_spec: BuildSpec,
-    on_warning: Callable[[str], None] | None = None,
-) -> int:
-    """Bind ``builtin.avatar_body`` to the player's body with its BuildSpec.
+def _apply_hold_offsets(
+    entities: list[dict[str, Any]], asset_by_id: dict[str, AssetItem]
+) -> None:
+    """Carry the manifest's per-asset grip correction onto its grab binding.
 
-    The engine binds this mechanic on its own whenever a scene places an
-    entity tagged ``player_avatar``, so the body is never left unposed. But an
-    auto-bind has no params, which means it runs on defaults -- and the
-    BuildSpec agent already made every one of those decisions from the prompt.
-    ``leg_animation: false`` ("the avatar should just slide") and
-    ``head_visibility: toggleable`` ("let me see my own face in the mirror")
-    were being decided, written down, and then silently discarded here.
-
-    An explicit binding wins over the auto-bind, so emitting one is the whole
-    fix. Returns how many entities were bound.
-
-    Also strips ``attached_to`` from the avatar: the mechanic plants the body
-    on the XR rig every frame, and attachments are resolved AFTER mechanics
-    run, so a parented avatar gets pinned to its parent's authored transform
-    instead of following the player. The engine drops the attachment too, but
-    doing it here means the compiled scene says what will actually happen.
+    ``hold_rotation_offset_deg`` is for the rare asset whose geometry-derived
+    grip socket still sits wrong in the hand. It belongs to the asset, so it
+    applies wherever that asset is grabbable; a per-entity param wins.
     """
-    spec = getattr(build_spec, "player_avatar", None)
-    if spec is None:
-        return 0
-
-    params = {
-        "coverage": spec.coverage.value,
-        "head_visibility": spec.head_visibility.value,
-        "leg_animation": bool(spec.leg_animation),
-    }
-
-    bound = 0
-    for entity in entities:
-        if "player_avatar" not in (entity.get("tags") or []):
+    for e in entities:
+        mesh = e.get("mesh") or {}
+        asset = asset_by_id.get(str(mesh.get("asset_id") or ""))
+        offset = getattr(asset, "hold_rotation_offset_deg", None)
+        if not offset:
             continue
-        bindings = entity.setdefault("mechanic_bindings", [])
-        if any(
-            isinstance(b, dict) and b.get("id") == "builtin.avatar_body"
-            for b in bindings
-        ):
-            continue
-        bindings.append(
-            {
-                "id": "builtin.avatar_body",
-                "builtin_id": "builtin.avatar_body",
-                "params": dict(params),
-            }
-        )
-        bound += 1
-        if entity.pop("attached_to", None) is not None and on_warning:
-            on_warning(
-                f"entity '{entity.get('id')}' is the player avatar and was"
-                " attached to another entity; dropped the attachment so"
-                " builtin.avatar_body can plant it on the XR rig"
+        for b in e.get("mechanic_bindings") or []:
+            if not isinstance(b, dict):
+                continue
+            if (b.get("builtin_id") or b.get("id")) != "builtin.grab":
+                continue
+            b.setdefault("params", {}).setdefault(
+                "hold_rotation_offset_deg", [float(v) for v in offset]
             )
-    return bound
 
 
 def _mesh_render_fields(
@@ -621,6 +587,12 @@ def _mesh_render_fields(
         # longest axis; the runtime rescales by target_scale_meters, so the
         # world-space radius scales identically.
         out["bounds_radius_m"] = float(unit_radius) * float(target_scale_meters)
+    # Metres per GLB unit, measured once on LOD0. The runtime applies it to
+    # every LOD instead of re-measuring each file, so an object is the same
+    # size at every distance and on every launch.
+    lod0_longest = float(norm.get("lod0_longest_axis") or 0.0)
+    if lod0_longest > 1e-6 and float(target_scale_meters or 0.0) > 0.0:
+        out["unit_scale"] = float(target_scale_meters) / lod0_longest
     # Rigged assets need a CSkeleton and the skinned draw pipeline. Carrying
     # the flag in scene.json lets the runtime decide without opening every
     # GLB, and gives the build a record of which assets are animatable.
@@ -954,7 +926,10 @@ def compile_scene_json(
         referenced_asset_ids.add(asset.id)
         auto_index += 1
 
-    bind_avatar_body(entities_out, build_spec, on_warning)
+    # Every player mechanic is bound explicitly -- the engine injects none.
+    # Hands Only also drops any player-avatar entity here.
+    bind_player_roles(entities_out, plan, build_spec, on_warning)
+    _apply_hold_offsets(entities_out, asset_by_id)
 
     # Now that every mesh in the scene is known, answer the checks that could
     # not be answered entity-locally.
@@ -997,6 +972,7 @@ def compile_scene_json(
             "height_meters": build_spec.player_height_meters,
             "locomotion": build_spec.locomotion.value,
             "comfort": build_spec.comfort.value,
+            **player_block_fields(build_spec, entities_out, plan),
             "spawn": {
                 "position": [
                     scene.player_spawn.transform.position.x,
@@ -1143,6 +1119,7 @@ def _repoint_world_meshes_to_lods(
     entities: list[dict],
     nrep: dict[str, dict[str, Any]],
     contracts: dict[str, dict[str, Any]] | None = None,
+    manifest_scales: dict[str, float] | None = None,
 ) -> list[dict]:
     """Point world-generated mesh entities at the optimized LOD chain.
 
@@ -1151,28 +1128,111 @@ def _repoint_world_meshes_to_lods(
     merged into the scene verbatim, bypassing ``compile_scene_json``'s mesh
     mapping -- without this remap a single world-placed prop would drag a
     500k-triangle mesh onto the headset.
+
+    The size comes from the manifest, not from what the world builder wrote:
+    the same asset placed by the world and by the SceneSpec must be the same
+    size (a world rack at 1.0 m beside a gameplay rack at 1.15 m).
     """
 
+    scales = manifest_scales or {}
     out: list[dict] = []
     for entity in entities:
         mesh = entity.get("mesh")
         if not isinstance(mesh, dict) or not mesh.get("asset_id"):
             out.append(entity)
             continue
-        norm = nrep.get(mesh["asset_id"]) or {}
-        if not norm.get("lod_paths"):
-            out.append(entity)
-            continue
-        scale_m = float(mesh.get("target_scale_meters") or 1.0)
+        asset_id = mesh["asset_id"]
+        scale_m = float(
+            scales.get(asset_id) or mesh.get("target_scale_meters") or 1.0
+        )
+        norm = nrep.get(asset_id) or {}
         merged = dict(entity)
-        merged["mesh"] = {
-            **mesh,
-            "glb_path": norm["glb_path"],
-            **_mesh_render_fields(
-                norm, scale_m, (contracts or {}).get(mesh["asset_id"])
-            ),
-        }
+        new_mesh = {**mesh, "target_scale_meters": scale_m}
+        if norm.get("lod_paths"):
+            new_mesh["glb_path"] = norm["glb_path"]
+            new_mesh.update(
+                _mesh_render_fields(norm, scale_m, (contracts or {}).get(asset_id))
+            )
+        merged["mesh"] = new_mesh
         out.append(merged)
+    return out
+
+
+#: A world copy this close to a gameplay entity of the same asset is the same
+#: object placed twice.
+_DUPLICATE_RADIUS_M = 0.5
+
+
+def reconcile_world_copies(
+    world_entities: list[dict],
+    gameplay_entities: list[dict],
+    on_warning: Callable[[str], None] | None = None,
+) -> list[dict]:
+    """Make world-placed copies of gameplay objects behave like the originals.
+
+    The world builder dresses the environment and sometimes places an asset
+    the SceneSpec already made interactive -- a pistol on a table that turned
+    out not to be grabbable, next to the one that was. Equivalent objects
+    must behave the same everywhere (the BuildSpec INTERACTION RULES default),
+    so a world copy inherits the gameplay entity's bindings, physics and
+    interaction tags. A copy sitting on top of the gameplay entity is the
+    same object placed twice and is dropped.
+    """
+    warn = on_warning or (lambda _m: None)
+    templates: dict[str, dict] = {}
+    positions: dict[str, list[list[float]]] = {}
+    for e in gameplay_entities:
+        mesh = e.get("mesh") or {}
+        aid = mesh.get("asset_id")
+        if not aid:
+            continue
+        pos = ((e.get("transform") or {}).get("position")) or [0.0, 0.0, 0.0]
+        positions.setdefault(aid, []).append([float(v) for v in pos[:3]])
+        if e.get("mechanic_bindings") and aid not in templates:
+            templates[aid] = e
+
+    out: list[dict] = []
+    for w in world_entities:
+        mesh = w.get("mesh") or {}
+        aid = mesh.get("asset_id")
+        if not aid or aid not in positions:
+            out.append(w)
+            continue
+        wpos = ((w.get("transform") or {}).get("position")) or [0.0, 0.0, 0.0]
+        near = any(
+            sum((float(a) - float(b)) ** 2 for a, b in zip(wpos[:3], p)) ** 0.5
+            < _DUPLICATE_RADIUS_M
+            for p in positions[aid]
+        )
+        if near:
+            warn(
+                f"world entity '{w.get('id')}' duplicates gameplay asset"
+                f" '{aid}' at the same spot; dropped the world copy"
+            )
+            continue
+        tmpl = templates.get(aid)
+        if tmpl is not None and not w.get("mechanic_bindings"):
+            w = dict(w)
+            w["mechanic_bindings"] = [
+                json.loads(json.dumps(b))
+                for b in tmpl.get("mechanic_bindings") or []
+                if isinstance(b, dict)
+                and not role_of(str(b.get("builtin_id") or b.get("id") or ""))
+            ]
+            if tmpl.get("physics") is not None:
+                w["physics"] = json.loads(json.dumps(tmpl["physics"]))
+            tags = list(w.get("tags") or [])
+            for t in tmpl.get("tags") or []:
+                if t in ("grabbable", "interactable", "equippable", "weapon",
+                         "target") and t not in tags:
+                    tags.append(t)
+            w["tags"] = tags
+            warn(
+                f"world entity '{w.get('id')}' is a copy of interactive asset"
+                f" '{aid}'; gave it the same bindings and physics as"
+                f" '{tmpl.get('id')}'"
+            )
+        out.append(w)
     return out
 
 
@@ -1307,12 +1367,22 @@ def _merge_world_into_scene(
     world_doc: dict,
     nrep: dict[str, dict[str, Any]] | None = None,
     contracts: dict[str, dict[str, Any]] | None = None,
+    manifest: AssetManifest | None = None,
+    on_warning: Callable[[str], None] | None = None,
 ) -> dict:
     """Merge the C++-generated environment (world.scene.json) into a compiled
     gameplay scene doc: environment entities + sky + lights + spawn come from
     the world; gameplay entities render on top of it."""
+    scales = (
+        {a.id: float(a.target_scale_meters) for a in manifest.items}
+        if manifest is not None
+        else None
+    )
     world_entities = _repoint_world_meshes_to_lods(
-        list(world_doc.get("entities") or []), nrep or {}, contracts
+        list(world_doc.get("entities") or []), nrep or {}, contracts, scales
+    )
+    world_entities = reconcile_world_copies(
+        world_entities, list(doc.get("entities") or []), on_warning
     )
     doc["entities"] = list(world_entities) + list(doc.get("entities") or [])
     if "sky" in world_doc:
@@ -1460,7 +1530,10 @@ def run(ctx: PipelineContext) -> StageResult:
         world_doc = _load_world(scene_entry.id)
         if world_doc is not None:
             doc = _merge_world_into_scene(
-                doc, world_doc, normalization, asset_contract
+                doc, world_doc, normalization, asset_contract, manifest,
+                on_warning=lambda m, sid=scene_entry.id: ctx.emit(
+                    ProjectStage.scene_compile, "warning", f"{sid}: {m}"
+                ),
             )
 
         # Every entity is now present -- authored, world-merged and

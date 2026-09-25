@@ -38,6 +38,7 @@ from ptv_schemas import (
     BuildSpec,
     MechanicPlan,
     NpcPlan,
+    PlayerExperience,
     ProjectStage,
     ProjectState,
     ProjectStatus,
@@ -140,6 +141,7 @@ class ProjectStore:
         title: str,
         prompt: str,
         target_device: TargetDevice = TargetDevice.pcvr,
+        player_experience: PlayerExperience = PlayerExperience.full_avatar,
     ) -> ProjectState:
         pid = self.new_id(title)
         proj_dir = self.dir_for(pid)
@@ -151,6 +153,7 @@ class ProjectStore:
             title=title[:128] or "Untitled",
             prompt=prompt,
             target_device=target_device,
+            player_experience=player_experience,
         )
         self.save_state(state)
         return state

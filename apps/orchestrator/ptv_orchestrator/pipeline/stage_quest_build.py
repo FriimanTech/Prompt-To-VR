@@ -118,40 +118,43 @@ def _compile_shaders(engine_dir: Path, assets_dir: Path) -> list[str]:
 
 
 def _package_engine_assets(engine_dir: Path, assets_dir: Path) -> list[str]:
-    """Generate the rigged hand meshes into ``assets/engine/``.
+    """Build the default rigged hands into ``assets/engine/``.
 
-    These are engine-owned rather than project-owned, so they are produced
-    here from the committed script rather than copied out of the project
-    directory. Matches ``PTV_ENGINE_ASSET_DIR="engine"`` in the Android
-    CMakeLists. Failure is non-fatal: the runtime falls back to the
-    procedural block hands.
+    Engine-owned rather than project-owned: produced here from
+    ``Default_Models/default_rigged_hand_model.glb`` by the committed
+    ``prepare_default_hands.py`` (renamed to BodySlots joints, mirrored for
+    the left hand), exactly as the desktop CMake build does. Matches
+    ``PTV_ENGINE_ASSET_DIR="engine"`` in the Android CMakeLists. Failure is
+    non-fatal: the runtime falls back to the procedural block hands.
     """
     import subprocess
     import sys
 
     notes: list[str] = []
-    script = engine_dir / "tools" / "make_hand_fixture.py"
+    script = engine_dir / "tools" / "prepare_default_hands.py"
+    source = engine_dir.parent / "Default_Models" / "default_rigged_hand_model.glb"
     if not script.is_file():
-        notes.append("make_hand_fixture.py missing; hands NOT packaged")
+        notes.append("prepare_default_hands.py missing; hands NOT packaged")
+        return notes
+    if not source.is_file():
+        notes.append(f"{source} missing; default hands NOT packaged")
         return notes
 
     out_dir = assets_dir / "engine"
     out_dir.mkdir(parents=True, exist_ok=True)
-    for hand in ("left", "right"):
-        out = out_dir / f"hand_{hand}.glb"
-        try:
-            subprocess.run(
-                [sys.executable, str(script), "--output", str(out),
-                 "--hand", hand],
-                check=True,
-                capture_output=True,
-                text=True,
-            )
-        except subprocess.CalledProcessError as exc:
-            notes.append(
-                f"hand generation failed ({hand}): "
-                f"{(exc.stderr or exc.stdout)[:200]}"
-            )
+    try:
+        subprocess.run(
+            [sys.executable, str(script), "--input", str(source),
+             "--out-dir", str(out_dir)],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except subprocess.CalledProcessError as exc:
+        notes.append(
+            f"default hand preparation failed: "
+            f"{(exc.stderr or exc.stdout)[:200]}"
+        )
     return notes
 
 

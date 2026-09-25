@@ -83,7 +83,7 @@ Generated mechanics use only public APIs (`IMechanic`, `World`, etc.) — no per
 | 6 | Copy `scene.json` into assets | |
 | 7 | Copy LOD GLBs only | Skips raw Tripo sources superseded by `_lod0..3` |
 | 8 | `_compile_shaders()` | `glslc` GLSL → `.spv` under `assets/shaders/` |
-| 9 | `_package_engine_assets()` | Runs `make_hand_fixture.py` → hand GLBs in `assets/engine/` |
+| 9 | `_package_engine_assets()` | Runs `prepare_default_hands.py` on `Default_Models/default_rigged_hand_model.glb` → `default_hand_{left,right}.glb` in `assets/engine/` |
 | 10 | `assemble_debug()` | Gradle + NDK builds `libptv_quest.so` + APK |
 | 11 | `find_debug_apk()` | Locates `app-debug.apk` |
 | 12 | Set `state.latest_build_apk`, succeed | Failure → RuntimeError + gradle.log |

@@ -210,11 +210,22 @@ def run_with_composer_factory(
     # where a reused 11-asset scene named eight assets the 14-asset manifest
     # had never heard of.
     known_asset_ids = {a.id for a in manifest.items}
+    # The same goes for mechanics: a re-planned game that turned a generated
+    # teleport copy back into the built-in must not keep a scene that binds
+    # the copy.
+    plan_for_reuse: MechanicPlan = (
+        ctx.mechanic_plan or ctx.store.load_mechanic_plan(ctx.project_id)
+    )
+    known_generated_ids = {
+        f"generated.{it.code_task.id if it.code_task else it.id}"
+        for it in plan_for_reuse.items
+        if it.classification.value in ("generate", "builtin+config_code_edit")
+    }
 
     existing: dict[int, SceneSpec] = {}
     for i, scene_entry in enumerate(build_spec.scenes):
         loaded, rejected = _try_load_existing_scene_spec(
-            project_dir, scene_entry.id, known_asset_ids
+            project_dir, scene_entry.id, known_asset_ids, known_generated_ids
         )
         if loaded is not None:
             existing[i] = loaded
@@ -390,6 +401,7 @@ def _try_load_existing_scene_spec(
     project_dir: Path,
     scene_id: str,
     known_asset_ids: set[str] | None = None,
+    known_generated_ids: set[str] | None = None,
 ) -> tuple[Optional[SceneSpec], Optional[str]]:
     """``(scene, rejection_reason)`` for ``scene_spec.<scene_id>.json``.
 
@@ -431,6 +443,19 @@ def _try_load_existing_scene_spec(
             return None, (
                 f"it references {len(unknown)} asset(s) absent from the"
                 f" current AssetManifest: {unknown}"
+            )
+    if known_generated_ids is not None:
+        stale = sorted({
+            b.mechanic_id
+            for e in scene.entities
+            for b in e.mechanic_bindings
+            if b.mechanic_id.startswith("generated.")
+            and b.mechanic_id not in known_generated_ids
+        })
+        if stale:
+            return None, (
+                f"it binds {len(stale)} generated mechanic(s) the current"
+                f" MechanicPlan no longer generates: {stale}"
             )
     return scene, None
 

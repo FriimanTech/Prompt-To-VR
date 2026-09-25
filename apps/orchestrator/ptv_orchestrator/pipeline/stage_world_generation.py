@@ -881,6 +881,10 @@ def _validate_world_scene(path: Path) -> tuple[bool, str]:
     if portal_problems:
         return False, "portals: " + "; ".join(portal_problems[:4])
 
+    barrier_problems = _validate_barriers(doc)
+    if barrier_problems:
+        return False, "barriers: " + "; ".join(barrier_problems[:4])
+
     nav = doc.get("navigation") or {}
     regions = nav.get("regions") or []
     nav_note = f", {len(regions)} nav regions" if regions else ""
@@ -908,6 +912,74 @@ _AFFORDANCE_KINDS = frozenset(
 # Settings.world_max_interactives_per_env; duplicated here so the pure
 # validator stays callable without a settings object.
 _MAX_INTERACTIVES = 512
+
+
+_BARRIER_WORDS = ("wall", "barrier", "fence", "partition", "boundary")
+# Names that contain a barrier word but are dressing ON a wall, not the wall.
+_BARRIER_DRESSING_WORDS = (
+    "trim", "sign", "art", "poster", "stripe", "decal", "light", "lamp",
+    "panel", "shelf", "hook", "clock", "screen", "window", "vent",
+)
+_MIN_BARRIER_THICKNESS_M = 0.2
+_BARRIER_MIN_HEIGHT_M = 1.5
+_BARRIER_MIN_LENGTH_M = 1.5
+
+
+def _validate_barriers(doc: dict) -> list[str]:
+    """Walls must stop the player from every side.
+
+    A barrier (a floor-standing box named or tagged wall / barrier / fence /
+    partition) needs collision and enough thickness that a head or a fast
+    slide cannot tunnel through it. ``walkthrough`` in its tags is the
+    prompt-requested exception (a holographic wall, a curtain).
+    """
+    problems: list[str] = []
+    for e in doc.get("entities") or []:
+        if not isinstance(e, dict):
+            continue
+        prim = e.get("primitive") or {}
+        if prim.get("kind") != "box":
+            continue
+        tags = [str(t).lower() for t in (e.get("tags") or [])]
+        label = f"{e.get('id', '')} {e.get('name', '')}".lower()
+        if "walkthrough" in tags:
+            continue
+        named = any(w in label for w in _BARRIER_WORDS) or any(
+            t in _BARRIER_WORDS for t in tags
+        )
+        if not named or any(w in label for w in _BARRIER_DRESSING_WORDS):
+            continue
+        size = prim.get("size") or []
+        if len(size) < 3:
+            continue
+        try:
+            scale = float((e.get("transform") or {}).get("scale") or 1.0)
+            sx, sy, sz = (float(v) * scale for v in size[:3])
+            y = float(((e.get("transform") or {}).get("position") or [0, 0, 0])[1])
+        except (TypeError, ValueError):
+            continue
+        if sy < _BARRIER_MIN_HEIGHT_M or max(sx, sz) < _BARRIER_MIN_LENGTH_M:
+            continue
+        if y - sy * 0.5 > 0.5:
+            continue  # not standing on the floor: a header, a beam
+        physics = e.get("physics")
+        if not isinstance(physics, dict) or physics.get("collision_shape") in (
+            None, "", "none"
+        ):
+            problems.append(
+                f"'{e.get('id')}' is a wall with no collision; give it"
+                " Collision::Box (tag it 'walkthrough' only if the prompt"
+                " asks for a wall the player can pass through)"
+            )
+            continue
+        thickness = min(sx, sz)
+        if thickness < _MIN_BARRIER_THICKNESS_M:
+            problems.append(
+                f"'{e.get('id')}' is {thickness:.2f} m thick; walls must be at"
+                f" least 0.3 m (the player can push through anything under"
+                f" {_MIN_BARRIER_THICKNESS_M} m)"
+            )
+    return problems
 
 
 def _validate_entity_ids(doc: dict) -> list[str]:
@@ -1279,11 +1351,46 @@ def _validate_navigation(doc: dict) -> list[str]:
     return problems
 
 
-def _load_object_assets(ctx: PipelineContext) -> tuple[dict[str, str], list[dict]]:
-    """Return (asset_id->glb_path map, [ {id,name,category,notes} ]) for props
-    the agent MAY place. Environment assets are no longer generated as GLBs."""
-    asset_map: dict[str, str] = {}
+def _gameplay_owned_assets(ctx: PipelineContext) -> set[str]:
+    """Asset ids the scene composer already places as INTERACTIVE entities.
+
+    A world architect that also places those (a rack of the same rifles the
+    scene hands the player) produces look-alike props that cannot be picked
+    up, at whatever scale it guessed -- the player cannot tell which rifle is
+    real. They are listed as off-limits instead.
+    """
+    owned: set[str] = set()
+    for path in sorted(ctx.project_dir.glob("scene_spec*.json")):
+        try:
+            doc = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        for ent in doc.get("entities", []) or []:
+            if not isinstance(ent, dict):
+                continue
+            mesh = ent.get("mesh") or {}
+            aid = mesh.get("asset_id") if isinstance(mesh, dict) else None
+            if not aid:
+                continue
+            tags = set(ent.get("tags") or [])
+            interactive = bool(ent.get("mechanic_bindings")) or bool(
+                tags & {"grabbable", "weapon", "interactable", "wearable"}
+            )
+            if interactive:
+                owned.add(aid)
+    return owned
+
+
+def _load_object_assets(ctx: PipelineContext) -> tuple[dict[str, dict], list[dict]]:
+    """Return (asset_id -> {glb_path, target_scale_meters}, listing) for props
+    the agent MAY place. Environment assets are no longer generated as GLBs.
+
+    The scale travels with the path: ``ptv_worldgen`` used to hard-code 1.0
+    for every placed object, so a world-placed pistol came out a metre long.
+    """
+    asset_map: dict[str, dict] = {}
     listing: list[dict] = []
+    owned = _gameplay_owned_assets(ctx)
     # glb paths from the normalization report (if present).
     norm_path = ctx.project_dir / "asset_normalization.json"
     norm: dict[str, Any] = {}
@@ -1305,12 +1412,19 @@ def _load_object_assets(ctx: PipelineContext) -> tuple[dict[str, str], list[dict
         if isinstance(info, dict):
             glb = info.get("glb_path", "") or ""
         if glb:
-            asset_map[item.id] = glb
+            asset_map[item.id] = {
+                "glb_path": glb,
+                "target_scale_meters": float(item.target_scale_meters),
+            }
         listing.append(
             {
                 "id": item.id,
                 "name": item.name,
                 "category": cat,
+                "target_scale_meters": float(item.target_scale_meters),
+                # The scene already places this as something the player
+                # interacts with; do NOT place decorative copies of it.
+                "gameplay_owned": item.id in owned,
                 "notes": (item.style_notes or "")[:300],
             }
         )

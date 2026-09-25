@@ -98,12 +98,71 @@ public:
      *  something is in the way. ``ignore_entity`` is the mover's own body,
      *  which must be excluded or every cast hits itself at distance zero.
      *
-     *  Deliberately fails open: if the sweep resolves to almost no movement
-     *  the mover is probably already inside geometry, and the original delta
-     *  is returned instead. A player frozen in place cannot recover, while a
-     *  player who clips a wall for one frame can just walk back out. */
+     *  Fails CLOSED: a mover already touching a wall may still move away
+     *  from it or along it, but never further into it. Returning the full
+     *  delta when wedged -- the old behaviour -- is exactly what let a
+     *  player who backed into a wall walk straight through it. */
     Vec3 slide_character(const Vec3& center, float height, const Vec3& delta,
                          std::uint32_t ignore_entity) const;
+
+    // ------------------------------------------------------------------
+    // The player's body.
+    //
+    // A Jolt CharacterVirtual: a swept capsule with ground detection,
+    // stair stepping, slope limits and penetration recovery. It is not a
+    // rigid body, so nothing else is simulated against it; the separate
+    // kinematic player capsule still exists for contacts with NPCs and
+    // triggers. Positions here are the capsule's FEET.
+    // ------------------------------------------------------------------
+
+    struct CharacterState {
+        Vec3 feet{0.0f};
+        bool grounded{false};
+        Vec3 ground_normal{0.0f, 1.0f, 0.0f};
+        float vertical_speed{0.0f};
+        float height{1.7f};
+    };
+
+    /** Create (or re-create) the player character at ``feet``. */
+    void create_player_character(const Vec3& feet, float height, float radius);
+    void destroy_player_character();
+    bool has_player_character() const;
+
+    /** Bodies the player character must pass through: the player's own
+     *  contact capsule and anything currently held in a hand, which would
+     *  otherwise shove the player backwards the moment it was picked up. */
+    void set_player_character_ignored(const std::vector<std::uint32_t>& entities);
+
+    /** Move the character through ``displacement`` (world metres) this
+     *  frame and return how far it actually went.
+     *
+     *  ``grounded`` applies gravity and keeps the feet on the floor --
+     *  stepping up stairs and down slopes -- and IGNORES the vertical part
+     *  of ``displacement``: vertical position is owned by the ground, not by
+     *  whoever asked to move. ``grounded == false`` is free flight: gravity
+     *  is off and the displacement is used as-is. ``jump_speed > 0`` launches
+     *  the character upward if it is standing on something. */
+    Vec3 move_player_character(const Vec3& displacement, bool grounded,
+                               float jump_speed, float dt,
+                               bool apply_gravity = true);
+
+    /** Put the character at ``feet`` without sweeping (teleport, spawn). */
+    void teleport_player_character(const Vec3& feet);
+
+    /** Change capsule height (crouching). Refused -- returning false --
+     *  when the taller shape would not fit, e.g. standing up under a desk. */
+    bool resize_player_character(float height);
+
+    CharacterState player_character_state() const;
+
+    /** Keep a head-sized sphere out of static geometry.
+     *
+     *  Sweeps a sphere of ``radius`` from ``from`` to ``to`` against STATIC
+     *  bodies only, then pushes it out of anything it still overlaps.
+     *  Returns where the head is allowed to be. Static only on purpose: the
+     *  head should be stopped by walls, not by a crate the player is leaning
+     *  over or the gun in their own hand. */
+    Vec3 resolve_head(const Vec3& from, const Vec3& to, float radius) const;
 
     /** Cast a ray against all physics bodies. ``dir`` need not be normalized;
      *  the ray extends ``max_dist`` meters along ``normalize(dir)``. On a hit,

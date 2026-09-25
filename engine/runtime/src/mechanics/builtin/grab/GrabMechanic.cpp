@@ -21,9 +21,13 @@
 
 #include <algorithm>
 #include <cmath>
+#include <unordered_map>
+
+#include <glm/gtc/quaternion.hpp>
 
 #include "../BuiltinMechanicBase.h"
 #include "GrabRelease.h"
+#include "GripHold.h"
 #include "ptv/core/Logger.h"
 
 namespace ptv {
@@ -86,6 +90,17 @@ public:
     // Called once per bound entity even though only one instance exists.
     void on_attach(World& world, std::uint32_t entity, const nlohmann::json& p,
                    MechanicContext&) override {
+        // Per-asset correction for an asset whose derived grip socket is
+        // not quite how it should sit in the hand (XYZ Euler, degrees, in the
+        // socket's frame).
+        if (p.contains("hold_rotation_offset_deg") &&
+            p["hold_rotation_offset_deg"].is_array() &&
+            p["hold_rotation_offset_deg"].size() == 3) {
+            const auto& a = p["hold_rotation_offset_deg"];
+            const Vec3 deg(a[0].get<float>(), a[1].get<float>(),
+                           a[2].get<float>());
+            hold_offsets_[entity] = glm::normalize(glm::quat(glm::radians(deg)));
+        }
         // Binding this mechanic is what makes an object grabbable. Previously
         // the engine had two disagreeing notions -- a CGrabbable component
         // that nothing read, and a "grabbable" tag that the search actually
@@ -171,9 +186,20 @@ private:
         // guess.
         Vec3 grip_offset{0.0f};
         Quat grip_rotation{1.0f, 0.0f, 0.0f, 0.0f};
+        // The controller's aim direction in its grip frame: the Touch
+        // handle is angled, so "pointing forward" is the aim pose, not the
+        // grip pose.
+        const Quat grip_to_aim =
+            hand.aim_valid ? glm::normalize(glm::inverse(hand.hand_rotation) *
+                                            hand.aim_rotation)
+                           : Quat(1.0f, 0.0f, 0.0f, 0.0f);
+        const auto off = hold_offsets_.find(target);
+        const Quat extra = off != hold_offsets_.end()
+                               ? off->second
+                               : Quat(1.0f, 0.0f, 0.0f, 0.0f);
         if (snap_to_grip_ &&
-            grip_hold_from_socket(world, target, &grip_offset,
-                                  &grip_rotation)) {
+            grip_hold_from_socket(world, target, grip_to_aim, extra,
+                                  &grip_offset, &grip_rotation)) {
             hold_[h].local_offset = grip_offset;
             hold_[h].local_rotation = grip_rotation;
         } else {
@@ -197,21 +223,19 @@ private:
         PTV_INFO("Grab: hand {} -> entity {}", h == 0 ? "L" : "R", target);
     }
 
-    /** Hold offsets that put the asset's ``grip`` socket in the hand.
+    /** Hold offsets that put the asset's ``grip`` socket in the hand,
+     *  pointing where the controller aims (see GripHold.h).
      *
-     *  The hold is applied as
-     *  ``obj_pos = hand_pos + hand_rot * local_offset`` and
-     *  ``obj_rot = hand_rot * local_rotation``, while the socket sits at
-     *  ``obj_pos + obj_rot * (scale * s_pos)`` with rotation
-     *  ``obj_rot * s_rot``. Solving "socket pose == hand pose" for the two
-     *  hold terms cancels the hand out entirely, which is the point: the
-     *  result depends only on the asset, so the object lands in the same
-     *  orientation no matter how the player reached for it.
+     *  The result depends only on the asset and the controller, not on how
+     *  the player reached for it, so the object lands in the same
+     *  orientation from any approach.
      *
      *  Returns false when the asset has no grip socket, leaving the caller to
      *  fall back to the relative hold. */
     static bool grip_hold_from_socket(World& world, std::uint32_t entity,
-                                      Vec3* out_offset, Quat* out_rotation) {
+                                      const Quat& grip_to_aim,
+                                      const Quat& extra, Vec3* out_offset,
+                                      Quat* out_rotation) {
         const auto e = static_cast<entt::entity>(entity);
         if (!world.registry().all_of<CMesh>(e)) return false;
         const auto& mesh = world.registry().get<CMesh>(e);
@@ -219,15 +243,14 @@ private:
         if (it == mesh.sockets.end()) return false;
 
         const Transform& socket = it->second;
-        const Quat inv_socket = glm::inverse(socket.rotation);
         // Socket positions arrive in metres at the asset's authored scale;
         // the entity's own CTransform scale still applies on top.
         float entity_scale = 1.0f;
         if (world.registry().all_of<CTransform>(e)) {
             entity_scale = world.registry().get<CTransform>(e).t.scale;
         }
-        *out_rotation = inv_socket;
-        *out_offset = -(inv_socket * (socket.position * entity_scale));
+        grab::solve_grip_hold(socket.position, socket.rotation, entity_scale,
+                              grip_to_aim, extra, out_offset, out_rotation);
         return true;
     }
 
@@ -250,6 +273,7 @@ private:
     Hold hold_[2]{};
     float radius_m_{kGrabRadius};
     bool snap_to_grip_{true};
+    std::unordered_map<std::uint32_t, Quat> hold_offsets_;
 };
 
 }  // namespace

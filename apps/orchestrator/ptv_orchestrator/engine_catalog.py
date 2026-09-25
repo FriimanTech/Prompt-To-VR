@@ -50,9 +50,12 @@ class CatalogEntry:
     inputs: tuple[str, ...] = ()
     comfort_notes: str = ""
     aliases: tuple[str, ...] = ()
+    # The player job this mechanic fills (see PLAYER_ROLES), or "". At most
+    # one bound mechanic may fill each role in a scene.
+    role: str = ""
 
     def to_json(self) -> dict[str, object]:
-        return {
+        out: dict[str, object] = {
             "id": self.id,
             "summary": self.summary,
             "category": self.category,
@@ -61,6 +64,9 @@ class CatalogEntry:
             "comfort_notes": self.comfort_notes,
             "aliases": list(self.aliases),
         }
+        if self.role:
+            out["role"] = self.role
+        return out
 
 
 _BUILTINS: tuple[CatalogEntry, ...] = (
@@ -68,20 +74,25 @@ _BUILTINS: tuple[CatalogEntry, ...] = (
     CatalogEntry(
         id="builtin.locomotion.teleport",
         summary=(
-            "Discrete teleport locomotion: aim a parabolic arc from the "
-            "left controller; release the stick to commit. Comfort-safe."
+            "Discrete teleport locomotion. Push the left stick FORWARD to "
+            "raise a parabolic arc from the controller; tilt the controller "
+            "up to reach farther and down to land closer; release the stick "
+            "to land there (feet at the target, wherever the player stands "
+            "in their playspace). No fade and no blink -- teleport is "
+            "already the comfort option."
         ),
         category="locomotion",
         params={
-            # ``max_distance_m`` is accepted as a synonym of the first one --
-            # the hand-authored starter room uses that spelling.
-            "max_horizontal_m": "float, default 12.0",
-            "launch_speed_mps": "float, default 6.0",
+            # ``max_distance_m`` / ``max_horizontal_m`` are accepted as
+            # synonyms -- older scenes use those spellings.
+            "max_range_m": "float, default 12.0 (farthest landing)",
+            "min_range_m": "float, default 1.0 (closest landing)",
             "hand": "'left' (default) or 'right'",
         },
-        inputs=("left thumbstick magnitude",),
-        comfort_notes="Discrete; safe for VR-novice users.",
+        inputs=("left thumbstick pushed forward", "controller pitch"),
+        comfort_notes="Discrete; safe for VR-novice users. Never add a vignette.",
         aliases=("builtin.teleport",),
+        role="role:teleport",
     ),
     CatalogEntry(
         id="builtin.locomotion.slide.head_relative",
@@ -95,12 +106,19 @@ _BUILTINS: tuple[CatalogEntry, ...] = (
             "max_speed_mps": "float, default 1.5",
             "accel_tau_s": "float, default 0.12",
             "decel_tau_s": "float, default 0.18",
+            "vignette": (
+                "object, default off: {enabled: bool, user_toggle: bool, "
+                "strength 0..1, inner_fov_deg, feather_deg}. Only when the "
+                "prompt asks for comfort options."
+            ),
         },
         inputs=("left thumbstick (X=strafe, -Y=forward)",),
         comfort_notes=(
-            "Comfort ramp + circular dead zone. Can induce vection on "
-            "long traversals; pair with snap turn."
+            "Comfort ramp + circular dead zone. The player stays on the "
+            "ground and follows terrain. Optional Meta-style tunnel-vision "
+            "vignette only when requested."
         ),
+        role="role:slide_head",
     ),
     CatalogEntry(
         id="builtin.locomotion.slide.controller_relative",
@@ -114,27 +132,93 @@ _BUILTINS: tuple[CatalogEntry, ...] = (
             "max_speed_mps": "float, default 1.5",
             "accel_tau_s": "float, default 0.12",
             "decel_tau_s": "float, default 0.18",
+            "vignette": (
+                "object, default off (same shape as head-relative slide)"
+            ),
         },
         inputs=("left thumbstick (X=strafe, -Y=forward)",),
         comfort_notes=(
             "Same ramps as head-relative; lets the user move sideways "
             "while looking elsewhere. Common in shooters / combat games."
         ),
+        role="role:slide_controller",
     ),
     CatalogEntry(
         id="builtin.locomotion.snap_turn",
         summary=(
-            "Right-stick snap rotation, comfort-safe. Always-on while a "
-            "locomotion menu binding is present."
+            "Right-stick snap rotation: one turn per flick, about the "
+            "player's head. Never blinks or darkens the screen."
         ),
         category="locomotion",
         params={
             "degrees": "float, default 45.0",
-            "cooldown_s": "float, default 0.30",
+            "cooldown_s": "float, default 0.30 (minimum gap between flicks)",
+            "activation_threshold": "float, default 0.70 (stick push that turns)",
+            "recenter_threshold": (
+                "float, default 0.30 (stick must return inside this before the "
+                "next turn)"
+            ),
+            "allowed_degrees": (
+                "list of floats, e.g. [15, 30, 45]; the angle in force snaps to "
+                "the nearest one"
+            ),
+            "degrees_key": (
+                "string; a persisted number (ctx.persistence) that overrides "
+                "degrees every frame, so a settings panel can change the angle"
+            ),
         },
         inputs=("right thumbstick X",),
-        comfort_notes="Discrete rotation; safer than smooth turn for novices.",
+        comfort_notes=(
+            "Discrete rotation; already the comfort option, so never add a "
+            "vignette or blink to it."
+        ),
         aliases=("builtin.snap_turn",),
+        role="role:snap_turn",
+    ),
+    CatalogEntry(
+        id="builtin.locomotion.smooth_turn",
+        summary=(
+            "Right-stick continuous rotation, eased in. Bind alongside snap "
+            "turn when the prompt lets the player choose; the active turn "
+            "mode decides which one reacts."
+        ),
+        category="locomotion",
+        params={
+            "degrees_per_second": "float, default 90",
+            "ease_tau_s": "float, default 0.08",
+            "vignette": (
+                "object, default off: {enabled, user_toggle, strength, "
+                "inner_fov_deg, feather_deg}. Only when the prompt asks for "
+                "comfort options."
+            ),
+        },
+        inputs=("right thumbstick X",),
+        comfort_notes=(
+            "Continuous rotation is the strongest vection cue; offer a "
+            "vignette only when the prompt asks for comfort settings."
+        ),
+        role="role:smooth_turn",
+    ),
+    CatalogEntry(
+        id="builtin.movement_settings_menu",
+        summary=(
+            "The player's movement and comfort settings panel, opened with a "
+            "controller button. It lists ONLY what the game offers: "
+            "locomotion modes when two or more are bound, snap vs smooth "
+            "turning when both are bound, and vignette switches (only while "
+            "a slide mode or smooth turn is active, and only when a vignette "
+            "was offered as a user option). A game with nothing to choose "
+            "never shows it. Use this instead of generating a locomotion "
+            "menu."
+        ),
+        category="locomotion",
+        params={
+            "open_button": "'x' (default) / 'y' / 'a' / 'b'",
+            "open_on_start": "bool, default false",
+            "distance_m": "float, default 1.1",
+        },
+        inputs=("the open button", "either trigger to pick"),
+        role="role:movement_settings_menu",
     ),
     # ----- Object interaction -----
     CatalogEntry(
@@ -197,16 +281,15 @@ _BUILTINS: tuple[CatalogEntry, ...] = (
         id="builtin.hand_pose",
         summary=(
             "Curls the PLAYER'S OWN fingers from the controller: index "
-            "follows the trigger, the other three follow the grip, and the "
-            "thumb folds when it touches the thumbrest or a face button. "
-            "Capacitive touch gives a resting bend, so a finger lying on the "
-            "trigger without pulling it looks relaxed instead of pointing. "
-            "The engine binds this automatically -- you do NOT need to plan "
-            "it, and it is not a mechanic for scene objects. Listed here so "
-            "you know the player's hands already animate themselves: do not "
-            "generate a mechanic to do it, and never couple a weapon to the "
-            "hand (both read the same trigger value and stay in sync on "
-            "their own)."
+            "follows the trigger, middle/ring/pinky follow the grip, and the "
+            "thumb lowers toward the index when it rests on the thumbstick. "
+            "It curls whichever hands the player actually sees -- the "
+            "default rigged hands (Hands Only) or the avatar's own finger "
+            "bones (Full Player Avatar) -- about axes measured from the rig. "
+            "EVERY game plans exactly one of these (role:fingers); the scene "
+            "compiler binds it on the player rig. Never generate a mechanic "
+            "that curls the player's fingers, and never couple a weapon to "
+            "the hand (both read the same trigger value)."
         ),
         category="interaction",
         params={
@@ -217,8 +300,14 @@ _BUILTINS: tuple[CatalogEntry, ...] = (
                 "float, default 0.85 (how closed the fingers sit while the "
                 "hand is holding something)"
             ),
+            "thumb_sources": (
+                "list, default ['thumbstick']. Add 'thumbrest' and/or "
+                "'face_buttons' only when the prompt asks for that."
+            ),
+            "relaxed_curl": "float, default 0.08 (gentle bend when idle)",
         },
-        inputs=("both triggers", "both grips", "trigger/thumbrest touch"),
+        inputs=("both triggers", "both grips", "thumbstick/trigger touch"),
+        role="role:fingers",
     ),
     CatalogEntry(
         id="builtin.character_locomotion",
@@ -263,26 +352,21 @@ _BUILTINS: tuple[CatalogEntry, ...] = (
     CatalogEntry(
         id="builtin.avatar_body",
         summary=(
-            "The player's own body. Plants the avatar on the XR rig so it "
-            "travels with locomotion, drives the neck and head from the "
-            "headset so the body agrees with where the player is looking, "
-            "runs two-bone IK on both arms toward the controllers (which is "
-            "what makes a forearm-mounted item look attached rather than "
-            "floating), and animates the legs from the speed the rig "
-            "actually achieved. Head visibility is PER-VIEW: the head is "
-            "suppressed in the player's own view so the camera is not inside "
-            "the skull, while a mirror still shows a complete avatar. The "
-            "engine binds this automatically whenever a scene places an "
-            "entity tagged 'player_avatar', so a scene never has to ask. "
-            "It also decides which hands the player sees, from the rig "
-            "itself: an auto-rigged avatar ends at the wrist and has no "
-            "finger bones, so its rigid hand is hidden and the engine's "
-            "finger-rigged hand model is placed on the avatar's solved wrist "
-            "instead -- the hand reads as the end of that arm and still curls "
-            "on trigger and grip. An avatar that does have finger bones uses "
-            "its own hands and the engine's are hidden. Nothing to configure. "
-            "Fingers belong to builtin.hand_pose; never write finger curl "
-            "here, and never move the avatar by writing CTransform."
+            "The player's own body, first person. Stands the avatar under "
+            "the headset every frame (so physical walking carries it and "
+            "looking down shows the chest, legs and feet), faces it the way "
+            "the player faces whatever axis the GLB was authored on, scales "
+            "it to the player's eye height, drives the neck and head from "
+            "the headset, and solves two-bone IK on both arms to the "
+            "controllers. Head visibility is PER-VIEW: the head is hidden in "
+            "the player's own view, while a mirror still shows a complete "
+            "avatar. The avatar's OWN hands are the player's hands: their "
+            "fingers curl through builtin.hand_pose when the rig has finger "
+            "bones; a rig that stops at the wrist keeps rigid hands. No "
+            "substitute hands are ever drawn. Only in Full Player Avatar "
+            "games (role:body); bound on the player_avatar entity itself. "
+            "Never write finger curl here, and never move the avatar by "
+            "writing CTransform."
         ),
         category="avatar",
         params={
@@ -309,11 +393,16 @@ _BUILTINS: tuple[CatalogEntry, ...] = (
             ),
             "walk_speed_mps": "float, default 1.4",
             "run_speed_mps": "float, default 4.0",
+            "height_calibration": (
+                "'auto' (default: scale to the player's eye height) / 'off'"
+            ),
+            "torso_yaw_deadzone_deg": "float, default 40",
         },
-        inputs=("headset pose", "controller poses", "rig velocity"),
+        inputs=("headset pose", "controller poses", "body velocity"),
         comfort_notes=(
             "One extra skinned rig plus two analytic IK solves per frame."
         ),
+        role="role:body",
     ),
     CatalogEntry(
         id="builtin.mirror_surface",
@@ -716,6 +805,74 @@ _BUILTINS: tuple[CatalogEntry, ...] = (
 def builtin_catalog() -> list[dict[str, object]]:
     """JSON-friendly list of built-in mechanic descriptors."""
     return [e.to_json() for e in _BUILTINS]
+
+
+# ---------------------------------------------------------------------------
+# Player roles
+#
+# A role is a job slot, not code: "the one thing in this game that does X".
+# It is filled either by its stock built-in or by a generated replacement
+# (``builtin+config_code_edit`` inherits its base built-in's role and REPLACES
+# it). At most one mechanic may fill each role in a scene -- two teleporters
+# bound at once is how a game ended up with two aim arcs.
+#
+# ``host`` is the entity whose ``mechanic_bindings`` carries the binding.
+# ---------------------------------------------------------------------------
+
+PLAYER_ROLES: dict[str, dict[str, str]] = {
+    "role:fingers": {"builtin": "builtin.hand_pose", "host": "player_rig"},
+    "role:body": {"builtin": "builtin.avatar_body", "host": "player_avatar"},
+    "role:teleport": {
+        "builtin": "builtin.locomotion.teleport", "host": "player_rig"},
+    "role:slide_head": {
+        "builtin": "builtin.locomotion.slide.head_relative",
+        "host": "player_rig"},
+    "role:slide_controller": {
+        "builtin": "builtin.locomotion.slide.controller_relative",
+        "host": "player_rig"},
+    "role:snap_turn": {
+        "builtin": "builtin.locomotion.snap_turn", "host": "player_rig"},
+    "role:smooth_turn": {
+        "builtin": "builtin.locomotion.smooth_turn", "host": "player_rig"},
+    "role:movement_settings_menu": {
+        "builtin": "builtin.movement_settings_menu", "host": "player_rig"},
+}
+
+#: BuildSpec movement mode -> role.
+MOVEMENT_MODE_ROLES: dict[str, str] = {
+    "teleport": "role:teleport",
+    "slide_head": "role:slide_head",
+    "slide_controller": "role:slide_controller",
+}
+#: BuildSpec turn style -> role.
+TURN_ROLES: dict[str, str] = {
+    "snap": "role:snap_turn",
+    "smooth": "role:smooth_turn",
+}
+
+
+def role_of(mechanic_id: str | None) -> str:
+    """The player role a built-in (or alias) fills, or ""."""
+    if not mechanic_id:
+        return ""
+    e = entry(mechanic_id)
+    return e.role if e is not None else ""
+
+
+def role_of_plan_item(item: object) -> str:
+    """The role a MechanicPlan item fills.
+
+    A built-in fills its own role; a ``builtin+config_code_edit`` copy fills
+    its BASE built-in's role, because it replaces that built-in. A fresh
+    ``generate`` item fills no role.
+    """
+    classification = getattr(item, "classification", None)
+    cls = getattr(classification, "value", classification)
+    if cls in ("builtin", "builtin+config"):
+        return role_of(getattr(item, "builtin_id", None))
+    if cls == "builtin+config_code_edit":
+        return role_of(getattr(item, "base_builtin_id", None))
+    return ""
 
 
 def builtin_ids() -> list[str]:

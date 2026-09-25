@@ -149,6 +149,16 @@ No skip logic — each run calls the LLM and overwrites the manifest. If you res
 
 Post-npc_plan manifest is authoritative for `rigged`/`animations` — stage 2 values may be overwritten.
 
+### Hands Only drops the player body
+
+When `BuildSpec.player_experience` is `hands_only`, every item with
+`character_role: player_avatar` (or a character whose text names the player's
+body) is removed before anything is billed -- no reference image, Tripo mesh,
+rig or animation for a body nobody sees. Hand-shaped props are kept as
+ordinary props and labelled with `AssetItem.wearable_region` (`hands`,
+`forearms`, ...). `AssetItem.hold_rotation_offset_deg` is an optional manual
+grip correction that scene_compile forwards to `builtin.grab`.
+
 ---
 
 ## Extend this folder

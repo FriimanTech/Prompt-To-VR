@@ -98,6 +98,16 @@ Missing normalization → RuntimeError. Tool build fail → RuntimeError. Per-as
 
 Never --sloppy on skinned meshes — sloppy invents vertices without valid bone weights, breaking animation at runtime.
 
+### One size for every LOD
+
+Each LOD's `longest_axis` is recorded; LOD0's becomes `lod0_longest_axis` in
+`asset_normalization.json`. A sloppy LOD whose longest axis drifts more than
+2 % from LOD0 is rebuilt without `--sloppy`. scene_compile turns the value
+into `mesh.unit_scale` (metres per GLB unit), which the runtime applies to
+every LOD instead of re-measuring each file, and the renderer caches meshes by
+(path, scale) -- so an object is the same size at every distance and launch.
+Stamps written before this existed are rebuilt once.
+
 ---
 
 ## Extend this folder

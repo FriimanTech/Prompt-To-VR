@@ -78,6 +78,8 @@ private:
     class PersistenceService;
     class TransitionService;
     class UiService;
+    class ComfortService;
+    friend class ComfortService;
     friend class LocomotionService;
     friend class PhysicsAccessService;
     friend class ContactsService;
@@ -121,9 +123,48 @@ private:
     // room) still look good.
     void build_render_env();
 
-    // Guarantee that every locomotion style the runtime menu can select has
-    // a mechanic attached, adding only the ones the scene left out.
-    void ensure_player_locomotion_bindings();
+    /** Log when two bound mechanics fill the same player role (two
+     *  teleporters, two snap turns). The engine injects no player mechanics
+     *  of its own; a scene that binds none is a stationary game. */
+    void check_player_mechanic_roles() const;
+
+    /** Copy locomotion tunables and default modes from the scene's player
+     *  block, and reset what the scene's mechanics have declared. */
+    void apply_player_settings_from_scene();
+
+    /** Make sure the active locomotion / turn mode is one some bound
+     *  mechanic actually implements. */
+    void reconcile_available_modes();
+
+    // ------------------------------------------------------------------
+    // Player motor
+    // ------------------------------------------------------------------
+
+    /** True when the CharacterVirtual body owns the player's movement. */
+    bool motor_active() const;
+
+    /** Resolve this frame's requested movement plus the player's physical
+     *  walking against the world, and keep the feet on the ground. */
+    void step_player_motor(float dt);
+
+    /** Movement for a player the motor does not own (riding a frame, or
+     *  scaled): swept, never floated, applied frame-relative. */
+    void apply_pending_move_legacy();
+
+    /** The headset's world position against the rig as it is RIGHT NOW. */
+    Vec3 current_head_world() const;
+
+    /** Put a hand entity on its controller through the hand mesh's
+     *  measured grip alignment. */
+    void place_hand_entity(int hand, const Vec3& grip_pos,
+                           const Quat& grip_rot);
+
+    /** ``player.hands.grip_trim_deg`` as a rotation in the grip frame. */
+    Quat grip_trim_quat() const;
+
+    /** ``player.hands.debug_axes``: draw each grip frame for calibration. */
+    void draw_hand_debug_axes(const Vec3 grip_pos[2], const Quat grip_rot[2],
+                              const bool valid[2]);
 
     /** Create the ECS entity that gives the player a body in the world.
      *
@@ -394,30 +435,6 @@ private:
         SlideHeadRelative = 1,       // left-stick: slide in the direction of head gaze
         SlideControllerRelative = 2, // left-stick: slide along the left controller's aim
     };
-    enum class MenuPage : int {
-        Root = 0,           // "Pick your Movement Style"
-        SlidingSubmenu = 1, // "Pick your Sliding Style"
-        Closed = 2,         // user confirmed; menu removed
-    };
-    struct Menu {
-        MenuPage page{MenuPage::Root};
-        int highlighted{-1};        // -1 = nothing, 0/1 = per-page options
-        // Which controller is currently aiming at the highlighted pad
-        // (-1 = neither). Both controllers can drive the menu; whichever
-        // hand is pointing closer to a pad wins, and that hand's trigger
-        // edge confirms the selection.
-        int active_hand{-1};
-        float confirm_cooldown_s{0.5f};    // debounce so the menu doesn't
-                                           // instantly eat the first click
-        float prev_trigger[2]{0.0f, 0.0f}; // [0]=left, [1]=right
-        // The menu panel is placed once (when first shown) in front of the
-        // user's eyes (HMD position). Default is a fallback used only
-        // until the first valid HMD pose has been observed.
-        Vec3 world_anchor{0.0f, 1.55f, -1.2f}; // default in-stage pose
-        float yaw_rad{0.0f};
-        bool anchor_set{false};
-    };
-
     // NOTE: teleport aim/commit state used to live here. It now belongs to
     // the builtin.locomotion.teleport mechanic, which owns its own arc.
 
@@ -486,7 +503,36 @@ private:
     // rising + falling edges).
     XrRuntime::InputState prev_input_{};
     LocomotionMode locomotion_{LocomotionMode::Teleport};
-    Menu menu_{};
+    ::ptv::TurnMode turn_mode_{::ptv::TurnMode::Snap};
+    // What the bound mechanics implement, declared as they attach. Indexed
+    // by the API enums.
+    std::array<bool, 3> mode_available_{false, false, false};
+    std::array<bool, 2> turn_available_{false, false};
+    // Menus currently holding the sticks.
+    std::vector<std::string> input_lock_owners_;
+
+    // --- Player motor ---
+    ::ptv::VerticalMode vertical_mode_{::ptv::VerticalMode::Grounded};
+    // Movement requested by locomotion mechanics this frame (world metres).
+    Vec3 pending_move_{0.0f};
+    float pending_jump_mps_{0.0f};
+    // Stand the body under the head on the next frame that has a pose.
+    bool motor_needs_sync_{true};
+    // Where the head was last allowed to be, for the head sweep.
+    Vec3 motor_head_resolved_{0.0f};
+    float motor_resize_timer_s_{0.0f};
+    // No collider under the spawn: treat the flat floor plane as ground.
+    bool motor_virtual_floor_{false};
+    Vec3 motor_last_grounded_{0.0f};
+    bool motor_has_grounded_{false};
+    // Latest headset pose in STAGE space.
+    Mat4 head_local_{1.0f};
+    bool head_local_valid_{false};
+
+    // Which skeleton builtin.hand_pose curls on each hand (IHands).
+    std::array<entt::entity, 2> finger_targets_{entt::null, entt::null};
+    // Grip frame -> hand entity frame, measured per hand mesh.
+    std::array<Mat4, 2> hand_grip_to_entity_{Mat4(1.0f), Mat4(1.0f)};
     // Horizontal head-facing direction in **stage / world XZ** (Y=0 plane).
     //
     // CRITICAL: this MUST default to the zero vector so that until we have
@@ -507,21 +553,12 @@ private:
     Vec3 last_head_world_pos_{0.0f, 0.0f, 0.0f};
     bool last_head_pose_valid_{false};
 
-    // Pre-loaded GLB icons for the locomotion menu (root: Walking + Teleport,
-    // submenu: Head-Relative + Controller-Relative). -1 = not loaded yet
-    // (renderer falls back to procedural icons in that case).
-    int menu_icon_walking_slot_{-1};
-    int menu_icon_teleport_slot_{-1};
-    int menu_icon_head_relative_slot_{-1};
-    int menu_icon_controller_relative_slot_{-1};
-
     // NOTE: the slide comfort ramp used to live here. It now belongs to the
     // slide mechanics (see mechanics/builtin/slide/SlideComfort.h), one ramp
     // per mechanic instance.
 
     // Locomotion tunables (loaded from scene.json ``player`` block; see
     // docs/locomotion.md). Defaults match Meta's comfort recommendations.
-    bool locomotion_menu_enabled_{true};
     float slide_max_speed_mps_{1.5f};
     float slide_accel_tau_s_{0.12f};
     float slide_decel_tau_s_{0.18f};
@@ -552,7 +589,26 @@ private:
     std::unique_ptr<PersistenceService> persistence_svc_;
     std::unique_ptr<TransitionService> transition_svc_;
     std::unique_ptr<UiService> ui_svc_;
+    std::unique_ptr<ComfortService> comfort_svc_;
     MechanicContext mech_ctx_{};
+
+    // Comfort vignette state, per ComfortChannel.
+    struct VignetteChannel {
+        bool offered{false};
+        bool toggleable{false};
+        bool enabled{false};
+    };
+    std::array<VignetteChannel, 2> vignette_channels_{};
+    // Strongest request this frame, and the smoothed value actually drawn.
+    float vignette_request_{0.0f};
+    float vignette_request_inner_deg_{55.0f};
+    float vignette_request_feather_deg_{25.0f};
+    float vignette_level_{0.0f};
+    float vignette_inner_deg_{55.0f};
+    float vignette_feather_deg_{25.0f};
+    float vignette_since_request_s_{10.0f};
+    /** Smooth this frame's vignette requests into what the renderer draws. */
+    void tick_comfort_vignette(float dt);
     // Monotonic seconds since the loop started; the haptics rate limiter
     // needs a clock that does not depend on wall-clock formatting.
     double haptic_clock_s_{0.0};

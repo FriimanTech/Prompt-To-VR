@@ -34,11 +34,21 @@ orchestrator and a reusable Vulkan + OpenXR engine core.
    generated mechanic. Generated code adds mechanics; it does not
    reimplement basic VR behavior, and it never modifies a built-in.
    `builtin.smooth_locomotion` has been REMOVED; use the explicit
-   `builtin.locomotion.slide.*` ids. The player's own hands are rigged
-   entities posed by `builtin.hand_pose`, which the engine binds
-   automatically — generated code must never re-implement finger curl, and
-   must never couple a weapon to the hand (both read the same
-   `input.hands[h].trigger` and stay in sync on their own).
+   `builtin.locomotion.slide.*` ids. The engine INJECTS NO player
+   mechanic: finger posing (`builtin.hand_pose`), the avatar body
+   (`builtin.avatar_body`), each locomotion mode, snap / smooth turn and
+   `builtin.movement_settings_menu` are planned in `mechanic_plan.json`
+   and bound in `scene.json` from the BuildSpec `movement` block and
+   `player_experience` — one mechanic per `role:` (see
+   `PLAYER_ROLES` in `engine_catalog.py`), none for roles the game lacks.
+   A scene with no locomotion is a valid stationary game. The player's
+   hands are the engine's default rigged hands (Hands Only) or the
+   avatar's own (Full Player Avatar); generated code must never
+   re-implement finger curl, and must never couple a weapon to the hand
+   (both read the same `input.hands[h].trigger` and stay in sync on
+   their own). Walking moves go through `ctx.locomotion->move_horizontal`
+   (horizontal-only, resolved by the engine's character controller);
+   comfort vignettes go through `ctx.comfort`, never a drawn blink.
    NPC movement is likewise owned by `builtin.character_locomotion`:
    generated AI writes a desired velocity into `CLocomotionIntent` and the
    built-in moves the body, turns it, picks idle/walk/run from the achieved
@@ -109,7 +119,10 @@ orchestrator and a reusable Vulkan + OpenXR engine core.
 
 ## Generation pipeline (order is fixed)
 
-1. Prompt → **BuildSpec** (Claude Opus, structured output).
+1. Prompt → **BuildSpec** (Claude Opus, structured output). `target_device`
+   and `player_experience` (Hands Only / Full Player Avatar) are the
+   user's choices and are forced to match `ProjectState`; the model
+   decides the `movement` block (modes may be empty for stationary games).
 2. BuildSpec → **AssetManifest** (Claude Sonnet, structured output). Only
    OBJECTS (characters, props, fx, ui) — the environment is not a GLB, and
    neither is a SOUND. Every item costs a reference image plus a paid Tripo
@@ -137,7 +150,9 @@ orchestrator and a reusable Vulkan + OpenXR engine core.
    (control + hand) to every input-driven mechanic; a deterministic
    validator normalizes face-button hands (sharing a control is allowed,
    not a conflict). BuildSpec labels each mechanic `regular` or
-   `hub` (a shared foundation like a shooting hub).
+   `hub` (a shared foundation like a shooting hub). A deterministic
+   player-roles reconcile then adds / collapses / removes player
+   mechanics so the plan matches the BuildSpec exactly.
 4. All above → **SceneSpec**, one per scene (OpenAI Agents SDK agent,
    `gpt-5.6-sol` @ reasoning `medium`, no tools) with a deterministic validate-and-repair loop
    (asset coverage, environment presence, valid mechanic-binding ids);

@@ -35,6 +35,8 @@ extern "C" int ptv_force_link_builtin_ui_panel;
 extern "C" int ptv_force_link_builtin_head_interior;
 extern "C" int ptv_force_link_builtin_motion_affordances;
 extern "C" int ptv_force_link_builtin_state_affordances;
+extern "C" int ptv_force_link_builtin_smooth_turn;
+extern "C" int ptv_force_link_builtin_movement_settings_menu;
 
 namespace {
 int sum_builtin_module_anchors() {
@@ -49,7 +51,9 @@ int sum_builtin_module_anchors() {
            ptv_force_link_builtin_ui_panel +
            ptv_force_link_builtin_head_interior +
            ptv_force_link_builtin_motion_affordances +
-           ptv_force_link_builtin_state_affordances;
+           ptv_force_link_builtin_state_affordances +
+           ptv_force_link_builtin_smooth_turn +
+           ptv_force_link_builtin_movement_settings_menu;
 }
 // Deliberately ``volatile``: a const, unused aggregate of the same values
 // gets constant-folded away and the modules go missing from the link again.

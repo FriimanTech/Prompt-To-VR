@@ -137,6 +137,25 @@ class CharacterRole(str, Enum):
     player_avatar = "player_avatar"
 
 
+class WearableRegion(str, Enum):
+    """Which part of the PLAYER'S body an item is designed to be worn on.
+
+    Descriptive only today. In a Hands Only game an item marked ``hands`` or
+    ``forearms`` (a glove, a gauntlet) is still generated and placed as an
+    ordinary prop -- the player cannot yet wear it AS their hands, because
+    nothing rigs a standalone hand model. The label is what lets a future
+    hand-rigging update find those items without re-planning the game.
+    """
+
+    none = "none"
+    hands = "hands"
+    forearms = "forearms"
+    head = "head"
+    torso = "torso"
+    legs = "legs"
+    feet = "feet"
+
+
 class ReferenceImageRequest(StrictModel):
     """Reference image parameters sent to Gemini / Imagen.
 
@@ -169,6 +188,9 @@ class AssetItem(StrictModel):
     # stage to decide pose and by the scene compiler to place the avatar,
     # replacing style_notes keyword matching.
     character_role: CharacterRole = CharacterRole.none
+    # Body part the item is worn on, when it is a wearable (see
+    # WearableRegion). ``none`` for everything else.
+    wearable_region: WearableRegion = WearableRegion.none
     reference: ReferenceImageRequest
     strategy: GenerationStrategy = GenerationStrategy.image_to_3d
     tripo: TripoRequest = Field(default_factory=TripoRequest)
@@ -224,6 +246,17 @@ class AssetItem(StrictModel):
         description=(
             "Hard per-asset triangle cap after decimation. Overrides the"
             " budget allocator for this asset when set."
+        ),
+    )
+    hold_rotation_offset_deg: Optional[List[float]] = Field(
+        default=None,
+        min_length=3,
+        max_length=3,
+        description=(
+            "Optional XYZ Euler correction (degrees) to how this asset sits"
+            " in the hand when grabbed by its grip socket. Leave unset: the"
+            " grip socket already points the business end where the"
+            " controller aims. Only for an asset that is known to hold wrong."
         ),
     )
 

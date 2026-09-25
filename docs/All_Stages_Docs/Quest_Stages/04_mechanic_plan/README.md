@@ -121,6 +121,25 @@ Hub CodeTasks (e.g. shooting_hub) emit first with empty `depends_on`; weapon/ene
 
 Planner message lists which built-ins support `code_edit` and source paths under `engine/runtime/src/mechanics/builtin/`.
 
+### Player roles reconcile
+
+The engine injects no player mechanic, so the plan must name them. After the
+planner runs, `pipeline/movement.py::reconcile_mechanic_plan` makes the plan
+fill exactly the roles the BuildSpec implies:
+
+| Role | Built-in | When |
+|------|----------|------|
+| `role:fingers` | `builtin.hand_pose` | every game |
+| `role:body` | `builtin.avatar_body` | Full Player Avatar only |
+| `role:teleport` / `role:slide_head` / `role:slide_controller` | the three locomotion built-ins | one per `movement.modes` entry (none for a stationary game) |
+| `role:snap_turn` / `role:smooth_turn` | snap / smooth turn | one per `movement.turning` entry |
+| `role:movement_settings_menu` | `builtin.movement_settings_menu` | only when there is a choice (2+ modes, both turns, or a vignette switch) |
+
+Missing roles get their stock built-in; two items for one role collapse (a
+`builtin+config_code_edit` replacement beats its base); locomotion the
+BuildSpec does not allow is removed and logged. Slide and smooth-turn configs
+get `vignette.enabled` / `user_toggle` from `movement.vignette`.
+
 ---
 
 ## Extend this folder

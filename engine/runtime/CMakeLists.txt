@@ -92,39 +92,40 @@ else()
 endif()
 
 # ---------------------------------------------------------------------------
-# Engine-owned runtime assets: the rigged player hands.
+# Engine-owned runtime assets: the default rigged player hands.
 #
-# Generated rather than committed for the same reason the test fixtures are:
-# a deterministic script beats a binary in git, and Tripo cannot produce this
-# asset at all (its rig types are all whole creatures, so a disembodied hand
-# is not riggable). Resolved through PTV_ENGINE_ASSET_DIR, mirroring how
-# PTV_SHADER_DIR works -- an absolute build path on desktop, a bare relative
-# path inside the APK on Quest.
+# Built from Default_Models/default_rigged_hand_model.glb, a single rigged
+# hand: prepare_default_hands.py renames its joints to the BodySlots
+# vocabulary and mirrors it to make the other hand. Resolved through
+# PTV_ENGINE_ASSET_DIR, mirroring how PTV_SHADER_DIR works -- an absolute
+# build path on desktop, a bare relative path inside the APK on Quest.
 # ---------------------------------------------------------------------------
 find_package(Python3 COMPONENTS Interpreter QUIET)
 
 set(PTV_ENGINE_ASSET_DIR "${CMAKE_BINARY_DIR}/assets")
-if(Python3_Interpreter_FOUND)
-  set(PTV_HAND_SCRIPT "${CMAKE_CURRENT_SOURCE_DIR}/../tools/make_hand_fixture.py")
-  set(PTV_HAND_FILES)
-  foreach(hand left right)
-    set(hand_out "${PTV_ENGINE_ASSET_DIR}/hand_${hand}.glb")
-    add_custom_command(
-      OUTPUT "${hand_out}"
-      COMMAND "${Python3_EXECUTABLE}" "${PTV_HAND_SCRIPT}"
-              --output "${hand_out}" --hand ${hand}
-      DEPENDS "${PTV_HAND_SCRIPT}"
-      COMMENT "Generating rigged ${hand} hand"
-      VERBATIM
-    )
-    list(APPEND PTV_HAND_FILES "${hand_out}")
-  endforeach()
+set(PTV_DEFAULT_HAND_SRC
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../Default_Models/default_rigged_hand_model.glb")
+if(Python3_Interpreter_FOUND AND EXISTS "${PTV_DEFAULT_HAND_SRC}")
+  set(PTV_HAND_SCRIPT "${CMAKE_CURRENT_SOURCE_DIR}/../tools/prepare_default_hands.py")
+  set(PTV_HAND_FILES
+      "${PTV_ENGINE_ASSET_DIR}/default_hand_left.glb"
+      "${PTV_ENGINE_ASSET_DIR}/default_hand_right.glb")
+  add_custom_command(
+    OUTPUT ${PTV_HAND_FILES}
+    COMMAND "${Python3_EXECUTABLE}" "${PTV_HAND_SCRIPT}"
+            --input "${PTV_DEFAULT_HAND_SRC}"
+            --out-dir "${PTV_ENGINE_ASSET_DIR}"
+    DEPENDS "${PTV_HAND_SCRIPT}" "${PTV_DEFAULT_HAND_SRC}"
+    COMMENT "Preparing the default rigged hands"
+    VERBATIM
+  )
   add_custom_target(ptv_engine_assets ALL DEPENDS ${PTV_HAND_FILES})
   add_dependencies(ptv_runtime ptv_engine_assets)
 else()
   message(WARNING
-    "Python3 not found; rigged hand meshes will not be generated. The runtime "
-    "falls back to the procedural block hands.")
+    "Python3 or Default_Models/default_rigged_hand_model.glb not found; the "
+    "default hands will not be built and the runtime falls back to the "
+    "procedural block hands.")
 endif()
 target_compile_definitions(ptv_runtime PUBLIC
   "PTV_ENGINE_ASSET_DIR=\"${PTV_ENGINE_ASSET_DIR}\"")

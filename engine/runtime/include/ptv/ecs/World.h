@@ -178,6 +178,13 @@ struct CMesh {
      * the feet from sliding over the floor. Empty means "unknown", and the
      * mechanic falls back to a height-derived estimate. */
     std::unordered_map<std::string, float> animation_speeds;
+    /** Metres per source unit, measured ONCE from the asset's LOD0 by the
+     *  asset_optimization stage. When set, every LOD is loaded with exactly
+     *  this factor instead of each file re-normalizing itself to
+     *  ``target_scale_meters``, so all levels are guaranteed the same size.
+     *  0 = unknown (older scenes): per-file normalization. Last member so
+     *  positional initializers written before it existed stay correct. */
+    float unit_scale{0.0f};
 };
 
 /** Skeleton for a rigged ``CMesh``, plus the palette the renderer uploads.

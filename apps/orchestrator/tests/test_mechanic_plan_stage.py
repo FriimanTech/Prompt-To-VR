@@ -173,9 +173,14 @@ def test_stage_saves_plan_and_summary(tmp_path):
 
     # Plan saved + on context.
     saved = store.load_mechanic_plan(pid)
-    assert {it.id for it in saved.items} == {"grab", "shooting_hub", "jump"}
+    ids = {it.id for it in saved.items}
+    assert {"grab", "shooting_hub", "jump"} <= ids
+    # The player roles the default BuildSpec implies are planned explicitly.
+    assert {"hand_pose", "avatar_body", "teleport", "slide_head_relative",
+            "slide_controller_relative", "snap_turn",
+            "movement_settings_menu"} <= ids
     assert ctx.mechanic_plan is not None
-    assert result.data is plan
+    assert result.data is ctx.mechanic_plan
 
     statuses = [(e.status, e.message) for e in bus.published]
     assert any(s == "succeeded" for s, _ in statuses)
@@ -244,7 +249,7 @@ def test_stage_allows_shared_control_binding(tmp_path):
     stage_mechanic_plan.run_with_planner(ctx, planner=_stub_planner(plan))
 
     saved = store.load_mechanic_plan(pid)
-    assert {it.id for it in saved.items} == {"shooting_hub", "ui_pointer"}
+    assert {"shooting_hub", "ui_pointer"} <= {it.id for it in saved.items}
     statuses = [e.status for e in bus.published]
     assert "succeeded" in statuses
     assert "failed" not in statuses

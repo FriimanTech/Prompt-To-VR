@@ -1,75 +1,74 @@
 // builtin.hand_pose -- curl the player's fingers from the controller.
 //
-// This is the payoff for the skinning tier. The player's hands are rigged
-// entities (16 joints each, created by Application::create_hand_entities from
-// the generated hand mesh), and this mechanic states their finger pose every
-// frame as a pure function of the CURRENT input:
+// States the finger pose every frame as a pure function of the CURRENT input:
 //
-//   index finger        <- trigger
-//   middle/ring/pinky   <- grip
-//   thumb               <- thumbrest / face-button touch
+//   nothing touched         -> relaxed, open hand
+//   trigger                 -> index finger curls
+//   grip                    -> middle, ring and little fingers close into
+//                              the palm
+//   grip + trigger          -> full fist
+//   thumb on the thumbstick -> thumb lowers toward the index side, as if
+//                              resting on the stick
+//   finger resting on the trigger without pulling -> slight index bend
+//   holding something       -> grip fingers stay closed around it
 //
-// That is why it is an override rather than a clip. There is no recording of
-// "the player pulled the trigger 40% of the way"; the pose is whatever the
-// analog value is this instant. Clips are for motion baked into an asset -- a
-// walk cycle -- and both write into the same CSkeleton::local_pose, so a
-// character could play an idle animation while code steers its fingers.
+// WHICH hand gets posed is not this mechanic's decision. It curls exactly
+// ``ctx.hands->finger_target(h)`` -- the skeleton whose fingers the player
+// actually sees on that hand:
 //
-// Capsense is what makes this read as a hand rather than a claw. A Touch
-// controller reports whether a finger is RESTING on the trigger separately
-// from how hard it is pulled, so a finger that is touching but not pressing
-// gets a slight curl instead of sticking out straight. Without that,
-// every idle hand looks like it is pointing.
+//   * Hands Only: the engine's default rigged hands.
+//   * Full Player Avatar: the avatar itself, pointed at by
+//     builtin.avatar_body once it has found finger bones on that side.
+//   * An avatar whose rig stops at the wrist: nothing. Its hands follow the
+//     controllers; there are no fingers to bend.
 //
-// Player-scoped: one instance drives both hands. Simulate phase, because the
-// pose system runs immediately after it -- an override written in any other
-// phase is a frame late or ignored entirely.
+// The previous version curled the engine's own hand models only, so on a
+// full-body avatar -- where those models are hidden -- the visible fingers
+// never moved. Driving whatever is visible, and nothing else, is the fix.
 //
-// Deliberately NOT coupled to whatever the hand is holding. A weapon that
-// reacts to the trigger reads the same input.hands[h].trigger scalar, so the
-// two stay in sync every frame with no event plumbing and no ordering
-// dependency between the mechanics.
+// HOW the joints bend comes from HandRig, measured from the rig's own rest
+// pose, and every curl is applied on top of the joint's REST rotation. The
+// old code replaced each joint's rotation outright with a hard-coded
+// axis-angle, which only matched the procedural hands it was written for;
+// on a real rig it threw the rest pose away, so fingers bent backwards,
+// sideways, or into the wrong hand.
+//
+// Player-scoped: one instance drives both hands. Simulate phase, after
+// builtin.avatar_body (which places the wrist this curl sits on), because the
+// pose system runs immediately after that phase.
 
 #include <algorithm>
 #include <array>
 #include <cmath>
 #include <string>
+#include <vector>
 
 #include <glm/gtc/quaternion.hpp>
 
 #include "../BuiltinMechanicBase.h"
-#include "ptv/api/BodySlots.h"
+#include "../HandRig.h"
 #include "ptv/core/Logger.h"
 
 namespace ptv {
 namespace {
 
-// Joint naming from engine/tools/make_hand_fixture.py. The mixamorig:
-// prefix is the hand fixture's own contract for builtin.hand_pose; Tripo
-// character auto-rig uses spec="tripo" and does not share these names.
-constexpr const char* kBonePrefix = "mixamorig:";
-
-constexpr int kFingerCount = 5;
-constexpr int kSegmentsPerFinger = 3;
-
-// Index 0 is the thumb; 1 is the index finger; 2..4 are the grip fingers.
-const std::array<const char*, kFingerCount> kFingerNames = {
-    "thumb", "index", "middle", "ring", "pinky",
-};
-
 // How far each segment bends at full curl, in radians. Distal joints bend
 // further than proximal ones, which is what makes a fist look like a fist
 // rather than three equal hinges.
-constexpr float kCurlProximal = 1.15f;
-constexpr float kCurlIntermediate = 1.45f;
-constexpr float kCurlDistal = 1.20f;
+constexpr float kCurlProximal = 1.35f;
+constexpr float kCurlIntermediate = 1.55f;
+constexpr float kCurlDistal = 1.15f;
 
 // A finger resting on its control without pressing sits slightly bent.
 constexpr float kRestingCurl = 0.18f;
+// The relaxed open hand is not flat: fingers keep a gentle natural bend.
+constexpr float kDefaultRelaxedCurl = 0.08f;
 
-// The thumb folds across the palm rather than curling into it, so it gets its
-// own smaller range about a different axis.
-constexpr float kThumbCurl = 0.75f;
+// The thumb resting on the stick: swings toward the index finger and bends a
+// little at each joint. Deliberately modest -- it rests on the side of the
+// index, it does not fold across the palm.
+constexpr float kThumbAdduct = 0.45f;
+constexpr float kThumbFlex[3] = {0.15f, 0.35f, 0.40f};
 
 // Exponential smoothing time constant, matching the convention the locomotion
 // built-ins use. Fingers reach ~95% of a new target in ~3 tau; at 45 ms that
@@ -94,12 +93,21 @@ float approach(float current, float target, float tau, float dt) {
     return current + (target - current) * k;
 }
 
+enum ThumbSource : unsigned {
+    kThumbstick = 1u << 0,
+    kThumbrest = 1u << 1,
+    kFaceButtons = 1u << 2,
+};
+
 class HandPoseMechanic : public BuiltinMechanicBase<HandPoseMechanic> {
 public:
     static constexpr const char* kId = "builtin.hand_pose";
 
     MechanicPhase phase() const override { return MechanicPhase::Simulate; }
     MechanicScope scope() const override { return MechanicScope::Player; }
+    // After builtin.avatar_body, which places the wrist these curls sit on
+    // and points the finger targets at the avatar.
+    int order() const override { return 10; }
 
     void configure(const nlohmann::json& p) {
         smoothing_tau_ = std::clamp(
@@ -107,44 +115,81 @@ public:
         // A held object should read as gripped even if the player relaxes the
         // squeeze, which they will, because the controller does the holding.
         hold_curl_ = std::clamp(p.value("hold_curl", 0.85f), 0.0f, 1.0f);
-        resolved_ = false;
+        relaxed_curl_ =
+            std::clamp(p.value("relaxed_curl", kDefaultRelaxedCurl), 0.0f, 0.4f);
+
+        // Which capsense lowers the thumb. The thumbstick by default: that is
+        // where a Touch player's thumb rests nearly all the time. A thumbrest
+        // or face-button trigger only when a prompt asks for it.
+        thumb_sources_ = kThumbstick;
+        if (p.contains("thumb_sources") && p["thumb_sources"].is_array()) {
+            thumb_sources_ = 0u;
+            for (const auto& s : p["thumb_sources"]) {
+                if (!s.is_string()) continue;
+                const std::string v = s.get<std::string>();
+                if (v == "thumbstick") thumb_sources_ |= kThumbstick;
+                if (v == "thumbrest") thumb_sources_ |= kThumbrest;
+                if (v == "face_buttons") thumb_sources_ |= kFaceButtons;
+            }
+        }
+        for (auto& r : rigs_) r = Resolved{};
     }
 
     void tick(World&, std::uint32_t, float dt, const InputSnapshot& input,
               MechanicContext& ctx) {
         if (ctx.skeleton == nullptr || ctx.hands == nullptr) return;
-        if (!resolved_) resolve_joints(ctx);
 
         for (int h = 0; h < 2; ++h) {
-            const std::uint32_t hand_entity = ctx.hands->hand_entity(h);
-            if (hand_entity == InputSnapshot::kInvalidEntity) continue;
+            const std::uint32_t target = ctx.hands->finger_target(h);
+            auto& res = rigs_[static_cast<size_t>(h)];
+            if (target == InputSnapshot::kInvalidEntity ||
+                !ctx.skeleton->has_skeleton(target)) {
+                res = Resolved{};
+                continue;
+            }
+            // Re-measured whenever the target changes -- a skeleton attaches
+            // after load, and an avatar can be swapped mid-game. A one-shot
+            // latch is what used to freeze fingers for a whole session.
+            if (res.entity != target) {
+                res.entity = target;
+                res.rig = hand_rig::analyze(*ctx.skeleton, target, h);
+                if (!res.rig.valid) {
+                    PTV_INFO(
+                        "builtin.hand_pose: {} hand target has no finger "
+                        "bones; fingers will not animate",
+                        h == 0 ? "left" : "right");
+                }
+            }
+            if (!res.rig.valid) continue;
 
             const auto& hand = input.hands[h];
             const auto hand_enum = static_cast<InputSnapshot::Hand>(h);
 
             // --- target curl per finger group -------------------------
-            // Touching without pressing gives a resting bend; the analog
-            // value takes over the moment it exceeds that.
-            float index_target = hand.trigger;
+            float index_target = std::max(relaxed_curl_, hand.trigger);
             if (input.trigger_touching(hand_enum)) {
                 index_target = std::max(index_target, kRestingCurl);
             }
-            float grip_target = hand.grip;
-
+            float grip_target = std::max(relaxed_curl_, hand.grip);
             // Holding something pins the fingers closed regardless of how
             // lightly the player is now squeezing.
             if (hand.held_entity != InputSnapshot::kInvalidEntity) {
                 grip_target = std::max(grip_target, hold_curl_);
                 index_target = std::max(index_target, kRestingCurl);
             }
-
-            // The thumb has no analog axis at all -- capsense is the only
-            // signal there is. Resting it on the thumbrest or a face button
-            // folds it down over the palm.
-            const bool thumb_down =
-                input.thumbrest_touching(hand_enum) ||
-                (h == 0 ? (input.button_x || input.button_y)
-                        : (input.button_a || input.button_b));
+            bool thumb_down = false;
+            if ((thumb_sources_ & kThumbstick) &&
+                input.thumbstick_touching(hand_enum)) {
+                thumb_down = true;
+            }
+            if ((thumb_sources_ & kThumbrest) &&
+                input.thumbrest_touching(hand_enum)) {
+                thumb_down = true;
+            }
+            if ((thumb_sources_ & kFaceButtons) &&
+                input.face_button_touching(hand_enum)) {
+                thumb_down = true;
+            }
             const float thumb_target = thumb_down ? 1.0f : 0.0f;
 
             auto& state = smoothed_[static_cast<size_t>(h)];
@@ -152,7 +197,7 @@ public:
             state.grip = approach(state.grip, grip_target, smoothing_tau_, dt);
             state.thumb = approach(state.thumb, thumb_target, smoothing_tau_, dt);
 
-            apply(ctx, hand_entity, h, state);
+            apply(ctx, target, res.rig, state);
         }
     }
 
@@ -163,84 +208,49 @@ private:
         float thumb{0.0f};
     };
 
-    void resolve_joints(MechanicContext& ctx) {
-        // Resolved once, then cached: joint_index is a string lookup, and
-        // doing it for 15 joints on both hands every frame would be pure
-        // waste.
-        //
-        // Only latch ``resolved_`` once a hand actually answered. Bindings are
-        // attached before the renderer exists, so the very first attempt can
-        // legitimately find no hand entity yet; latching then would leave the
-        // fingers frozen for the whole session.
-        int found = 0;
-        for (int h = 0; h < 2; ++h) {
-            const std::uint32_t e = ctx.hands->hand_entity(h);
-            if (e == InputSnapshot::kInvalidEntity) continue;
-            for (int f = 0; f < kFingerCount; ++f) {
-                for (int s = 0; s < kSegmentsPerFinger; ++s) {
-                    // Resolve through the canonical slot vocabulary rather
-                    // than the engine hand fixture's own bone names. Both
-                    // resolve the fixture identically, but the slot table
-                    // also covers Mixamo, Tripo, Unity and Unreal naming, so
-                    // this same mechanic now poses the fingers of a generated
-                    // full-body avatar instead of silently doing nothing.
-                    const std::string slot = body_finger_slot(
-                        kFingerNames[static_cast<size_t>(f)], s + 1, h);
-                    const int j =
-                        ctx.skeleton->joint_for_slot(e, slot.c_str());
-                    joints_[static_cast<size_t>(h)][static_cast<size_t>(f)]
-                           [static_cast<size_t>(s)] = j;
-                    if (j >= 0) ++found;
-                }
+    struct Resolved {
+        std::uint32_t entity{InputSnapshot::kInvalidEntity};
+        hand_rig::Rig rig{};
+    };
+
+    void apply(MechanicContext& ctx, std::uint32_t entity,
+               const hand_rig::Rig& rig, const Curl& curl) const {
+        for (int f = hand_rig::Index; f <= hand_rig::Pinky; ++f) {
+            const float amount = (f == hand_rig::Index) ? curl.index : curl.grip;
+            const auto& chain = rig.fingers[static_cast<size_t>(f)];
+            for (int s = 0; s < hand_rig::kSegments; ++s) {
+                const auto& seg = chain.segments[static_cast<size_t>(s)];
+                if (seg.joint < 0) continue;
+                ctx.skeleton->set_joint_rotation_from_bind(
+                    entity, seg.joint,
+                    glm::angleAxis(amount * curl_for_segment(s),
+                                   seg.curl_axis_local));
             }
-            resolved_ = true;
         }
-        if (resolved_ && found == 0) {
-            PTV_WARN(
-                "builtin.hand_pose found no finger joints; the hand asset's "
-                "bones match none of the known finger naming conventions "
-                "(expected something like '{}index_01' or 'RightHandIndex1')",
-                kBonePrefix);
-        }
-    }
 
-    void apply(MechanicContext& ctx, std::uint32_t entity, int hand,
-               const Curl& curl) const {
-        for (int f = 0; f < kFingerCount; ++f) {
-            const bool is_thumb = (f == 0);
-            const bool is_index = (f == 1);
-            const float amount = is_thumb ? curl.thumb
-                                          : (is_index ? curl.index : curl.grip);
-
-            for (int s = 0; s < kSegmentsPerFinger; ++s) {
-                const int joint =
-                    joints_[static_cast<size_t>(hand)][static_cast<size_t>(f)]
-                           [static_cast<size_t>(s)];
-                if (joint < 0) continue;
-
-                // Fingers close around +X (the palm normal in the OpenXR grip
-                // frame), so they hinge about X. The thumb folds ACROSS the
-                // palm instead, which is a rotation about Y.
-                const float angle =
-                    amount * (is_thumb ? kThumbCurl : curl_for_segment(s));
-                const Vec3 axis = is_thumb ? Vec3(0.0f, 1.0f, 0.0f)
-                                           : Vec3(1.0f, 0.0f, 0.0f);
-                // Mirror the bend direction so the left hand closes inward
-                // too rather than bending backwards.
-                const float sign = (hand == 0) ? -1.0f : 1.0f;
-                ctx.skeleton->set_joint_rotation(
-                    entity, joint, glm::angleAxis(angle * sign, axis));
+        const auto& thumb = rig.fingers[hand_rig::Thumb];
+        for (int s = 0; s < hand_rig::kSegments; ++s) {
+            const auto& seg = thumb.segments[static_cast<size_t>(s)];
+            if (seg.joint < 0) continue;
+            Quat q = glm::angleAxis(curl.thumb * kThumbFlex[s],
+                                    seg.curl_axis_local);
+            if (s == 0) {
+                // The base joint also swings toward the index finger, which
+                // is what reads as "resting on the stick".
+                q = glm::angleAxis(curl.thumb * kThumbAdduct,
+                                   rig.thumb_adduct_axis_local) *
+                    q;
             }
+            ctx.skeleton->set_joint_rotation_from_bind(entity, seg.joint, q);
         }
     }
 
     float smoothing_tau_{kDefaultSmoothingTau};
     float hold_curl_{0.85f};
-    bool resolved_{false};
+    float relaxed_curl_{kDefaultRelaxedCurl};
+    unsigned thumb_sources_{kThumbstick};
     std::array<Curl, 2> smoothed_{};
-    // [hand][finger][segment] -> joint index, or -1.
-        int joints_[2][kFingerCount][kSegmentsPerFinger]{};
-
+    std::array<Resolved, 2> rigs_{};
 };
 
 }  // namespace

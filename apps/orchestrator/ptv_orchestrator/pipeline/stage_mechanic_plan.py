@@ -40,6 +40,7 @@ from .mechanic_plan_agent import (
     MechanicPlanner,
     build_planner_message,
 )
+from .movement import reconcile_mechanic_plan, required_roles
 from .prompts import mechanic_plan_system
 
 
@@ -98,6 +99,11 @@ def run_with_planner(
             " needed.",
             "For hub-type BuildSpec mechanics, generate the hub and set"
             " depends_on so branch mechanics are built after it.",
+            "PLAYER ROLES this game needs (plan exactly one item for each,"
+            " as builtin / builtin+config of the listed built-in, and plan"
+            " NO other locomotion, turning, finger-posing, avatar-body or"
+            " movement-menu mechanics): "
+            + ", ".join(required_roles(build_spec)),
         ],
     )
 
@@ -120,6 +126,17 @@ def run_with_planner(
         )
         ctx.emit(ProjectStage.mechanic_plan, "failed", detail[:240])
         raise ValueError(f"MechanicPlan binding conflicts: {detail}")
+
+    # Player roles are decided by the BuildSpec, not by the planner: exactly
+    # one mechanic per role the game needs (fingers always, the body for
+    # Full Player Avatar, each allowed locomotion mode and turn style, the
+    # settings menu when there is a choice), none for roles it does not.
+    reconciled = reconcile_mechanic_plan(plan, build_spec)
+    plan = reconciled.plan
+    for note in reconciled.notes:
+        ctx.emit(ProjectStage.mechanic_plan, "info", f"player roles: {note}"[:240])
+        ctx.store.append_log(ctx.project_id, "mechanic_plan",
+                             f"player roles: {note}")
 
     ctx.mechanic_plan = plan
     art = ctx.store.save_mechanic_plan(ctx.project_id, plan)

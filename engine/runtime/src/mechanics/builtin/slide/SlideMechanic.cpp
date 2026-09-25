@@ -17,6 +17,7 @@
 #include <cmath>
 
 #include "../BuiltinMechanicBase.h"
+#include "../ComfortVignette.h"
 #include "../StickFilter.h"
 #include "SlideComfort.h"
 #include "ptv/core/Logger.h"
@@ -31,7 +32,12 @@ public:
     MechanicScope scope() const override { return MechanicScope::Player; }
 
     void on_attach(World&, std::uint32_t, const nlohmann::json& p,
-                   MechanicContext&) override {
+                   MechanicContext& ctx) override {
+        vignette_ = comfort::parse_vignette(p);
+        comfort::offer(ctx.comfort, ComfortChannel::Movement, vignette_);
+        if (ctx.locomotion != nullptr) {
+            ctx.locomotion->declare_mode_available(mode());
+        }
         if (p.contains("speed_mps") && p["speed_mps"].is_number()) {
             max_speed_override_ = p.value("speed_mps", 0.0f);
         } else if (p.contains("max_speed_mps") && p["max_speed_mps"].is_number()) {
@@ -81,7 +87,23 @@ public:
         const slide::Basis basis = compute_basis(input);
 
         const float target_speed = basis.valid ? filtered.magnitude * max_speed : 0.0f;
+        const float prev_speed = ramp_.speed();
         const float speed = ramp_.update(target_speed, dt);
+
+        // Vignette strength follows speed AND acceleration, per Meta's
+        // guidance: a change of velocity is the strongest vection cue.
+        if (ctx.comfort != nullptr && max_speed > 1e-3f && dt > 1e-5f) {
+            const float speed_part = std::clamp(speed / max_speed, 0.0f, 1.0f);
+            const float accel = std::abs(speed - prev_speed) / dt;
+            const float accel_part = std::clamp(accel / (2.0f * max_speed),
+                                                0.0f, 1.0f);
+            const float s = std::max(speed_part, accel_part);
+            if (s > 0.02f) {
+                ctx.comfort->request_vignette(
+                    ComfortChannel::Movement, s * vignette_.strength,
+                    vignette_.inner_fov_deg, vignette_.feather_deg);
+            }
+        }
 
         if (basis.valid && speed > 1e-4f && filtered.magnitude > 0.0f) {
             // Re-normalise the stick intent: its magnitude is already baked
@@ -90,8 +112,9 @@ public:
             const float fa = forward_axis * inv;
             const float sa = strafe_axis * inv;
             const Vec3 dir = basis.forward * fa + basis.right * sa;
-            ctx.locomotion->translate(Vec3(dir.x * speed * dt, 0.0f,
-                                           dir.z * speed * dt));
+            // Horizontal only: the player's height belongs to the ground.
+            ctx.locomotion->move_horizontal(Vec3(dir.x * speed * dt, 0.0f,
+                                                 dir.z * speed * dt));
             trace(dt, basis, filtered, speed, ctx);
         } else if (filtered.magnitude > 0.05f && !basis.valid) {
             // The player is pushing but we refused to move because no
@@ -133,6 +156,7 @@ private:
     }
 
     slide::ComfortRamp ramp_{};
+    comfort::VignetteParams vignette_{};
     float max_speed_override_{0.0f};
     float accel_tau_override_{0.0f};
     float decel_tau_override_{0.0f};

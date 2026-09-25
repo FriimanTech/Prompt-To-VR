@@ -37,6 +37,29 @@ enum class LocomotionMode : int {
     SlideControllerRelative = 2,
 };
 
+/** Which turning style owns the right stick. Same rule as LocomotionMode:
+ *  a turn mechanic early-outs unless ``ILocomotion::turn_mode()`` is its
+ *  own, so snap and smooth turning can both be bound and the player can
+ *  switch between them in a settings menu. */
+enum class TurnMode : int {
+    Snap = 0,
+    Smooth = 1,
+};
+
+/** Who owns the player's height.
+ *
+ *  ``Grounded`` is the default and the right answer for walking, running,
+ *  crouching and jumping: gravity pulls the body down, the feet follow the
+ *  terrain up ramps and stairs, and the vertical part of any horizontal move
+ *  is ignored -- so a locomotion mechanic cannot accidentally float the
+ *  player off the ground. ``Free`` hands vertical motion to the caller, for
+ *  flying, swimming or climbing mechanics that genuinely move the player up
+ *  and down. */
+enum class VerticalMode : int {
+    Grounded = 0,
+    Free = 1,
+};
+
 /**
  * Comfort/tuning values authored in the scene's ``player`` block.
  *
@@ -72,18 +95,61 @@ public:
     /** Current rig yaw in radians. */
     virtual float yaw_radians() const = 0;
 
-    /** Move the rig by ``delta`` (world space).
+    /** Move the player by ``delta`` (world space).
+     *
+     *  The move is swept against the world through the player's body, so it
+     *  stops at walls from every direction. In ``VerticalMode::Grounded``
+     *  (the default) only the horizontal part is used and the body stays on
+     *  the ground; the vertical part is applied only in ``Free`` mode.
      *
      *  CLAMPED: non-finite values are rejected, and the per-frame magnitude is
      *  capped so a runaway mechanic cannot launch the player across the map. */
     virtual void translate(const Vec3& delta) = 0;
+
+    /** Same as ``translate`` with the vertical part discarded. Prefer this
+     *  for walking: it says what it means. */
+    virtual void move_horizontal(const Vec3& delta) = 0;
+
+    /** True while the player's feet are on something walkable. */
+    virtual bool is_grounded() const = 0;
+
+    /** Launch the player upward at ``speed_mps`` if they are grounded.
+     *  Gravity brings them back down. Ignored mid-air and in Free mode. */
+    virtual void jump(float speed_mps) = 0;
+
+    virtual void set_vertical_mode(VerticalMode mode) = 0;
+    virtual VerticalMode vertical_mode() const = 0;
+
+    /** Where the player's feet are: under the headset, on the ground.
+     *  Differs from ``position()`` (the stage origin) whenever the player
+     *  has walked away from the centre of their playspace. */
+    virtual Vec3 body_position() const = 0;
+
+    /** The headset's world pose right now, including any rig movement made
+     *  earlier this frame. */
+    virtual Vec3 head_position() const = 0;
+    virtual Quat head_rotation() const = 0;
+
+    /** Which turning style owns the right stick. */
+    virtual TurnMode turn_mode() const = 0;
+    virtual void set_turn_mode(TurnMode mode) = 0;
+
+    /** Locomotion and turn mechanics announce themselves here when they
+     *  attach, so a settings menu offers exactly the options this game has
+     *  and the engine never leaves the player in a mode nothing implements. */
+    virtual void declare_mode_available(LocomotionMode mode) = 0;
+    virtual bool mode_available(LocomotionMode mode) const = 0;
+    virtual void declare_turn_available(TurnMode mode) = 0;
+    virtual bool turn_available(TurnMode mode) const = 0;
 
     /** Rotate the rig about world +Y.
      *
      *  CLAMPED: non-finite values are rejected. */
     virtual void rotate_yaw(float radians) = 0;
 
-    /** Move the rig so the player stands at ``position``.
+    /** Move the player so they stand at ``position``: their FEET land
+     *  there, directly under their head, wherever they are standing in their
+     *  playspace.
      *
      *  CLAMPED: non-finite values are rejected, the horizontal distance is
      *  capped to ``teleport_max_horizontal_m()``, and the destination is
@@ -96,9 +162,13 @@ public:
     /** Switch styles (the runtime locomotion menu calls this). */
     virtual void set_active_mode(LocomotionMode mode) = 0;
 
-    /** True while something else owns the sticks (e.g. the locomotion menu is
+    /** True while something else owns the sticks (e.g. a settings menu is
      *  open). Locomotion mechanics must not move the player when this is set. */
     virtual bool input_locked() const = 0;
+
+    /** Claim or release the sticks for a menu. Reference counted by owner
+     *  id, so two panels closing in either order leave the sticks free. */
+    virtual void set_input_lock(const char* owner, bool locked) = 0;
 
     /** Scene-authored comfort tunables, so a mechanic can default to what the
      *  scene asked for instead of hard-coding its own numbers. */
@@ -271,6 +341,19 @@ public:
      *  Do NOT grab, throw or apply physics to these -- they follow the
      *  controller and are not simulated. */
     virtual std::uint32_t hand_entity(int hand) const = 0;
+
+    /** The skeleton whose fingers the player actually SEES on ``hand``, or
+     *  ``InputSnapshot::kInvalidEntity`` when that hand has no posable
+     *  fingers.
+     *
+     *  With the engine's default hands this is ``hand_entity``. With a
+     *  full-body avatar it is the avatar itself, set by
+     *  ``builtin.avatar_body`` once it has found finger bones on that side.
+     *  ``builtin.hand_pose`` curls exactly this entity and nothing else, so
+     *  a hidden pair of hands can never be the one being driven while the
+     *  visible fingers stay frozen. */
+    virtual std::uint32_t finger_target(int hand) const = 0;
+    virtual void set_finger_target(int hand, std::uint32_t entity) = 0;
 
     /** The player's own body: a kinematic capsule that follows the headset.
      *
@@ -720,8 +803,41 @@ public:
      *  all: the length from a fingertip to an elbow is not a constant, it is
      *  a property of the rig plus its current pose, so it has to be measured
      *  rather than assumed. Includes the entity's own transform, so the
-     *  result is directly comparable with ``ISockets::socket_world``. */
+     *  result is directly comparable with ``ISockets::socket_world``.
+     *
+     *  Computed from the CURRENT local pose, including every override
+     *  written earlier this frame, so a solver that writes a parent and then
+     *  reads the child sees the child where the new parent put it. */
     virtual Mat4 joint_world(std::uint32_t entity, int joint) const = 0;
+
+    /** ``joint``'s pose in the entity's OWN space (metres, before the
+     *  entity transform), from the current local pose. Rotation columns are
+     *  orthonormal: any scale a rig carries on its armature is removed, so
+     *  the rotation can be fed straight into quaternion maths. */
+    virtual Mat4 joint_model(std::uint32_t entity, int joint) const = 0;
+
+    /** Same as ``joint_model`` but for the rig's bind (rest) pose. Use this,
+     *  not the current pose, to measure a rig: bone lengths, finger
+     *  directions, which way the body faces. */
+    virtual Mat4 joint_bind_model(std::uint32_t entity, int joint) const = 0;
+
+    /** ``joint``'s LOCAL rotation in the bind pose. */
+    virtual Quat joint_bind_rotation(std::uint32_t entity, int joint) const = 0;
+
+    /** ``joint``'s LOCAL rotation as it stands right now. */
+    virtual Quat joint_local_rotation(std::uint32_t entity,
+                                      int joint) const = 0;
+
+    /** Override ``joint``'s local rotation as ``bind * delta`` for this
+     *  frame.
+     *
+     *  Prefer this to ``set_joint_rotation`` for anything that BENDS a rig
+     *  (a finger curl, a head turn): real rigs carry a non-identity rest
+     *  rotation on nearly every joint, and replacing it outright throws the
+     *  rest pose away -- the finger ends up pointing wherever the identity
+     *  quaternion happens to point. */
+    virtual void set_joint_rotation_from_bind(std::uint32_t entity, int joint,
+                                              const Quat& delta) = 0;
 
     /** Write every joint in ``root``'s subtree (including ``root``) into
      *  ``out``, returning how many were written.
@@ -1105,6 +1221,58 @@ public:
                             const Quat& rotation) = 0;
 };
 
+/** Which kind of artificial motion a comfort setting applies to. */
+enum class ComfortChannel : int {
+    /** Sliding locomotion (head- or controller-relative). */
+    Movement = 0,
+    /** Smooth turning. */
+    Turning = 1,
+};
+
+/**
+ * Comfort vignette ("tunnel vision"), implemented the way Meta's locomotion
+ * guidance describes it.
+ *
+ * A vignette darkens the edges of the view while artificial motion happens,
+ * because peripheral optic flow is what drives vection. It is:
+ *
+ *   * dynamic -- it appears only while moving or turning and fades out
+ *     shortly after the motion stops;
+ *   * graded -- its strength follows speed, angular speed and acceleration;
+ *   * defined in DEGREES of visual angle with a feathered edge, so it
+ *     occludes the same amount of view on any headset.
+ *
+ * It is NOT a blink or a flash. Snap turning and teleporting are already the
+ * comfort options and never use it; darkening the screen on every snap is
+ * the flicker players complain about.
+ *
+ * Off by default. A slide or smooth-turn mechanic offers it on attach, with
+ * the default state the prompt asked for, and a settings menu may let the
+ * player toggle it.
+ */
+class IComfort {
+public:
+    virtual ~IComfort() = default;
+
+    /** A motion mechanic says it supports a vignette for ``channel``.
+     *  ``enabled`` is its starting state; ``user_toggle`` lets a settings
+     *  menu show a switch for it. */
+    virtual void offer_vignette(ComfortChannel channel, bool enabled,
+                                bool user_toggle) = 0;
+    virtual bool vignette_offered(ComfortChannel channel) const = 0;
+    virtual bool vignette_toggleable(ComfortChannel channel) const = 0;
+    virtual bool vignette_enabled(ComfortChannel channel) const = 0;
+    virtual void set_vignette_enabled(ComfortChannel channel, bool on) = 0;
+
+    /** Ask for a vignette THIS frame. ``strength`` 0..1 scales how far the
+     *  edge closes in; ``inner_fov_deg`` is the clear field at full strength
+     *  and ``feather_deg`` the width of the soft edge. The strongest request
+     *  in a frame wins, and the engine smooths it in and out. Ignored when
+     *  the channel's vignette is disabled. */
+    virtual void request_vignette(ComfortChannel channel, float strength,
+                                  float inner_fov_deg, float feather_deg) = 0;
+};
+
 /**
  * Bundle of engine services passed to every mechanic call.
  *
@@ -1132,6 +1300,7 @@ struct MechanicContext {
     IPersistence* persistence{nullptr};
     ISceneTransition* transition{nullptr};
     IUi* ui{nullptr};
+    IComfort* comfort{nullptr};
 };
 
 }  // namespace ptv

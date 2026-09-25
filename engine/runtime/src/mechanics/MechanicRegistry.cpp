@@ -80,7 +80,18 @@ void MechanicHost::attach_bindings(World& world, MechanicContext& ctx) {
     for (auto entity : view) {
         attach_one(world, static_cast<std::uint32_t>(entity), ctx);
     }
+    sort_by_order();
     PTV_INFO("Attached {} mechanic instances", instances_.size());
+}
+
+void MechanicHost::sort_by_order() {
+    std::stable_sort(instances_.begin(), instances_.end(),
+                     [](const auto& a, const auto& b) {
+                         const int oa = a.second.impl ? a.second.impl->order() : 0;
+                         const int ob = b.second.impl ? b.second.impl->order() : 0;
+                         return oa < ob;
+                     });
+    reindex_player_scoped();
 }
 
 void MechanicHost::attach_one(World& world, std::uint32_t entity,
@@ -141,6 +152,7 @@ void MechanicHost::attach_one(World& world, std::uint32_t entity,
 void MechanicHost::attach_entity(World& world, std::uint32_t entity,
                                  MechanicContext& ctx) {
     attach_one(world, entity, ctx);
+    sort_by_order();
 }
 
 void MechanicHost::detach_entity(World& world, std::uint32_t entity) {

@@ -9,7 +9,7 @@ from typing import Dict, List, Optional
 from pydantic import Field
 
 from .common import IdStr, StrictModel
-from .build_spec import TargetDevice
+from .build_spec import PlayerExperience, TargetDevice
 
 
 class ProjectStage(str, Enum):
@@ -89,6 +89,11 @@ class ProjectState(StrictModel):
     # Quest toggle) and used to route the build + launch stages. Defaults to
     # pcvr so existing projects load unchanged.
     target_device: TargetDevice = TargetDevice.pcvr
+
+    # Hands Only vs Full Player Avatar. Chosen at create time like
+    # target_device and mirrored into BuildSpec.player_experience. Defaults to
+    # full_avatar so existing projects keep the body they were planned with.
+    player_experience: PlayerExperience = PlayerExperience.full_avatar
 
     stages: List[StageRecord] = Field(default_factory=list)
     env_snapshot: Dict[str, str] = Field(default_factory=dict)

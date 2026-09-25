@@ -16,20 +16,28 @@
 //    clip_contract       — animation intents resolve to real glTF clip names
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <memory>
+#include <sstream>
 #include <string>
 #include <vector>
 
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/quaternion.hpp>
+#include <spdlog/sinks/ostream_sink.h>
 
+#include "../src/mechanics/builtin/HandRig.h"
 #include "../src/mechanics/builtin/TwoBoneIk.h"
+#include "../src/mechanics/builtin/grab/GripHold.h"
+#include "../src/mechanics/builtin/teleport/TeleportArc.h"
 #include "ptv/api/BodySlots.h"
 #include "ptv/api/IMechanic.h"
+#include "ptv/core/Logger.h"
 #include "ptv/ecs/Skeleton.h"
 #include "ptv/ecs/World.h"
 #include "ptv/mechanics/MechanicRegistry.h"
@@ -159,6 +167,99 @@ static int case_scene() {
 static int fail(const char* what) {
     std::fprintf(stderr, "[fail] %s\n", what);
     return 1;
+}
+
+// A player with no locomotion and no turning is a stationary game (a rhythm
+// game, a fixed archery range). It must load and run without the engine
+// adding a mechanic or complaining: the scene binds only finger posing on
+// the player rig, and that is the whole player.
+static int case_stationary_scene() {
+    const char* doc = R"({
+        "version": 1, "prompt_id": "t", "scene_id": "s", "title": "T", "name": "S",
+        "player": {"height_meters": 1.7, "locomotion": "stationary",
+                   "hands": {"source": "default"},
+                   "spawn": {"position": [0,0,0], "rotation": [0,0,0,1]}},
+        "sky_color": [0,0,0], "ambient_intensity": 0.1, "lights": [],
+        "entities": [
+          {"id": "player_rig", "name": "Player Rig",
+           "transform": {"position": [0,0,0], "rotation": [0,0,0,1], "scale": 1.0},
+           "mesh": null, "physics": null,
+           "mechanic_bindings": [{"id": "builtin.hand_pose",
+                                  "builtin_id": "builtin.hand_pose", "params": {}}],
+           "tags": ["player_rig", "player_system"]},
+          {"id": "floor", "name": "Floor",
+           "transform": {"position": [0,-0.05,0], "rotation": [0,0,0,1], "scale": 10.0},
+           "mesh": null,
+           "physics": {"kind": "static", "mass_kg": 0.0, "restitution": 0.1,
+                       "friction": 0.9, "collision_shape": "aabb"},
+           "mechanic_bindings": [], "tags": ["ground"]}
+        ]
+    })";
+    const char* path = "ptv_smoke_stationary.json";
+    std::FILE* f = std::fopen(path, "wb");
+    std::fwrite(doc, 1, std::strlen(doc), f);
+    std::fclose(f);
+
+    std::ostringstream captured;
+    auto sink = std::make_shared<spdlog::sinks::ostream_sink_mt>(captured);
+    sink->set_level(spdlog::level::warn);
+    ptv::log().sinks().push_back(sink);
+    auto drop_sink = [&] {
+        auto& sinks = ptv::log().sinks();
+        sinks.erase(std::remove(sinks.begin(), sinks.end(), sink), sinks.end());
+    };
+
+    auto loaded = ptv::LoadSceneJson(path);
+    if (loaded.locomotion_menu_enabled) {
+        drop_sink();
+        return fail("stationary: locomotion_menu defaulted on");
+    }
+    if (loaded.hands_source != "default" || !loaded.default_locomotion_mode.empty()) {
+        drop_sink();
+        return fail("stationary: player block parsed wrong");
+    }
+    ptv::World world;
+    ptv::ApplySceneToWorld(loaded, world);
+    ptv::PhysicsWorld physics;
+    if (!physics.initialize()) {
+        drop_sink();
+        return fail("stationary: physics failed to initialize");
+    }
+    physics.rebuild_from_world(world);
+    ptv::MechanicContext ctx{};
+    ptv::MechanicHost host;
+    host.attach_bindings(world, ctx);
+    const ptv::InputSnapshot input{};
+    for (int i = 0; i < 3; ++i) {
+        host.update(world, 1.0f / 60.0f, input, ctx, ptv::MechanicPhase::Input);
+        host.update(world, 1.0f / 60.0f, input, ctx, ptv::MechanicPhase::Simulate);
+    }
+
+    // Exactly what the scene bound -- nothing was added behind its back.
+    int bindings = 0;
+    auto view = world.registry().view<const ptv::CMechanicBinding>();
+    for (auto e : view) {
+        for (const auto& entry : view.get<const ptv::CMechanicBinding>(e).entries) {
+            ++bindings;
+            if (entry.id != "builtin.hand_pose") {
+                physics.shutdown();
+                drop_sink();
+                std::fprintf(stderr, "[fail] stationary: unexpected binding %s\n",
+                             entry.id.c_str());
+                return 1;
+            }
+        }
+    }
+    physics.shutdown();
+    drop_sink();
+    if (bindings != 1) return fail("stationary: expected one binding");
+    if (!captured.str().empty()) {
+        std::fprintf(stderr, "[fail] stationary scene logged:\n%s\n",
+                     captured.str().c_str());
+        return 1;
+    }
+    return ok("stationary: a player with no locomotion loads and runs with no "
+              "added mechanics, errors or warnings");
 }
 
 // Loads the fixture written by engine/tools/make_rigged_fixture.py and checks
@@ -2010,174 +2111,405 @@ static int case_self_view_hide(const char* glb) {
     return 0;
 }
 
-// The generated hand asset is what makes builtin.hand_pose possible, so it
-// has a contract the mechanic depends on by name: 16 joints, mixamorig:
-// bone names (hand fixture only; Tripo NPCs use spec=tripo), and knuckle
-// vertices that blend two joints (a hand rigidly bound one-box-per-joint
-// would tear open at every bend).
-static int case_hand_asset(const char* glb) {
-    namespace gml = ptv::gltf_mesh_load;
-    std::string err;
+namespace {
 
-    std::vector<gml::SkinnedVertex> verts;
-    std::vector<std::uint32_t> indices;
-    gml::SkeletonData skel;
-    if (!gml::load_glb_skinned(glb, 0.0f, verts, indices, skel, err)) {
-        std::fprintf(stderr, "[fail] load_glb_skinned: %s\n", err.c_str());
-        return 1;
+/** ISkeleton over a loaded SkeletonData, with the same forward kinematics
+ *  Application's SkeletonService uses. Enough to run HandRig and pose a hand
+ *  the way builtin.hand_pose does, without an Application. */
+class TestSkeleton final : public ptv::ISkeleton {
+public:
+    ptv::gltf_mesh_load::SkeletonData sk;
+    std::vector<ptv::gltf_mesh_load::JointPose> pose;
+
+    void reset() { pose = sk.bind_pose; }
+
+    bool has_skeleton(std::uint32_t) const override {
+        return sk.joint_count() > 0;
     }
-
-    if (skel.joint_count() != 16) {
-        std::fprintf(stderr, "[fail] hand has %zu joints, want 16\n",
-                     skel.joint_count());
-        return 1;
+    int joint_index(std::uint32_t, const char* name) const override {
+        const auto it = sk.name_to_joint.find(name);
+        return it == sk.name_to_joint.end() ? -1 : it->second;
     }
-    if (skel.name_to_joint.count("mixamorig:hand_root") != 1)
-        return fail("hand has no mixamorig:hand_root");
-
-    // Exactly the names builtin.hand_pose resolves. A rename here silently
-    // turns the whole mechanic into a no-op, so assert the contract.
-    const char* fingers[5] = {"thumb", "index", "middle", "ring", "pinky"};
-    for (const char* finger : fingers) {
-        for (int s = 1; s <= 3; ++s) {
-            const std::string name =
-                std::string("mixamorig:") + finger + "_0" + std::to_string(s);
-            if (skel.name_to_joint.count(name) != 1) {
-                std::fprintf(stderr, "[fail] hand is missing joint %s\n",
-                             name.c_str());
-                return 1;
+    int joint_count(std::uint32_t) const override {
+        return static_cast<int>(sk.joint_count());
+    }
+    int joint_for_slot(std::uint32_t, const char* slot) const override {
+        for (const auto& c : ptv::body_slot_candidates(slot)) {
+            for (size_t i = 0; i < sk.names.size(); ++i) {
+                if (ptv::normalize_joint_name(sk.names[i]) == c) {
+                    return static_cast<int>(i);
+                }
             }
         }
+        return -1;
     }
+    int joint_parent(std::uint32_t, int j) const override {
+        return (j < 0 || static_cast<size_t>(j) >= sk.parents.size())
+                   ? -1
+                   : sk.parents[static_cast<size_t>(j)];
+    }
+    ptv::Mat4 joint_world(std::uint32_t, int j) const override {
+        return fk(pose, j, false);
+    }
+    ptv::Mat4 joint_model(std::uint32_t, int j) const override {
+        return fk(pose, j, true);
+    }
+    ptv::Mat4 joint_bind_model(std::uint32_t, int j) const override {
+        return fk(sk.bind_pose, j, true);
+    }
+    ptv::Quat joint_bind_rotation(std::uint32_t, int j) const override {
+        return sk.bind_pose[static_cast<size_t>(j)].rotation;
+    }
+    ptv::Quat joint_local_rotation(std::uint32_t, int j) const override {
+        return pose[static_cast<size_t>(j)].rotation;
+    }
+    void set_joint_rotation_from_bind(std::uint32_t, int j,
+                                      const ptv::Quat& d) override {
+        pose[static_cast<size_t>(j)].rotation =
+            glm::normalize(sk.bind_pose[static_cast<size_t>(j)].rotation * d);
+    }
+    int joint_subtree(std::uint32_t, int, int*, int) const override {
+        return 0;
+    }
+    void set_joint_rotation(std::uint32_t, int j, const ptv::Quat& q) override {
+        pose[static_cast<size_t>(j)].rotation = glm::normalize(q);
+    }
+    void set_joint_translation(std::uint32_t, int, const ptv::Vec3&) override {}
+    void set_joint_scale(std::uint32_t, int, const ptv::Vec3&) override {}
+    bool play_clip(std::uint32_t, const char*, bool, float) override {
+        return false;
+    }
+    void stop_clip(std::uint32_t) override {}
+    void set_clip_speed(std::uint32_t, float) override {}
+    bool has_clip(std::uint32_t, const char*) const override { return false; }
+    const char* current_clip(std::uint32_t) const override { return ""; }
+    float clip_time(std::uint32_t) const override { return 0.0f; }
+    float clip_duration(std::uint32_t) const override { return 0.0f; }
+    bool clip_finished(std::uint32_t) const override { return false; }
 
-    // Every finger joint must hang off the wrist chain, or curling a knuckle
-    // would not carry the segments beyond it.
-    const int root = skel.name_to_joint.at("mixamorig:hand_root");
-    for (const char* finger : fingers) {
-        const int proximal =
-            skel.name_to_joint.at(std::string("mixamorig:") + finger + "_01");
-        if (skel.parents[static_cast<size_t>(proximal)] != root) {
-            std::fprintf(stderr, "[fail] %s_01 is not parented to the wrist\n",
-                         finger);
+private:
+    ptv::Mat4 fk(const std::vector<ptv::gltf_mesh_load::JointPose>& p, int j,
+                 bool ortho) const {
+        ptv::Mat4 m(1.0f);
+        int cur = j;
+        while (cur >= 0) {
+            auto jp = p[static_cast<size_t>(cur)];
+            jp.translation *= sk.unit_scale;
+            m = jp.matrix() * m;
+            cur = sk.parents[static_cast<size_t>(cur)];
+        }
+        if (!ortho) return m;
+        ptv::Vec3 x = glm::normalize(ptv::Vec3(m[0]));
+        ptv::Vec3 y = ptv::Vec3(m[1]);
+        y = glm::normalize(y - x * glm::dot(x, y));
+        const ptv::Vec3 z = glm::cross(x, y);
+        ptv::Mat4 o(1.0f);
+        o[0] = ptv::Vec4(x, 0.0f);
+        o[1] = ptv::Vec4(y, 0.0f);
+        o[2] = ptv::Vec4(z, 0.0f);
+        o[3] = m[3];
+        return o;
+    }
+};
+
+/** The other hand's file: default_hand_right.glb <-> default_hand_left.glb. */
+std::string other_hand_path(const std::string& path) {
+    std::string p = path;
+    const auto r = p.rfind("right");
+    if (r != std::string::npos) return p.replace(r, 5, "left");
+    const auto l = p.rfind("left");
+    if (l != std::string::npos) return p.replace(l, 4, "right");
+    return p;
+}
+
+}  // namespace
+
+// The default rigged hands are what builtin.hand_pose poses in every Hands
+// Only game, so they carry a contract: canonical BodySlots joint names on the
+// correct side, five complete finger chains under the wrist, and knuckle
+// vertices that blend two joints (a hand bound one-box-per-joint would tear
+// open at every bend).
+static int case_hand_asset(const char* glb) {
+    namespace gml = ptv::gltf_mesh_load;
+    for (const std::string& path : {std::string(glb), other_hand_path(glb)}) {
+        const bool right = path.find("right") != std::string::npos;
+        const char* sfx = right ? "_r" : "_l";
+        std::string err;
+        std::vector<gml::SkinnedVertex> verts;
+        std::vector<std::uint32_t> indices;
+        gml::SkeletonData skel;
+        if (!gml::load_glb_skinned(path, 0.2f, verts, indices, skel, err)) {
+            std::fprintf(stderr, "[fail] load_glb_skinned %s: %s\n",
+                         path.c_str(), err.c_str());
             return 1;
         }
-    }
-
-    size_t blended = 0;
-    for (const auto& v : verts) {
-        int sum = 0;
-        for (int k = 0; k < 4; ++k) {
-            if (v.joints[k] >= skel.joint_count() && v.weights[k] != 0)
-                return fail("hand vertex references a joint outside the skin");
-            sum += v.weights[k];
+        auto has = [&](const std::string& n) {
+            return skel.name_to_joint.count(n) == 1;
+        };
+        if (!has(std::string("hand") + sfx)) return fail("hand has no wrist");
+        for (const char* f : {"thumb", "index", "middle", "ring", "pinky"}) {
+            for (int s = 1; s <= 3; ++s) {
+                const std::string n = std::string(f) + "_0" +
+                                      std::to_string(s) + sfx;
+                if (!has(n)) {
+                    std::fprintf(stderr, "[fail] %s missing joint %s\n",
+                                 path.c_str(), n.c_str());
+                    return 1;
+                }
+            }
         }
-        if (sum != 255) return fail("hand weights do not sum to 255");
-        if (v.weights[0] != 0 && v.weights[1] != 0) ++blended;
+        size_t blended = 0;
+        for (const auto& v : verts) {
+            int sum = 0;
+            for (int k = 0; k < 4; ++k) sum += v.weights[k];
+            if (sum != 255) return fail("hand weights do not sum to 255");
+            if (v.weights[0] != 0 && v.weights[1] != 0) ++blended;
+        }
+        if (blended == 0)
+            return fail("no knuckle vertices blend two joints; bends would tear");
+        std::printf("[ok] %s: %zu joints, %zu verts, %zu blended\n",
+                    right ? "right hand" : "left hand", skel.joint_count(),
+                    verts.size(), blended);
     }
-    if (blended == 0)
-        return fail("no knuckle vertices blend two joints; bends would tear");
-
-    std::printf(
-        "[ok] hand asset: %zu verts, %zu tris, %zu joints, %zu blended "
-        "knuckle vertices\n",
-        verts.size(), indices.size() / 3, skel.joint_count(), blended);
     return 0;
 }
 
-// Mirrors what builtin.hand_pose does to the skeleton and asserts the two
-// properties that make a curl read as a hand: the right fingers move for the
-// right control, and nothing else does.
+// What builtin.hand_pose does, on the real default hands of BOTH sides:
+// HandRig finds the fingers, and a bind-relative curl about the measured axis
+// moves each fingertip INTO THE PALM (not sideways, not backwards) while
+// leaving the other fingers alone. These are exactly the on-device bugs the
+// old fixed-axis curl produced on a real rig.
 static int case_hand_pose(const char* glb) {
     namespace gml = ptv::gltf_mesh_load;
-    std::string err;
-
-    gml::SkeletonData skel;
-    if (!gml::load_glb_skeleton(glb, 0.0f, skel, err)) {
-        std::fprintf(stderr, "[fail] load_glb_skeleton: %s\n", err.c_str());
-        return 1;
-    }
-
-    auto joint = [&](const char* finger, int seg) {
-        return skel.name_to_joint.at(std::string("mixamorig:") + finger + "_0" +
-                                     std::to_string(seg));
-    };
-
-    // Tip of each finger in bind pose, so we can see which ones moved.
-    auto tip_position = [&](const char* finger,
-                            const std::vector<ptv::Mat4>& palette) {
-        const int j = joint(finger, 3);
-        // The palette maps bind-space to posed space, so applying it to the
-        // joint's own bind-space origin gives where the tip ended up.
-        ptv::Mat4 world(1.0f);
-        int cur = j;
-        ptv::Vec3 bind(0.0f);
-        while (cur >= 0) {
-            bind += skel.bind_pose[static_cast<size_t>(cur)].translation;
-            cur = skel.parents[static_cast<size_t>(cur)];
-        }
-        (void)world;
-        return ptv::Vec3(palette[static_cast<size_t>(j)] *
-                         ptv::Vec4(bind, 1.0f));
-    };
-
-    std::vector<ptv::Mat4> bind_palette;
-    gml::build_joint_palette(skel, skel.bind_pose, bind_palette);
-
-    // Curl ONLY the index finger, the way a full trigger pull would.
-    std::vector<gml::JointPose> pose = skel.bind_pose;
-    for (int s = 1; s <= 3; ++s) {
-        const int j = joint("index", s);
-        pose[static_cast<size_t>(j)].rotation =
-            glm::angleAxis(1.2f, ptv::Vec3(1.0f, 0.0f, 0.0f));
-    }
-    std::vector<ptv::Mat4> posed;
-    gml::build_joint_palette(skel, pose, posed);
-
-    const float index_shift = glm::length(tip_position("index", posed) -
-                                          tip_position("index", bind_palette));
-    if (index_shift < 0.02f) {
-        std::fprintf(stderr,
-                     "[fail] index tip moved only %.4f m on a full curl\n",
-                     index_shift);
-        return 1;
-    }
-    for (const char* other : {"middle", "ring", "pinky", "thumb"}) {
-        const float shift = glm::length(tip_position(other, posed) -
-                                        tip_position(other, bind_palette));
-        if (shift > 1e-5f) {
-            std::fprintf(stderr,
-                         "[fail] curling the index moved %s by %.5f m\n",
-                         other, shift);
+    for (const std::string& path : {std::string(glb), other_hand_path(glb)}) {
+        const bool right = path.find("right") != std::string::npos;
+        const int hand = right ? 1 : 0;
+        TestSkeleton ts;
+        std::string err;
+        if (!gml::load_glb_skeleton(path, 0.2f, ts.sk, err)) {
+            std::fprintf(stderr, "[fail] load_glb_skeleton: %s\n", err.c_str());
             return 1;
         }
-    }
+        ts.reset();
+        ptv::hand_rig::Resolution how{};
+        const auto rig = ptv::hand_rig::analyze(ts, 0, hand, &how);
+        if (!rig.valid) return fail("HandRig found no hand");
+        if (how != ptv::hand_rig::Resolution::Names)
+            return fail("HandRig did not resolve the default hand by name");
+        for (int f = 0; f < ptv::hand_rig::kFingers; ++f) {
+            if (!rig.fingers[static_cast<size_t>(f)].present())
+                return fail("HandRig is missing a finger");
+        }
 
-    // A resting touch has to land strictly between open and closed, or
-    // capsense buys nothing over the plain analog value.
-    std::vector<gml::JointPose> resting = skel.bind_pose;
-    for (int s = 1; s <= 3; ++s) {
-        const int j = joint("index", s);
-        resting[static_cast<size_t>(j)].rotation =
-            glm::angleAxis(0.18f * 1.2f, ptv::Vec3(1.0f, 0.0f, 0.0f));
-    }
-    std::vector<ptv::Mat4> resting_palette;
-    gml::build_joint_palette(skel, resting, resting_palette);
-    const float rest_shift =
-        glm::length(tip_position("index", resting_palette) -
-                    tip_position("index", bind_palette));
-    if (!(rest_shift > 1e-4f && rest_shift < index_shift)) {
-        std::fprintf(stderr,
-                     "[fail] resting curl %.4f m is not between 0 and the "
-                     "full curl %.4f m\n",
-                     rest_shift, index_shift);
-        return 1;
-    }
+        // Palm normal: out of the palm. The grip frame's +X is INTO the palm
+        // on the right hand and out of it on the left.
+        const ptv::Vec3 gx(rig.hand_frame_model[0]);
+        const ptv::Vec3 palm = right ? -gx : gx;
 
-    std::printf(
-        "[ok] hand pose: index tip travels %.3f m at full curl, %.3f m at "
-        "rest, other fingers unmoved\n",
-        index_shift, rest_shift);
+        auto tip = [&](int finger) {
+            const auto& seg = rig.fingers[static_cast<size_t>(finger)]
+                                  .segments[2];
+            // Tip: the distal joint's child if there is one.
+            int j = seg.joint;
+            for (int k = 0; k < ts.joint_count(0); ++k) {
+                if (ts.joint_parent(0, k) == seg.joint) {
+                    j = k;
+                    break;
+                }
+            }
+            return ptv::Vec3(ts.joint_model(0, j)[3]);
+        };
+        std::array<ptv::Vec3, 5> rest{};
+        for (int f = 0; f < 5; ++f) rest[static_cast<size_t>(f)] = tip(f);
+
+        for (int f = ptv::hand_rig::Index; f <= ptv::hand_rig::Pinky; ++f) {
+            // A full curl must move the tip a real distance...
+            ts.reset();
+            for (const auto& seg : rig.fingers[static_cast<size_t>(f)].segments) {
+                if (seg.joint < 0) continue;
+                ts.set_joint_rotation_from_bind(
+                    0, seg.joint, glm::angleAxis(1.2f, seg.curl_axis_local));
+            }
+            if (glm::length(tip(f) - rest[static_cast<size_t>(f)]) < 0.01f)
+                return fail("a full curl barely moved the fingertip");
+            // ...and its DIRECTION, taken from a small curl (a full one wraps
+            // the tip past the palm, which says nothing about the axis), must
+            // be into the palm.
+            ts.reset();
+            for (const auto& seg : rig.fingers[static_cast<size_t>(f)].segments) {
+                if (seg.joint < 0) continue;
+                ts.set_joint_rotation_from_bind(
+                    0, seg.joint, glm::angleAxis(0.25f, seg.curl_axis_local));
+            }
+            const ptv::Vec3 moved = tip(f) - rest[static_cast<size_t>(f)];
+            // A rest pose that is already curled swings the tip partly back
+            // toward the wrist too, so the test is: toward the palm side,
+            // AND closer to the grip point in the middle of the palm.
+            const ptv::Vec3 grip(rig.hand_frame_model[3]);
+            const bool closer = glm::length(tip(f) - grip) <
+                                glm::length(rest[static_cast<size_t>(f)] - grip);
+            if (glm::dot(glm::normalize(moved), palm) < 0.15f || !closer) {
+                std::fprintf(stderr,
+                             "[fail] %s hand finger %d curled away from the "
+                             "palm (dot %.2f)\n",
+                             right ? "right" : "left", f,
+                             glm::dot(glm::normalize(moved), palm));
+                return 1;
+            }
+            for (int o = 0; o < 5; ++o) {
+                if (o == f) continue;
+                if (glm::length(tip(o) - rest[static_cast<size_t>(o)]) > 1e-4f)
+                    return fail("curling one finger moved another");
+            }
+        }
+
+        // The thumb resting on the stick moves toward the index finger.
+        ts.reset();
+        const auto& thumb = rig.fingers[ptv::hand_rig::Thumb];
+        ts.set_joint_rotation_from_bind(
+            0, thumb.segments[0].joint,
+            glm::angleAxis(0.45f, rig.thumb_adduct_axis_local));
+        const ptv::Vec3 index_base(
+            ts.joint_model(0, rig.fingers[ptv::hand_rig::Index].segments[0]
+                                  .joint)[3]);
+        const float before = glm::length(rest[0] - index_base);
+        const float after = glm::length(tip(0) - index_base);
+        if (!(after < before))
+            return fail("thumb did not move toward the index finger");
+
+        std::printf("[ok] %s hand: fingers curl into the palm, thumb "
+                    "adducts toward the index\n",
+                    right ? "right" : "left");
+    }
     return 0;
+}
+
+// The player body: grounded, and walls stop it from every direction.
+static int case_player_character() {
+    ptv::World world;
+    auto add_box = [&](const char* id, ptv::Vec3 pos, ptv::Vec3 size,
+                       ptv::Quat rot = ptv::Quat(1, 0, 0, 0)) {
+        const auto e = world.create_entity(id);
+        ptv::Transform t{};
+        t.position = pos;
+        t.rotation = rot;
+        world.registry().emplace<ptv::CTransform>(e, ptv::CTransform{t});
+        world.registry().emplace<ptv::CPrimitive>(
+            e, ptv::CPrimitive{"box", size, ptv::Vec3(0.5f)});
+        ptv::CPhysics p{};
+        p.kind = "static";
+        p.collision_shape = "box";
+        world.registry().emplace<ptv::CPhysics>(e, p);
+    };
+    add_box("floor", ptv::Vec3(0.0f, -0.1f, 0.0f), ptv::Vec3(60.0f, 0.2f, 60.0f));
+    // A 0.3 m thick wall whose near face is at x = 3.85.
+    add_box("wall", ptv::Vec3(4.0f, 1.5f, 0.0f), ptv::Vec3(0.3f, 3.0f, 12.0f));
+    // A 12 degree ramp rising toward -Z, starting at z = -6.
+    add_box("ramp", ptv::Vec3(-6.0f, 0.4f, -10.0f), ptv::Vec3(3.0f, 0.2f, 10.0f),
+            glm::angleAxis(glm::radians(12.0f), ptv::Vec3(1, 0, 0)));
+
+    ptv::PhysicsWorld physics;
+    if (!physics.initialize()) return fail("physics failed to initialize");
+    physics.rebuild_from_world(world);
+    const float dt = 1.0f / 72.0f;
+
+    // 1) Sliding across flat ground for five seconds must not climb.
+    physics.create_player_character(ptv::Vec3(0.0f, 0.0f, 0.0f), 1.7f, 0.22f);
+    for (int i = 0; i < 72 * 5; ++i) {
+        physics.move_player_character(ptv::Vec3(0.0f, 0.0f, 1.5f * dt), true,
+                                      0.0f, dt);
+    }
+    {
+        const auto st = physics.player_character_state();
+        if (std::fabs(st.feet.y) > 0.03f) {
+            std::fprintf(stderr, "  feet at y=%.3f after 5 s\n", st.feet.y);
+            return fail("sliding drifted vertically");
+        }
+        if (!st.grounded) return fail("sliding body is not grounded");
+    }
+
+    // 2) The wall blocks from every approach: forward, backward and diagonal.
+    struct Approach {
+        ptv::Vec3 start;
+        ptv::Vec3 dir;
+    };
+    const Approach approaches[] = {
+        {ptv::Vec3(1.0f, 0.0f, 0.0f), ptv::Vec3(1.0f, 0.0f, 0.0f)},
+        {ptv::Vec3(1.0f, 0.0f, 2.0f), glm::normalize(ptv::Vec3(1, 0, -1))},
+        {ptv::Vec3(1.0f, 0.0f, -2.0f), glm::normalize(ptv::Vec3(1, 0, 1))},
+        {ptv::Vec3(7.0f, 0.0f, 0.0f), ptv::Vec3(-1.0f, 0.0f, 0.0f)},
+    };
+    for (const auto& a : approaches) {
+        physics.teleport_player_character(a.start);
+        for (int i = 0; i < 72 * 4; ++i) {
+            physics.move_player_character(a.dir * (2.0f * dt), true, 0.0f, dt);
+        }
+        const float x = physics.player_character_state().feet.x;
+        const bool from_near = a.start.x < 4.0f;
+        if (from_near ? (x > 3.85f) : (x < 4.15f)) {
+            std::fprintf(stderr, "  approach from x=%.1f ended at x=%.3f\n",
+                         a.start.x, x);
+            return fail("the player body passed through the wall");
+        }
+    }
+
+    // 3) Walking up the ramp follows it.
+    physics.teleport_player_character(ptv::Vec3(-6.0f, 0.0f, -3.0f));
+    for (int i = 0; i < 72 * 4; ++i) {
+        physics.move_player_character(ptv::Vec3(0.0f, 0.0f, -1.5f * dt), true,
+                                      0.0f, dt);
+    }
+    // Six metres up a 12 degree ramp that starts below the floor surface:
+    // about 0.28 m of climb by the end.
+    if (physics.player_character_state().feet.y < 0.2f) {
+        std::fprintf(stderr, "  feet at y=%.3f on the ramp\n",
+                     physics.player_character_state().feet.y);
+        return fail("the body did not climb the ramp");
+    }
+
+    // 4) The head cannot be pushed through the wall either.
+    const ptv::Vec3 head = physics.resolve_head(
+        ptv::Vec3(3.0f, 1.6f, 0.0f), ptv::Vec3(4.6f, 1.6f, 0.0f), 0.12f);
+    if (head.x > 3.85f) {
+        std::fprintf(stderr, "  head ended at x=%.3f\n", head.x);
+        return fail("the head passed into the wall");
+    }
+
+    physics.shutdown();
+    return ok("player body: stays grounded, climbs ramps, and walls block it "
+              "and the head from every direction");
+}
+
+// Teleport distance follows controller pitch monotonically, and the launch
+// speed actually lands the arc where that distance says.
+static int case_teleport_pitch() {
+    namespace tp = ptv::teleport;
+    float prev = -1.0f;
+    for (float deg = -60.0f; deg <= 35.0f; deg += 5.0f) {
+        const float d = tp::distance_for_pitch(glm::radians(deg), 1.0f, 8.0f);
+        if (d <= prev) return fail("teleport distance is not monotonic in pitch");
+        prev = d;
+    }
+    for (float deg : {-30.0f, 0.0f, 20.0f, 35.0f}) {
+        const float pitch = glm::radians(deg);
+        const float want = tp::reachable_distance(
+            pitch, tp::distance_for_pitch(pitch, 1.0f, 8.0f), 1.2f);
+        tp::ArcParams p;
+        p.max_horizontal_m = 20.0f;
+        p.launch_speed_mps = tp::launch_speed_for(pitch, want, 1.2f, p.gravity_mps2);
+        tp::ArcResult r;
+        const ptv::Vec3 dir(0.0f, std::sin(pitch), -std::cos(pitch));
+        tp::solve_arc(ptv::Vec3(0.0f, 1.2f, 0.0f), dir, p, nullptr, r);
+        if (!r.valid) return fail("teleport arc found no landing");
+        const float got = glm::length(ptv::Vec3(r.target.x, 0.0f, r.target.z));
+        if (std::fabs(got - want) > 0.15f * want + 0.2f) {
+            std::fprintf(stderr, "  pitch %.0f: landed %.2f m, wanted %.2f\n",
+                         deg, got, want);
+            return fail("teleport arc does not land at the pitch's distance");
+        }
+    }
+    return ok("teleport: pitch maps monotonically to distance and the arc "
+              "lands there");
 }
 
 // builtin.grab's grip-socket alignment, evaluated with the same maths the
@@ -2186,51 +2518,58 @@ static int case_hand_pose(const char* glb) {
 // different hand poses and expects the same outcome.
 static int case_grab_socket() {
     // A weapon whose grip sits 12 cm back and 3 cm down from the origin,
-    // rotated a quarter turn about Y -- i.e. nothing like identity.
+    // with the socket tilted like a real derived pistol grip (-21 degrees
+    // about X, i.e. its +Z barrel axis not exactly the model's +Z).
     ptv::Transform socket;
     socket.position = ptv::Vec3(0.0f, -0.03f, 0.12f);
     socket.rotation =
-        glm::angleAxis(glm::radians(90.0f), ptv::Vec3(0.0f, 1.0f, 0.0f));
+        glm::angleAxis(glm::radians(-21.0f), ptv::Vec3(1.0f, 0.0f, 0.0f));
 
-    // Same solve as GrabMechanic::grip_hold_from_socket.
-    const ptv::Quat inv_socket = glm::inverse(socket.rotation);
-    const ptv::Vec3 local_offset = -(inv_socket * socket.position);
-    const ptv::Quat local_rotation = inv_socket;
+    // A Touch controller held upright: the aim pose looks straight ahead
+    // (-Z) with +Y up; the grip pose is the handle, pitched ~35 degrees.
+    const ptv::Quat aim(1.0f, 0.0f, 0.0f, 0.0f);
+    const ptv::Quat grip =
+        glm::angleAxis(glm::radians(-35.0f), ptv::Vec3(1.0f, 0.0f, 0.0f));
+    const ptv::Quat grip_to_aim = glm::inverse(grip) * aim;
 
-    struct HandPose {
-        ptv::Vec3 position;
-        ptv::Quat rotation;
+    ptv::Vec3 local_offset;
+    ptv::Quat local_rotation;
+    ptv::grab::solve_grip_hold(socket.position, socket.rotation, 1.0f,
+                               grip_to_aim, ptv::Quat(1, 0, 0, 0),
+                               &local_offset, &local_rotation);
+
+    // Two very different body orientations holding the controller the same
+    // way relative to the head: the result must be identical relative to aim.
+    const ptv::Quat turns[2] = {
+        ptv::Quat(1, 0, 0, 0),
+        glm::angleAxis(glm::radians(-110.0f), ptv::Vec3(0.0f, 1.0f, 0.0f)),
     };
-    const HandPose poses[2] = {
-        {ptv::Vec3(0.2f, 1.1f, -0.4f),
-         glm::angleAxis(glm::radians(35.0f), ptv::Vec3(0.0f, 1.0f, 0.0f))},
-        // Reaching from a completely different angle.
-        {ptv::Vec3(-0.7f, 0.6f, 0.9f),
-         glm::angleAxis(glm::radians(-110.0f),
-                        glm::normalize(ptv::Vec3(0.3f, 1.0f, 0.2f)))},
-    };
-
-    for (const auto& hand : poses) {
-        // What the mechanic's per-frame kinematic follow will command.
-        const ptv::Vec3 obj_pos =
-            hand.position + hand.rotation * local_offset;
-        const ptv::Quat obj_rot = hand.rotation * local_rotation;
-
-        // Where the grip socket actually ends up.
+    for (const auto& turn : turns) {
+        const ptv::Vec3 hand_pos(0.2f, 1.1f, -0.4f);
+        const ptv::Quat hand_rot = turn * grip;
+        const ptv::Quat aim_rot = turn * aim;
+        const ptv::Vec3 obj_pos = hand_pos + hand_rot * local_offset;
+        const ptv::Quat obj_rot = hand_rot * local_rotation;
         const ptv::Vec3 socket_pos = obj_pos + obj_rot * socket.position;
         const ptv::Quat socket_rot = obj_rot * socket.rotation;
 
-        if (glm::length(socket_pos - hand.position) > 1e-4f) {
-            std::fprintf(stderr,
-                         "[fail] grip socket landed %.5f m from the hand\n",
-                         glm::length(socket_pos - hand.position));
-            return 1;
+        if (glm::length(socket_pos - hand_pos) > 1e-4f)
+            return fail("grip socket did not land in the hand");
+        const ptv::Vec3 barrel = socket_rot * ptv::Vec3(0, 0, 1);
+        const ptv::Vec3 up = socket_rot * ptv::Vec3(0, 1, 0);
+        const ptv::Vec3 aim_fwd = aim_rot * ptv::Vec3(0, 0, -1);
+        const ptv::Vec3 aim_up = aim_rot * ptv::Vec3(0, 1, 0);
+        if (glm::dot(barrel, aim_fwd) < 0.95f) {
+            std::fprintf(stderr, "  barrel . aim = %.3f\n",
+                         glm::dot(barrel, aim_fwd));
+            return fail("the gun does not point where the controller aims");
         }
-        if (std::fabs(glm::dot(socket_rot, hand.rotation)) < 0.9999f)
-            return fail("grip socket orientation does not match the hand");
+        if (glm::dot(up, aim_up) < 0.9f)
+            return fail("the gun is not upright in an upright hand");
     }
 
-    return ok("grab socket: the grip lands in the hand from any approach");
+    return ok("grab socket: the grip lands in the hand, barrel along the aim, "
+              "gun upright");
 }
 
 // The clip contract: a mechanic asks for the semantic intent "walk" and the
@@ -2805,6 +3144,20 @@ public:
     ptv::Mat4 joint_world(std::uint32_t, int) const override {
         return ptv::Mat4(1.0f);
     }
+    ptv::Mat4 joint_model(std::uint32_t, int) const override {
+        return ptv::Mat4(1.0f);
+    }
+    ptv::Mat4 joint_bind_model(std::uint32_t, int) const override {
+        return ptv::Mat4(1.0f);
+    }
+    ptv::Quat joint_bind_rotation(std::uint32_t, int) const override {
+        return ptv::Quat(1.0f, 0.0f, 0.0f, 0.0f);
+    }
+    ptv::Quat joint_local_rotation(std::uint32_t, int) const override {
+        return ptv::Quat(1.0f, 0.0f, 0.0f, 0.0f);
+    }
+    void set_joint_rotation_from_bind(std::uint32_t, int,
+                                      const ptv::Quat&) override {}
     int joint_subtree(std::uint32_t, int, int*, int) const override {
         return 0;
     }
@@ -3361,9 +3714,12 @@ int main(int argc, char** argv) {
     std::string what = argv[1];
     if (what == "mechanics") return case_mechanics();
     if (what == "scene") return case_scene();
+    if (what == "stationary_scene") return case_stationary_scene();
     if (what == "openxr") return case_openxr();
     if (what == "physics_capsule") return case_physics_capsule();
     if (what == "physics_player_slide") return case_physics_player_slide();
+    if (what == "player_character") return case_player_character();
+    if (what == "teleport_pitch") return case_teleport_pitch();
     if (what == "physics_overlap") return case_physics_overlap();
     if (what == "runtime_spawn") return case_runtime_spawn();
     if (what == "character_locomotion") return case_character_locomotion();

@@ -122,6 +122,15 @@ public:
         // reads as "finger not there" -- the safe degradation.
         bool trigger_touch[2]{false, false};    // [0]=left, [1]=right
         bool thumbrest_touch[2]{false, false};
+        // Thumb resting on the stick itself -- the default signal for the
+        // virtual thumb, because that is where a Touch player's thumb sits
+        // almost all the time.
+        bool thumbstick_touch[2]{false, false};
+        // Thumb resting on a face button (A/B right, X/Y left).
+        bool button_a_touch{false};
+        bool button_b_touch{false};
+        bool button_x_touch{false};
+        bool button_y_touch{false};
     };
 
     XrRuntime() = default;
@@ -269,6 +278,11 @@ private:
     XrAction button_y_action_{XR_NULL_HANDLE};   // left controller Y
     XrAction trigger_touch_action_{XR_NULL_HANDLE};    // capsense, per hand
     XrAction thumbrest_touch_action_{XR_NULL_HANDLE};  // capsense, per hand
+    XrAction thumbstick_touch_action_{XR_NULL_HANDLE}; // capsense, per hand
+    XrAction button_a_touch_action_{XR_NULL_HANDLE};   // capsense, right
+    XrAction button_b_touch_action_{XR_NULL_HANDLE};   // capsense, right
+    XrAction button_x_touch_action_{XR_NULL_HANDLE};   // capsense, left
+    XrAction button_y_touch_action_{XR_NULL_HANDLE};   // capsense, left
     XrAction haptic_action_{XR_NULL_HANDLE};     // vibration output, per hand
     XrPath hand_paths_[2]{XR_NULL_PATH, XR_NULL_PATH};
 

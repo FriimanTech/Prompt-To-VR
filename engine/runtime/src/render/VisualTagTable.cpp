@@ -23,6 +23,14 @@ const std::vector<Row>& rows() {
         // --- visibility policy ------------------------------------------
         {"template", Role::kAlwaysHidden, {}, 0, 0, {}, 0},
         {"player_system", Role::kHiddenWhenMeshless, {}, 0, 0, {}, 0},
+        // The player's own collision capsule and rig carry no mesh; drawn as
+        // placeholders they are the grey box a player sees when looking
+        // straight down.
+        {"player", Role::kHiddenWhenMeshless, {}, 0, 0, {}, 0},
+        {"player_rig", Role::kHiddenWhenMeshless, {}, 0, 0, {}, 0},
+        {"player_hand", Role::kHiddenWhenMeshless, {}, 0, 0, {}, 0},
+        {"player_locomotion", Role::kHiddenWhenMeshless, {}, 0, 0, {}, 0},
+        {"mechanic_host", Role::kHiddenWhenMeshless, {}, 0, 0, {}, 0},
         {"tutorial", Role::kHiddenWhenMeshless, {}, 0, 0, {}, 0},
         {"checkpoint", Role::kHiddenWhenMeshless, {}, 0, 0, {}, 0},
         {"spawn_point", Role::kHiddenWhenMeshless, {}, 0, 0, {}, 0},
