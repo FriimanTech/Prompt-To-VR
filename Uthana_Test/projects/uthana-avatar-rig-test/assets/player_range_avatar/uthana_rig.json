@@ -1,0 +1,12 @@
+{
+  "character_id": "cWkgh3cPtxuL",
+  "auto_rig_confidence": 1.0,
+  "source_glb": "C:\\Users\\micha\\Documents\\Prompt-To-VR\\projects\\20260907-144543-shooting-range-game\\assets\\player_range_avatar\\model.glb",
+  "output_glb": "C:\\Users\\micha\\Documents\\Prompt-To-VR\\Uthana_Test\\projects\\uthana-avatar-rig-test\\assets\\player_range_avatar\\model.glb",
+  "params": {
+    "auto_rig": true,
+    "auto_rig_front_facing": true,
+    "include_fingers": true,
+    "auto_rig_strip_namespace": true
+  }
+}

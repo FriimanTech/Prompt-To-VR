@@ -1,0 +1,3 @@
+uthana>=0.4.1
+httpx>=0.27
+python-dotenv>=1.0

@@ -1,0 +1,35 @@
+{
+  "project_id": "uthana-avatar-rig-test",
+  "title": "Uthana Avatar Rig Test",
+  "prompt": "Hand-authored Uthana auto-rig first-person avatar Quest playtest. No LLM stages.",
+  "created_at": "2026-09-16T19:00:00Z",
+  "updated_at": "2026-09-16T19:34:58.832615Z",
+  "current_stage": "quest_build",
+  "status": "succeeded",
+  "target_device": "quest",
+  "stages": [
+    {
+      "stage": "quest_build",
+      "status": "running",
+      "started_at": "2026-09-16T19:32:01.140164Z",
+      "ended_at": null,
+      "message": "",
+      "artifacts": []
+    },
+    {
+      "stage": "quest_build",
+      "status": "succeeded",
+      "started_at": null,
+      "ended_at": "2026-09-16T19:34:58.832446Z",
+      "message": "APK: app-debug.apk",
+      "artifacts": [
+        "Uthana_Test/projects/uthana-avatar-rig-test/builds/quest/app/build/outputs/apk/debug/app-debug.apk"
+      ]
+    }
+  ],
+  "env_snapshot": {},
+  "latest_build_exe": null,
+  "latest_build_dir": "C:\\Users\\micha\\Documents\\Prompt-To-VR\\Uthana_Test\\projects\\uthana-avatar-rig-test\\builds\\quest",
+  "latest_scene_json": "scene.json",
+  "latest_build_apk": "C:\\Users\\micha\\Documents\\Prompt-To-VR\\Uthana_Test\\projects\\uthana-avatar-rig-test\\builds\\quest\\app\\build\\outputs\\apk\\debug\\app-debug.apk"
+}

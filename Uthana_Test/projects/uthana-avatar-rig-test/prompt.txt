@@ -1,0 +1,1 @@
+Hand-authored Uthana auto-rig first-person avatar Quest playtest. No LLM stages.

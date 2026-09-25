@@ -1,0 +1,535 @@
+{
+  "version": 1,
+  "prompt_id": "uthana-avatar-rig-test",
+  "scene_id": "uthana_avatar_room",
+  "title": "Uthana Avatar Rig Test",
+  "name": "Uthana Avatar Room",
+  "player": {
+    "height_meters": 1.7,
+    "locomotion": "smooth",
+    "comfort": "comfort",
+    "locomotion_menu": false,
+    "default_locomotion_mode": "slide_head_relative",
+    "spawn": {
+      "position": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "rotation": [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ]
+    },
+    "default_turn_mode": "snap",
+    "hands": {
+      "source": "avatar"
+    }
+  },
+  "sky_color": [
+    0.1,
+    0.12,
+    0.18
+  ],
+  "ambient_intensity": 0.4,
+  "lights": [
+    {
+      "id": "sun",
+      "kind": "directional",
+      "transform": {
+        "position": [
+          3.0,
+          6.0,
+          2.0
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ],
+        "scale": 1.0
+      },
+      "color_rgb": [
+        1.0,
+        0.95,
+        0.9
+      ],
+      "intensity": 1.5
+    },
+    {
+      "id": "fill",
+      "kind": "point",
+      "transform": {
+        "position": [
+          0.0,
+          2.4,
+          0.0
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ],
+        "scale": 1.0
+      },
+      "color_rgb": [
+        0.55,
+        0.7,
+        1.0
+      ],
+      "intensity": 1.2
+    }
+  ],
+  "entities": [
+    {
+      "id": "player_rig",
+      "name": "Player Rig",
+      "transform": {
+        "position": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ],
+        "scale": 1.0
+      },
+      "mesh": null,
+      "physics": null,
+      "mechanic_bindings": [
+        {
+          "id": "builtin.hand_pose",
+          "builtin_id": "builtin.hand_pose",
+          "params": {}
+        },
+        {
+          "id": "builtin.locomotion.slide.head_relative",
+          "builtin_id": "builtin.locomotion.slide.head_relative",
+          "params": {}
+        },
+        {
+          "id": "builtin.locomotion.slide.controller_relative",
+          "builtin_id": "builtin.locomotion.slide.controller_relative",
+          "params": {}
+        },
+        {
+          "id": "builtin.locomotion.snap_turn",
+          "builtin_id": "builtin.locomotion.snap_turn",
+          "params": {}
+        },
+        {
+          "id": "builtin.movement_settings_menu",
+          "builtin_id": "builtin.movement_settings_menu",
+          "params": {}
+        }
+      ],
+      "tags": [
+        "player_rig",
+        "player_system"
+      ]
+    },
+    {
+      "id": "floor",
+      "name": "Floor",
+      "transform": {
+        "position": [
+          0.0,
+          -0.01,
+          0.0
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ],
+        "scale": 8.0
+      },
+      "mesh": null,
+      "physics": {
+        "kind": "static",
+        "mass_kg": 0.0,
+        "collision_shape": "aabb",
+        "restitution": 0.1,
+        "friction": 0.9
+      },
+      "mechanic_bindings": [],
+      "tags": [
+        "ground"
+      ]
+    },
+    {
+      "id": "wall_n",
+      "name": "North Wall",
+      "transform": {
+        "position": [
+          0.0,
+          1.5,
+          -4.0
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ],
+        "scale": 12.0
+      },
+      "mesh": null,
+      "physics": {
+        "kind": "static",
+        "mass_kg": 0.0,
+        "collision_shape": "aabb",
+        "restitution": 0.05,
+        "friction": 0.9
+      },
+      "tags": [
+        "wall"
+      ]
+    },
+    {
+      "id": "wall_s",
+      "name": "South Wall",
+      "transform": {
+        "position": [
+          0.0,
+          1.5,
+          4.0
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ],
+        "scale": 12.0
+      },
+      "mesh": null,
+      "physics": {
+        "kind": "static",
+        "mass_kg": 0.0,
+        "collision_shape": "aabb",
+        "restitution": 0.05,
+        "friction": 0.9
+      },
+      "tags": [
+        "wall"
+      ]
+    },
+    {
+      "id": "wall_e",
+      "name": "East Wall",
+      "transform": {
+        "position": [
+          4.0,
+          1.5,
+          0.0
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ],
+        "scale": 12.0
+      },
+      "mesh": null,
+      "physics": {
+        "kind": "static",
+        "mass_kg": 0.0,
+        "collision_shape": "aabb",
+        "restitution": 0.05,
+        "friction": 0.9
+      },
+      "tags": [
+        "wall"
+      ]
+    },
+    {
+      "id": "wall_w",
+      "name": "West Wall",
+      "transform": {
+        "position": [
+          -4.0,
+          1.5,
+          0.0
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ],
+        "scale": 12.0
+      },
+      "mesh": null,
+      "physics": {
+        "kind": "static",
+        "mass_kg": 0.0,
+        "collision_shape": "aabb",
+        "restitution": 0.05,
+        "friction": 0.9
+      },
+      "tags": [
+        "wall"
+      ]
+    },
+    {
+      "id": "table",
+      "name": "Table",
+      "transform": {
+        "position": [
+          0.0,
+          0.4,
+          -1.2
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ],
+        "scale": 1.0
+      },
+      "mesh": null,
+      "physics": {
+        "kind": "static",
+        "mass_kg": 0.0,
+        "collision_shape": "aabb",
+        "restitution": 0.1,
+        "friction": 0.7
+      },
+      "tags": [
+        "table"
+      ]
+    },
+    {
+      "id": "player_body",
+      "name": "Player Avatar (Uthana)",
+      "transform": {
+        "position": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ],
+        "scale": 1.0
+      },
+      "mesh": {
+        "asset_id": "player_range_avatar",
+        "glb_path": "assets/player_range_avatar/model.glb",
+        "target_scale_meters": 1.7,
+        "skinned": true
+      },
+      "physics": null,
+      "mechanic_bindings": [
+        {
+          "id": "builtin.avatar_body",
+          "builtin_id": "builtin.avatar_body",
+          "params": {
+            "coverage": "full_body",
+            "head_visibility": "hidden_in_self_view",
+            "leg_animation": false,
+            "arm_ik": true,
+            "head_tracking": true
+          }
+        }
+      ],
+      "tags": [
+        "player_avatar"
+      ]
+    },
+    {
+      "id": "range_pistol",
+      "name": "Range Pistol",
+      "transform": {
+        "position": [
+          0.15,
+          0.95,
+          -1.1
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ],
+        "scale": 1.0
+      },
+      "mesh": {
+        "asset_id": "range_pistol",
+        "glb_path": "assets/range_pistol/model.glb",
+        "target_scale_meters": 0.22,
+        "skinned": false
+      },
+      "physics": {
+        "kind": "dynamic",
+        "mass_kg": 0.9,
+        "collision_shape": "aabb",
+        "restitution": 0.2,
+        "friction": 0.6
+      },
+      "mechanic_bindings": [
+        {
+          "id": "builtin.grab",
+          "builtin_id": "builtin.grab",
+          "params": {}
+        },
+        {
+          "id": "builtin.throw",
+          "builtin_id": "builtin.throw",
+          "params": {
+            "impulse": 5.0
+          }
+        }
+      ],
+      "tags": [
+        "grabbable",
+        "prop",
+        "weapon"
+      ]
+    },
+    {
+      "id": "cube_a",
+      "name": "Grabbable Cube A",
+      "transform": {
+        "position": [
+          -0.35,
+          0.95,
+          -1.1
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ],
+        "scale": 1.0
+      },
+      "mesh": null,
+      "physics": {
+        "kind": "dynamic",
+        "mass_kg": 0.4,
+        "collision_shape": "aabb",
+        "restitution": 0.25,
+        "friction": 0.5
+      },
+      "mechanic_bindings": [
+        {
+          "id": "builtin.grab",
+          "builtin_id": "builtin.grab",
+          "params": {}
+        },
+        {
+          "id": "builtin.throw",
+          "builtin_id": "builtin.throw",
+          "params": {
+            "impulse": 4.5
+          }
+        }
+      ],
+      "tags": [
+        "grabbable"
+      ]
+    },
+    {
+      "id": "cube_b",
+      "name": "Grabbable Cube B",
+      "transform": {
+        "position": [
+          0.45,
+          0.95,
+          -1.1
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ],
+        "scale": 1.0
+      },
+      "mesh": null,
+      "physics": {
+        "kind": "dynamic",
+        "mass_kg": 0.4,
+        "collision_shape": "aabb",
+        "restitution": 0.25,
+        "friction": 0.5
+      },
+      "mechanic_bindings": [
+        {
+          "id": "builtin.grab",
+          "builtin_id": "builtin.grab",
+          "params": {}
+        },
+        {
+          "id": "builtin.throw",
+          "builtin_id": "builtin.throw",
+          "params": {
+            "impulse": 4.5
+          }
+        }
+      ],
+      "tags": [
+        "grabbable"
+      ]
+    },
+    {
+      "id": "cube_c",
+      "name": "Grabbable Cube C",
+      "transform": {
+        "position": [
+          1.2,
+          0.5,
+          -0.4
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ],
+        "scale": 1.0
+      },
+      "mesh": null,
+      "physics": {
+        "kind": "dynamic",
+        "mass_kg": 0.35,
+        "collision_shape": "aabb",
+        "restitution": 0.3,
+        "friction": 0.5
+      },
+      "mechanic_bindings": [
+        {
+          "id": "builtin.grab",
+          "builtin_id": "builtin.grab",
+          "params": {}
+        },
+        {
+          "id": "builtin.throw",
+          "builtin_id": "builtin.throw",
+          "params": {
+            "impulse": 4.5
+          }
+        }
+      ],
+      "tags": [
+        "grabbable"
+      ]
+    }
+  ]
+}
