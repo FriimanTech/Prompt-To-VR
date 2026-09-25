@@ -1,6 +1,10 @@
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { api, type TargetDevice } from "../api/client";
+import {
+  api,
+  type PlayerExperience,
+  type TargetDevice,
+} from "../api/client";
 
 const SAMPLE = `A small Iron Man-style training arcade (local PC VR, Quest 3 via Quest Link).
 
@@ -27,6 +31,8 @@ export default function NewProjectPage() {
   const [title, setTitle] = useState("Iron Man training arcade");
   const [prompt, setPrompt] = useState(SAMPLE);
   const [device, setDevice] = useState<TargetDevice>("pcvr");
+  const [experience, setExperience] =
+    useState<PlayerExperience>("full_avatar");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
@@ -34,7 +40,12 @@ export default function NewProjectPage() {
     setBusy(true);
     setErr(null);
     try {
-      const { project_id } = await api.createProject(title, prompt, device);
+      const { project_id } = await api.createProject(
+        title,
+        prompt,
+        device,
+        experience,
+      );
       if (runNow) {
         await api.run(project_id).catch((e) => {
           // Surface the error but still navigate so the user can see state.
@@ -90,6 +101,34 @@ export default function NewProjectPage() {
             {device === "pcvr"
               ? "Builds a Windows .exe you run on the PC and view over Quest Link."
               : "Builds a standalone Android APK installed and run locally on the Quest 3."}
+          </div>
+        </label>
+        <label className="block">
+          <div className="text-sm text-muted mb-1">User Experience</div>
+          <div className="flex gap-2">
+            <button
+              type="button"
+              className={
+                experience === "hands_only" ? "ptv-button-primary" : "ptv-button"
+              }
+              onClick={() => setExperience("hands_only")}
+            >
+              Hands Only
+            </button>
+            <button
+              type="button"
+              className={
+                experience === "full_avatar" ? "ptv-button-primary" : "ptv-button"
+              }
+              onClick={() => setExperience("full_avatar")}
+            >
+              Full Player Avatar
+            </button>
+          </div>
+          <div className="text-xs text-muted mt-1">
+            {experience === "hands_only"
+              ? "You are a pair of rigged hands. No player body is generated; hand-shaped props (gloves, gauntlets) are still made as normal props."
+              : "You get a generated full-body avatar seen in first person: look down to see your body and feet, and its own hands are your hands."}
           </div>
         </label>
         <label className="block">

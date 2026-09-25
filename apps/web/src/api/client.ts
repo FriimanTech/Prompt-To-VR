@@ -35,6 +35,9 @@ export type StageRecord = {
 
 export type TargetDevice = "pcvr" | "quest";
 
+/** What the player is: the engine's default hands, or a generated full body. */
+export type PlayerExperience = "hands_only" | "full_avatar";
+
 export type ProjectState = {
   project_id: string;
   title: string;
@@ -44,6 +47,8 @@ export type ProjectState = {
   current_stage: string;
   status: string;
   target_device: TargetDevice;
+  /** Absent on projects created before the choice existed (= full_avatar). */
+  player_experience?: PlayerExperience;
   stages: StageRecord[];
   latest_build_exe: string | null;
   latest_build_dir: string | null;
@@ -80,10 +85,15 @@ export const api = {
     title: string,
     prompt: string,
     target_device: TargetDevice = "pcvr",
+    player_experience: PlayerExperience = "full_avatar",
   ) =>
-    req<{ project_id: string; target_device: TargetDevice }>("/projects", {
+    req<{
+      project_id: string;
+      target_device: TargetDevice;
+      player_experience: PlayerExperience;
+    }>("/projects", {
       method: "POST",
-      body: JSON.stringify({ title, prompt, target_device }),
+      body: JSON.stringify({ title, prompt, target_device, player_experience }),
     }),
   listArtifacts: (id: string) => req<Artifact[]>(`/projects/${id}/artifacts`),
   listLogs: (id: string) => req<string[]>(`/projects/${id}/logs`),

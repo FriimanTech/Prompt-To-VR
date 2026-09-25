@@ -253,6 +253,11 @@ export default function ProjectDetailPage() {
             <span className="ptv-pill border-white/10 bg-white/5 text-muted">
               {isQuest ? "Quest (standalone APK)" : "PC VR (Quest Link)"}
             </span>
+            <span className="ptv-pill border-white/10 bg-white/5 text-muted">
+              {p.player_experience === "hands_only"
+                ? "Hands Only"
+                : "Full Player Avatar"}
+            </span>
             <span
               className={
                 "ptv-pill " +
