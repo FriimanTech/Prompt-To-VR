@@ -29,7 +29,7 @@ from tripo_common import (
 # API key is loaded from TRIPO_API_KEY in the repo-root .env
 # (or the process environment). Do not paste the key here.
 
-INPUT_GLB_PATH = Path(r"C:\Users\micha\Desktop\Sequential_Runs\Image_To_3D_Tripo\Test_Tripo_Output\Real_Hands.glb")
+INPUT_GLB_PATH = Path(r"C:\\Users\\micha\\Downloads\\Tranformaer picture.glb")
 
 # ============================================================
 # IMPLEMENTATION
