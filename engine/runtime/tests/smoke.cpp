@@ -2107,7 +2107,7 @@ static int case_self_view_hide(const char* glb) {
     }
 
     std::printf("[ok] self-view hide: %zu joints, mirror palette intact\n",
-                skel.joint_count());
+                     skel.joint_count());
     return 0;
 }
 
@@ -2258,15 +2258,15 @@ static int case_hand_asset(const char* glb) {
                 }
             }
         }
-        size_t blended = 0;
-        for (const auto& v : verts) {
-            int sum = 0;
+    size_t blended = 0;
+    for (const auto& v : verts) {
+        int sum = 0;
             for (int k = 0; k < 4; ++k) sum += v.weights[k];
-            if (sum != 255) return fail("hand weights do not sum to 255");
-            if (v.weights[0] != 0 && v.weights[1] != 0) ++blended;
-        }
-        if (blended == 0)
-            return fail("no knuckle vertices blend two joints; bends would tear");
+        if (sum != 255) return fail("hand weights do not sum to 255");
+        if (v.weights[0] != 0 && v.weights[1] != 0) ++blended;
+    }
+    if (blended == 0)
+        return fail("no knuckle vertices blend two joints; bends would tear");
         std::printf("[ok] %s: %zu joints, %zu verts, %zu blended\n",
                     right ? "right hand" : "left hand", skel.joint_count(),
                     verts.size(), blended);
@@ -2285,11 +2285,11 @@ static int case_hand_pose(const char* glb) {
         const bool right = path.find("right") != std::string::npos;
         const int hand = right ? 1 : 0;
         TestSkeleton ts;
-        std::string err;
+    std::string err;
         if (!gml::load_glb_skeleton(path, 0.2f, ts.sk, err)) {
-            std::fprintf(stderr, "[fail] load_glb_skeleton: %s\n", err.c_str());
-            return 1;
-        }
+        std::fprintf(stderr, "[fail] load_glb_skeleton: %s\n", err.c_str());
+        return 1;
+    }
         ts.reset();
         ptv::hand_rig::Resolution how{};
         const auto rig = ptv::hand_rig::analyze(ts, 0, hand, &how);
