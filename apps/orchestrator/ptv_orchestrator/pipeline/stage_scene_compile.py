@@ -609,8 +609,28 @@ def _mesh_render_fields(
         speeds = _animation_reference_speeds(
             animations.keys(), target_scale_meters
         )
+        # Uthana clips carry their own speed (requested or measured from the
+        # clip, already at the asset's in-scene size) for every key,
+        # gait variants such as "run.punching" included. Those win over the
+        # height-derived estimate.
+        overrides = norm.get("animation_speed_overrides")
+        if isinstance(overrides, dict):
+            for key, mps in overrides.items():
+                if str(key) in out["animations"] and float(mps) > 0.0:
+                    speeds[str(key)] = round(float(mps), 4)
         if speeds:
             out["animation_speeds"] = speeds
+    # How far below the origin the soles are, at the asset's in-scene size,
+    # so a grounded character stands ON the floor even when its mesh is not
+    # vertically symmetric about the origin.
+    sole = norm.get("bind_sole_y")
+    if norm.get("skinned") and sole is not None and float(sole) < 0.0:
+        scale = out.get("unit_scale")
+        if scale is None:
+            longest = float(norm.get("lod0_longest_axis") or 0.0)
+            scale = float(target_scale_meters) / longest if longest > 1e-6 else None
+        if scale:
+            out["foot_offset_m"] = round(-float(sole) * float(scale), 4)
     sockets = _sockets_in_meters(contract, target_scale_meters)
     if sockets:
         out["sockets"] = sockets

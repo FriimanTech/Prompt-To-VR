@@ -23,8 +23,20 @@ class ProjectStage(str, Enum):
     scene_spec = "scene_spec"
     reference_images = "reference_images"
     tripo_models = "tripo_models"
+    # Decides per character whether Tripo or Uthana rigs and animates it,
+    # once the Tripo meshes exist (rig-check needs the model).
+    character_routing = "character_routing"
+    # Uthana auto-rig (with finger joints) for the player avatar and the
+    # humanoid NPCs routed to Uthana.
+    uthana_rigging = "uthana_rigging"
     asset_rigging = "asset_rigging"
     asset_animation = "asset_animation"
+    # Plans every Uthana motion (style, speed, strides, name) before any is
+    # generated.
+    uthana_motion_plan = "uthana_motion_plan"
+    # Resolves, downloads and merges the planned Uthana motions into one
+    # animated GLB per character.
+    uthana_animation = "uthana_animation"
     asset_normalization = "asset_normalization"
     # Derives each asset's named sockets (muzzle, grip) from its geometry and
     # writes asset_contract.json. Deterministic, no model calls. Runs BEFORE

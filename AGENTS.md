@@ -163,7 +163,21 @@ orchestrator and a reusable Vulkan + OpenXR engine core.
 6. Reference images → Tripo image-to-3D (textured, PBR). The generation
    `task_id` is recorded as `assets/<id>/tripo_task.json` so rigging can
    reference it instead of re-uploading the mesh.
-6b. **Auto-rigging** (`asset_rigging`): for every `AssetItem` with
+6a. **Character routing** (`character_routing`): per character, Tripo or
+   Uthana rigs and animates it, written to `character_routing.json`. The
+   player avatar always goes to Uthana (finger joints). A biped humanoid Tripo's
+   free rig-check cannot rig goes to Uthana; creatures go to Tripo; a humanoid
+   both can rig is decided by an agent comparing the NPC's needs against both
+   animation libraries (it sees the reference image). "Biped humanoid" = two
+   legs + two arms, human or not. See `docs/uthana.md`.
+6a'. **Uthana auto-rig** (`uthana_rigging`): uploads `model.glb` with
+   `auto_rig`, `front_facing`, `include_fingers`, `strip_namespace`,
+   `feet_on_floor`; downloads `model_uthana_rigged.glb`; records the
+   `character_id` in `uthana_rig.json`; centres the origin (Uthana returns the
+   FIRST character for a repeated upload, so its flags are never assumed).
+   Confidence <= 0.20 falls back to Tripo with a loud warning. Runs before
+   Tripo rigging so the fallback happens in the same run.
+6b. **Auto-rigging** (`asset_rigging`): for every Tripo-routed `AssetItem` with
    `rigged: true`, call `POST /v3/animations/rig-check` (free) and, only if
    it answers `riggable: true`, `POST /v3/animations/rig` (~30 credits).
    Both endpoints take a single `input` field — a task_id, a `file_token`,
@@ -197,7 +211,23 @@ orchestrator and a reusable Vulkan + OpenXR engine core.
    `export_with_geometry=True` because the runtime reads mesh, skin and
    clips from one GLB. Output is `model_animated.glb`; `asset_animation.json`
    records intent → the clip name Tripo ACTUALLY produced (read back out of
-   the GLB, never assumed).
+   the GLB, never assumed). Routed Tripo bipeds may use any of the 101 v1.0
+   presets (`resolve_tripo_motions`), not only the 13 intents.
+6d. **Uthana motion plan** (`uthana_motion_plan`): NOTHING is generated. Code
+   measures each rigged GLB's world height; an agent picks each gait's
+   `style_id`; code enforces `strides` 5, `travel_angle` 0, speed
+   `0.78 x h` (walk) / `2.2 x h` (run) and the canonical name
+   `style-str{N}-ms{speed}-deg{angle}`, and adds the shared library idle
+   (`uthana_idle_motion_id`, default `msf9nhQ4yyTJ`) to every character.
+6e. **Uthana animation** (`uthana_animation`): per motion, via pluggable
+   resolvers (`pipeline/uthana/motion_library.py`): locomotion = List your
+   motions [:500] -> exact-name Motion Verification -> reuse, or Generate
+   Locomotion then Rename; library = fixed id. Download is always
+   `glb, no_mesh=True, in_place=True` with THIS character's `character_id`.
+   Only when every motion is on disk, `glb_merge` combines them into
+   `model_animated.glb` (clip names = motion names, one Hips offset per
+   character so the origin sits at the character's middle) and writes the
+   `asset_animation.json` entry with `provider: "uthana"` and clip speeds.
 7. Assets **validated** (`asset_normalization`): GLB header/JSON check plus
    scale / collision metadata. This stage does NOT modify geometry.
 7b. **Asset contract** (`asset_contract`): derives each asset's named

@@ -2589,6 +2589,33 @@ public:
         w.get<CAnimator>(entity).playing = false;
     }
 
+    void fade_to_rest(std::uint32_t entity, float fade_s) override {
+        World& w = app_->world_;
+        if (!w.valid(entity) || !w.has<CAnimator>(entity)) return;
+        auto& anim = w.get<CAnimator>(entity);
+        if (anim.active_clip < 0) return;  // already at rest
+        // The animator cross-fades toward the bind pose when there is no
+        // incoming clip, so handing the active clip to the outgoing slot and
+        // clearing it is a faded stop.
+        const float fade = std::clamp(fade_s, 0.0f, 1.0f);
+        if (fade > 0.0f) {
+            anim.prev_clip = anim.active_clip;
+            anim.prev_time_s = anim.time_s;
+            anim.blend_t = fade;
+            anim.blend_duration = fade;
+        }
+        anim.active_clip = -1;
+        anim.time_s = 0.0f;
+        anim.playing = false;
+    }
+
+    bool one_shot_playing(std::uint32_t entity) const override {
+        const World& w = app_->world_;
+        if (!w.valid(entity) || !w.has<CAnimator>(entity)) return false;
+        const auto& anim = w.get<CAnimator>(entity);
+        return anim.active_clip >= 0 && !anim.looping && anim.playing;
+    }
+
     void set_clip_speed(std::uint32_t entity, float speed) override {
         World& w = app_->world_;
         if (!w.valid(entity) || !w.has<CAnimator>(entity)) return;

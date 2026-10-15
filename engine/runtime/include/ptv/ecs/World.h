@@ -185,6 +185,11 @@ struct CMesh {
      *  0 = unknown (older scenes): per-file normalization. Last member so
      *  positional initializers written before it existed stay correct. */
     float unit_scale{0.0f};
+    /** Distance in metres from the origin DOWN to the soles in the rest pose,
+     *  at the asset's in-scene size. A grounded character is planted this far
+     *  above the floor. 0 = unknown: half the body height is assumed, which
+     *  is right for a symmetric mesh and a few centimetres off otherwise. */
+    float foot_offset_m{0.0f};
 };
 
 /** Skeleton for a rigged ``CMesh``, plus the palette the renderer uploads.
@@ -581,6 +586,12 @@ struct CLocomotionIntent {
      *  circles the player while keeping its weapon trained uses this. */
     Vec3 face_target{0.0f};
     bool has_face_target{false};
+    /** Play a gait VARIANT clip at the current tier -- "punching" plays
+     *  ``run.punching`` while running -- when the asset has one. The body
+     *  still moves at the walk/run speed; only the clip changes. Empty plays
+     *  the plain walk/run clip. Last member so positional initializers stay
+     *  valid. */
+    std::string gait_variant{};
 };
 
 struct CPhysics {

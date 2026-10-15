@@ -436,6 +436,19 @@ def _build_lod_chain(
             "has none -- the skeleton was stripped during decimation. Refusing "
             "to record an un-rigged chain for a rigged asset."
         )
+    # The same failure for clips: an animated character (a Uthana merge can
+    # carry idle + several gaits) whose LODs lost clips would silently stop
+    # animating at a distance, or everywhere.
+    if rig["animation_clips"] > 0:
+        for p in lod_paths:
+            lod_rig = glb_rig_summary(repo_root / p)
+            if lod_rig["animation_clips"] != rig["animation_clips"]:
+                raise RuntimeError(
+                    f"{asset_id}: source {source.name} has {rig['animation_clips']} "
+                    f"animation clip(s) but {Path(p).name} has "
+                    f"{lod_rig['animation_clips']} -- clips were dropped during "
+                    "decimation."
+                )
 
     stamp = {
         "targets": targets,

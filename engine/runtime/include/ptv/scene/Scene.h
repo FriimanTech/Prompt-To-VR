@@ -21,6 +21,8 @@ struct MeshRef {
     /** Metres per source unit, measured once from LOD0 (see CMesh). 0 means
      *  per-file normalization to ``target_scale_meters``. */
     float unit_scale{0.0f};
+    /** Origin-to-sole distance in metres (see CMesh). 0 = unknown. */
+    float foot_offset_m{0.0f};
     std::string collision_shape{"aabb"};
     /** Decimated level-of-detail chain produced by the ``asset_optimization``
      * pipeline stage, coarsest last. ``lod_paths[0]`` is the same mesh as

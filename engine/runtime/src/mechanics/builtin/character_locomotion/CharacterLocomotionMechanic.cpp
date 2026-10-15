@@ -107,7 +107,7 @@ public:
         Vec3 next = transform.position + delta;
 
         if (ground_snap_ && ctx.physics != nullptr) {
-            next = snap_to_ground(ctx, next, height);
+            next = snap_to_ground(ctx, next, height, foot_offset(world, self, height));
         }
 
         // The speed ACHIEVED, not the speed requested. A character pressed
@@ -138,7 +138,8 @@ public:
         }
 
         if (!animated_) return;
-        drive_animation(world, self, achieved, intent.sprint, height, ctx);
+        drive_animation(world, self, achieved, intent.sprint, height, ctx,
+                        intent.gait_variant);
     }
 
 private:
@@ -149,7 +150,7 @@ private:
      *  (a ledge, or a scene with no floor), and the safe answer is to leave
      *  the height alone rather than drop the character into the void. */
     Vec3 snap_to_ground(MechanicContext& ctx, const Vec3& position,
-                        float height) const {
+                        float height, float feet_below_origin) const {
         const float half = 0.5f * height;
         const Vec3 from(position.x, position.y + half, position.z);
         PhysicsRayHit hit{};
@@ -157,9 +158,21 @@ private:
         if (!ctx.physics->raycast(from, Vec3(0.0f, -1.0f, 0.0f), reach, hit)) {
             return position;
         }
-        // The entity origin sits at the capsule centre, so resting on the
-        // ground means one half-height above the contact point.
-        return Vec3(position.x, hit.point.y + half, position.z);
+        // The entity origin sits at the body's middle, so resting on the
+        // ground means the origin-to-sole distance above the contact point.
+        return Vec3(position.x, hit.point.y + feet_below_origin, position.z);
+    }
+
+    /** How far below the origin the soles are: measured by the pipeline when
+     *  known, otherwise half the height (a symmetric body). */
+    static float foot_offset(const World& world, std::uint32_t self, float height) {
+        // Same space as ``body_height`` (the mesh's target size), so the
+        // measured value and the half-height fallback agree.
+        if (world.has<CMesh>(self)) {
+            const float f = world.get<CMesh>(self).foot_offset_m;
+            if (f > 1.0e-4f && f < 2.0f * height) return f;
+        }
+        return 0.5f * height;
     }
 
     /** Rotate toward ``forward_xz`` at the configured rate. */
@@ -186,13 +199,14 @@ private:
      *  legs: an NPC and the player walking side by side at the same speed
      *  have to scale their clips the same way, or one of them skates. */
     void drive_animation(World& world, std::uint32_t self, float speed,
-                         bool sprint, float height, MechanicContext& ctx) {
+                         bool sprint, float height, MechanicContext& ctx,
+                         const std::string& variant) {
         locomotion_clips::Tunables tune{};
         tune.walk_speed_mps = walk_speed_;
         tune.run_speed_mps = run_speed_;
         tune.reference_walk_mps = ref_walk_override_;
         tune.reference_run_mps = ref_run_override_;
-        clips_.update(world, self, speed, sprint, height, tune, ctx);
+        clips_.update(world, self, speed, sprint, height, tune, ctx, variant);
     }
 
     float walk_speed_{1.4f};

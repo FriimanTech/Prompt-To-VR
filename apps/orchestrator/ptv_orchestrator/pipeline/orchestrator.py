@@ -30,6 +30,7 @@ from . import (
     stage_asset_normalize,
     stage_asset_optimize,
     stage_asset_rigging,
+    stage_character_routing,
     stage_npc_plan,
     stage_build_spec,
     stage_cmake,
@@ -41,6 +42,9 @@ from . import (
     stage_scene_compile,
     stage_scene_spec,
     stage_tripo_models,
+    stage_uthana_animation,
+    stage_uthana_motion_plan,
+    stage_uthana_rigging,
     stage_world_generation,
 )
 from .context import PipelineContext, StageResult
@@ -64,6 +68,14 @@ _SHARED_STAGES: list[tuple[ProjectStage, StageFn]] = [
     (ProjectStage.scene_spec, stage_scene_spec.run),
     (ProjectStage.reference_images, stage_reference_images.run),
     (ProjectStage.tripo_models, stage_tripo_models.run),
+    # Tripo vs Uthana, per character. Needs the finished meshes (Tripo's free
+    # rig-check runs on them) and precedes every rigging stage, which all
+    # read character_routing.json.
+    (ProjectStage.character_routing, stage_character_routing.run),
+    # Uthana auto-rig (with fingers) BEFORE Tripo rigging, so an avatar or
+    # NPC whose Uthana rig fails or is not trusted falls back to Tripo in
+    # the same run.
+    (ProjectStage.uthana_rigging, stage_uthana_rigging.run),
     # Must precede asset_normalization: rigging REPLACES the primary GLB, so
     # everything downstream (validation, socket derivation, decimation, the
     # scene's mesh.skinned flag) has to see the rigged mesh. Rigging after
@@ -74,6 +86,11 @@ _SHARED_STAGES: list[tuple[ProjectStage, StageFn]] = [
     # validates, sockets, decimates and compiles. A rigged enemy with no
     # clips is a statue that slides across the floor.
     (ProjectStage.asset_animation, stage_asset_animation.run),
+    # Plan every Uthana motion (no generation), then resolve, download and
+    # merge them into one animated GLB per character -- still before
+    # normalization, so the animated GLB is what everything downstream sees.
+    (ProjectStage.uthana_motion_plan, stage_uthana_motion_plan.run),
+    (ProjectStage.uthana_animation, stage_uthana_animation.run),
     (ProjectStage.asset_normalization, stage_asset_normalize.run),
     # Must precede code_generation: the codegen agent needs asset_contract.json
     # in context so it writes ctx.sockets->socket_world(self, "muzzle") against

@@ -1,0 +1,212 @@
+{
+  "$defs": {
+    "MotionSource": {
+      "description": "Where one motion comes from.\n\nNew sources are added here, each with a resolver in\n``pipeline/uthana/motion_library.py`` that turns a planned motion into a\nUthana ``motion_id``. Download and merge only ever see that id.",
+      "enum": [
+        "uthana_locomotion",
+        "uthana_library",
+        "tripo_preset",
+        "engine_procedural",
+        "none"
+      ],
+      "title": "MotionSource",
+      "type": "string"
+    },
+    "UthanaCharacterMotionPlan": {
+      "additionalProperties": false,
+      "properties": {
+        "asset_id": {
+          "description": "Snake-case identifier, max 64 chars.",
+          "pattern": "^[a-z0-9][a-z0-9_.\\-]{0,63}$",
+          "title": "Asset Id",
+          "type": "string"
+        },
+        "character_id": {
+          "maxLength": 64,
+          "title": "Character Id",
+          "type": "string"
+        },
+        "character_role": {
+          "default": "npc",
+          "pattern": "^(npc|player_avatar)$",
+          "title": "Character Role",
+          "type": "string"
+        },
+        "engine_scale": {
+          "exclusiveMinimum": 0.0,
+          "title": "Engine Scale",
+          "type": "number"
+        },
+        "height_for_motion_m": {
+          "exclusiveMinimum": 0.0,
+          "title": "Height For Motion M",
+          "type": "number"
+        },
+        "motions": {
+          "items": {
+            "$ref": "#/$defs/UthanaMotionSpec"
+          },
+          "maxItems": 12,
+          "title": "Motions",
+          "type": "array"
+        },
+        "notes": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 24,
+          "title": "Notes",
+          "type": "array"
+        },
+        "target_scale_meters": {
+          "exclusiveMinimum": 0.0,
+          "title": "Target Scale Meters",
+          "type": "number"
+        }
+      },
+      "required": [
+        "asset_id",
+        "character_id",
+        "height_for_motion_m",
+        "target_scale_meters",
+        "engine_scale"
+      ],
+      "title": "UthanaCharacterMotionPlan",
+      "type": "object"
+    },
+    "UthanaMotionSpec": {
+      "additionalProperties": false,
+      "properties": {
+        "gait": {
+          "anyOf": [
+            {
+              "pattern": "^(walk|run)$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Gait"
+        },
+        "key": {
+          "pattern": "^[a-z0-9_]{1,48}(\\.[a-z0-9_]{1,48})?$",
+          "title": "Key",
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/$defs/MotionSource"
+        },
+        "motion_id": {
+          "anyOf": [
+            {
+              "maxLength": 64,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Motion Id"
+        },
+        "motion_name": {
+          "maxLength": 128,
+          "title": "Motion Name",
+          "type": "string"
+        },
+        "move_speed": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0.0,
+              "maximum": 8.0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Move Speed"
+        },
+        "purpose": {
+          "default": "",
+          "maxLength": 400,
+          "title": "Purpose",
+          "type": "string"
+        },
+        "strides": {
+          "anyOf": [
+            {
+              "maximum": 5,
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Strides"
+        },
+        "style_id": {
+          "anyOf": [
+            {
+              "maxLength": 64,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Style Id"
+        },
+        "travel_angle": {
+          "default": 0.0,
+          "maximum": 180.0,
+          "minimum": -180.0,
+          "title": "Travel Angle",
+          "type": "number"
+        }
+      },
+      "required": [
+        "key",
+        "kind",
+        "motion_name"
+      ],
+      "title": "UthanaMotionSpec",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "characters": {
+      "items": {
+        "$ref": "#/$defs/UthanaCharacterMotionPlan"
+      },
+      "maxItems": 48,
+      "title": "Characters",
+      "type": "array"
+    },
+    "locomotion_styles": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Locomotion Styles",
+      "type": "array"
+    },
+    "prompt_id": {
+      "description": "Snake-case identifier, max 64 chars.",
+      "pattern": "^[a-z0-9][a-z0-9_.\\-]{0,63}$",
+      "title": "Prompt Id",
+      "type": "string"
+    }
+  },
+  "required": [
+    "prompt_id"
+  ],
+  "title": "UthanaMotionPlan",
+  "type": "object"
+}

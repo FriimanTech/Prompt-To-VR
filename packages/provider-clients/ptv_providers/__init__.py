@@ -10,7 +10,16 @@ from .tripo_client import (
     animation_intents,
     presets_for_rig,
     resolve_animations,
+    resolve_tripo_motions,
     rig_model_for_type,
+)
+from .uthana_client import (
+    AutoRigFlags,
+    CreatedCharacter,
+    MotionRecord,
+    UthanaClient,
+    UthanaClientError,
+    load_uthana_api_key,
 )
 from .openai_client import OpenAIClient, OpenAIConfig
 from .llm_client import LlmClient, build_default_llm_client
@@ -30,7 +39,14 @@ __all__ = [
     "animation_intents",
     "presets_for_rig",
     "resolve_animations",
+    "resolve_tripo_motions",
     "rig_model_for_type",
+    "AutoRigFlags",
+    "CreatedCharacter",
+    "MotionRecord",
+    "UthanaClient",
+    "UthanaClientError",
+    "load_uthana_api_key",
     "OpenAIClient",
     "OpenAIConfig",
     "LlmClient",

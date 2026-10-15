@@ -251,6 +251,48 @@ def resolve_animations(
             presets.append(preset)
     return presets, mapping, dropped
 
+
+def resolve_tripo_motions(
+    requests: list[tuple[str, str | None]],
+    rig_type: str,
+    model: str | None = None,
+) -> tuple[list[str], dict[str, str], list[str]]:
+    """Like :func:`resolve_animations`, but each request may name an exact preset.
+
+    ``requests`` is ``[(key, preset_or_None), ...]``. A request with an exact
+    preset (chosen by character routing from the full v1.0 biped library,
+    e.g. ``("box_01", "preset:biped:box_01")``) is used as-is when the rig is
+    the v1.0 biped; otherwise ``key`` is treated as a semantic intent and
+    resolved the usual way. Returns ``(presets, key_to_preset, dropped)``.
+    """
+
+    from .animation_catalog import TRIPO_BIPED_V1_PRESETS
+
+    key_type = (rig_type or "").strip().lower()
+    resolved_model = (model or rig_model_for_type(key_type)).strip() if key_type else ""
+    exact_ok = key_type == "biped" and resolved_model == _RIG_MODEL_BIPED
+    table = presets_for_rig(rig_type, model)
+
+    presets: list[str] = []
+    mapping: dict[str, str] = {}
+    dropped: list[str] = []
+    for raw_key, exact in requests or []:
+        key = (raw_key or "").strip().lower()
+        if not key:
+            continue
+        preset = None
+        if exact and exact_ok and exact in TRIPO_BIPED_V1_PRESETS:
+            preset = exact
+        else:
+            preset = table.get(key)
+        if not preset:
+            dropped.append(key)
+            continue
+        mapping[key] = preset
+        if preset not in presets:
+            presets.append(preset)
+    return presets, mapping, dropped
+
 # Terminal task states. V3 collapsed V2's 8-state enum down to 5: the old
 # ``banned`` and ``expired`` are now ``failed`` carrying error_code 2008 and
 # 2018 respectively.

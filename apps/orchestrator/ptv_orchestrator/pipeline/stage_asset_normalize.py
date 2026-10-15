@@ -26,6 +26,7 @@ def run(ctx: PipelineContext) -> StageResult:
     assets_dir = ctx.project_dir / "assets"
     report: dict[str, dict[str, Any]] = {}
     animation_map = _animation_clip_names(ctx.project_dir)
+    animation_extras = _animation_extras(ctx.project_dir)
     ok = 0
     rejected = 0
 
@@ -49,6 +50,19 @@ def run(ctx: PipelineContext) -> StageResult:
         clips = animation_map.get(item.id)
         if clips:
             info["animations"] = dict(clips)
+        extras = animation_extras.get(item.id) or {}
+        if extras.get("speeds"):
+            # Measured/requested clip speeds already in engine metres per
+            # second (Uthana path); the scene compiler prefers them over the
+            # height-derived estimate.
+            info["animation_speed_overrides"] = dict(extras["speeds"])
+        if extras.get("provider"):
+            info["animation_provider"] = extras["provider"]
+        # ``skinned`` is only set later by the optimizer, so ask the file.
+        if glb_rig_summary(glb)["num_skins"] > 0:
+            sole = _bind_sole(glb)
+            if sole is not None:
+                info["bind_sole_y"] = sole
         if info["valid"] and info["has_any_material"]:
             info["status"] = "ok"
             ok += 1
@@ -108,6 +122,42 @@ def _animation_clip_names(project_dir: Path) -> dict[str, dict[str, str]]:
         if isinstance(clips, dict) and clips:
             out[str(asset_id)] = {str(k): str(v) for k, v in clips.items()}
     return out
+
+
+def _animation_extras(project_dir: Path) -> dict[str, dict[str, Any]]:
+    """Per-asset provider and engine-space clip speeds from asset_animation.json."""
+    path = project_dir / "asset_animation.json"
+    if not path.is_file():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    out: dict[str, dict[str, Any]] = {}
+    for asset_id, entry in (data.items() if isinstance(data, dict) else []):
+        if not isinstance(entry, dict) or entry.get("status") != "animated":
+            continue
+        speeds = {}
+        for key, rec in (entry.get("clip_speeds") or {}).items():
+            if isinstance(rec, dict) and float(rec.get("engine_mps") or 0) > 0:
+                speeds[str(key)] = float(rec["engine_mps"])
+        out[str(asset_id)] = {"provider": entry.get("provider", "tripo"), "speeds": speeds}
+    return out
+
+
+def _bind_sole(glb: Path) -> float | None:
+    """Lowest rest-pose vertex height of a rigged GLB, in GLB units.
+
+    Taken through the skin (joint matrices x inverse bind), because the
+    rendered rest pose -- not the raw POSITION data -- is where the feet are.
+    """
+    try:
+        from .uthana.gltf_io import Glb, aabb, skinned_bind_positions
+
+        lo, _ = aabb(skinned_bind_positions(Glb.load(glb), max_vertices=20000))
+    except Exception:  # noqa: BLE001 - best effort; the engine falls back to h/2
+        return None
+    return float(lo[1])
 
 
 def is_lod_output(path: Path) -> bool:

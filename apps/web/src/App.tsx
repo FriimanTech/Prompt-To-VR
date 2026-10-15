@@ -14,8 +14,9 @@ export default function App() {
         openai: health.data.has_openai_key,
         google: health.data.has_google_key,
         tripo: health.data.has_tripo_key,
+        uthana: Boolean(health.data.has_uthana_key),
       }
-    : { anthropic: false, openai: false, google: false, tripo: false };
+    : { anthropic: false, openai: false, google: false, tripo: false, uthana: false };
 
   return (
     <div className="min-h-full">

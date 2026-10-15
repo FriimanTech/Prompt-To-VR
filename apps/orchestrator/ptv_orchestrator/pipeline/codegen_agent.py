@@ -136,6 +136,12 @@ class CodegenAgentInput:
     just AI ones: a wave spawner needs the spawn caps, a HUD needs the health
     values, and a weapon needs to know which faction it damages."""
 
+    animation_inventory_json: str = ""
+    """Per character: which provider animated it and the EXACT animation keys
+    it has (``idle``, ``walk``, ``run``, ``run.punching``, ``box_01``...), plus
+    the actions it lacks. The only reliable list of what ``play_clip`` and
+    ``CLocomotionIntent::gait_variant`` can ask for on that asset."""
+
     world_context_json: str = ""
     """The declared vocabulary of every generated environment: interactive
     ids and their state keys, spawn points, portals, nav regions.
@@ -446,6 +452,18 @@ def build_user_message(inp: CodegenAgentInput) -> str:
             "CTransform, and never play their walk/run clips yourself.\n"
             f"{inp.npc_plan_json}\n"
             if inp.npc_plan_json
+            else ""
+        )
+        + (
+            "\n================ ANIMATION INVENTORY ================\n"
+            "The animation keys each character ACTUALLY has. Ask play_clip only "
+            "for keys listed here; a 'missing' action has no clip, so check "
+            "play_clip's return and apply that character's animation_fallback. "
+            "Keys like 'run.punching' are gait variants: set "
+            "want.gait_variant = \"punching\" on CLocomotionIntent while the "
+            "character acts on the move -- never play_clip them.\n"
+            f"{inp.animation_inventory_json}\n"
+            if inp.animation_inventory_json
             else ""
         )
         + (

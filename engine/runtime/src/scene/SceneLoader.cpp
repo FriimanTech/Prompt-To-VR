@@ -331,6 +331,8 @@ SceneDoc LoadSceneJson(const std::string& path) {
             m.glb_path = e["mesh"].value("glb_path", "");
             m.target_scale_meters = e["mesh"].value("target_scale_meters", 1.0f);
             m.unit_scale = std::max(0.0f, e["mesh"].value("unit_scale", 0.0f));
+            m.foot_offset_m =
+                std::clamp(e["mesh"].value("foot_offset_m", 0.0f), 0.0f, 100.0f);
             m.collision_shape = e["mesh"].value("collision_shape", "aabb");
             // Decimated LOD chain + culling radius from asset_optimization.
             // Absent on scenes compiled before that stage: the renderer then
@@ -513,7 +515,8 @@ void ApplySceneToWorld(const SceneDoc& doc, World& world,
                          es.mesh->target_scale_meters, es.mesh->lod_paths,
                          es.mesh->bounds_radius_m, es.mesh->sockets,
                          es.mesh->skinned, es.mesh->animations,
-                         es.mesh->animation_speeds, es.mesh->unit_scale});
+                         es.mesh->animation_speeds, es.mesh->unit_scale,
+                         es.mesh->foot_offset_m});
         }
         if (es.primitive.has_value()) {
             world.registry().emplace<CPrimitive>(

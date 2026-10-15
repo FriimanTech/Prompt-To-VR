@@ -75,8 +75,14 @@ def run(ctx: PipelineContext) -> StageResult:
     produced: list[str] = []
     pending = []
     reused = 0
+    routing = _load_routing(ctx)
     for item in manifest.items:
         if not item.rigged:
+            continue
+        # character_routing decides who rigs each character. Uthana-routed
+        # ones (unless they fell back to Tripo) are rigged by uthana_rigging.
+        route = routing.route_for(item.id) if routing else None
+        if route is not None and route.effective_rig_provider().value != "tripo":
             continue
         item_dir = assets_dir / item.id
         rigged_glb = item_dir / _RIGGED_GLB_NAME
@@ -173,7 +179,9 @@ def run(ctx: PipelineContext) -> StageResult:
         ctx.raise_if_cancelled()
         task_id = _read_task_id(item_dir)
         try:
-            check = client.rig_check(task_id=task_id, glb_path=None if task_id else source)
+            check = _cached_rig_check(ctx, item.id, source)
+            if check is None:
+                check = client.rig_check(task_id=task_id, glb_path=None if task_id else source)
             if not check.riggable:
                 not_riggable += 1
                 report[item.id] = {
@@ -231,6 +239,7 @@ def run(ctx: PipelineContext) -> StageResult:
             produced.append(_rel(ctx, final))
             report[item.id] = {
                 "status": "rigged",
+                "provider": "tripo",
                 "rig_check_task_id": check.task_id,
                 "rig_task_id": result.task_id,
                 "rig_type": check.rig_type,
@@ -274,6 +283,30 @@ def run(ctx: PipelineContext) -> StageResult:
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def _load_routing(ctx: PipelineContext):
+    from .character_artifacts import load_routing
+
+    return load_routing(ctx.project_dir)
+
+
+def _cached_rig_check(ctx: PipelineContext, asset_id: str, source: Path):
+    """The rig-check character_routing already paid nothing for, if still valid."""
+    from ptv_providers import TripoRigCheck
+
+    from .character_artifacts import RIG_CHECK_NAME, load_json, sha256_file
+
+    entry = load_json(ctx.project_dir / RIG_CHECK_NAME).get(asset_id)
+    if not isinstance(entry, dict) or entry.get("error") or not entry.get("task_id"):
+        return None
+    if entry.get("source_sha256") != sha256_file(source):
+        return None
+    return TripoRigCheck(
+        task_id=str(entry["task_id"]),
+        riggable=bool(entry.get("riggable")),
+        rig_type=str(entry.get("rig_type") or "biped").strip().lower(),
+    )
 
 
 def _make_client(ctx: PipelineContext) -> TripoClient:

@@ -39,9 +39,10 @@ import struct
 from pathlib import Path
 from typing import Any
 
-from ptv_providers import TripoClient, TripoConfig, resolve_animations
+from ptv_providers import TripoClient, TripoConfig, resolve_tripo_motions
 from ptv_schemas import ProjectStage, ProjectStatus
 
+from .character_artifacts import load_routing
 from .context import PipelineContext, StageResult
 
 _STAGE = ProjectStage.asset_animation
@@ -87,9 +88,23 @@ def run(ctx: PipelineContext) -> StageResult:
     reused = 0
     billable = 0
 
+    routing = load_routing(ctx.project_dir)
     for item in manifest.items:
         intents = [a.value for a in getattr(item, "animations", [])]
-        if not item.rigged or not intents:
+        route = routing.route_for(item.id) if routing else None
+        if route is not None and route.effective_animation_provider().value != "tripo":
+            # Animated by Uthana (or not at all) -- see uthana_animation.
+            continue
+        # Exact presets character_routing chose from the full v1.0 library.
+        # A character that FELL BACK from Uthana keeps its semantic intents:
+        # its routed motions are Uthana gaits Tripo cannot read.
+        requests: list[tuple[str, str | None]] = [(i, None) for i in intents]
+        if route is not None and route.fallback is None:
+            tripo_motions = [m for m in route.required_motions
+                             if m.source.value == "tripo_preset"]
+            if tripo_motions:
+                requests = [(m.key, m.tripo_preset) for m in tripo_motions]
+        if not item.rigged or not requests:
             continue
 
         item_dir = assets_dir / item.id
@@ -136,9 +151,10 @@ def run(ctx: PipelineContext) -> StageResult:
 
         rig_type = str(rig.get("rig_type") or "biped")
         rig_model = rig.get("model")
-        presets, mapping, dropped = resolve_animations(
-            intents[:cap], rig_type, rig_model
+        presets, mapping, dropped = resolve_tripo_motions(
+            requests[:cap], rig_type, rig_model
         )
+        intents = [k for k, _ in requests]
         if dropped:
             ctx.emit(
                 _STAGE,
@@ -294,6 +310,7 @@ def run(ctx: PipelineContext) -> StageResult:
             produced.append(_rel(ctx, final))
             report[item.id] = {
                 "status": "animated",
+                "provider": "tripo",
                 "retarget_task_id": result.task_id,
                 "rig_task_id": job["rig_task_id"],
                 "rig_type": job["rig_type"],

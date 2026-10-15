@@ -88,9 +88,13 @@ def run(ctx: PipelineContext) -> StageResult:
                 f"({item.reference.coverage.value})",
             )
 
+        prompt = compose_prompt(item, pose)
+        # Kept beside the image: character routing reads the exact wording
+        # Gemini was given when it judges a character's body shape.
+        (item_dir / "reference_prompt.txt").write_text(prompt, encoding="utf-8")
         try:
             results = _client().generate(
-                prompt=compose_prompt(item, pose),
+                prompt=prompt,
                 out_dir=item_dir,
                 number_of_images=item.reference.number_of_images,
                 aspect_ratio=item.reference.aspect_ratio,

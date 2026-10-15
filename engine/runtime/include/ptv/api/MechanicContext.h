@@ -908,6 +908,22 @@ public:
      *  for ``clip_finished`` before returning to the locomotion state. Always
      *  false while a looping clip plays, since it never ends. */
     virtual bool clip_finished(std::uint32_t entity) const = 0;
+
+    /** Stop the active clip by cross-fading back to the rest (bind) pose over
+     *  ``fade_s`` instead of freezing on the current frame. What a character
+     *  with no ``idle`` clip does when it stands still. */
+    virtual void fade_to_rest(std::uint32_t entity, float fade_s) {
+        (void)fade_s;
+        stop_clip(entity);
+    }
+
+    /** True while a NON-looping clip (attack, hurt, die, a wave) is still
+     *  playing. Locomotion leaves the clip alone until it finishes, so a
+     *  one-shot is not replaced by the walk cycle on the next frame. */
+    virtual bool one_shot_playing(std::uint32_t entity) const {
+        (void)entity;
+        return false;
+    }
 };
 
 /**

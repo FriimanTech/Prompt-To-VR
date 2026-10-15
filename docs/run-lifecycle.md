@@ -60,6 +60,24 @@ interrupted stays as `current_stage`, so **Resume** picks up exactly there.
 The Abort button performs the same reconciliation when no run is in flight, so
 it doubles as a manual unstick.
 
+## Resuming older projects after new stages are added
+
+**Resume** restarts at the first stage whose latest record is not
+`succeeded`. A stage added to the pipeline later (for example
+`character_routing`, `uthana_rigging`, `uthana_motion_plan`,
+`uthana_animation`) has no record at all in an older project, so Resume starts
+there and runs everything after it.
+
+The paid stages after it keep their ledgers, so they re-bill nothing:
+
+- `asset_rig.json`
+- `asset_animation.json`
+- `uthana_rig.json`
+- `uthana_animation.json`
+
+Uthana motions are additionally reused by name across the whole Uthana
+organisation.
+
 ## Terminal status is guaranteed
 
 Every orchestrator entry point runs inside `_claimed_run`, which stamps a

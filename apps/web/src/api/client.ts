@@ -73,6 +73,7 @@ export type Health = {
   has_openai_key: boolean;
   has_google_key: boolean;
   has_tripo_key: boolean;
+  has_uthana_key?: boolean;
   cmake_generator: string;
   vcpkg_root: string | null;
 };

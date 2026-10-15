@@ -203,6 +203,22 @@ a clip that is not there.
 Set `PTV_TRIPO_ANIMATION_ENABLED=false` to skip the stage, or
 `PTV_TRIPO_ANIMATION_MAX_PER_ASSET` (default 4) to cap the bill.
 
+## Uthana (humanoid rig with fingers + locomotion)
+
+- Create an API key at https://uthana.com and paste it into `.env` as
+  `UTHANA_API_KEY`. The client loads it with python-dotenv.
+- Install the SDK in the venv: `uv pip install "uthana>=0.5.1"` (it is a
+  dependency of `packages/provider-clients`).
+- Billing is pay-as-you-go per generated second; downloads (including
+  retargeting an existing motion onto another character) are free.
+- `UTHANA_IDLE_MOTION_ID` (default `msf9nhQ4yyTJ`) names the existing idle
+  motion every Uthana character is given.
+- `UTHANA_ENABLED=false` routes every character to Tripo (the avatar then
+  has no finger curls).
+
+See [uthana.md](uthana.md) for the full flow: routing, auto-rig, the motion
+naming convention and reuse, the shared idle, and the GLB merge.
+
 ## Verifying the keys
 
 ```powershell
@@ -218,6 +234,7 @@ Example response:
   "has_openai_key": true,
   "has_google_key": true,
   "has_tripo_key": true,
+  "has_uthana_key": true,
   "cmake_generator": "Visual Studio 18 2026",
   "vcpkg_root": "C:\\src\\vcpkg"
 }
@@ -237,8 +254,12 @@ Pills are red with ✗ if a key is missing.
 | SceneSpec (per scene) | OpenAI Agents SDK `gpt-5.6-sol` @ `medium` (no tools) + validate-and-repair | — (OpenAI-only) | JSON schema |
 | Reference image | Google `gemini-3.1-flash-image` | — | — |
 | Image-to-3D | Tripo (default latest, configurable) | — | textured + PBR |
+| Character routing | Tripo rig-check (free) + OpenAI Agents SDK `gpt-5.6-sol` @ `high` (reference images attached) | deterministic rules | JSON schema |
+| Uthana auto-rig | Uthana `create_character` (fingers) | Tripo rig | — |
 | Auto-rigging | Tripo rig-check + rig | — | — |
 | Animation retarget | Tripo retarget | — | — |
+| Uthana motion plan | OpenAI Agents SDK `gpt-5.6-sol` @ `medium` + code validation | deterministic defaults | JSON schema |
+| Uthana animation | Uthana list / create_locomotion / rename / download | — | — |
 | C++ modules (code_generation) | OpenAI Agents SDK `codegen_model` (default `gpt-5.6-sol`) @ `high` + `WebSearchTool` | — (OpenAI-only) | free-form, guarded by boundaries |
 | World generation | OpenAI Agents SDK `world_model` (default `gpt-5.6-sol`) @ `high` + `WebSearchTool` | — (OpenAI-only) | C++ source, compile-verify |
 | Engine promotion | — (deterministic index) | — | — |

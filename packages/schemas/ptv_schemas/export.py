@@ -19,12 +19,14 @@ from . import (
     ArtifactMetadata,
     AssetManifest,
     BuildSpec,
+    CharacterRoutingPlan,
     CodeTask,
     MechanicPlan,
     NpcPlan,
     PerformanceProfile,
     ProjectState,
     SceneSpec,
+    UthanaMotionPlan,
 )
 
 
@@ -33,6 +35,8 @@ _EXPORTS: dict[str, Type[BaseModel]] = {
     "asset_manifest": AssetManifest,
     "mechanic_plan": MechanicPlan,
     "npc_plan": NpcPlan,
+    "character_routing": CharacterRoutingPlan,
+    "uthana_motion_plan": UthanaMotionPlan,
     "scene_spec": SceneSpec,
     "code_task": CodeTask,
     "project_state": ProjectState,

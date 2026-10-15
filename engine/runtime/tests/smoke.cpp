@@ -3135,6 +3135,11 @@ public:
     float speed{1.0f};
     int play_calls{0};
     bool have_run{true};
+    bool have_idle{true};
+    /** Gait-variant clips ("run.punching") this fake asset has. */
+    std::vector<std::string> variants;
+    int fade_rest_calls{0};
+    bool one_shot{false};
 
     bool has_skeleton(std::uint32_t) const override { return true; }
     int joint_index(std::uint32_t, const char*) const override { return -1; }
@@ -3174,7 +3179,12 @@ public:
     void set_clip_speed(std::uint32_t, float s) override { speed = s; }
     bool has_clip(std::uint32_t, const char* name) const override {
         if (name == nullptr) return false;
-        if (std::string(name) == "run") return have_run;
+        const std::string n(name);
+        if (n == "run") return have_run;
+        if (n == "idle") return have_idle;
+        if (n.find('.') != std::string::npos) {
+            return std::find(variants.begin(), variants.end(), n) != variants.end();
+        }
         return true;
     }
     const char* current_clip(std::uint32_t) const override {
@@ -3183,6 +3193,11 @@ public:
     float clip_time(std::uint32_t) const override { return 0.0f; }
     float clip_duration(std::uint32_t) const override { return 1.0f; }
     bool clip_finished(std::uint32_t) const override { return false; }
+    void fade_to_rest(std::uint32_t, float) override {
+        ++fade_rest_calls;
+        requested.clear();
+    }
+    bool one_shot_playing(std::uint32_t) const override { return one_shot; }
 };
 
 }  // namespace
@@ -3305,6 +3320,133 @@ static int case_character_locomotion() {
 
     return ok("character locomotion: gait follows achieved speed, playback "
               "rate matches ground covered, and animated:false still slides");
+}
+
+// Uthana characters: a gait VARIANT plays its own clip at the same travel
+// speed, a missing idle settles to the rest pose instead of walking in place,
+// a one-shot action is not overwritten by the gait clip, and the measured
+// origin-to-sole distance plants the feet on the floor.
+static int case_locomotion_variants() {
+    auto mech = ptv::MechanicRegistry::get().make_mechanic(
+        "builtin.character_locomotion");
+    if (!mech) return fail("builtin.character_locomotion is not registered");
+
+    ptv::World world;
+    const auto e = world.create_entity("zombie");
+    const auto id = static_cast<std::uint32_t>(e);
+    {
+        ptv::Transform t{};
+        t.position = ptv::Vec3(0.0f, 0.85f, 0.0f);
+        world.registry().emplace<ptv::CTransform>(e, ptv::CTransform{t});
+        ptv::CMesh m{};
+        m.asset_id = "zombie";
+        m.target_scale_meters = 1.8f;
+        m.skinned = true;
+        m.foot_offset_m = 0.85f;  // asymmetric mesh: soles 0.85 m below origin
+        world.registry().emplace<ptv::CMesh>(e, std::move(m));
+    }
+    FakePhysics physics;
+    FakeSkeleton skeleton;
+    skeleton.variants = {"run.punching"};
+    ptv::MechanicContext ctx{};
+    ctx.physics = &physics;
+    ctx.skeleton = &skeleton;
+    const ptv::InputSnapshot input{};
+    mech->on_attach(world, id, nlohmann::json::object(), ctx);
+
+    auto drive = [&](ptv::Vec3 velocity, const char* variant, int frames) {
+        auto& want = world.registry().emplace_or_replace<ptv::CLocomotionIntent>(e);
+        want.desired_velocity = velocity;
+        want.gait_variant = variant;
+        for (int i = 0; i < frames; ++i) {
+            mech->on_update(world, id, 1.0f / 60.0f, input, ctx);
+        }
+    };
+
+    drive(ptv::Vec3(0.0f, 0.0f, -9.0f), "punching", 20);
+    if (skeleton.requested != "run.punching")
+        return fail("a gait variant did not play its own clip");
+    drive(ptv::Vec3(0.0f, 0.0f, -9.0f), "kicking", 5);
+    if (skeleton.requested != "run")
+        return fail("a variant the asset lacks did not fall back to the plain clip");
+
+    const float y = world.get<ptv::CTransform>(id).t.position.y;
+    if (std::fabs(y - 0.85f) > 1e-3f) {
+        std::fprintf(stderr, "  origin at y=%.3f, expected 0.850\n", y);
+        return fail("ground snap ignored the measured foot offset");
+    }
+
+    skeleton.have_idle = false;
+    drive(ptv::Vec3(0.0f), "", 3);
+    if (skeleton.fade_rest_calls == 0)
+        return fail("standing still without an idle clip did not settle to rest");
+    if (skeleton.requested == "run" || skeleton.requested == "walk")
+        return fail("standing still without an idle clip kept the gait clip playing");
+
+    skeleton.one_shot = true;
+    const int before = skeleton.play_calls;
+    drive(ptv::Vec3(0.0f, 0.0f, -9.0f), "", 5);
+    if (skeleton.play_calls != before)
+        return fail("a one-shot action was overwritten by the gait clip");
+
+    return ok("locomotion variants: variant clips at gait speed, rest pose "
+              "without idle, one-shots play out, measured foot offset");
+}
+
+// A Uthana rig hangs its skeleton under an "Armature" node scaled by 0.01 and
+// rotated 90 degrees about X, and its clips animate the root joint in that
+// node's centimetre space. The loader must bake the ancestor into the root's
+// keys exactly as it folds it into the bind pose, or the animated character
+// is drawn 100x too big and lying on its back.
+static int case_uthana_root_bake(const char* glb) {
+    namespace gml = ptv::gltf_mesh_load;
+    std::string err;
+    std::vector<gml::SkinnedVertex> verts;
+    std::vector<std::uint32_t> indices;
+    gml::SkeletonData skel;
+    if (!gml::load_glb_skinned(glb, 0.0f, verts, indices, skel, err)) {
+        std::fprintf(stderr, "[fail] load_glb_skinned: %s\n", err.c_str());
+        return 1;
+    }
+    if (skel.clips.empty()) return fail("merged Uthana fixture has no clip");
+
+    auto bounds = [&](const std::vector<gml::JointPose>& pose, float& lo, float& hi) {
+        std::vector<ptv::Mat4> palette;
+        gml::build_joint_palette(skel, pose, palette);
+        lo = 1e30f;
+        hi = -1e30f;
+        for (size_t i = 0; i < verts.size(); i += 7) {
+            ptv::Mat4 m(0.0f);
+            for (int k = 0; k < 4; ++k) {
+                const float w = static_cast<float>(verts[i].weights[k]) / 255.0f;
+                if (w > 0.0f) m += w * palette[verts[i].joints[k]];
+            }
+            const ptv::Vec3 p(m * ptv::Vec4(verts[i].pos[0], verts[i].pos[1],
+                                            verts[i].pos[2], 1.0f));
+            lo = std::min(lo, p.y);
+            hi = std::max(hi, p.y);
+        }
+    };
+
+    float bind_lo = 0.0f, bind_hi = 0.0f;
+    bounds(skel.bind_pose, bind_lo, bind_hi);
+    std::vector<gml::JointPose> pose = skel.bind_pose;
+    const std::vector<std::uint8_t> none(skel.bind_pose.size(), 0u);
+    ptv::sample_animation_clip(skel.clips[0], 0.0f, none, pose);
+    float anim_lo = 0.0f, anim_hi = 0.0f;
+    bounds(pose, anim_lo, anim_hi);
+
+    const float bind_h = bind_hi - bind_lo;
+    const float anim_h = anim_hi - anim_lo;
+    std::printf("  bind y [%.3f, %.3f]  frame0 y [%.3f, %.3f]\n", bind_lo, bind_hi,
+                anim_lo, anim_hi);
+    if (bind_h < 1e-3f) return fail("fixture has no height");
+    if (std::fabs(anim_h - bind_h) > 0.15f * bind_h)
+        return fail("animated character height differs from bind: ancestor not baked");
+    if (std::fabs(anim_lo - bind_lo) > 0.06f)
+        return fail("animated feet are not where the bind feet are");
+    return ok("Uthana root bake: animated root keeps the Armature's scale and "
+              "rotation; feet stay on the bind sole");
 }
 
 // Scenario 2 from the NPC brief: the pipeline produced a goblin and a rifle
@@ -3723,6 +3865,7 @@ int main(int argc, char** argv) {
     if (what == "physics_overlap") return case_physics_overlap();
     if (what == "runtime_spawn") return case_runtime_spawn();
     if (what == "character_locomotion") return case_character_locomotion();
+    if (what == "locomotion_variants") return case_locomotion_variants();
     if (what == "attachment") return case_attachment();
     if (what == "combat_factions") return case_combat_factions();
     if (what == "nav_graph") return case_nav_graph();
@@ -3754,6 +3897,13 @@ int main(int argc, char** argv) {
             return 2;
         }
         return case_gltf_nodes(argv[2]);
+    }
+    if (what == "uthana_root_bake") {
+        if (argc < 3) {
+            std::fprintf(stderr, "usage: ptv_smoke uthana_root_bake <glb>\n");
+            return 2;
+        }
+        return case_uthana_root_bake(argv[2]);
     }
     if (what == "skinning_math") {
         if (argc < 3) {

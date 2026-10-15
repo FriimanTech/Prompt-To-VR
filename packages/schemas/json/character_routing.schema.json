@@ -1,0 +1,292 @@
+{
+  "$defs": {
+    "AnimationFallback": {
+      "description": "What to do when Tripo has no animation for something the NPC must do.\n\nThe gameplay capability is never blocked on the animation. An NPC that\nshould fly still flies; the only question is whether it looks animated\nwhile doing so.",
+      "enum": [
+        "nearest_preset",
+        "procedural_cpp",
+        "none"
+      ],
+      "title": "AnimationFallback",
+      "type": "string"
+    },
+    "BodyPlan": {
+      "description": "The body a character has, as far as rigging is concerned.",
+      "enum": [
+        "biped_humanoid",
+        "biped_non_humanoid",
+        "quadruped",
+        "hexapod",
+        "octopod",
+        "avian",
+        "serpentine",
+        "aquatic",
+        "non_creature"
+      ],
+      "title": "BodyPlan",
+      "type": "string"
+    },
+    "CharacterRoute": {
+      "additionalProperties": false,
+      "properties": {
+        "animation_provider": {
+          "$ref": "#/$defs/RigProvider"
+        },
+        "asset_id": {
+          "description": "Snake-case identifier, max 64 chars.",
+          "pattern": "^[a-z0-9][a-z0-9_.\\-]{0,63}$",
+          "title": "Asset Id",
+          "type": "string"
+        },
+        "body_plan": {
+          "$ref": "#/$defs/BodyPlan"
+        },
+        "character_role": {
+          "default": "npc",
+          "pattern": "^(npc|player_avatar)$",
+          "title": "Character Role",
+          "type": "string"
+        },
+        "decided_by": {
+          "default": "code",
+          "pattern": "^(code|agent)$",
+          "title": "Decided By",
+          "type": "string"
+        },
+        "fallback": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RigProvider"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "fallback_reason": {
+          "default": "",
+          "maxLength": 600,
+          "title": "Fallback Reason",
+          "type": "string"
+        },
+        "rationale": {
+          "default": "",
+          "maxLength": 2000,
+          "title": "Rationale",
+          "type": "string"
+        },
+        "required_motions": {
+          "items": {
+            "$ref": "#/$defs/RequiredMotion"
+          },
+          "maxItems": 12,
+          "title": "Required Motions",
+          "type": "array"
+        },
+        "rig_provider": {
+          "$ref": "#/$defs/RigProvider"
+        },
+        "tripo_rig_check": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TripoRigCheckRecord"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "unmet": {
+          "items": {
+            "$ref": "#/$defs/UnmetMotion"
+          },
+          "maxItems": 12,
+          "title": "Unmet",
+          "type": "array"
+        }
+      },
+      "required": [
+        "asset_id",
+        "body_plan",
+        "rig_provider",
+        "animation_provider"
+      ],
+      "title": "CharacterRoute",
+      "type": "object"
+    },
+    "MotionKind": {
+      "enum": [
+        "idle",
+        "locomotion",
+        "action"
+      ],
+      "title": "MotionKind",
+      "type": "string"
+    },
+    "MotionSource": {
+      "description": "Where one motion comes from.\n\nNew sources are added here, each with a resolver in\n``pipeline/uthana/motion_library.py`` that turns a planned motion into a\nUthana ``motion_id``. Download and merge only ever see that id.",
+      "enum": [
+        "uthana_locomotion",
+        "uthana_library",
+        "tripo_preset",
+        "engine_procedural",
+        "none"
+      ],
+      "title": "MotionSource",
+      "type": "string"
+    },
+    "RequiredMotion": {
+      "additionalProperties": false,
+      "properties": {
+        "key": {
+          "pattern": "^[a-z0-9_]{1,48}(\\.[a-z0-9_]{1,48})?$",
+          "title": "Key",
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/$defs/MotionKind"
+        },
+        "library_motion_id": {
+          "anyOf": [
+            {
+              "maxLength": 64,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Library Motion Id"
+        },
+        "purpose": {
+          "default": "",
+          "maxLength": 400,
+          "title": "Purpose",
+          "type": "string"
+        },
+        "source": {
+          "$ref": "#/$defs/MotionSource"
+        },
+        "style_hint": {
+          "anyOf": [
+            {
+              "maxLength": 64,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Style Hint"
+        },
+        "tripo_preset": {
+          "anyOf": [
+            {
+              "maxLength": 96,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Tripo Preset"
+        }
+      },
+      "required": [
+        "key",
+        "kind",
+        "source"
+      ],
+      "title": "RequiredMotion",
+      "type": "object"
+    },
+    "RigProvider": {
+      "enum": [
+        "uthana",
+        "tripo",
+        "none"
+      ],
+      "title": "RigProvider",
+      "type": "string"
+    },
+    "TripoRigCheckRecord": {
+      "additionalProperties": false,
+      "properties": {
+        "error": {
+          "default": "",
+          "title": "Error",
+          "type": "string"
+        },
+        "rig_type": {
+          "default": "",
+          "title": "Rig Type",
+          "type": "string"
+        },
+        "riggable": {
+          "default": false,
+          "title": "Riggable",
+          "type": "boolean"
+        },
+        "task_id": {
+          "default": "",
+          "title": "Task Id",
+          "type": "string"
+        }
+      },
+      "title": "TripoRigCheckRecord",
+      "type": "object"
+    },
+    "UnmetMotion": {
+      "additionalProperties": false,
+      "properties": {
+        "fallback": {
+          "$ref": "#/$defs/AnimationFallback",
+          "default": "none"
+        },
+        "key": {
+          "pattern": "^[a-z0-9_]{1,48}(\\.[a-z0-9_]{1,48})?$",
+          "title": "Key",
+          "type": "string"
+        },
+        "reason": {
+          "default": "",
+          "maxLength": 400,
+          "title": "Reason",
+          "type": "string"
+        }
+      },
+      "required": [
+        "key"
+      ],
+      "title": "UnmetMotion",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "prompt_id": {
+      "description": "Snake-case identifier, max 64 chars.",
+      "pattern": "^[a-z0-9][a-z0-9_.\\-]{0,63}$",
+      "title": "Prompt Id",
+      "type": "string"
+    },
+    "routes": {
+      "items": {
+        "$ref": "#/$defs/CharacterRoute"
+      },
+      "maxItems": 48,
+      "title": "Routes",
+      "type": "array"
+    }
+  },
+  "required": [
+    "prompt_id"
+  ],
+  "title": "CharacterRoutingPlan",
+  "type": "object"
+}

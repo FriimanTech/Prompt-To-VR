@@ -13,9 +13,13 @@
 //   * ``npc_plan`` precedes rigging. Whether a thing needs animating at all is
 //     the most expensive question in the pipeline (~30 credits per rig, ~20
 //     per clip) and only the prompt can answer it.
-//   * ``asset_rigging`` and ``asset_animation`` precede normalization, because
-//     rigging REPLACES the primary GLB and everything downstream has to
-//     validate, socket, decimate and compile the rigged mesh.
+//   * ``character_routing`` follows ``tripo_models`` (Tripo's rig-check needs
+//     the mesh) and precedes every rigging stage, which all read its answer.
+//     ``uthana_rigging`` runs before Tripo's ``asset_rigging`` so a character
+//     whose Uthana rig fails falls back to Tripo in the same run.
+//   * All rigging and animation (Tripo and Uthana) precede normalization,
+//     because they REPLACE the primary GLB and everything downstream has to
+//     validate, socket, decimate and compile the rigged, animated mesh.
 //   * ``asset_contract`` precedes codegen: the agent needs real socket names.
 //   * ``world_generation`` precedes ``code_generation``. Gameplay code acts on
 //     the worlds, and a mechanic that opens a door needs the ids the world
@@ -147,25 +151,61 @@ const STAGES: StageMeta[] = [
     blurb: "Image to textured, PBR 3D mesh.",
   },
   {
-    id: "asset_rigging",
+    id: "character_routing",
     step: 8,
+    label: "Character routing",
+    group: "assets",
+    cost: "llm",
+    blurb:
+      "Decides who rigs and animates each character: Uthana (humanoids, finger joints, styled gaits) or Tripo (creatures, preset clips). Tripo's rig-check is free.",
+  },
+  {
+    id: "uthana_rigging",
+    step: 9,
+    label: "Uthana auto-rig",
+    group: "assets",
+    cost: "credits",
+    blurb:
+      "Rigs the player's avatar and routed humanoids WITH finger joints. A low-confidence rig falls back to Tripo.",
+  },
+  {
+    id: "asset_rigging",
+    step: 10,
     label: "Auto-rigging",
     group: "assets",
     cost: "credits",
     blurb:
-      "~30 credits per rigged asset. A free rig-check runs first, so props never get billed.",
+      "Tripo-routed creatures and humanoids: ~30 credits per rig. The free rig-check from routing is reused.",
   },
   {
     id: "asset_animation",
-    step: 9,
+    step: 11,
     label: "Animation retarget",
     group: "assets",
     cost: "credits",
     blurb: "~20 credits per clip. Idle, walk, run, attack and the rest.",
   },
   {
+    id: "uthana_motion_plan",
+    step: 12,
+    label: "Uthana motion plan",
+    group: "assets",
+    cost: "llm",
+    blurb:
+      "Chooses each character's gait style, stride and speed (0.78 x height to walk, 2.2 x height to run). Generates nothing.",
+  },
+  {
+    id: "uthana_animation",
+    step: 13,
+    label: "Uthana animation",
+    group: "assets",
+    cost: "credits",
+    blurb:
+      "Reuses motions already in your Uthana organisation by name, generates the rest, adds the shared idle, and merges all clips into one animated GLB.",
+  },
+  {
     id: "asset_normalization",
-    step: 10,
+    step: 14,
     label: "Asset normalization",
     group: "assets",
     cost: "free",
@@ -174,7 +214,7 @@ const STAGES: StageMeta[] = [
   },
   {
     id: "asset_contract",
-    step: 11,
+    step: 15,
     label: "Asset sockets",
     group: "assets",
     cost: "free",
@@ -183,7 +223,7 @@ const STAGES: StageMeta[] = [
   },
   {
     id: "world_generation",
-    step: 12,
+    step: 16,
     label: "VR environments",
     group: "build",
     cost: "llm",
@@ -192,7 +232,7 @@ const STAGES: StageMeta[] = [
   },
   {
     id: "code_generation",
-    step: 13,
+    step: 17,
     label: "Gameplay C++",
     group: "build",
     cost: "llm",
@@ -201,7 +241,7 @@ const STAGES: StageMeta[] = [
   },
   {
     id: "asset_optimization",
-    step: 14,
+    step: 18,
     label: "Decimation and LODs",
     group: "compile",
     cost: "free",
@@ -210,7 +250,7 @@ const STAGES: StageMeta[] = [
   },
   {
     id: "scene_compile",
-    step: 15,
+    step: 19,
     label: "Scene compile",
     group: "compile",
     cost: "free",
@@ -219,7 +259,7 @@ const STAGES: StageMeta[] = [
   },
   {
     id: "cmake_build",
-    step: 16,
+    step: 20,
     label: "CMake build (.exe)",
     group: "ship",
     cost: "free",
@@ -228,7 +268,7 @@ const STAGES: StageMeta[] = [
   },
   {
     id: "quest_build",
-    step: 16,
+    step: 20,
     label: "Quest APK build",
     group: "ship",
     cost: "free",
@@ -237,7 +277,7 @@ const STAGES: StageMeta[] = [
   },
   {
     id: "engine_promotion",
-    step: 17,
+    step: 21,
     label: "Engine promotion",
     group: "ship",
     cost: "free",

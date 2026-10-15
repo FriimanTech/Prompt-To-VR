@@ -126,6 +126,7 @@ function ProviderHealth() {
     ["OpenAI", h.has_openai_key],
     ["Google", h.has_google_key],
     ["Tripo", h.has_tripo_key],
+    ["Uthana", Boolean(h.has_uthana_key)],
   ];
   const missing = keys.filter(([, ok]) => !ok);
   if (missing.length === 0) return null;

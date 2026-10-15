@@ -232,9 +232,93 @@ AnimInterp parse_interp(const std::string& s) {
     return AnimInterp::Linear;
 }
 
+/** The non-joint ancestors folded into a root joint's bind pose, as one TRS.
+ *
+ * ``build_skeleton`` folds them (a Blender/Uthana "Armature" node, typically
+ * scale 0.01 and a 90 degree X rotation) into the root joint's bind
+ * transform. An animation channel REPLACES that joint's local transform, so
+ * its keys must carry the same prefix or an animated root would be drawn in
+ * the ancestor's units and axes -- 100x too large and rotated. */
+struct RootPrefix {
+    Vec3 translation{0.0f};
+    Quat rotation{1.0f, 0.0f, 0.0f, 0.0f};
+    float scale{1.0f};
+};
+
+std::unordered_map<int, RootPrefix> root_prefixes(
+    const tinygltf::Model& model,
+    const std::unordered_map<int, int>& node_to_joint) {
+    std::unordered_map<int, RootPrefix> out;
+    const std::vector<int> node_parent = build_node_parents(model);
+    for (const auto& [node, joint] : node_to_joint) {
+        int p = node_parent[static_cast<size_t>(node)];
+        if (p < 0 || node_to_joint.count(p) != 0) continue;  // not a root, or no ancestor
+        Mat4 prefix(1.0f);
+        size_t guard = 0;
+        while (p >= 0 && node_to_joint.count(p) == 0 &&
+               guard++ <= model.nodes.size()) {
+            prefix = node_local_matrix(model.nodes[static_cast<size_t>(p)]) * prefix;
+            p = node_parent[static_cast<size_t>(p)];
+        }
+        const JointPose trs = decompose_trs(prefix);
+        RootPrefix rp;
+        rp.translation = trs.translation;
+        rp.rotation = trs.rotation;
+        const Vec3 s = glm::abs(trs.scale);
+        rp.scale = (s.x + s.y + s.z) / 3.0f;
+        if (std::abs(s.x - s.y) > 1e-4f * rp.scale ||
+            std::abs(s.x - s.z) > 1e-4f * rp.scale) {
+            PTV_WARN(
+                "skeleton root joint {} sits under a non-uniformly scaled node "
+                "({:.4f}, {:.4f}, {:.4f}); its animation uses the average scale",
+                joint, s.x, s.y, s.z);
+        }
+        const bool identity =
+            glm::length(rp.translation) < 1e-7f && std::abs(rp.scale - 1.0f) < 1e-6f &&
+            std::abs(std::abs(rp.rotation.w) - 1.0f) < 1e-6f;
+        if (!identity) out.emplace(joint, rp);
+    }
+    return out;
+}
+
+/** Apply a root prefix to one channel's keys. CUBICSPLINE tangents get the
+ *  same linear part but not the constant translation. */
+void bake_prefix(const RootPrefix& rp, AnimChannel& ch) {
+    const size_t comps = (ch.path == AnimPath::Rotation) ? 4u : 3u;
+    const bool cubic = ch.interp == AnimInterp::CubicSpline;
+    const size_t count = ch.values.size() / comps;
+    for (size_t k = 0; k < count; ++k) {
+        float* v = &ch.values[k * comps];
+        const bool is_value = !cubic || (k % 3u) == 1u;
+        if (ch.path == AnimPath::Translation) {
+            const Vec3 t(v[0], v[1], v[2]);
+            const Vec3 r = rp.rotation * (rp.scale * t) +
+                           (is_value ? rp.translation : Vec3(0.0f));
+            v[0] = r.x;
+            v[1] = r.y;
+            v[2] = r.z;
+        } else if (ch.path == AnimPath::Rotation) {
+            // glTF stores x, y, z, w; glm::quat's constructor takes w first.
+            // Left-multiplying by a constant rotation is linear, so values and
+            // spline tangents transform the same way.
+            const Quat q(v[3], v[0], v[1], v[2]);
+            const Quat r = rp.rotation * q;
+            v[0] = r.x;
+            v[1] = r.y;
+            v[2] = r.z;
+            v[3] = r.w;
+        } else {
+            v[0] *= rp.scale;
+            v[1] *= rp.scale;
+            v[2] *= rp.scale;
+        }
+    }
+}
+
 void parse_animations(const tinygltf::Model& model,
                       const std::unordered_map<int, int>& node_to_joint,
                       SkeletonData& out) {
+    const auto prefixes = root_prefixes(model, node_to_joint);
     for (size_t a = 0; a < model.animations.size(); ++a) {
         const auto& anim = model.animations[a];
         AnimationClip clip;
@@ -288,6 +372,8 @@ void parse_animations(const tinygltf::Model& model,
                 out_ch.values.size() < out_ch.times.size() * per_key * comps) {
                 continue;
             }
+            const auto pre = prefixes.find(out_ch.joint);
+            if (pre != prefixes.end()) bake_prefix(pre->second, out_ch);
             clip.duration = std::max(clip.duration, out_ch.times.back());
             clip.channels.push_back(std::move(out_ch));
         }

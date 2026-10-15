@@ -466,6 +466,11 @@ class _StaticContext:
     # which faction it damages.
     npc_plan_json: str = ""
 
+    # The animation keys every character really has, from asset_animation.json
+    # and character_routing.json (provider, keys, gait variants, missing
+    # actions). Without it the agent guesses clip names from the NPC plan.
+    animation_inventory_json: str = ""
+
     # What the world architects actually declared, per environment: the
     # interactive ids, their kinds and state keys, the spawn points and the
     # portals. This is why world_generation now runs BEFORE this stage.
@@ -615,8 +620,36 @@ def _load_static_context(ctx: PipelineContext) -> _StaticContext:
         sockets_by_asset=_sockets_by_asset(project_dir),
         target_device=ctx.store.load_state(ctx.project_id).target_device,
         npc_plan_json=npc_plan_json,
+        animation_inventory_json=animation_inventory(project_dir),
         world_context_json=_load_world_context(ctx),
     )
+
+
+def animation_inventory(project_dir: Path) -> str:
+    """Per character: provider, available animation keys, variants, gaps."""
+    from .character_artifacts import ASSET_ANIMATION_NAME, load_json, load_routing
+
+    anims = load_json(project_dir / ASSET_ANIMATION_NAME)
+    routing = load_routing(project_dir)
+    out: dict[str, Any] = {}
+    asset_ids = set(anims) | {r.asset_id for r in (routing.routes if routing else [])}
+    for asset_id in sorted(asset_ids):
+        entry = anims.get(asset_id) if isinstance(anims.get(asset_id), dict) else {}
+        route = routing.route_for(asset_id) if routing else None
+        keys = sorted((entry.get("animations") or {}).keys()) if entry.get("status") == "animated" else []
+        out[asset_id] = {
+            "provider": entry.get("provider")
+            or (route.effective_animation_provider().value if route else "none"),
+            "keys": keys,
+            "gait_variants": sorted(k.split(".", 1)[1] for k in keys if "." in k),
+            "missing": [
+                {"key": u.key, "fallback": u.fallback.value}
+                for u in (route.unmet if route else [])
+            ],
+        }
+    if not out:
+        return ""
+    return json.dumps(out, indent=2, sort_keys=True)
 
 
 # ---------------------------------------------------------------------------
@@ -831,6 +864,7 @@ class _StageRuntime:
             scene_context_json=scene_ctx_json,
             build_spec_excerpt=bs_excerpt,
             npc_plan_json=self.static.npc_plan_json,
+            animation_inventory_json=self.static.animation_inventory_json,
             world_context_json=self.static.world_context_json,
             instructions=code_task_system(self.static.target_device),
             base_source_block=base_source_block,

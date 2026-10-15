@@ -212,6 +212,45 @@ class Settings(BaseSettings):
     # attached (see mechanic_plan_max_retries).
     npc_plan_max_retries: int = Field(default=1, ge=0, le=4)
 
+    # --- Character routing (Tripo vs Uthana) -----------------------------
+    # Decides, after the Tripo models exist, which provider rigs and animates
+    # each character. High effort: it weighs gameplay needs against two
+    # animation libraries, and a wrong call costs credits and looks wrong.
+    character_routing_model: str = "gpt-5.6-sol"
+    character_routing_reasoning_effort: str = "high"
+    character_routing_verbosity: str = "medium"
+    character_routing_agent_max_turns: int = Field(default=30, ge=4, le=200)
+    character_routing_max_retries: int = Field(default=1, ge=0, le=4)
+
+    # --- Uthana (humanoid rig with fingers + locomotion) -----------------
+    uthana_api_key: str | None = None
+    # Turn every Uthana stage off; humanoids then route to Tripo (the avatar
+    # without finger curls).
+    uthana_enabled: bool = True
+    # Auto-rig confidence at or below which the rig is not trusted and the
+    # character falls back to Tripo (0-1, Uthana's own score).
+    uthana_avatar_min_confidence: float = Field(default=0.20, ge=0.0, le=1.0)
+    uthana_npc_min_confidence: float = Field(default=0.20, ge=0.0, le=1.0)
+    # Stride pairs per generated locomotion clip (1-5). Five gives the
+    # longest clip and therefore the smoothest loop.
+    uthana_locomotion_strides: int = Field(default=5, ge=1, le=5)
+    # How many organisation motions "List your motions" returns.
+    uthana_motion_list_limit: int = Field(default=500, ge=1, le=100_000)
+    # The shared idle every Uthana-animated character is given. It already
+    # exists in the organisation; each character downloads it retargeted to
+    # its own character_id, so nothing is generated.
+    uthana_idle_motion_id: str = "msf9nhQ4yyTJ"
+    # Ceiling on newly generated motion seconds in one run (cost guard).
+    # Library motions and reused motions cost nothing and are not counted.
+    uthana_max_generated_seconds_per_run: float = Field(default=600.0, ge=0.0)
+    # The motion-plan agent's output is constrained and re-validated in code,
+    # so medium effort is enough.
+    uthana_motion_plan_model: str = "gpt-5.6-sol"
+    uthana_motion_plan_reasoning_effort: str = "medium"
+    uthana_motion_plan_verbosity: str = "medium"
+    uthana_motion_plan_agent_max_turns: int = Field(default=20, ge=4, le=200)
+    uthana_motion_plan_max_retries: int = Field(default=1, ge=0, le=4)
+
     # --- World-generation stage (agentic VR environment) -----------------
     # A single "world architect" agent (OpenAI Agents SDK) authors ALL the
     # C++ for the VR environment, bounded to the IWorldBuilder surface and
@@ -322,6 +361,8 @@ class Settings(BaseSettings):
         "codegen_reasoning_effort",
         "mechanic_plan_reasoning_effort",
         "npc_plan_reasoning_effort",
+        "character_routing_reasoning_effort",
+        "uthana_motion_plan_reasoning_effort",
         "world_reasoning_effort",
         "scene_spec_reasoning_effort",
     )
@@ -339,6 +380,8 @@ class Settings(BaseSettings):
         "codegen_verbosity",
         "mechanic_plan_verbosity",
         "npc_plan_verbosity",
+        "character_routing_verbosity",
+        "uthana_motion_plan_verbosity",
         "world_verbosity",
         "scene_spec_verbosity",
     )

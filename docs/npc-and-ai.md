@@ -105,6 +105,27 @@ picks the strategy:
 
 A flying NPC still flies in all three cases.
 
+### Humanoids animated by Uthana
+
+A biped humanoid NPC (human or not) can be rigged and animated by Uthana
+instead of Tripo. `character_routing` decides this after the meshes exist; see
+[uthana.md](uthana.md). Such a character has:
+
+- `idle`, the shared library idle;
+- `walk` and `run` in a style that fits it (zombie, crouching, limp, robot,
+  ...);
+- optionally gait variants such as `run.punching`.
+
+It has no one-shot action clips. Those are listed as `missing` in the codegen
+agent's animation inventory and use `animation_fallback`.
+
+A behaviour that wants the punching gait while charging sets
+`CLocomotionIntent::gait_variant = "punching"`. The body still moves at
+`run_speed_mps`; only the clip changes. A one-shot `play_clip(self, "attack",
+false)` on any character now plays to the end before locomotion takes the clip
+back. A character with no `idle` clip settles into its rest pose when it
+stops, instead of walking in place.
+
 ## Health, factions and death
 
 `CHealth` and `CFaction` are engine components, and damage goes through

@@ -11,6 +11,12 @@ add_test(NAME ptv_smoke_scene_loader
          COMMAND ptv_smoke scene)
 add_test(NAME ptv_smoke_stationary_scene
          COMMAND ptv_smoke stationary_scene)
+add_test(NAME ptv_smoke_locomotion_variants
+         COMMAND ptv_smoke locomotion_variants)
+# A real Uthana rig (Armature scale 0.01, 90 deg X) with one merged walk clip.
+add_test(NAME ptv_smoke_uthana_root_bake
+         COMMAND ptv_smoke uthana_root_bake
+                 "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/uthana_walk_merged.glb")
 add_test(NAME ptv_smoke_openxr_detect
          COMMAND ptv_smoke openxr)
 # openxr_detect passes even without a runtime; it just prints whether the

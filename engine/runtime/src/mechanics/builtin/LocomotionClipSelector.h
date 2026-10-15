@@ -25,6 +25,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <string>
 
 #include "ptv/api/MechanicContext.h"
 #include "ptv/ecs/World.h"
@@ -114,23 +115,35 @@ public:
     Gait gait() const { return gait_; }
 
     /** Choose the tier, fall back to a clip the asset actually has, start it
-     *  and set its playback rate. Returns the gait finally used. */
+     *  and set its playback rate. Returns the gait finally used.
+     *
+     *  ``variant`` picks a gait VARIANT clip ("run.punching") for the same
+     *  tier when the asset has one: the body still travels at the walk/run
+     *  speed the behaviour asked for, only the clip changes. Empty, or a
+     *  variant the asset lacks, plays the plain tier clip.
+     *
+     *  A one-shot clip that is still playing (attack, hurt, die) is left
+     *  alone until it finishes, rather than being replaced by the gait clip
+     *  on the very next frame. */
     Gait update(const World& world, std::uint32_t entity, float achieved_speed,
                 bool sprint, float height, const Tunables& tune,
-                MechanicContext& ctx) {
+                MechanicContext& ctx, const std::string& variant = {}) {
         if (ctx.skeleton == nullptr || !ctx.skeleton->has_skeleton(entity)) {
             return gait_;
         }
+        if (ctx.skeleton->one_shot_playing(entity)) return gait_;
 
+        const std::string walk_key = clip_key(ctx, entity, "walk", variant);
+        const std::string run_key = clip_key(ctx, entity, "run", variant);
         const float ref_walk =
             tune.reference_walk_mps > 0.0f
                 ? tune.reference_walk_mps
-                : reference_speed(world, entity, "walk", height,
+                : reference_speed(world, entity, walk_key.c_str(), height,
                                   kWalkSpeedPerMeterOfHeight);
         const float ref_run =
             tune.reference_run_mps > 0.0f
                 ? tune.reference_run_mps
-                : reference_speed(world, entity, "run", height,
+                : reference_speed(world, entity, run_key.c_str(), height,
                                   kRunSpeedPerMeterOfHeight);
 
         const Gait wanted =
@@ -140,18 +153,30 @@ public:
         // one locomotion preset, so "run" resolves to the walk clip played
         // faster rather than to nothing at all.
         Gait gait = wanted;
-        if (gait == Gait::Run && !ctx.skeleton->has_clip(entity, "run")) {
+        if (gait == Gait::Run && !ctx.skeleton->has_clip(entity, run_key.c_str())) {
             gait = Gait::Walk;
         }
-        if (gait == Gait::Walk && !ctx.skeleton->has_clip(entity, "walk")) {
+        if (gait == Gait::Walk && !ctx.skeleton->has_clip(entity, walk_key.c_str())) {
             gait = Gait::Idle;
         }
 
         // play_clip is a no-op when this clip is already running, so calling
         // it every frame costs a string compare and does not restart the
         // cycle.
-        ctx.skeleton->play_clip(entity, gait_intent(gait), /*looping=*/true,
-                                kGaitFade);
+        if (gait == Gait::Idle && !ctx.skeleton->has_clip(entity, "idle")) {
+            // No idle clip: settle into the rest pose instead of leaving the
+            // walk cycle running in place.
+            const char* playing = ctx.skeleton->current_clip(entity);
+            if (playing != nullptr && playing[0] != '\0') {
+                ctx.skeleton->fade_to_rest(entity, kGaitFade);
+            }
+            gait_ = Gait::Idle;
+            return gait_;
+        }
+        const char* key = gait == Gait::Walk ? walk_key.c_str()
+                          : gait == Gait::Run ? run_key.c_str()
+                                              : "idle";
+        ctx.skeleton->play_clip(entity, key, /*looping=*/true, kGaitFade);
 
         float rate = 1.0f;
         if (gait == Gait::Walk) {
@@ -167,6 +192,16 @@ public:
     }
 
 private:
+    /** "run.punching" when the asset has that variant clip, else "run". */
+    static std::string clip_key(MechanicContext& ctx, std::uint32_t entity,
+                                const char* tier, const std::string& variant) {
+        if (!variant.empty()) {
+            std::string key = std::string(tier) + "." + variant;
+            if (ctx.skeleton->has_clip(entity, key.c_str())) return key;
+        }
+        return tier;
+    }
+
     /** Tier selection with hysteresis around each boundary. */
     Gait choose_gait(float speed, bool sprint, float ref_walk,
                      const Tunables& tune) const {

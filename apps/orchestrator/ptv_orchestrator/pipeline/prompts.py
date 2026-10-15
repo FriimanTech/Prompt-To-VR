@@ -463,6 +463,13 @@ controllers, and its legs do not move when the player walks. Without
 ``walk`` and ``run`` the body slides across the floor feet-first. Ask for
 ``turn`` as the fourth intent when the game has snap turn.
 
+WHO RIGS WHAT is decided AFTER the meshes exist, by a routing stage: the
+player's avatar body is always rigged by Uthana (which adds finger joints so
+the player's hands curl) and given walk/run plus a shared idle; humanoid NPCs
+go to Uthana or Tripo depending on what they need; creatures stay with Tripo.
+So keep stating ``rigged`` and ``animations`` as above -- they are the intent
+that routing works from -- and never try to pick a provider here.
+
 STYLE CONSISTENCY. ``style_notes`` should keep every asset in the same
 art language so the generated concepts feel like one game. Echo the
 prompt's art-direction phrases (palette, mood, era, material language)
@@ -560,6 +567,13 @@ priority order, and nothing else -- each one is billed separately. An enemy
 that patrols, charges and shoots needs ["idle", "walk", "run", "shoot"]. A
 background villager needs ["idle", "walk"]. Available intents: idle, walk,
 run, attack, shoot, hurt, die, jump, turn, climb, dance, wave, sit.
+
+SAY HOW IT MOVES, not just that it moves. In ``notes``, describe the
+character's gait in plain words when it has one: "shambles like a zombie",
+"sneaks crouched", "limps on its left leg", "marches stiffly like a robot",
+"struts", "throws punches while it charges". A later stage chooses each
+humanoid's locomotion style and its rigging provider from exactly this
+description, so a manner of moving left unsaid is a manner of moving lost.
 
 WHEN TRIPO HAS NO CLIP FOR SOMETHING THE CHARACTER MUST DO, set
 ``animation_fallback``. The gameplay ability is NEVER blocked on the
@@ -1602,6 +1616,11 @@ exactly this vocabulary:
   idle, walk, run, attack, shoot, hurt, die, jump, turn, climb, dance,
   wave, sit
 
+plus whatever extra keys the ANIMATION INVENTORY lists for that asset: a Tripo
+preset key such as ``box_01`` or ``hit_to_head``, and gait variants written
+``<walk|run>.<variant>`` such as ``run.punching``. The inventory is the
+authority on what a given character has.
+
     ctx.skeleton->play_clip(self, "walk", /*looping=*/true);
 
 The retargeter names the underlying clips, not this pipeline, so the real
@@ -1676,6 +1695,18 @@ So your AI code writes an intent and stops:
 
 Everything else follows. To circle a target while keeping it covered, clear
 ``face_travel`` and set ``face_target``.
+
+Two more things the locomotion built-in handles for you:
+
+* GAIT VARIANTS. When the inventory lists a variant (``run.punching``),
+  set ``want.gait_variant = "punching";`` while the character acts on the
+  move -- the body keeps travelling at its run speed, only the clip changes.
+  Clear it (``""``) when the action ends. Never ``play_clip`` a variant.
+* ONE-SHOTS PLAY OUT. A non-looping ``play_clip(self, "attack", false)``
+  is left alone by locomotion until it finishes; you do not need to stop
+  moving to see it. Characters animated by Uthana have ``idle`` and their
+  gaits but NO attack/hurt/die clips: check ``play_clip``'s return value and
+  apply the character's ``animation_fallback`` (procedural joints or none).
 
 A complete chase-and-attack behaviour, which is most of what enemies do:
 
@@ -2189,6 +2220,136 @@ def code_task_system(target_device: TargetDevice) -> str:
 def world_builder_system(target_device: TargetDevice) -> str:
     return _with_device(_WORLD_BUILDER_TMPL, target_device)
 
+
+CHARACTER_ROUTING_SYSTEM = """You are the CHARACTER RIGGING ROUTER for a VR game
+pipeline. Every character mesh has already been created by Tripo. You decide,
+for each non-player character (NPC) you are given, what kind of body it has
+and -- for humanoids Tripo can rig -- whether Tripo or Uthana should rig and
+animate it.
+
+THE TWO PROVIDERS
+
+* Tripo rigs whole creatures (biped, quadruped, hexapod, octopod, avian,
+  serpentine, aquatic) and retargets FIXED PRESET clips. For humanoid bipeds
+  it uses rig model v1.0-20240301, whose full preset list is given to you
+  below: actions (box, slash, kick, shoot, cast a spell, hurt, fall/die,
+  jump, climb), gestures (wave, clap, cheer, bow) and a few gaits (walk, run,
+  swagger, flee, run_upstairs). At most 5 presets per character.
+* Uthana rigs ONLY bipedal humanoids, with finger joints, and generates
+  LOCOMOTION: the character travels the whole clip, in any of the styles
+  listed below, at any speed and stride. Styles are body attitudes for a gait
+  (zombie, crouching, on_toes_crouching, drunk, limp_left, elderly, robot,
+  strutting, march, heavyset, ...), including action-while-moving gaits
+  (punching, kicking, karate_chop, holding_sword, pistol_non_gendered,
+  rifle_male, shielding_left, ...). Every Uthana character also gets one
+  shared library IDLE clip automatically. Uthana provides NO one-shot actions
+  in this pipeline: no attack, hurt, death, jump or gesture clips.
+
+BODY PLAN (classify every NPC you are given)
+
+Look at the reference image and its prompt, then pick one:
+  biped_humanoid     upright, two legs, two arms, a head and a torso -- human
+                     or NOT. A fish-man, an alien, a robot, a goblin, a
+                     transforming car, a cartoon duck whose wings read as
+                     arms: all biped_humanoid.
+  biped_non_humanoid two legs, no arms (a bird on foot, a T-rex).
+  quadruped | hexapod | octopod | avian | serpentine | aquatic
+  non_creature       a drone, turret, orb, vehicle that does not stand up.
+
+DECIDING THE PROVIDER (only for biped_humanoid that Tripo CAN rig)
+
+Fixed rules decide every other case; set rig_provider to your best guess for
+those anyway, it is ignored. For biped_humanoid with Tripo riggable = true:
+
+  1. List the motions this NPC needs from its role, behaviors, notes and the
+     game prompt: does it stand still (idle)? walk? run? in what manner (a
+     shambling zombie, a crouching sneak, a limping wounded soldier)? does it
+     act while moving (punching while charging)? does it perform one-shot
+     actions (attack, take a hit, die, jump, wave)?
+  2. Check which library covers them. Uthana covers idle and any gait with
+     character; Tripo covers generic walk/run plus the listed actions.
+  3. Pick the provider that covers ALL needed motions; if neither does, the
+     one that covers the most important ones (how the NPC moves is usually
+     what the player notices most). Example: an NPC that only ever stands
+     still and then slowly crouch-walks -> uthana (crouching). A boxer that
+     needs box_01 and hit_to_head -> tripo. A zombie that shambles and runs at
+     the player -> uthana (zombie), with its attack listed as unmet.
+
+OUTPUT, per NPC: body_plan, rig_provider, required_motions and unmet.
+
+required_motions entries:
+  key       idle | walk | run | a Tripo preset key (box_01) | a gait variant
+            "<walk|run>.<style>" for acting while moving (run.punching).
+  kind      idle | locomotion | action
+  source    uthana_locomotion (Uthana gaits), uthana_library (idle on Uthana),
+            tripo_preset (Tripo clip), engine_procedural, none
+  style_hint the Uthana style you have in mind (uthana_locomotion only)
+  tripo_preset the exact Tripo preset id (tripo_preset only, from the list)
+  purpose   one line: when the game plays it
+Every motion the chosen provider cannot give goes in unmet with a fallback:
+nearest_preset, procedural_cpp or none.
+
+Return ONLY the schema.
+"""
+
+UTHANA_MOTION_PLAN_SYSTEM = """You are the UTHANA MOTION PLANNER for a VR game
+pipeline. Each character you are given has been rigged by Uthana. For each of
+its locomotion motions you choose the parameters of one Uthana
+``create_locomotion`` call. You do NOT generate anything; code checks your
+plan, looks for an existing motion with the same name, and only then
+generates what is missing.
+
+PARAMETERS (the character_id is filled in by code; never output it)
+
+* style_id    one style from the live list you are given. It is the body
+              attitude of the gait: pick it from who the character IS and how
+              it should move -- a zombie -> zombie; a male soldier ->
+              neutral_male_a; a woman -> neutral_female_a; unspecified or
+              non-gendered -> neutral_non_gendered; a sneaking thief ->
+              on_toes_crouching; a wounded survivor -> limp_left; a robot ->
+              robot. The player's own avatar uses a neutral style matching
+              its gender unless the game says otherwise.
+* strides     count of full stride PAIRS (left+right). Use 5: the longest
+              clip loops the smoothest. 4 only if a clip must be shorter.
+* travel_angle always 0 (straight ahead), like every engine clip.
+* move_speed  metres per second, RELATIVE TO THE CHARACTER'S HEIGHT, which is
+              given to you as height_for_motion_m (the height Uthana animates
+              the character at). Use exactly the engine's formulas so the clip
+              matches how the engine moves the body:
+                  walk = 0.78 x height_for_motion_m
+                  run  = 2.2  x height_for_motion_m
+              Round to one decimal. A taller character moves faster for the
+              same gait: its stride is longer.
+
+GAIT VARIANTS. When a character acts WHILE moving (punching while it charges,
+holding a sword while it walks, aiming a rifle while it advances), plan an
+extra motion keyed "<walk|run>.<variant>" (e.g. run.punching) using the
+action-gait style (punching, kicking, karate_chop, holding_sword,
+pistol_non_gendered, rifle_male, ...) at that gait's speed. The body still
+travels at the walk/run speed; only the clip changes.
+
+NAME. Every motion is named style-str{N}-ms{speed}-deg{angle}, for example
+zombie-str5-ms1.4-deg0. Code recomputes this from your parameters.
+
+IDLE. Do NOT plan an idle: every character is given a shared library idle by
+code.
+
+ONE-SHOT ACTIONS (attack, hurt, die, jump) are not available from Uthana in
+this pipeline; do not plan them.
+
+Worked example. A zombie shooting game has a normal zombie (height 1.8 m) and
+a tall lanky zombie (height 2.8 m). Both walk when they have not seen the
+player and run at the player once it is in range. Normal zombie: walk =
+zombie, strides 5, move_speed 0.78 x 1.8 = 1.4, angle 0 ->
+zombie-str5-ms1.4-deg0; run = zombie, strides 5, 2.2 x 1.8 = 4.0 ->
+zombie-str5-ms4.0-deg0. Tall zombie: walk = 0.78 x 2.8 = 2.2 ->
+zombie-str5-ms2.2-deg0; run = 2.2 x 2.8 = 6.2 -> zombie-str5-ms6.2-deg0.
+A motion whose name already exists is reused, so identical names across
+characters are good, not wasteful.
+
+Return ONLY the schema: one entry per character, one motion per key you were
+asked to plan.
+"""
 
 BUILD_SPEC_SYSTEM = build_spec_system(TargetDevice.pcvr)
 MECHANIC_PLAN_SYSTEM = mechanic_plan_system(TargetDevice.pcvr)

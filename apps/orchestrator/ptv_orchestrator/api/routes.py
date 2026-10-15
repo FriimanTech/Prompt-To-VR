@@ -44,6 +44,7 @@ def health():
         "has_openai_key": bool(s.openai_api_key),
         "has_google_key": bool(s.google_api_key),
         "has_tripo_key": bool(s.tripo_api_key),
+        "has_uthana_key": bool(s.uthana_api_key),
         "cmake_generator": s.cmake_generator,
         "vcpkg_root": s.vcpkg_root,
     }
