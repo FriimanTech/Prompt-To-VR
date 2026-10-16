@@ -193,6 +193,72 @@ fails closed. `translate()` is horizontal-only while the vertical mode is
 `Grounded` (the default); a mechanic that really wants flight or swimming
 calls `set_vertical_mode(VerticalMode::Free)`. Jumps go through `jump(v)`.
 
+### The player's body family never collides with the player
+
+Anything that moves WITH the player and has a collider would push the
+capsule at the player's own speed, every frame -- and the push compounds.
+A kinematic hip holster attached to the avatar's pelvis turned a 1.5 m/s
+walk into 20+ m/s on a Quest 3 (`ptv_smoke player_self_push` reproduces it
+headless: 2,470 m/s after five seconds). So the character sweep ignores the
+whole body family, rebuilt every frame
+(`Application::collect_player_body_family`):
+
+* the contact capsule and the hand anchors;
+* held items, and items worn through `builtin.equip` (`CEquipped` wearer is
+  the player or the avatar);
+* every entity whose `CAttachment` chain (depth 8) reaches the player rig,
+  the `player_avatar` entity, a hand anchor or a held item.
+
+They still collide with everything else: grabbing, shooting, raycasts and
+NPCs are unchanged.
+
+**Governor.** As a safety net, the stick step may cover what was asked for,
+plus a moving platform's carry, plus a centimetre of penetration recovery.
+Anything more is clamped, and the first time it happens the log names what
+the body was touching:
+`player motor: body was pushed 0.31 m this frame but only 0.02 m was asked
+for; clamped. Touching: [hip_holster] ...`
+
+### The player's avatar body
+
+`builtin.avatar_body` hangs the body from the neck pivot under the headset.
+It sizes the body to the player's standing eye height, again when they stand
+up taller, and never smaller for a crouch. The arms follow the controllers
+with two-bone IK and a capped shoulder assist that is rebuilt every frame. A
+controller that drops out of tracking holds for 0.3 s before the arm relaxes
+to the clip. The renderer never culls or LOD-switches the player's own body.
+Details and the logcat lines are in [`uthana.md`](uthana.md#engine-support).
+
+## Walking and running (sprint)
+
+Both slides walk at `slide_max_speed_mps` and run at `sprint_speed_mps`.
+The player runs by **holding the left stick in while pushing forward**
+(within `forward_cone_deg` of straight ahead and at least `min_stick`).
+The run ramps in and out (`accel_tau_s` / `decel_tau_s`) and narrows the
+movement vignette a little further. In the settings menu the player can
+choose Hold, Toggle (click once; the run ends when the stick returns to
+centre) or Off. Those rows appear only when the menu already offers other
+choices.
+
+The slide publishes the state through `ILocomotion::sprinting()` and
+`gait_speed_cap()`. `builtin.avatar_body` plays the run clip only while
+`sprinting()` is true, so the player's legs show their intent, not a speed
+threshold. Generated code reads these and never writes a sprint of its own.
+
+**Speeds come from the avatar's clips.** When the player has a body,
+`scene_compile` (`pipeline/player_bindings.py::gait_speed_fields`) sets the
+walk speed to the avatar's measured walk-clip speed and the sprint speed to
+its run-clip speed (`animation_speeds`). Both clips then play at rate 1.0,
+with no skating. Bounds are walk 1.0-2.0 m/s and run 2.0-3.5 m/s, with the
+run at least 0.5 m/s faster than the walk. Without an avatar the defaults
+are 1.5 and 3.0 m/s. A slide binding's own `max_speed_mps` /
+`sprint.speed_mps` still win.
+
+The 1 Hz slide trace proves it on a headset:
+`Slide[head_rel] ... speed=3.22m/s achieved=3.21m/s sprint=1.00* ...`.
+`achieved` is what the rig actually covered, and `*` means sprint is
+engaged.
+
 ## Comfort vignette
 
 Sliding and smooth turning can darken the edges of the view while moving,
@@ -253,9 +319,13 @@ mechanic defaults to these and lets its own binding `params` override them:
 | `default_turn_mode` | `"snap"` | `snap` or `smooth`, when both are bound. |
 | `hands.source` | `"default"` | `default` loads the engine's rigged hands (Hands Only); `avatar` uses the player avatar's own hands and creates meshless anchors. |
 | `hands.scale_m`, `hands.grip_trim_deg`, `hands.debug_axes` | `0.20`, `[0,0,0]`, `false` | Default-hand size, a per-profile grip trim, and an axis overlay for on-device calibration. |
-| `slide_max_speed_mps` | `1.5` | Comfort cap for sliding (Meta walking pace). |
+| `slide_max_speed_mps` | `1.5` | Walking pace of the slide. `scene_compile` sets it from the avatar's walk clip. |
 | `slide_accel_tau_s` | `0.12` | Acceleration smoothing time constant. |
 | `slide_decel_tau_s` | `0.18` | Deceleration smoothing time constant. |
+| `sprint_speed_mps` | `3.0` | Running pace (hold the left stick in). Set from the avatar's run clip. |
+| `sprint.activation` | `"hold"` | `hold`, `toggle` or `off` (`enabled: false` is the same as `off`); the player can change it in the settings menu unless it is `off`. |
+| `sprint.accel_tau_s`, `sprint.decel_tau_s` | `0.35`, `0.25` | Run ramp in / out. |
+| `sprint.forward_cone_deg`, `sprint.min_stick` | `70`, `0.6` | Sprint only applies while pushing mostly forward and far enough. |
 | `teleport_launch_speed_mps` | `6.0` | Parabolic arc launch speed. |
 | `teleport_max_horizontal_m` | `12.0` | Arc range cap. |
 | `teleport_floor_y` | `0.0` | Floor plane height for arc intersection tests. |

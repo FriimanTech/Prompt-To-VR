@@ -26,4 +26,26 @@ struct Transform {
     }
 };
 
+/** Position and orientation of ``m`` with its scale (and shear) removed.
+ *
+ *  A joint's matrix carries the rig's own unit scale -- Uthana's root joint
+ *  is scaled 0.01 because the rig is authored in centimetres -- and an
+ *  offset composed through it would shrink a hundredfold. */
+inline Mat4 rigid_part(const Mat4& m) {
+    Vec3 x(m[0]), y(m[1]);
+    const float lx = glm::length(x);
+    if (lx < 1e-8f) return glm::translate(Mat4(1.0f), Vec3(m[3]));
+    x /= lx;
+    y -= x * glm::dot(x, y);
+    const float ly = glm::length(y);
+    if (ly < 1e-8f) return glm::translate(Mat4(1.0f), Vec3(m[3]));
+    y /= ly;
+    Mat4 out(1.0f);
+    out[0] = Vec4(x, 0.0f);
+    out[1] = Vec4(y, 0.0f);
+    out[2] = Vec4(glm::cross(x, y), 0.0f);
+    out[3] = m[3];
+    return out;
+}
+
 }  // namespace ptv

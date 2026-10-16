@@ -103,20 +103,36 @@ _BUILTINS: tuple[CatalogEntry, ...] = (
         ),
         category="locomotion",
         params={
-            "max_speed_mps": "float, default 1.5",
+            "max_speed_mps": (
+                "float, default: the player avatar's walk-clip speed "
+                "(else 1.5). Walking pace. Leave unset unless the prompt "
+                "names a speed."
+            ),
             "accel_tau_s": "float, default 0.12",
             "decel_tau_s": "float, default 0.18",
+            "sprint": (
+                "object, BUILT IN and on by default: {enabled: bool, "
+                "speed_mps: float (default: the avatar's run-clip speed, "
+                "else 3.0)}. Hold the left stick IN while pushing forward "
+                "to run; the player picks Hold / Toggle / Off in the "
+                "settings menu. The avatar's run clip plays only while "
+                "sprinting. Never generate a sprint/run mechanic."
+            ),
             "vignette": (
                 "object, default off: {enabled: bool, user_toggle: bool, "
                 "strength 0..1, inner_fov_deg, feather_deg}. Only when the "
                 "prompt asks for comfort options."
             ),
         },
-        inputs=("left thumbstick (X=strafe, -Y=forward)",),
+        inputs=(
+            "left thumbstick (X=strafe, -Y=forward)",
+            "left thumbstick click (hold to sprint)",
+        ),
         comfort_notes=(
             "Comfort ramp + circular dead zone. The player stays on the "
-            "ground and follows terrain. Optional Meta-style tunnel-vision "
-            "vignette only when requested."
+            "ground and follows terrain. Sprint ramps in and out and "
+            "narrows the vignette while running. Optional Meta-style "
+            "tunnel-vision vignette only when requested."
         ),
         role="role:slide_head",
     ),
@@ -129,14 +145,23 @@ _BUILTINS: tuple[CatalogEntry, ...] = (
         ),
         category="locomotion",
         params={
-            "max_speed_mps": "float, default 1.5",
+            "max_speed_mps": (
+                "float, default: the avatar's walk-clip speed (else 1.5)"
+            ),
             "accel_tau_s": "float, default 0.12",
             "decel_tau_s": "float, default 0.18",
+            "sprint": (
+                "object, built in and on by default (same shape as "
+                "head-relative slide): hold the left stick in to run"
+            ),
             "vignette": (
                 "object, default off (same shape as head-relative slide)"
             ),
         },
-        inputs=("left thumbstick (X=strafe, -Y=forward)",),
+        inputs=(
+            "left thumbstick (X=strafe, -Y=forward)",
+            "left thumbstick click (hold to sprint)",
+        ),
         comfort_notes=(
             "Same ramps as head-relative; lets the user move sideways "
             "while looking elsewhere. Common in shooters / combat games."

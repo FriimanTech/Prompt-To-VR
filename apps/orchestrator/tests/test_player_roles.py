@@ -20,7 +20,12 @@ from ptv_orchestrator.pipeline.movement import (
     reconcile_mechanic_plan,
     required_roles,
 )
-from ptv_orchestrator.pipeline.player_bindings import PlayerRoleError
+from ptv_orchestrator.pipeline.player_bindings import (
+    DEFAULT_RUN_MPS,
+    DEFAULT_WALK_MPS,
+    PlayerRoleError,
+    gait_speed_fields,
+)
 from ptv_orchestrator.pipeline.player_experience import (
     strip_player_avatar_assets,
     sync_build_spec_experience,
@@ -600,3 +605,31 @@ def test_wall_dressing_is_not_a_barrier():
     trim = _wall(id="wall_trim_north", physics=None,
                  primitive={"kind": "box", "size": [8.0, 3.0, 0.02]})
     assert _validate_barriers({"entities": [trim]}) == []
+
+
+def _avatar(speeds):
+    return {"id": "body", "tags": ["player_avatar"],
+            "mesh": {"animation_speeds": speeds}}
+
+
+def test_gait_speeds_come_from_the_avatar_clips():
+    out = gait_speed_fields([_avatar({"walk": 1.3277, "run": 3.2193})])
+    assert out["slide_max_speed_mps"] == pytest.approx(1.3277)
+    assert out["sprint_speed_mps"] == pytest.approx(3.2193)
+    assert out["sprint"] == {"activation": "hold", "speed_source": "avatar_clips"}
+
+
+def test_gait_speeds_are_clamped_to_comfort_bounds():
+    out = gait_speed_fields([_avatar({"walk": 0.4, "run": 9.0})])
+    assert out["slide_max_speed_mps"] == pytest.approx(1.0)
+    assert out["sprint_speed_mps"] == pytest.approx(3.5)
+    # A run barely faster than the walk is pushed clear of it.
+    out = gait_speed_fields([_avatar({"walk": 1.9, "run": 2.0})])
+    assert out["sprint_speed_mps"] >= out["slide_max_speed_mps"] + 0.5
+
+
+def test_gait_speeds_default_without_an_avatar():
+    out = gait_speed_fields([])
+    assert out["slide_max_speed_mps"] == DEFAULT_WALK_MPS
+    assert out["sprint_speed_mps"] == DEFAULT_RUN_MPS
+    assert out["sprint"]["speed_source"] == "defaults"

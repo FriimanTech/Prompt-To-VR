@@ -671,6 +671,13 @@ void PhysicsWorld::apply_impulse(std::uint32_t entity, const Vec3& impulse) {
 Vec3 PhysicsWorld::slide_character(const Vec3& center, float height,
                                    const Vec3& delta,
                                    std::uint32_t ignore_entity) const {
+    return slide_character(center, height, delta,
+                           std::vector<std::uint32_t>{ignore_entity});
+}
+
+Vec3 PhysicsWorld::slide_character(
+    const Vec3& center, float height, const Vec3& delta,
+    const std::vector<std::uint32_t>& ignore) const {
     if (!impl_) return delta;
     const float want = glm::length(delta);
     if (want < 1.0e-6f) return delta;
@@ -680,12 +687,13 @@ Vec3 PhysicsWorld::slide_character(const Vec3& center, float height,
 
     // Exclude the mover's own body, otherwise the very first cast reports a
     // zero-distance hit against itself and the player can never move.
-    JPH::BodyID self;
-    if (auto it = impl_->entity_to_body.find(ignore_entity);
-        it != impl_->entity_to_body.end()) {
-        self = it->second;
+    IgnoreBodiesFilter body_filter;
+    for (const std::uint32_t e : ignore) {
+        if (auto it = impl_->entity_to_body.find(e);
+            it != impl_->entity_to_body.end()) {
+            body_filter.ids.push_back(it->second);
+        }
     }
-    JPH::IgnoreSingleBodyFilter body_filter(self);
 
     JPH::ShapeCastSettings settings;
     settings.mReturnDeepestPoint = false;
@@ -870,6 +878,26 @@ Vec3 PhysicsWorld::move_player_character(const Vec3& displacement,
                 static_cast<float>(after.GetZ() - before.GetZ()));
 }
 
+void PhysicsWorld::player_character_contacts(
+    std::vector<std::uint32_t>& out) const {
+    out.clear();
+    if (!impl_ || impl_->character == nullptr) return;
+    for (const auto& c : impl_->character->GetActiveContacts()) {
+        if (!c.mHadCollision || c.mIsSensorB || c.mBodyB.IsInvalid()) continue;
+        const auto it =
+            impl_->body_to_entity.find(c.mBodyB.GetIndexAndSequenceNumber());
+        if (it == impl_->body_to_entity.end()) continue;
+        if (std::find(out.begin(), out.end(), it->second) == out.end()) {
+            out.push_back(it->second);
+        }
+    }
+}
+
+void PhysicsWorld::set_player_character_position(const Vec3& feet) {
+    if (!impl_ || impl_->character == nullptr) return;
+    impl_->character->SetPosition(JPH::RVec3(feet.x, feet.y, feet.z));
+}
+
 void PhysicsWorld::teleport_player_character(const Vec3& feet) {
     if (!impl_ || impl_->character == nullptr) return;
     impl_->character->SetPosition(JPH::RVec3(feet.x, feet.y, feet.z));
@@ -905,6 +933,8 @@ PhysicsWorld::CharacterState PhysicsWorld::player_character_state() const {
     s.ground_normal = Vec3(n.GetX(), n.GetY(), n.GetZ());
     s.vertical_speed = impl_->character_vertical_speed;
     s.height = impl_->character_height;
+    const JPH::Vec3 gv = ch.GetGroundVelocity();
+    s.ground_velocity = Vec3(gv.GetX(), gv.GetY(), gv.GetZ());
     return s;
 }
 

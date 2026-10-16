@@ -49,6 +49,19 @@ public:
         if (p.contains("decel_tau_s") && p["decel_tau_s"].is_number()) {
             decel_tau_override_ = p.value("decel_tau_s", 0.0f);
         }
+        // Per-binding sprint overrides; the scene's player block supplies the
+        // defaults and the settings menu the activation.
+        if (p.contains("sprint") && p["sprint"].is_object()) {
+            const auto& s = p["sprint"];
+            sprint_disabled_ = !s.value("enabled", true) ||
+                               s.value("activation", std::string()) == "off";
+            if (s.contains("speed_mps") && s["speed_mps"].is_number()) {
+                sprint_speed_override_ = s.value("speed_mps", 0.0f);
+            } else if (s.contains("run_speed_mps") &&
+                       s["run_speed_mps"].is_number()) {
+                sprint_speed_override_ = s.value("run_speed_mps", 0.0f);
+            }
+        }
     }
 
     void on_detach(World&, std::uint32_t) override {}
@@ -62,6 +75,12 @@ public:
         if (ctx.locomotion->active_mode() != mode() ||
             ctx.locomotion->input_locked()) {
             ramp_.reset();
+            sprint_.reset();
+            if (published_) {
+                ctx.locomotion->publish_sprint(
+                    false, ctx.locomotion->tunables().slide_max_speed_mps);
+                published_ = false;
+            }
             return;
         }
 
@@ -73,8 +92,29 @@ public:
         const float max_speed = max_speed_override_ > 0.0f
                                     ? max_speed_override_
                                     : tun.slide_max_speed_mps;
+        const float run_speed = std::max(
+            max_speed,
+            sprint_speed_override_ > 0.0f ? sprint_speed_override_
+                                          : tun.sprint_speed_mps);
 
-        const auto filtered = stick::filter(input.hands[InputSnapshot::Left].thumbstick);
+        const auto& left = input.hands[InputSnapshot::Left];
+        const auto filtered = stick::filter(left.thumbstick);
+
+        // Walk or run. The gate ramps the run in and out; the walk part
+        // still follows how far the stick is pushed.
+        slide::SprintGate::Config sc;
+        sc.activation = sprint_disabled_ ? SprintActivation::Off
+                                         : ctx.locomotion->sprint_activation();
+        sc.accel_tau_s = tun.sprint_accel_tau_s;
+        sc.decel_tau_s = tun.sprint_decel_tau_s;
+        sc.forward_cone_deg = tun.sprint_forward_cone_deg;
+        sc.min_stick = tun.sprint_min_stick;
+        const float blend = sprint_.update(
+            sc, filtered.axes, filtered.magnitude, left.thumbstick_click,
+            input.thumbstick_clicked(InputSnapshot::Left), dt);
+        ctx.locomotion->publish_sprint(
+            blend > 0.5f, max_speed + blend * (run_speed - max_speed));
+        published_ = true;
         // OpenXR thumbstick convention (1.1 spec, "Standard input
         // identifiers"): +1 y means all the way UP, i.e. pushed away from the
         // body. So forward is +y, not -y.
@@ -86,12 +126,16 @@ public:
         // immediately.
         const slide::Basis basis = compute_basis(input);
 
-        const float target_speed = basis.valid ? filtered.magnitude * max_speed : 0.0f;
+        const float walk_target = filtered.magnitude * max_speed;
+        const float target_speed =
+            basis.valid ? walk_target + blend * (run_speed - walk_target)
+                        : 0.0f;
         const float prev_speed = ramp_.speed();
         const float speed = ramp_.update(target_speed, dt);
 
         // Vignette strength follows speed AND acceleration, per Meta's
         // guidance: a change of velocity is the strongest vection cue.
+        // Running is the strongest of all, so it narrows a little further.
         if (ctx.comfort != nullptr && max_speed > 1e-3f && dt > 1e-5f) {
             const float speed_part = std::clamp(speed / max_speed, 0.0f, 1.0f);
             const float accel = std::abs(speed - prev_speed) / dt;
@@ -100,7 +144,8 @@ public:
             const float s = std::max(speed_part, accel_part);
             if (s > 0.02f) {
                 ctx.comfort->request_vignette(
-                    ComfortChannel::Movement, s * vignette_.strength,
+                    ComfortChannel::Movement,
+                    std::min(1.0f, s * vignette_.strength * (1.0f + 0.35f * blend)),
                     vignette_.inner_fov_deg, vignette_.feather_deg);
             }
         }
@@ -116,7 +161,11 @@ public:
             ctx.locomotion->move_horizontal(Vec3(dir.x * speed * dt, 0.0f,
                                                  dir.z * speed * dt));
             trace(dt, basis, filtered, speed, ctx);
-        } else if (filtered.magnitude > 0.05f && !basis.valid) {
+            return;
+        }
+        have_trace_rig_ = false;
+        trace_accum_s_ = 0.0f;
+        if (filtered.magnitude > 0.05f && !basis.valid) {
             // The player is pushing but we refused to move because no
             // tracked pose is available. Say so, once a second, otherwise
             // this looks like the game is simply broken.
@@ -147,20 +196,39 @@ private:
         trace_accum_s_ += dt;
         if (trace_accum_s_ < 1.0f) return;
         const Vec3 rig = ctx.locomotion->position();
+        // What the rig ACTUALLY covered since the last line. It should match
+        // the requested speed; more means something else is pushing the
+        // player.
+        float achieved = -1.0f;
+        if (have_trace_rig_) {
+            achieved = glm::length(Vec3(rig.x - trace_rig_.x, 0.0f,
+                                        rig.z - trace_rig_.z)) /
+                       trace_accum_s_;
+        }
         PTV_INFO(
             "Slide[{}] fwd=({:+.2f},{:+.2f}) stick=({:+.2f},{:+.2f}) "
-            "speed={:.2f}m/s rig=({:+.2f},{:+.2f})",
+            "speed={:.2f}m/s achieved={:.2f}m/s sprint={:.2f}{} "
+            "rig=({:+.2f},{:+.2f})",
             trace_name(), basis.forward.x, basis.forward.z, filtered.axes.x,
-            filtered.axes.y, speed, rig.x, rig.z);
+            filtered.axes.y, speed, achieved, sprint_.blend(),
+            sprint_.wanted() ? "*" : "", rig.x, rig.z);
+        trace_rig_ = rig;
+        have_trace_rig_ = true;
         trace_accum_s_ = 0.0f;
     }
 
     slide::ComfortRamp ramp_{};
+    slide::SprintGate sprint_{};
+    bool published_{false};
+    bool sprint_disabled_{false};
+    float sprint_speed_override_{0.0f};
     comfort::VignetteParams vignette_{};
     float max_speed_override_{0.0f};
     float accel_tau_override_{0.0f};
     float decel_tau_override_{0.0f};
     float trace_accum_s_{0.0f};
+    Vec3 trace_rig_{0.0f};
+    bool have_trace_rig_{false};
     float warn_accum_s_{0.0f};
 };
 

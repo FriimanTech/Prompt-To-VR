@@ -105,6 +105,11 @@ public:
     Vec3 slide_character(const Vec3& center, float height, const Vec3& delta,
                          std::uint32_t ignore_entity) const;
 
+    /** Same, ignoring every entity in ``ignore`` (the mover and everything
+     *  that rides on it). */
+    Vec3 slide_character(const Vec3& center, float height, const Vec3& delta,
+                         const std::vector<std::uint32_t>& ignore) const;
+
     // ------------------------------------------------------------------
     // The player's body.
     //
@@ -121,6 +126,9 @@ public:
         Vec3 ground_normal{0.0f, 1.0f, 0.0f};
         float vertical_speed{0.0f};
         float height{1.7f};
+        /** Velocity of whatever the feet stand on (a moving platform);
+         *  zero on static ground. */
+        Vec3 ground_velocity{0.0f};
     };
 
     /** Create (or re-create) the player character at ``feet``. */
@@ -129,9 +137,18 @@ public:
     bool has_player_character() const;
 
     /** Bodies the player character must pass through: the player's own
-     *  contact capsule and anything currently held in a hand, which would
-     *  otherwise shove the player backwards the moment it was picked up. */
+     *  contact capsule and everything that moves WITH the player (held,
+     *  worn and attached items). A kinematic body that follows the player
+     *  and overlaps the capsule pushes it at the player's own velocity --
+     *  a feedback loop that accelerates the player without bound. */
     void set_player_character_ignored(const std::vector<std::uint32_t>& entities);
+
+    /** Entities the character actually touched during its last move. */
+    void player_character_contacts(std::vector<std::uint32_t>& out) const;
+
+    /** Set the character's feet without touching its velocity (unlike
+     *  ``teleport_player_character``, which also zeroes it). */
+    void set_player_character_position(const Vec3& feet);
 
     /** Move the character through ``displacement`` (world metres) this
      *  frame and return how far it actually went.

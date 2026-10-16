@@ -541,12 +541,33 @@ public:
         tunables_.slide_max_speed_mps = app_->slide_max_speed_mps_;
         tunables_.slide_accel_tau_s = app_->slide_accel_tau_s_;
         tunables_.slide_decel_tau_s = app_->slide_decel_tau_s_;
+        tunables_.sprint_speed_mps = app_->sprint_speed_mps_;
+        tunables_.sprint_allowed = app_->scene_.sprint_activation != "off";
+        tunables_.sprint_accel_tau_s = app_->sprint_accel_tau_s_;
+        tunables_.sprint_decel_tau_s = app_->sprint_decel_tau_s_;
+        tunables_.sprint_forward_cone_deg = app_->sprint_forward_cone_deg_;
+        tunables_.sprint_min_stick = app_->sprint_min_stick_;
         tunables_.teleport_launch_speed_mps = app_->teleport_launch_speed_mps_;
         tunables_.teleport_max_horizontal_m = app_->teleport_max_horizontal_m_;
         tunables_.teleport_floor_y = app_->teleport_floor_y_;
         tunables_.snap_turn_degrees = app_->snap_turn_degrees_;
         tunables_.snap_turn_cooldown_s = app_->snap_turn_cooldown_s_;
         return tunables_;
+    }
+
+    bool sprinting() const override { return app_->sprinting_; }
+    float gait_speed_cap() const override { return app_->gait_speed_cap_; }
+    void publish_sprint(bool sprinting, float speed_cap) override {
+        app_->sprinting_ = sprinting;
+        app_->gait_speed_cap_ =
+            std::isfinite(speed_cap) ? std::max(0.0f, speed_cap)
+                                     : app_->slide_max_speed_mps_;
+    }
+    ::ptv::SprintActivation sprint_activation() const override {
+        return app_->sprint_activation_;
+    }
+    void set_sprint_activation(::ptv::SprintActivation mode) override {
+        app_->sprint_activation_ = mode;
     }
 
     void set_reference_frame(std::uint32_t entity,
@@ -2450,8 +2471,11 @@ public:
         // palette saw the forearm where the previous frame left it, which is
         // the feedback loop that made avatar arms flail.
         const auto& skc = w.get<CSkeleton>(entity);
+        // Scale-free like joint_model: a rig authored in centimetres scales
+        // its root joint by 0.01, and an offset composed through that would
+        // shrink a hundredfold.
         return w.get<CTransform>(entity).t.matrix() *
-               fk_metres(skc, current_pose(skc), joint);
+               orthonormal(fk_metres(skc, current_pose(skc), joint));
     }
 
     Mat4 joint_model(std::uint32_t entity, int joint) const override {
@@ -3019,14 +3043,72 @@ void Application::apply_pending_move_legacy() {
     pending_jump_mps_ = 0.0f;
     if (glm::length(d) < 1.0e-7f) return;
     if (player_entity_ != entt::null) {
+        collect_player_body_family(motor_ignored_);
         d = physics_.slide_character(player_capsule_center_,
                                      player_capsule_height_, d,
-                                     static_cast<std::uint32_t>(player_entity_));
+                                     motor_ignored_);
     }
     const Vec3 local = world_vector_to_frame(d);
     rig_.pos_x += local.x;
     rig_.pos_y += local.y;
     rig_.pos_z += local.z;
+}
+
+void Application::collect_player_body_family(
+    std::vector<std::uint32_t>& out) const {
+    out.clear();
+    auto& reg = world_.registry();
+    auto add = [&](entt::entity e) {
+        if (e == entt::null || !reg.valid(e)) return;
+        const auto id = static_cast<std::uint32_t>(e);
+        if (std::find(out.begin(), out.end(), id) == out.end()) out.push_back(id);
+    };
+    add(player_entity_);
+    for (const auto e : hand_entities_) add(e);
+    for (const auto& hand : hands_) add(hand.held);
+
+    // The player's own body entities, by tag: tagged once at scene load, so
+    // checking the tag on each attachment's chain is cheaper than a scan.
+    auto is_body_root = [&](entt::entity e) {
+        if (e == player_entity_) return true;
+        if (e == hand_entities_[0] || e == hand_entities_[1]) return true;
+        if (e == hands_[0].held || e == hands_[1].held) return true;
+        const auto* tag = reg.try_get<CTag>(e);
+        if (tag == nullptr) return false;
+        for (const auto& t : tag->tags) {
+            if (t == "player_avatar" || t == "player_rig") return true;
+        }
+        return false;
+    };
+
+    {
+        auto view = reg.view<const CAttachment>();
+        for (const auto child : view) {
+            entt::entity p = static_cast<entt::entity>(
+                view.get<const CAttachment>(child).parent);
+            for (int depth = 0; depth < 8 && p != entt::null && reg.valid(p);
+                 ++depth) {
+                if (is_body_root(p)) {
+                    add(child);
+                    break;
+                }
+                const auto* up = reg.try_get<CAttachment>(p);
+                if (up == nullptr) break;
+                p = static_cast<entt::entity>(up->parent);
+            }
+        }
+    }
+    {
+        auto view = reg.view<const CEquipped>();
+        for (const auto item : view) {
+            const auto wearer = static_cast<entt::entity>(
+                view.get<const CEquipped>(item).wearer);
+            if (wearer != entt::null && reg.valid(wearer) &&
+                is_body_root(wearer)) {
+                add(item);
+            }
+        }
+    }
 }
 
 void Application::step_player_motor(float dt) {
@@ -3037,18 +3119,12 @@ void Application::step_player_motor(float dt) {
     pending_jump_mps_ = 0.0f;
     if (grounded) request.y = 0.0f;
 
-    // Held items and the contact capsule would otherwise block the body --
-    // picking up a rifle must not shove the player backwards.
-    {
-        std::vector<std::uint32_t> ignored;
-        ignored.push_back(static_cast<std::uint32_t>(player_entity_));
-        for (const auto& hand : hands_) {
-            if (hand.held != entt::null) {
-                ignored.push_back(static_cast<std::uint32_t>(hand.held));
-            }
-        }
-        physics_.set_player_character_ignored(ignored);
-    }
+    // Everything that moves with the player would otherwise block or shove
+    // the body: picking up a rifle must not push the player backwards, and a
+    // worn holster overlapping the capsule must not push them forwards at
+    // their own speed every frame (which compounds into a runaway).
+    collect_player_body_family(motor_ignored_);
+    physics_.set_player_character_ignored(motor_ignored_);
 
     Vec3 head = current_head_world();
     if (motor_needs_sync_ && head_local_valid_) {
@@ -3061,8 +3137,46 @@ void Application::step_player_motor(float dt) {
 
     // --- (a) Stick movement, swept through the body --------------------
     // Gravity and ground contact are integrated here, once per frame.
-    const Vec3 moved =
-        physics_.move_player_character(request, grounded, jump, dt);
+    const Vec3 feet_before = physics_.player_character_state().feet;
+    Vec3 moved = physics_.move_player_character(request, grounded, jump, dt);
+    {
+        // Governor: the body may cover what was asked for, plus what a
+        // moving platform carried it, plus a little penetration recovery.
+        // Anything more is something pushing the player that should not be.
+        const auto st0 = physics_.player_character_state();
+        const float asked = glm::length(Vec3(request.x, 0.0f, request.z));
+        const float carried =
+            glm::length(Vec3(st0.ground_velocity.x, 0.0f,
+                             st0.ground_velocity.z)) * dt;
+        const float allowed = asked + carried + std::max(0.01f, 1.0f * dt);
+        const Vec3 flat(moved.x, 0.0f, moved.z);
+        const float got = glm::length(flat);
+        if (got > allowed && got > 1.0e-5f) {
+            const Vec3 kept = flat * (allowed / got);
+            if (!motor_push_warned_ && (got - allowed) > 0.2f * got) {
+                motor_push_warned_ = true;
+                physics_.player_character_contacts(motor_contacts_);
+                std::string names;
+                for (const std::uint32_t c : motor_contacts_) {
+                    const auto ce = static_cast<entt::entity>(c);
+                    if (!world_.registry().valid(ce)) continue;
+                    const std::string* id = world_.id_of(ce);
+                    if (!names.empty()) names += ", ";
+                    names += (id != nullptr && !id->empty())
+                                 ? *id
+                                 : std::to_string(c);
+                }
+                PTV_WARN(
+                    "player motor: body was pushed {:.2f} m this frame but "
+                    "only {:.2f} m was asked for; clamped. Touching: [{}]. "
+                    "Something that follows the player has a collider; attach "
+                    "it to the player/avatar so the body ignores it.",
+                    got, allowed, names.empty() ? "nothing" : names);
+            }
+            moved = Vec3(kept.x, moved.y, kept.z);
+            physics_.set_player_character_position(feet_before + moved);
+        }
+    }
     {
         const Vec3 horizontal(moved.x, grounded ? 0.0f : moved.y, moved.z);
         const Vec3 local = world_vector_to_frame(horizontal);
@@ -3425,8 +3539,10 @@ void Application::tick_attachments(float dt) {
             }
             Mat4 skin(1.0f);
             if (j < sk.palette.size()) skin = sk.palette[j];
-            anchor_world =
-                world_.get<CTransform>(parent).t.matrix() * skin * bind;
+            // The joint contributes where it is and which way it faces,
+            // never its scale: offsets are metres on every rig.
+            anchor_world = world_.get<CTransform>(parent).t.matrix() *
+                           rigid_part(skin * bind);
         } else {
             anchor_world = world_.get<CTransform>(parent).t.matrix();
         }
@@ -4606,6 +4722,8 @@ int Application::run(const Config& cfg) {
                 hs.prev_thumbrest_touched = prev_input_.thumbrest_touch[h];
                 hs.thumbstick_touched = input.thumbstick_touch[h];
                 hs.prev_thumbstick_touched = prev_input_.thumbstick_touch[h];
+                hs.thumbstick_click = input.thumbstick_click[h];
+                hs.prev_thumbstick_click = prev_input_.thumbstick_click[h];
                 hs.face_button_touched =
                     (h == 0) ? (input.button_x_touch || input.button_y_touch)
                              : (input.button_a_touch || input.button_b_touch);
@@ -4836,6 +4954,13 @@ int Application::run(const Config& cfg) {
             // GPU uploads so the Android event pump keeps running.
             renderer_.pump_streaming();
 
+            // The eyes ride the rig as it is NOW -- after the player motor,
+            // teleport and snap turn moved it this frame. The hands, the
+            // avatar body and every Simulate-phase mechanic already used this
+            // rig; the start-of-frame rig would draw the whole body one
+            // frame's travel ahead of the camera.
+            const Mat4 rig_render = rig_world_matrix();
+
             // One conservative frustum covering BOTH eyes, built from the HMD
             // centre pose with a deliberately padded FOV (Quest 3 is ~110 deg
             // horizontal; 140 deg here comfortably contains both eye frusta
@@ -4846,11 +4971,10 @@ int Application::run(const Config& cfg) {
             if (input.head_valid) {
                 constexpr float kCullFovRadians = 2.443f;  // 140 degrees
                 const Mat4 world_from_head =
-                    glm::translate(Mat4(1.0f), head_world_pos) *
-                    glm::mat4_cast(head_world_rot);
+                    rig_render * xr_pose_to_matrix(input.head.pose);
                 const Mat4 cull_proj = glm::perspective(
                     kCullFovRadians, 1.0f, 0.05f, 2000.0f);
-                view_info.camera_pos = head_world_pos;
+                view_info.camera_pos = mat_translation(world_from_head);
                 view_info.view_proj = cull_proj * glm::inverse(world_from_head);
                 view_info.valid = true;
             }
@@ -4898,7 +5022,7 @@ int Application::run(const Config& cfg) {
                         targets[e].width = eyes[e].width;
                         targets[e].height = eyes[e].height;
                         Mat4 world_from_head =
-                            rig_mat * xr_pose_to_matrix(eyes[e].pose);
+                            rig_render * xr_pose_to_matrix(eyes[e].pose);
                         targets[e].view = glm::inverse(world_from_head);
                         // Clip planes scale with the player. A 2 cm-tall
                         // passenger with a fixed 5 cm near plane cannot see
@@ -5194,6 +5318,19 @@ void Application::apply_player_settings_from_scene() {
     slide_max_speed_mps_ = scene_.slide_max_speed_mps;
     slide_accel_tau_s_ = scene_.slide_accel_tau_s;
     slide_decel_tau_s_ = scene_.slide_decel_tau_s;
+    sprint_speed_mps_ = scene_.sprint_speed_mps;
+    sprint_accel_tau_s_ = scene_.sprint_accel_tau_s;
+    sprint_decel_tau_s_ = scene_.sprint_decel_tau_s;
+    sprint_forward_cone_deg_ = scene_.sprint_forward_cone_deg;
+    sprint_min_stick_ = scene_.sprint_min_stick;
+    sprint_activation_ =
+        scene_.sprint_activation == "off"
+            ? ::ptv::SprintActivation::Off
+            : scene_.sprint_activation == "toggle"
+                  ? ::ptv::SprintActivation::Toggle
+                  : ::ptv::SprintActivation::Hold;
+    sprinting_ = false;
+    gait_speed_cap_ = slide_max_speed_mps_;
     teleport_launch_speed_mps_ = scene_.teleport_launch_speed_mps;
     teleport_max_horizontal_m_ = scene_.teleport_max_horizontal_m;
     teleport_floor_y_ = scene_.teleport_floor_y;

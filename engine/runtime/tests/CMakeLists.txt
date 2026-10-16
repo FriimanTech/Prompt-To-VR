@@ -141,6 +141,11 @@ add_test(NAME ptv_smoke_physics_player_slide
          COMMAND ptv_smoke physics_player_slide)
 add_test(NAME ptv_smoke_physics_overlap COMMAND ptv_smoke physics_overlap)
 add_test(NAME ptv_smoke_player_character COMMAND ptv_smoke player_character)
+add_test(NAME ptv_smoke_player_self_push COMMAND ptv_smoke player_self_push)
+add_test(NAME ptv_smoke_sprint_gate COMMAND ptv_smoke sprint_gate)
+add_test(NAME ptv_smoke_avatar_anchor COMMAND ptv_smoke avatar_anchor)
+add_test(NAME ptv_smoke_height_calibration COMMAND ptv_smoke height_calibration)
+add_test(NAME ptv_smoke_arm_assist COMMAND ptv_smoke arm_assist)
 add_test(NAME ptv_smoke_teleport_pitch COMMAND ptv_smoke teleport_pitch)
 add_test(NAME ptv_smoke_runtime_spawn COMMAND ptv_smoke runtime_spawn)
 add_test(NAME ptv_smoke_character_locomotion

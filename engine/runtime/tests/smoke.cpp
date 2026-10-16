@@ -35,6 +35,9 @@
 #include "../src/mechanics/builtin/TwoBoneIk.h"
 #include "../src/mechanics/builtin/grab/GripHold.h"
 #include "../src/mechanics/builtin/teleport/TeleportArc.h"
+#include "../src/mechanics/builtin/slide/SlideComfort.h"
+#include "../src/mechanics/builtin/avatar_body/NeckDrift.h"
+#include "../src/mechanics/builtin/avatar_body/HeightCalibration.h"
 #include "ptv/api/BodySlots.h"
 #include "ptv/api/IMechanic.h"
 #include "ptv/core/Logger.h"
@@ -2480,6 +2483,303 @@ static int case_player_character() {
               "and the head from every direction");
 }
 
+// A worn item with a collider (a kinematic hip holster) follows the player
+// every frame. Inside the capsule it pushes the body at the player's own
+// speed, and the push compounds: a 1.5 m/s walk became 20+ m/s on a Quest.
+// Ignored, as the player's body family is, it must change nothing.
+static int case_player_self_push() {
+    ptv::World world;
+    {
+        const auto e = world.create_entity("floor");
+        ptv::Transform t{};
+        t.position = ptv::Vec3(0.0f, -0.1f, 0.0f);
+        world.registry().emplace<ptv::CTransform>(e, ptv::CTransform{t});
+        world.registry().emplace<ptv::CPrimitive>(
+            e, ptv::CPrimitive{"box", ptv::Vec3(400.0f, 0.2f, 400.0f),
+                               ptv::Vec3(0.5f)});
+        ptv::CPhysics p{};
+        p.kind = "static";
+        p.collision_shape = "box";
+        world.registry().emplace<ptv::CPhysics>(e, p);
+    }
+    // Hip height, a hand's width behind the body's axis (+Z: the body walks
+    // towards -Z), overlapping a 0.22 m capsule.
+    const ptv::Vec3 hip_offset(0.0f, 0.9f, 0.12f);
+    const auto holster = world.create_entity("hip_holster");
+    const auto holster_id = static_cast<std::uint32_t>(holster);
+    {
+        ptv::Transform t{};
+        t.position = hip_offset;
+        world.registry().emplace<ptv::CTransform>(holster, ptv::CTransform{t});
+        world.registry().emplace<ptv::CPrimitive>(
+            holster, ptv::CPrimitive{"box", ptv::Vec3(0.28f, 0.2f, 0.14f),
+                                     ptv::Vec3(0.5f)});
+        ptv::CPhysics p{};
+        p.kind = "kinematic";
+        p.collision_shape = "box";
+        world.registry().emplace<ptv::CPhysics>(holster, p);
+    }
+
+    ptv::PhysicsWorld physics;
+    if (!physics.initialize()) return fail("physics failed to initialize");
+    physics.rebuild_from_world(world);
+    const float dt = 1.0f / 72.0f;
+    const float walk = 1.5f;
+
+    std::vector<std::uint32_t> touched;
+    auto run = [&](bool ignore_holster) {
+        physics.create_player_character(ptv::Vec3(0.0f), 1.7f, 0.22f);
+        physics.teleport(holster_id, hip_offset, ptv::Quat(1, 0, 0, 0));
+        std::vector<std::uint32_t> ignored;
+        if (ignore_holster) ignored.push_back(holster_id);
+        physics.set_player_character_ignored(ignored);
+        touched.clear();
+        const ptv::Vec3 start = physics.player_character_state().feet;
+        constexpr int kFrames = 72 * 5;
+        for (int i = 0; i < kFrames; ++i) {
+            physics.move_player_character(ptv::Vec3(0.0f, 0.0f, -walk * dt),
+                                          true, 0.0f, dt);
+            std::vector<std::uint32_t> now;
+            physics.player_character_contacts(now);
+            for (auto c : now) {
+                if (std::find(touched.begin(), touched.end(), c) == touched.end())
+                    touched.push_back(c);
+            }
+            // tick_attachments: the holster rides the body.
+            const ptv::Vec3 feet = physics.player_character_state().feet;
+            physics.move_kinematic(holster_id, feet + hip_offset,
+                                   ptv::Quat(1, 0, 0, 0), dt);
+            physics.step(dt);
+        }
+        const ptv::Vec3 end = physics.player_character_state().feet;
+        return glm::length(ptv::Vec3(end.x - start.x, 0.0f, end.z - start.z)) /
+               (kFrames * dt);
+    };
+
+    const float fixed = run(true);
+    const float broken = run(false);
+    const bool broken_named =
+        std::find(touched.begin(), touched.end(), holster_id) != touched.end();
+    std::printf("  walk %.2f m/s: holster ignored -> %.2f m/s, not ignored "
+                "-> %.2f m/s (contact reported: %s)\n",
+                walk, fixed, broken, broken_named ? "yes" : "no");
+    physics.shutdown();
+
+    if (fixed > walk * 1.05f) {
+        return fail("an ignored follower still pushed the player faster than "
+                    "they asked to move");
+    }
+    if (fixed < walk * 0.9f) return fail("the player no longer walks at pace");
+    if (broken > walk * 1.05f && !broken_named) {
+        return fail("the body was pushed but the contact list does not name "
+                    "the pusher");
+    }
+    return ok("self-push: a follower the player wears never pushes them; the "
+              "pusher is reported when it is not ignored");
+}
+
+// Walk or run on the slide: hold the left stick in while pushing forward.
+static int case_sprint_gate() {
+    using ptv::SprintActivation;
+    ptv::slide::SprintGate gate;
+    ptv::slide::SprintGate::Config cfg;
+    const float dt = 1.0f / 72.0f;
+    auto run_for = [&](float seconds, ptv::Vec2 axes, bool down, bool click_once) {
+        const int n = static_cast<int>(seconds / dt);
+        for (int i = 0; i < n; ++i) {
+            gate.update(cfg, axes, std::min(1.0f, glm::length(axes)), down,
+                        click_once && i == 0, dt);
+        }
+        return gate.blend();
+    };
+    const ptv::Vec2 fwd(0.0f, 1.0f), side(1.0f, 0.0f), back(0.0f, -1.0f);
+    const ptv::Vec2 half(0.0f, 0.4f), diag(0.6f, 0.8f);
+
+    cfg.activation = SprintActivation::Hold;
+    if (run_for(1.0f, fwd, false, false) > 0.0f)
+        return fail("hold: running without the stick pressed");
+    if (run_for(1.5f, fwd, true, true) < 0.95f)
+        return fail("hold: holding the stick in did not reach running pace");
+    if (run_for(1.5f, fwd, false, false) > 0.05f)
+        return fail("hold: releasing the stick did not return to walking");
+    gate.reset();
+    if (run_for(1.5f, side, true, true) > 0.0f)
+        return fail("hold: strafing sideways should never sprint");
+    if (run_for(1.5f, back, true, true) > 0.0f)
+        return fail("hold: walking backwards should never sprint");
+    if (run_for(1.5f, half, true, true) > 0.0f)
+        return fail("hold: a light push below min_stick should not sprint");
+    if (run_for(1.5f, diag, true, true) < 0.95f)
+        return fail("hold: a forward diagonal inside the cone should sprint");
+
+    gate.reset();
+    cfg.activation = SprintActivation::Toggle;
+    if (run_for(1.5f, fwd, false, true) < 0.95f)
+        return fail("toggle: one click did not start running");
+    if (run_for(1.0f, fwd, false, false) < 0.95f)
+        return fail("toggle: running stopped without the stick returning");
+    if (run_for(1.5f, ptv::Vec2(0.0f), false, false) > 0.05f)
+        return fail("toggle: centring the stick did not end the run");
+    if (run_for(1.0f, fwd, false, false) > 0.0f)
+        return fail("toggle: running resumed without a new click");
+
+    gate.reset();
+    cfg.activation = SprintActivation::Off;
+    if (run_for(1.5f, fwd, true, true) > 0.0f)
+        return fail("off: sprint engaged while switched off");
+
+    return ok("sprint gate: hold, toggle and off; forward cone and stick "
+              "threshold respected; ramps in and out");
+}
+
+// The avatar body follows the neck its clip produced, within limits, and
+// attachment offsets are metres even on a centimetre (0.01-scaled) rig.
+static int case_avatar_anchor() {
+    namespace ab = ptv::avatar_body;
+    ab::NeckDrift drift;
+    const ptv::Vec3 bind(0.0f, 1.45f, 0.0f);
+    for (int i = 0; i < 72; ++i) {
+        drift.update(bind + ptv::Vec3(0.0f, -0.05f, 0.10f), bind, 1.0f / 72.0f);
+    }
+    if (std::fabs(drift.value().z - 0.10f) > 0.005f || drift.value().y != 0.0f) {
+        std::fprintf(stderr, "  drift after 1 s = (%.3f, %.3f, %.3f)\n",
+                     drift.value().x, drift.value().y, drift.value().z);
+        return fail("neck drift did not converge to the clip's horizontal offset");
+    }
+    for (int i = 0; i < 144; ++i) {
+        drift.update(bind + ptv::Vec3(0.5f, 0.0f, 0.5f), bind, 1.0f / 72.0f);
+    }
+    if (glm::length(drift.value()) > ab::kMaxNeckDrift + 1e-4f)
+        return fail("neck drift escaped its clamp");
+    drift.update(ptv::Vec3(NAN, 0.0f, 0.0f), bind, 1.0f / 72.0f);
+    if (!std::isfinite(drift.value().x)) return fail("neck drift went non-finite");
+
+    // A joint at (1, 2, 3), turned 90 degrees, in a rig scaled 0.01.
+    const ptv::Mat4 joint =
+        glm::translate(ptv::Mat4(1.0f), ptv::Vec3(1.0f, 2.0f, 3.0f)) *
+        glm::rotate(ptv::Mat4(1.0f), glm::radians(90.0f), ptv::Vec3(0, 1, 0)) *
+        glm::scale(ptv::Mat4(1.0f), ptv::Vec3(0.01f));
+    const ptv::Vec3 offset(0.0f, -0.05f, 0.01f);
+    const ptv::Vec3 placed(ptv::rigid_part(joint) * ptv::Vec4(offset, 1.0f));
+    const float moved = glm::length(placed - ptv::Vec3(1.0f, 2.0f, 3.0f));
+    if (std::fabs(moved - glm::length(offset)) > 1e-4f) {
+        std::fprintf(stderr, "  offset of %.4f m landed %.4f m away\n",
+                     glm::length(offset), moved);
+        return fail("an attachment offset on a 0.01-scaled joint is not metres");
+    }
+    const ptv::Vec3 x(ptv::rigid_part(joint)[0]);
+    if (std::fabs(x.z + 1.0f) > 1e-4f)
+        return fail("stripping scale lost the joint's orientation");
+    return ok("avatar anchor: neck drift follows the clip within its clamp; "
+              "attachment offsets are metres on a 0.01-scaled rig");
+}
+
+// The avatar is sized to the player STANDING: not while the headset goes on
+// or the player sits, never shrunk by a crouch, and grown when they stand up.
+static int case_height_calibration() {
+    namespace ab = ptv::avatar_body;
+    const float dt = 1.0f / 72.0f;
+    const float avatar_eye = 1.62f;
+    auto feed = [&](ab::HeightCalibration& c, float seconds, float eye,
+                    float wobble = 0.0f) {
+        ab::HeightCalibration::Event last = ab::HeightCalibration::Event::None;
+        const int n = static_cast<int>(seconds / dt);
+        for (int i = 0; i < n; ++i) {
+            const float e = eye + wobble * std::sin(0.4f * static_cast<float>(i));
+            const auto ev = c.update(e, avatar_eye, dt);
+            if (ev != ab::HeightCalibration::Event::None) last = ev;
+        }
+        return last;
+    };
+
+    // Seated start, then stands up.
+    {
+        ab::HeightCalibration c;
+        feed(c, 3.0f, 1.11f);
+        if (c.calibrated())
+            return fail("calibrated to a seated eye height");
+        if (feed(c, 1.0f, 1.62f) != ab::HeightCalibration::Event::First)
+            return fail("did not calibrate once the player stood still");
+        if (std::fabs(c.scale() - 1.0f) > 0.01f) {
+            std::fprintf(stderr, "  scale %.3f, expected 1.000\n", c.scale());
+            return fail("standing calibration has the wrong scale");
+        }
+        // A crouch never shrinks the avatar.
+        feed(c, 4.0f, 1.0f);
+        if (c.target_scale() < 0.999f) return fail("a crouch shrank the avatar");
+        // Standing taller re-calibrates, but only after holding it.
+        feed(c, 1.0f, 1.80f);
+        if (c.target_scale() > 1.001f)
+            return fail("re-calibrated before the taller pose had held");
+        if (feed(c, 1.5f, 1.80f) != ab::HeightCalibration::Event::StoodTaller)
+            return fail("standing taller did not re-calibrate");
+        feed(c, 1.0f, 1.80f);
+        if (std::fabs(c.scale() - 1.80f / avatar_eye) > 0.01f)
+            return fail("re-calibrated scale did not blend to its target");
+    }
+    // A moving head (putting the headset on) never calibrates.
+    {
+        ab::HeightCalibration c;
+        feed(c, 3.0f, 1.6f, 0.08f);
+        if (c.calibrated()) return fail("calibrated while the head was moving");
+    }
+    // Seated for good: falls back after 10 s instead of never sizing.
+    {
+        ab::HeightCalibration c;
+        if (feed(c, 10.5f, 1.15f) != ab::HeightCalibration::Event::Fallback)
+            return fail("a seated player was never sized");
+        if (c.scale() < 0.749f || c.scale() > 0.751f)
+            return fail("fallback scale ignored the clamp");
+    }
+    return ok("height calibration: waits for standing, ignores crouches, grows "
+              "when the player stands, falls back when seated");
+}
+
+// The shoulder assist depends only on this frame's inputs. Applied on top of
+// its own previous result it used to wind the shoulder round frame after
+// frame -- the arm whipped in and out of view.
+static int case_arm_assist() {
+    namespace ik = ptv::two_bone_ik;
+    const ptv::Quat bind = glm::angleAxis(glm::radians(10.0f), ptv::Vec3(0, 1, 0));
+    const ptv::Vec3 clav(0.05f, 1.45f, 0.0f), shoulder(0.2f, 1.45f, 0.0f);
+    const ptv::Vec3 target(0.3f, 1.3f, -0.62f);
+    const float arm = 0.55f;
+    const float reach = glm::length(target - shoulder);
+    const float w = ik::shoulder_assist_weight(reach, arm);
+    if (w <= 0.0f) return fail("test reach should engage the assist");
+
+    const ptv::Quat a = ik::shoulder_assist(bind, clav, shoulder, target, w);
+    for (int i = 0; i < 200; ++i) {
+        const ptv::Quat b = ik::shoulder_assist(bind, clav, shoulder, target, w);
+        if (std::fabs(glm::dot(a, b)) < 0.99999f)
+            return fail("the shoulder assist is not idempotent");
+    }
+    const ptv::Quat delta = a * glm::inverse(bind);
+    const float deg =
+        glm::degrees(2.0f * std::acos(std::clamp(std::fabs(delta.w), 0.0f, 1.0f)));
+    if (deg > 25.0f + 1e-3f) return fail("the shoulder assist exceeds its cap");
+    // Even a target far behind the shoulder stays within the cap.
+    const ptv::Quat far = ik::shoulder_assist(bind, clav, shoulder,
+                                              ptv::Vec3(-2.0f, 3.0f, 2.0f), 1.0f);
+    const ptv::Quat fd = far * glm::inverse(bind);
+    if (glm::degrees(2.0f * std::acos(std::clamp(std::fabs(fd.w), 0.0f, 1.0f))) >
+        25.0f + 1e-3f)
+        return fail("an extreme reach escaped the assist cap");
+    // Continuous across the threshold: no jump as the reach crosses 85 %.
+    const float below = ik::shoulder_assist_weight(0.8499f * arm, arm);
+    const float above = ik::shoulder_assist_weight(0.8501f * arm, arm);
+    if (below != 0.0f || above > 0.01f)
+        return fail("the assist weight jumps at the threshold");
+    if (ik::shoulder_assist_weight(NAN, arm) != 0.0f)
+        return fail("a non-finite reach engaged the assist");
+    const ptv::Quat nan_q =
+        ik::shoulder_assist(bind, clav, shoulder, ptv::Vec3(NAN), 1.0f);
+    if (!std::isfinite(nan_q.w)) return fail("a non-finite target leaked a NaN");
+    std::printf("  assist at reach %.2f of arm: %.1f deg\n", reach / arm, deg);
+    return ok("arm assist: idempotent, capped at 25 degrees, continuous, "
+              "NaN-safe");
+}
+
 // Teleport distance follows controller pitch monotonically, and the launch
 // speed actually lands the arc where that distance says.
 static int case_teleport_pitch() {
@@ -3861,6 +4161,11 @@ int main(int argc, char** argv) {
     if (what == "physics_capsule") return case_physics_capsule();
     if (what == "physics_player_slide") return case_physics_player_slide();
     if (what == "player_character") return case_player_character();
+    if (what == "player_self_push") return case_player_self_push();
+    if (what == "sprint_gate") return case_sprint_gate();
+    if (what == "avatar_anchor") return case_avatar_anchor();
+    if (what == "height_calibration") return case_height_calibration();
+    if (what == "arm_assist") return case_arm_assist();
     if (what == "teleport_pitch") return case_teleport_pitch();
     if (what == "physics_overlap") return case_physics_overlap();
     if (what == "runtime_spawn") return case_runtime_spawn();

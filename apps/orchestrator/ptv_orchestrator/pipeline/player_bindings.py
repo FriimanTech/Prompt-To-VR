@@ -234,6 +234,55 @@ def body_is_bound(entities: list[dict[str, Any]], plan: MechanicPlan) -> bool:
     return False
 
 
+#: Slide walking pace and sprint running pace when the player has no avatar
+#: clips to take them from (m/s).
+DEFAULT_WALK_MPS = 1.5
+DEFAULT_RUN_MPS = 3.0
+#: Comfort bounds. Walking much past 2 m/s is the threshold Meta's
+#: locomotion guidance treats as fast; past 3.5 m/s a run in a headset is
+#: more than most players tolerate.
+WALK_RANGE_MPS = (1.0, 2.0)
+RUN_RANGE_MPS = (2.0, 3.5)
+#: A run that is barely faster than the walk is not worth a button.
+MIN_RUN_OVER_WALK_MPS = 0.5
+
+
+def _clamp(v: float, lo_hi: tuple[float, float]) -> float:
+    return max(lo_hi[0], min(lo_hi[1], v))
+
+
+def gait_speed_fields(entities: list[dict[str, Any]]) -> dict[str, Any]:
+    """The slide's walk and sprint speeds, taken from the player avatar's clips.
+
+    The avatar's walk and run clips were measured (``animation_speeds``) at
+    the speed their feet actually cover, so moving the player at exactly
+    those speeds plays each clip at rate 1.0 -- no skating, no moonwalking.
+    Without an avatar the comfort defaults apply.
+    """
+    speeds: dict[str, Any] = {}
+    for e in entities:
+        if "player_avatar" not in (e.get("tags") or []):
+            continue
+        mesh = e.get("mesh") or {}
+        speeds = dict(mesh.get("animation_speeds") or {})
+        break
+
+    def _speed(key: str) -> float | None:
+        v = speeds.get(key)
+        return float(v) if isinstance(v, (int, float)) and v > 0 else None
+
+    walk_clip, run_clip = _speed("walk"), _speed("run")
+    walk = _clamp(walk_clip, WALK_RANGE_MPS) if walk_clip else DEFAULT_WALK_MPS
+    run = _clamp(run_clip, RUN_RANGE_MPS) if run_clip else DEFAULT_RUN_MPS
+    run = max(run, walk + MIN_RUN_OVER_WALK_MPS)
+    source = "avatar_clips" if (walk_clip or run_clip) else "defaults"
+    return {
+        "slide_max_speed_mps": round(walk, 4),
+        "sprint_speed_mps": round(run, 4),
+        "sprint": {"activation": "hold", "speed_source": source},
+    }
+
+
 def player_block_fields(
     build_spec: BuildSpec, entities: list[dict[str, Any]], plan: MechanicPlan
 ) -> dict[str, Any]:
@@ -246,6 +295,7 @@ def player_block_fields(
         "locomotion_menu": False,
         "default_turn_mode": default_scene_turn(build_spec),
         "hands": {"source": "avatar" if avatar else "default"},
+        **gait_speed_fields(entities if avatar else []),
     }
     mode = default_scene_mode(build_spec)
     if mode:

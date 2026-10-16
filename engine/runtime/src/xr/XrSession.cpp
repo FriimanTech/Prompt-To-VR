@@ -355,6 +355,10 @@ bool XrRuntime::create_action_set() {
                 "Thumbrest Touch", thumbrest_touch_action_, true);
     make_action(XR_ACTION_TYPE_BOOLEAN_INPUT, "thumbstick_touch",
                 "Thumbstick Touch", thumbstick_touch_action_, true);
+    // Pressing the stick in: the conventional sprint control (hold the
+    // left stick down while pushing it forward).
+    make_action(XR_ACTION_TYPE_BOOLEAN_INPUT, "thumbstick_click",
+                "Thumbstick Click", thumbstick_click_action_, true);
     make_action(XR_ACTION_TYPE_BOOLEAN_INPUT, "button_a_touch",
                 "Button A Touch", button_a_touch_action_, false);
     make_action(XR_ACTION_TYPE_BOOLEAN_INPUT, "button_b_touch",
@@ -398,6 +402,10 @@ bool XrRuntime::create_action_set() {
          path("/user/hand/left/input/thumbstick/touch")},
         {thumbstick_touch_action_,
          path("/user/hand/right/input/thumbstick/touch")},
+        {thumbstick_click_action_,
+         path("/user/hand/left/input/thumbstick/click")},
+        {thumbstick_click_action_,
+         path("/user/hand/right/input/thumbstick/click")},
         {button_a_touch_action_, path("/user/hand/right/input/a/touch")},
         {button_b_touch_action_, path("/user/hand/right/input/b/touch")},
         {button_x_touch_action_, path("/user/hand/left/input/x/touch")},
@@ -987,6 +995,8 @@ void XrRuntime::sync_input(InputState& out) {
                        out.thumbrest_touch[i]);
         read_bool_hand(thumbstick_touch_action_, hand_paths_[i],
                        out.thumbstick_touch[i]);
+        read_bool_hand(thumbstick_click_action_, hand_paths_[i],
+                       out.thumbstick_click[i]);
     }
 }
 

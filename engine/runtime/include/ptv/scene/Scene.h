@@ -352,6 +352,14 @@ struct SceneDoc {
     float slide_max_speed_mps{1.5f};
     float slide_accel_tau_s{0.12f};
     float slide_decel_tau_s{0.18f};
+    /** Sprint on the slide (hold the left stick in while pushing forward).
+     *  ``sprint_activation`` is "hold", "toggle" or "off". */
+    float sprint_speed_mps{3.0f};
+    std::string sprint_activation{"hold"};
+    float sprint_accel_tau_s{0.35f};
+    float sprint_decel_tau_s{0.25f};
+    float sprint_forward_cone_deg{70.0f};
+    float sprint_min_stick{0.6f};
     float teleport_launch_speed_mps{6.0f};
     float teleport_max_horizontal_m{12.0f};
     /** Y plane used for teleport arc landing tests (meters). */

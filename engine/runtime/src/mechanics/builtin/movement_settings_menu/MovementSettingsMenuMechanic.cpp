@@ -205,10 +205,10 @@ private:
                 false);
         }
 
+        const bool sliding =
+            active == ::ptv::LocomotionMode::SlideHeadRelative ||
+            active == ::ptv::LocomotionMode::SlideControllerRelative;
         if (ctx.comfort != nullptr) {
-            const bool sliding =
-                active == ::ptv::LocomotionMode::SlideHeadRelative ||
-                active == ::ptv::LocomotionMode::SlideControllerRelative;
             if (sliding &&
                 ctx.comfort->vignette_toggleable(ComfortChannel::Movement)) {
                 add("vignette:movement", false,
@@ -219,6 +219,16 @@ private:
                 add("vignette:turning", false,
                     ctx.comfort->vignette_enabled(ComfortChannel::Turning));
             }
+        }
+
+        // Sprint style joins a menu the game already offers; on its own it
+        // does not justify opening one, because the open button may belong
+        // to the game in a title with nothing else to choose.
+        if (sliding && loco.tunables().sprint_allowed && !panel_.rows.empty()) {
+            const auto act = loco.sprint_activation();
+            add("sprint:hold", act == ::ptv::SprintActivation::Hold, false);
+            add("sprint:toggle", act == ::ptv::SprintActivation::Toggle, false);
+            add("sprint:off", act == ::ptv::SprintActivation::Off, false);
         }
         panel_.highlighted =
             (keep >= 0 && keep < static_cast<int>(panel_.rows.size())) ? keep
@@ -237,6 +247,12 @@ private:
             loco.set_turn_mode(::ptv::TurnMode::Snap);
         } else if (id == "turn:smooth") {
             loco.set_turn_mode(::ptv::TurnMode::Smooth);
+        } else if (id == "sprint:hold") {
+            loco.set_sprint_activation(::ptv::SprintActivation::Hold);
+        } else if (id == "sprint:toggle") {
+            loco.set_sprint_activation(::ptv::SprintActivation::Toggle);
+        } else if (id == "sprint:off") {
+            loco.set_sprint_activation(::ptv::SprintActivation::Off);
         } else if (id == "vignette:movement" && ctx.comfort != nullptr) {
             ctx.comfort->set_vignette_enabled(
                 ComfortChannel::Movement,
@@ -337,6 +353,20 @@ private:
             ctx.draw->line(tip, P(r * 1.2f * std::cos(kPi * 0.15f) - r * 0.4f,
                                   r * std::sin(kPi * 0.15f) - r * 0.4f),
                            color, 0.005f);
+        } else if (id.rfind("sprint:", 0) == 0) {
+            // A runner's chevrons: two for hold, two with a latch bar for
+            // toggle, a single one for walk-only.
+            auto chevron = [&](float x) {
+                line(x - r * 0.4f, -r * 0.7f, x + r * 0.3f, 0.0f);
+                line(x + r * 0.3f, 0.0f, x - r * 0.4f, r * 0.7f);
+            };
+            if (id == "sprint:off") {
+                chevron(0.0f);
+            } else {
+                chevron(-r * 0.45f);
+                chevron(r * 0.45f);
+                if (id == "sprint:toggle") line(r * 1.1f, -r * 0.7f, r * 1.1f, r * 0.7f);
+            }
         } else if (id.rfind("vignette:", 0) == 0) {
             // Concentric rings: a view narrowing to its centre.
             circle(0.0f, 0.0f, r, 20);

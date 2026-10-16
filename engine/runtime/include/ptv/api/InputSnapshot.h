@@ -59,6 +59,10 @@ struct InputSnapshot {
         // lowering the virtual thumb.
         bool thumbstick_touched{false};
         bool prev_thumbstick_touched{false};
+        // Thumbstick pressed IN (L3 on the left, R3 on the right) -- the
+        // conventional sprint control.
+        bool thumbstick_click{false};
+        bool prev_thumbstick_click{false};
         // Thumb resting on either face button of THIS controller (A/B on the
         // right, X/Y on the left).
         bool face_button_touched{false};
@@ -158,6 +162,12 @@ struct InputSnapshot {
         return hands[h].face_button_touched;
     }
 
+    // Thumbstick press (L3 / R3): held state and rising edge.
+    bool thumbstick_down(Hand h) const { return hands[h].thumbstick_click; }
+    bool thumbstick_clicked(Hand h) const {
+        return hands[h].thumbstick_click && !hands[h].prev_thumbstick_click;
+    }
+
     // Face-button current-state helpers.
     bool button_a_down() const { return button_a; }
     bool button_b_down() const { return button_b; }
@@ -172,12 +182,19 @@ struct InputSnapshot {
 
     // Named-button lookup so a bound mechanic can read the control named in
     // its params (e.g. ``params.value("button","a")``). Accepts "a"/"b"/"x"/
-    // "y" (case-sensitive lowercase). Unknown names return false.
+    // "y" and the stick presses "left_thumbstick"/"l3"/"right_thumbstick"/
+    // "r3" (case-sensitive lowercase). Unknown names return false.
     bool button_down(std::string_view name) const {
         if (name == "a") return button_a;
         if (name == "b") return button_b;
         if (name == "x") return button_x;
         if (name == "y") return button_y;
+        if (name == "left_thumbstick" || name == "l3") {
+            return hands[Left].thumbstick_click;
+        }
+        if (name == "right_thumbstick" || name == "r3") {
+            return hands[Right].thumbstick_click;
+        }
         return false;
     }
     bool button_pressed(std::string_view name) const {
@@ -185,6 +202,12 @@ struct InputSnapshot {
         if (name == "b") return button_b_pressed();
         if (name == "x") return button_x_pressed();
         if (name == "y") return button_y_pressed();
+        if (name == "left_thumbstick" || name == "l3") {
+            return thumbstick_clicked(Left);
+        }
+        if (name == "right_thumbstick" || name == "r3") {
+            return thumbstick_clicked(Right);
+        }
         return false;
     }
 

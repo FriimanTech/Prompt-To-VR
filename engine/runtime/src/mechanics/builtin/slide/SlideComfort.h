@@ -13,6 +13,7 @@
 #include <algorithm>
 #include <cmath>
 
+#include "ptv/api/MechanicContext.h"
 #include "ptv/math/Math.h"
 
 namespace ptv {
@@ -43,6 +44,70 @@ private:
     float accel_tau_s_{0.12f};
     float decel_tau_s_{0.18f};
     float speed_{0.0f};
+};
+
+/** Walk or run: whether the player is sprinting, and how far the run has
+ *  ramped in (0 = walking pace, 1 = running pace).
+ *
+ *  Sprint needs the stick pushed mostly FORWARD and far enough: running
+ *  sideways or backwards is neither natural nor comfortable. ``Hold`` runs
+ *  while the stick is held in; ``Toggle`` flips on a click and ends when
+ *  the stick comes back to centre, the way most Quest games do it. */
+class SprintGate {
+public:
+    struct Config {
+        SprintActivation activation{SprintActivation::Hold};
+        float accel_tau_s{0.35f};
+        float decel_tau_s{0.25f};
+        float forward_cone_deg{70.0f};
+        float min_stick{0.6f};
+    };
+
+    /** ``axes``: filtered stick (x strafe, +y forward); ``magnitude``: its
+     *  filtered length. Returns the ramped blend. */
+    float update(const Config& c, Vec2 axes, float magnitude, bool click_down,
+                 bool clicked, float dt) {
+        const float cone = c.forward_cone_deg * 3.14159265358979f / 180.0f;
+        const bool forwardish =
+            magnitude >= c.min_stick && axes.y > 0.0f &&
+            std::atan2(std::abs(axes.x), axes.y) <= cone;
+        bool want = false;
+        switch (c.activation) {
+            case SprintActivation::Hold:
+                toggled_ = false;
+                want = click_down && forwardish;
+                break;
+            case SprintActivation::Toggle:
+                if (clicked) toggled_ = !toggled_;
+                if (magnitude < 0.2f) toggled_ = false;
+                want = toggled_ && forwardish;
+                break;
+            case SprintActivation::Off:
+            default:
+                toggled_ = false;
+                break;
+        }
+        const float target = want ? 1.0f : 0.0f;
+        const float tau =
+            std::max(1e-3f, target > blend_ ? c.accel_tau_s : c.decel_tau_s);
+        blend_ += (target - blend_) * (1.0f - std::exp(-std::max(0.0f, dt) / tau));
+        if (!want && blend_ < 1e-3f) blend_ = 0.0f;
+        wanted_ = want;
+        return blend_;
+    }
+
+    float blend() const { return blend_; }
+    bool wanted() const { return wanted_; }
+    void reset() {
+        blend_ = 0.0f;
+        toggled_ = false;
+        wanted_ = false;
+    }
+
+private:
+    float blend_{0.0f};
+    bool toggled_{false};
+    bool wanted_{false};
 };
 
 /** Ground-plane movement basis derived from some tracked pose. */

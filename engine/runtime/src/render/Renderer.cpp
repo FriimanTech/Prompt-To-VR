@@ -2076,15 +2076,29 @@ void Renderer::build_items_from_world(World& world, std::vector<DrawItem>& out,
                              max_axis_scale(model);
                 }
 
+                // The player's own body is drawn every frame at full detail:
+                // the camera sits inside it, so a bounds test against a
+                // posed, IK-driven body is a guess, and any pop is right in
+                // the player's face.
+                bool first_person = world.registry().all_of<CSelfViewHide>(entity);
+                if (!first_person) {
+                    if (const auto* tag = world.registry().try_get<CTag>(entity)) {
+                        first_person =
+                            std::find(tag->tags.begin(), tag->tags.end(),
+                                      "player_avatar") != tag->tags.end();
+                    }
+                }
+
                 // Distance cull. cull_distance_m_ is effectively infinite for
                 // compact/standard scenes, so small games still show
                 // everything; the governor may tighten it under load.
-                if (view_info.valid && distance - radius > cull_distance_m_) {
+                if (!first_person && view_info.valid &&
+                    distance - radius > cull_distance_m_) {
                     ++stats_.culled_distance;
                     continue;
                 }
                 // Frustum cull once for both eyes.
-                if (view_info.valid &&
+                if (!first_person && view_info.valid &&
                     !frustum.intersects_sphere(center, radius)) {
                     ++stats_.culled_frustum;
                     continue;
@@ -2095,7 +2109,7 @@ void Renderer::build_items_from_world(World& world, std::vector<DrawItem>& out,
                 // shrunk by the governor's lod_bias when frames are slow.
                 const auto& chain = cm.lod_paths;
                 int desired = 0;
-                if (chain.size() > 1 && view_info.valid) {
+                if (chain.size() > 1 && view_info.valid && !first_person) {
                     const float bias = 1.0f / (1.0f + std::max(0.0f, lod_bias_));
                     const auto& sw = perf_.lod_switch_distances_m;
                     for (size_t i = 0; i < sw.size() &&

@@ -34,7 +34,15 @@ orchestrator and a reusable Vulkan + OpenXR engine core.
    generated mechanic. Generated code adds mechanics; it does not
    reimplement basic VR behavior, and it never modifies a built-in.
    `builtin.smooth_locomotion` has been REMOVED; use the explicit
-   `builtin.locomotion.slide.*` ids. The engine INJECTS NO player
+   `builtin.locomotion.slide.*` ids. Walk / run is BUILT INTO both slides
+   (hold the left thumbstick in to sprint; `InputSnapshot` exposes
+   `thumbstick_down(hand)` / `thumbstick_clicked(hand)`, and
+   `ILocomotion::sprinting()` is read-only for generated code), with walk
+   and run speeds taken from the player avatar's measured clips. Never
+   plan or generate a sprint or speed-modifier mechanic. Anything that
+   follows the player (worn, attached or held) is ignored by the player's
+   own collision sweep, so a worn collider cannot push the player.
+   The engine INJECTS NO player
    mechanic: finger posing (`builtin.hand_pose`), the avatar body
    (`builtin.avatar_body`), each locomotion mode, snap / smooth turn and
    `builtin.movement_settings_menu` are planned in `mechanic_plan.json`

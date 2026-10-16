@@ -99,6 +99,24 @@ SceneDoc LoadSceneJson(const std::string& path) {
         d.slide_max_speed_mps = p.value("slide_max_speed_mps", 1.5f);
         d.slide_accel_tau_s = p.value("slide_accel_tau_s", 0.12f);
         d.slide_decel_tau_s = p.value("slide_decel_tau_s", 0.18f);
+        d.sprint_speed_mps = std::clamp(
+            p.value("sprint_speed_mps", 3.0f),
+            std::max(0.2f, d.slide_max_speed_mps), 8.0f);
+        if (p.contains("sprint") && p["sprint"].is_object()) {
+            const auto& sj = p["sprint"];
+            std::string act = sj.value("activation", std::string("hold"));
+            if (!sj.value("enabled", true)) act = "off";
+            if (act != "hold" && act != "toggle" && act != "off") act = "hold";
+            d.sprint_activation = act;
+            d.sprint_accel_tau_s =
+                std::clamp(sj.value("accel_tau_s", 0.35f), 0.02f, 3.0f);
+            d.sprint_decel_tau_s =
+                std::clamp(sj.value("decel_tau_s", 0.25f), 0.02f, 3.0f);
+            d.sprint_forward_cone_deg =
+                std::clamp(sj.value("forward_cone_deg", 70.0f), 10.0f, 180.0f);
+            d.sprint_min_stick =
+                std::clamp(sj.value("min_stick", 0.6f), 0.1f, 1.0f);
+        }
         d.teleport_launch_speed_mps = p.value("teleport_launch_speed_mps", 6.0f);
         d.teleport_max_horizontal_m = p.value("teleport_max_horizontal_m", 12.0f);
         d.teleport_floor_y = p.value("teleport_floor_y", 0.0f);

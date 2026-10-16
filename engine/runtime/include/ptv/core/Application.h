@@ -151,6 +151,12 @@ private:
      *  scaled): swept, never floated, applied frame-relative. */
     void apply_pending_move_legacy();
 
+    /** Everything that moves WITH the player and must never collide with
+     *  the player's own body: the contact capsule, the hand anchors, the
+     *  avatar, held items, worn items and anything attached (at any depth)
+     *  to one of those. */
+    void collect_player_body_family(std::vector<std::uint32_t>& out) const;
+
     /** The headset's world position against the rig as it is RIGHT NOW. */
     Vec3 current_head_world() const;
 
@@ -525,6 +531,10 @@ private:
     bool motor_virtual_floor_{false};
     Vec3 motor_last_grounded_{0.0f};
     bool motor_has_grounded_{false};
+    // The player's body family, rebuilt each frame (reused allocation).
+    std::vector<std::uint32_t> motor_ignored_;
+    std::vector<std::uint32_t> motor_contacts_;
+    bool motor_push_warned_{false};
     // Latest headset pose in STAGE space.
     Mat4 head_local_{1.0f};
     bool head_local_valid_{false};
@@ -562,6 +572,15 @@ private:
     float slide_max_speed_mps_{1.5f};
     float slide_accel_tau_s_{0.12f};
     float slide_decel_tau_s_{0.18f};
+    float sprint_speed_mps_{3.0f};
+    float sprint_accel_tau_s_{0.35f};
+    float sprint_decel_tau_s_{0.25f};
+    float sprint_forward_cone_deg_{70.0f};
+    float sprint_min_stick_{0.6f};
+    ::ptv::SprintActivation sprint_activation_{::ptv::SprintActivation::Hold};
+    // Published by the slide each frame it owns the stick.
+    bool sprinting_{false};
+    float gait_speed_cap_{1.5f};
     float teleport_launch_speed_mps_{6.0f};
     float teleport_max_horizontal_m_{12.0f};
     float teleport_floor_y_{0.0f};

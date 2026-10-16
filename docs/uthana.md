@@ -159,6 +159,48 @@ present does the merge run (`pipeline/uthana/glb_merge.py`):
   gait clip until it finishes.
 - **Foot offset:** `mesh.foot_offset_m` (origin-to-sole distance) plants
   grounded characters exactly on the floor.
+- **Centimetre root scale:** an Uthana rig scales its root joint (Hips) by
+  0.01. Joint frames used for placement (`ISkeleton::joint_world`, attachment
+  anchors in `tick_attachments`) are scale-free, so an attachment offset of
+  5 cm stays 5 cm instead of shrinking to 0.5 mm.
+- **Player avatar walk/run:** the avatar's measured walk and run clip speeds
+  become the slide's walk and sprint speeds, and the run clip plays only
+  while the player holds the left stick in. See
+  [`locomotion.md`](locomotion.md#walking-and-running-sprint).
+- **Neck follows the clip:** `builtin.avatar_body` shifts the body by the
+  clip's smoothed horizontal neck offset (up to 15 cm). An idle that settles
+  the neck forward, or a run that leans it, no longer leaves the camera
+  behind the avatar's shoulders.
+- **The body hangs from the neck, not the eyes:** the eyes sit in front of
+  and above the neck, so turning or tilting the head swings the headset
+  through an arc. The body is placed under the neck pivot (the headset minus
+  the eye-from-neck offset, turned with the head), so looking around leaves
+  it still. The legs read their speed from that pivot. They start walking
+  above 0.25 m/s and stop below 0.12 m/s, and snap-turn and teleport frames
+  are skipped, so leaning and looking never start a walk cycle.
+- **Arms never blink out:**
+  - The shoulder (clavicle) reach assist is rebuilt from the bind pose every
+    frame (`two_bone_ik::shoulder_assist`) and capped at 25 degrees.
+    Stacked on its own previous result, it wound the shoulder round and
+    snapped it back, so the arm whipped out of view for a few frames at a
+    time.
+  - A controller that loses tracking is held for 0.3 s, then eased back to
+    the clip over 0.25 s.
+  - Non-finite IK results are never written.
+  - The player's own body (`CSelfViewHide` or the `player_avatar` tag) is
+    never frustum- or distance-culled and always draws LOD0.
+- **Height calibration** (`avatar_body/HeightCalibration.h`):
+  - It waits for a still, standing head before sizing the avatar. An eye
+    height under 1.25 m isn't treated as standing; after 10 s it uses what
+    it has.
+  - It grows the avatar when you stand up taller (held for 1.5 s), and a
+    crouch never shrinks it.
+  - logcat: `builtin.avatar_body: eye height 1.62 m -> avatar scale 1.000
+    (standing)`.
+- **Arm diagnostics:** once a second,
+  `builtin.avatar_body arms L reach=.. assist=..deg held=.. | R ...`. Any arm
+  joint that jumps more than 25 cm in one frame, measured in the body's own
+  frame, is logged by name.
 
 ## Costs
 
@@ -185,6 +227,11 @@ unlimited. Reused motions and the library idle cost nothing.
   scene.json.
 - **Hands do not curl:** check `uthana_rig.json`. `finger_joints` must be
   non-empty; a fallback to Tripo has no fingers.
+- **The player accelerates far past the walk speed, or the body runs ahead
+  of the camera:** something with a collider is following the player. The
+  body family (worn, attached and held items) is ignored automatically;
+  look for `player motor: body was pushed` in logcat, which names the
+  entity.
 - **"Maximum number of characters reached":** delete unused characters in
   your Uthana organisation.
 - **A motion was regenerated that you expected to reuse:** names must match

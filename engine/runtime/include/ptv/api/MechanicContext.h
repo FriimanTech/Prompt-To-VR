@@ -60,6 +60,15 @@ enum class VerticalMode : int {
     Free = 1,
 };
 
+/** How the player starts running on the slide. ``Hold``: keep the left
+ *  stick pressed in. ``Toggle``: press it once; running ends when the stick
+ *  returns to centre. ``Off``: walk only. Player-selectable at runtime. */
+enum class SprintActivation : int {
+    Off = 0,
+    Hold = 1,
+    Toggle = 2,
+};
+
 /**
  * Comfort/tuning values authored in the scene's ``player`` block.
  *
@@ -69,9 +78,21 @@ enum class VerticalMode : int {
  * itself. Defaults below match the engine's historical values.
  */
 struct LocomotionTunables {
+    /** Walking pace of the slide: full stick without sprint. */
     float slide_max_speed_mps{1.5f};
     float slide_accel_tau_s{0.12f};
     float slide_decel_tau_s{0.18f};
+    /** Running pace: full sprint, reached by holding the left stick in. */
+    float sprint_speed_mps{3.0f};
+    /** False when the scene turned sprint off: the settings menu then
+     *  offers no sprint choice. */
+    bool sprint_allowed{true};
+    float sprint_accel_tau_s{0.35f};
+    float sprint_decel_tau_s{0.25f};
+    /** Sprint only while the stick points within this angle of straight
+     *  forward, and is pushed at least ``sprint_min_stick``. */
+    float sprint_forward_cone_deg{70.0f};
+    float sprint_min_stick{0.6f};
     float teleport_launch_speed_mps{6.0f};
     float teleport_max_horizontal_m{12.0f};
     float teleport_floor_y{0.0f};
@@ -173,6 +194,31 @@ public:
     /** Scene-authored comfort tunables, so a mechanic can default to what the
      *  scene asked for instead of hard-coding its own numbers. */
     virtual const LocomotionTunables& tunables() const = 0;
+
+    // ------------------------------------------------------------------
+    // Walk / run. The built-in slide owns sprinting and publishes it here,
+    // so the avatar's legs (and any generated mechanic) can tell a run
+    // from a fast walk without re-reading the stick.
+    // ------------------------------------------------------------------
+
+    /** True while the player is running (sprint mostly engaged). */
+    virtual bool sprinting() const { return false; }
+    /** The slide's current top speed: the walk pace, rising towards the
+     *  run pace while sprinting. */
+    virtual float gait_speed_cap() const {
+        return tunables().slide_max_speed_mps;
+    }
+    /** Called by the slide each frame it owns the stick. */
+    virtual void publish_sprint(bool sprinting, float speed_cap) {
+        (void)sprinting;
+        (void)speed_cap;
+    }
+    /** The player's chosen activation (settings menu), seeded from the
+     *  scene's ``player.sprint.activation``. */
+    virtual SprintActivation sprint_activation() const {
+        return SprintActivation::Off;
+    }
+    virtual void set_sprint_activation(SprintActivation mode) { (void)mode; }
 
     // ------------------------------------------------------------------
     // Reference frame: what the player's coordinates are relative to.

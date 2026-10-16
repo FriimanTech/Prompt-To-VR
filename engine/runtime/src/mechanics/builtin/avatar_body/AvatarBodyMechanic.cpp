@@ -44,6 +44,8 @@
 #include "../HandRig.h"
 #include "../LocomotionClipSelector.h"
 #include "../TwoBoneIk.h"
+#include "HeightCalibration.h"
+#include "NeckDrift.h"
 #include "ptv/api/BodySlots.h"
 #include "ptv/core/Logger.h"
 
@@ -90,6 +92,24 @@ constexpr float kEyeAboveHeadJoint = 0.065f;
 constexpr float kEyeForwardOfHeadJoint = 0.045f;
 constexpr float kAnkleHeight = 0.045f;
 
+/** The legs start walking above this body speed and stop below the lower
+ *  one (m/s), and the speed they read is smoothed over this long. A real
+ *  stride is 0.5 m/s or more; leaning and shifting weight is not. */
+constexpr float kLegsStartMps = 0.25f;
+constexpr float kLegsStopMps = 0.12f;
+constexpr float kGaitSpeedTau = 0.15f;
+
+/** Shoulder-assist weight smoothing (s). */
+constexpr float kShoulderAssistTau = 0.1f;
+/** A controller that loses tracking is held where it was for this long,
+ *  then the arm eases back to the clip over the second interval (s). */
+constexpr float kHoldTrackingLossS = 0.3f;
+constexpr float kReleaseToClipS = 0.25f;
+/** An arm joint moving this far in one frame, in the body's own frame, is a
+ *  glitch, not a motion (m); warn about the first few. */
+constexpr float kJointJumpM = 0.25f;
+constexpr int kMaxJumpWarnings = 5;
+
 float wrap_pi(float a) {
     while (a > kPi) a -= 2.0f * kPi;
     while (a < -kPi) a += 2.0f * kPi;
@@ -133,6 +153,10 @@ public:
         yaw_deadzone_ = std::clamp(
             p.value("torso_yaw_deadzone_deg", 40.0f), 5.0f, 90.0f) *
                         kPi / 180.0f;
+        // Unset, these come from the avatar's own measured clip speeds when
+        // it is resolved (see resolve()).
+        walk_speed_param_ = p.contains("walk_speed_mps");
+        run_speed_param_ = p.contains("run_speed_mps");
         tune_.walk_speed_mps =
             std::clamp(p.value("walk_speed_mps", 1.4f), 0.05f, 20.0f);
         tune_.run_speed_mps = std::clamp(p.value("run_speed_mps", 4.0f),
@@ -155,8 +179,8 @@ public:
         calibrate_height(world, avatar, input, ctx, dt);
         plant_under_head(world, avatar, input, ctx, dt);
         if (head_tracking_) drive_head(avatar, input, ctx);
-        if (arm_ik_) drive_arms(avatar, input, ctx);
-        if (leg_animation_) drive_legs(world, avatar, ctx);
+        if (arm_ik_) drive_arms(world, avatar, input, ctx, dt);
+        if (leg_animation_) drive_legs(world, avatar, ctx, dt);
         hide_engine_hands(ctx);
         apply_head_visibility(world, avatar);
     }
@@ -180,6 +204,22 @@ private:
         // the wrist's local frame.
         Quat grip_to_wrist{1.0f, 0.0f, 0.0f, 0.0f};
         Vec3 palm_offset_local{0.0f};
+
+        // --- per-frame state ---
+        float assist_w{0.0f};  // smoothed shoulder-assist weight
+        // Last valid controller pose, in the avatar root's frame, so a held
+        // arm travels with the body while tracking is lost.
+        Vec3 held_pos_local{0.0f};
+        Quat held_rot_local{1.0f, 0.0f, 0.0f, 0.0f};
+        bool have_held{false};
+        float lost_s{0.0f};
+        // Diagnostics: last frame's joint positions (root frame) and what
+        // happened this second.
+        std::array<Vec3, 3> prev_joint_local{};
+        bool have_prev_joints{false};
+        float reach_ratio{0.0f};
+        float assist_deg{0.0f};
+        int held_frames{0};
     };
 
     std::uint32_t find_avatar(World& world) {
@@ -217,8 +257,7 @@ private:
         }
         base_scale_ = world.get<CTransform>(avatar).t.scale;
         calibrated_scale_ = 1.0f;
-        calibration_samples_.clear();
-        calibration_done_ = !height_calibration_;
+        calibration_.reset();
 
         if (!ctx.skeleton->has_skeleton(avatar)) {
             // A skeleton can attach a frame or two after load; try again.
@@ -280,6 +319,20 @@ private:
         facing_ = glm::angleAxis(-yaw_of(fwd_model), Vec3(0.0f, 1.0f, 0.0f));
         forward_model_ = fwd_model;
 
+        // --- Gait speeds: the clips' own, unless the binding set them ------
+        if (world.has<CMesh>(avatar)) {
+            const auto& speeds = world.get<CMesh>(avatar).animation_speeds;
+            const auto w = speeds.find("walk");
+            const auto r = speeds.find("run");
+            if (!walk_speed_param_ && w != speeds.end() && w->second > 0.05f) {
+                tune_.walk_speed_mps = w->second;
+            }
+            if (!run_speed_param_ && r != speeds.end() &&
+                r->second > tune_.walk_speed_mps) {
+                tune_.run_speed_mps = r->second;
+            }
+        }
+
         // --- Eyes and soles, in model space ------------------------------
         height_m_ = locomotion_clips::body_height(world, avatar);
         float sole = 0.0f;
@@ -307,6 +360,34 @@ private:
         }
         eye_model_.y += eye_height_offset_;
 
+        // The neck, not the head: head tracking rotates the neck joint, which
+        // moves the head joint but never the neck's own position, so the
+        // neck reports only what the CLIP did to the torso.
+        drift_joint_ = neck_ >= 0 ? neck_ : head_;
+        drift_bind_model_ =
+            drift_joint_ >= 0 ? bind_pos(ctx, avatar, drift_joint_) : Vec3(0.0f);
+        drift_.reset();
+
+        // The neck is the pivot a real head turns about. The eyes sit in
+        // front of and above it, so turning or tilting the head swings the
+        // headset through an arc while the neck -- and the body below it --
+        // stays put. Expressed in the HEADSET's frame (-Z forward, +Y up,
+        // +X right) so the arc can be undone with the headset's rotation.
+        pivot_model_ = drift_joint_ >= 0 ? drift_bind_model_
+                                         : Vec3(eye_model_.x, eye_model_.y -
+                                                0.1f * height_m_, eye_model_.z);
+        {
+            const Vec3 v = eye_model_ - pivot_model_;
+            const Vec3 up(0.0f, 1.0f, 0.0f);
+            Vec3 right = glm::cross(fwd_model, up);
+            if (glm::length(right) < 1e-4f) right = Vec3(1.0f, 0.0f, 0.0f);
+            right = glm::normalize(right);
+            eye_from_pivot_head_ =
+                Vec3(glm::dot(v, right), v.y, -glm::dot(v, fwd_model));
+        }
+        have_prev_pivot_ = false;
+        legs_moving_ = false;
+
         head_subtree_.clear();
         if (head_ >= 0) {
             std::array<int, 64> buf{};
@@ -333,7 +414,7 @@ private:
 
         body_yaw_ = ctx.locomotion->yaw_radians();
         last_rig_yaw_ = body_yaw_;
-        have_prev_root_ = false;
+        have_prev_pivot_ = false;
         resolved_ = true;
     }
 
@@ -366,31 +447,30 @@ private:
 
     float scale() const { return base_scale_ * calibrated_scale_; }
 
-    /** Size the avatar to the player once, from their standing eye height. */
+    /** Size the avatar to the player from their STANDING eye height, and
+     *  again if they stand up taller later (see HeightCalibration.h). */
     void calibrate_height(World& world, std::uint32_t avatar,
                           const InputSnapshot& input, MechanicContext& ctx,
                           float dt) {
-        if (calibration_done_ || !input.head_valid) return;
-        calibration_wait_s_ += dt;
-        if (calibration_wait_s_ < 0.5f) return;  // let tracking settle
-        const float ground = ctx.locomotion->body_position().y;
-        calibration_samples_.push_back(ctx.locomotion->head_position().y -
-                                       ground);
-        if (calibration_samples_.size() < 45) return;  // ~0.6 s of poses
-        std::vector<float> s = calibration_samples_;
-        std::nth_element(s.begin(), s.begin() + s.size() / 2, s.end());
-        const float user_eye = s[s.size() / 2];
-        const float avatar_eye = (eye_model_.y - sole_y_model_) * base_scale_;
-        if (avatar_eye > 0.3f && user_eye > 0.5f) {
-            calibrated_scale_ = std::clamp(user_eye / avatar_eye, 0.75f, 1.3f);
-            PTV_INFO(
-                "builtin.avatar_body: eye height {:.2f} m -> avatar scale "
-                "{:.3f}",
-                user_eye, calibrated_scale_);
-        }
-        calibration_done_ = true;
         (void)world;
         (void)avatar;
+        if (!height_calibration_ || !input.head_valid) return;
+        const float ground = ctx.locomotion->body_position().y;
+        const float user_eye = ctx.locomotion->head_position().y - ground;
+        const float avatar_eye = (eye_model_.y - sole_y_model_) * base_scale_;
+        const auto ev = calibration_.update(user_eye, avatar_eye, dt);
+        if (calibration_.calibrated()) calibrated_scale_ = calibration_.scale();
+        using Ev = avatar_body::HeightCalibration::Event;
+        if (ev != Ev::None) {
+            PTV_INFO(
+                "builtin.avatar_body: eye height {:.2f} m -> avatar scale "
+                "{:.3f} ({})",
+                calibration_.calibrated_eye(), calibration_.target_scale(),
+                ev == Ev::First      ? "standing"
+                : ev == Ev::Fallback ? "no standing pose in 10 s; using what "
+                                       "was seen"
+                                     : "player stood taller");
+        }
     }
 
     void plant_under_head(World& world, std::uint32_t avatar,
@@ -403,7 +483,8 @@ private:
 
         // Rig turns (snap, smooth) carry the torso with them immediately.
         const float rig_yaw = ctx.locomotion->yaw_radians();
-        body_yaw_ += wrap_pi(rig_yaw - last_rig_yaw_);
+        const float rig_turn = wrap_pi(rig_yaw - last_rig_yaw_);
+        body_yaw_ += rig_turn;
         last_rig_yaw_ = rig_yaw;
 
         // The torso follows the head's yaw through a dead zone, like a real
@@ -418,7 +499,7 @@ private:
                     body_yaw_ += diff - std::copysign(yaw_deadzone_, diff);
                 }
                 // While walking, the body settles back under the gaze.
-                if (speed_ > 0.3f) {
+                if (legs_moving_ && speed_ > 0.3f) {
                     body_yaw_ += wrap_pi(head_yaw - body_yaw_) *
                                  (1.0f - std::exp(-dt / 0.35f));
                 }
@@ -426,46 +507,88 @@ private:
         }
         body_yaw_ = wrap_pi(body_yaw_);
 
+        // Locomotion clips move the upper body: an idle can settle the neck
+        // 10 cm forward of where it stands in the bind pose, a run leans it.
+        // The eye point was measured in the bind pose, so follow the neck
+        // the clip actually produced (last frame's evaluated pose), or the
+        // camera ends up behind the avatar's own shoulders.
+        if (drift_joint_ >= 0) {
+            drift_.update(
+                Vec3(ctx.skeleton->joint_model(avatar, drift_joint_)[3]),
+                drift_bind_model_, dt);
+        }
+
         const float s = scale();
         const Quat rot =
             glm::angleAxis(body_yaw_, Vec3(0.0f, 1.0f, 0.0f)) * facing_;
-        const Vec3 eye_offset = rot * (eye_model_ * s);
-        Vec3 root(head.x - eye_offset.x, 0.0f, head.z - eye_offset.z);
-        // Feet on the ground -- unless the player crouches below the
-        // avatar's eye height, in which case the body sinks with them rather
-        // than leaving the camera inside its chest.
-        const float standing_root_y = ground - sole_y_model_ * s;
-        const float head_root_y = head.y - eye_offset.y;
-        root.y = std::min(standing_root_y, head_root_y);
 
-        // Gait speed from where the BODY went, not the avatar root: the root
-        // also swings whenever the torso turns about the eye point, and that
-        // must not start a walk cycle while the player stands still.
-        const Vec3 feet = ctx.locomotion->body_position();
-        if (have_prev_root_ && dt > 1.0e-5f) {
-            const Vec3 d(feet.x - prev_root_.x, 0.0f, feet.z - prev_root_.z);
-            const float instant = glm::length(d) / dt;
-            speed_ += (instant - speed_) * std::min(1.0f, dt / 0.08f);
+        // Where the neck is: the headset minus the eyes' offset from the
+        // neck, turned with the head. Looking around moves the headset but
+        // not this point, so the body stays still while the head turns.
+        Vec3 pivot;
+        if (input.head_valid) {
+            pivot = head - input.head_rotation * (eye_from_pivot_head_ * s);
+        } else {
+            pivot = head - rot * ((eye_model_ - pivot_model_) * s);
         }
-        prev_root_ = feet;
-        have_prev_root_ = true;
+        const Vec3 neck_offset = rot * ((pivot_model_ + drift_.value()) * s);
+        Vec3 root(pivot.x - neck_offset.x, 0.0f, pivot.z - neck_offset.z);
+        // Feet on the ground -- unless the player crouches below the
+        // avatar's neck height, in which case the body sinks with them rather
+        // than leaving the camera inside its chest. Measured at the neck,
+        // so looking down does not sink the body.
+        const float standing_root_y = ground - sole_y_model_ * s;
+        const float neck_root_y = pivot.y - neck_offset.y;
+        root.y = std::min(standing_root_y, neck_root_y);
+
+        // Gait speed from where the NECK went: a head turn does not move it,
+        // and the stick, teleports and real walking all do. A snap turn
+        // swings the neck about the head for one frame and a teleport jumps
+        // it; neither is walking, so those frames are not sampled.
+        const Vec3 d(pivot.x - prev_pivot_.x, 0.0f, pivot.z - prev_pivot_.z);
+        const bool jumped = glm::length(d) > 0.5f || std::abs(rig_turn) > 1e-3f;
+        body_jumped_ = jumped;
+        if (have_prev_pivot_ && dt > 1.0e-5f && !jumped) {
+            const float instant = glm::length(d) / dt;
+            speed_ += (instant - speed_) *
+                      (1.0f - std::exp(-dt / kGaitSpeedTau));
+        }
+        prev_pivot_ = pivot;
+        have_prev_pivot_ = true;
+        // Real bodies sway: a lean or a shuffle is not a step. Hysteresis so
+        // the legs neither start on noise nor flicker at the boundary.
+        legs_moving_ = legs_moving_ ? speed_ > kLegsStopMps
+                                    : speed_ > kLegsStartMps;
 
         t.position = root;
         t.rotation = rot;
         t.scale = s;
     }
 
-    /** Write ``joint`` so its WORLD rotation becomes ``want``. */
+    static bool finite_quat(const Quat& q) {
+        return std::isfinite(q.w) && std::isfinite(q.x) && std::isfinite(q.y) &&
+               std::isfinite(q.z) && (q.w * q.w + q.x * q.x + q.y * q.y +
+                                      q.z * q.z) > 1.0e-8f;
+    }
+    static bool finite_vec(const Vec3& v) {
+        return std::isfinite(v.x) && std::isfinite(v.y) && std::isfinite(v.z);
+    }
+
+    /** Write ``joint`` so its WORLD rotation becomes ``want``. A non-finite
+     *  answer is dropped: one NaN in a joint makes everything below it
+     *  vanish from the frame. */
     void set_world_rotation(std::uint32_t avatar, int joint, const Quat& want,
                             MechanicContext& ctx) const {
+        if (!finite_quat(want)) return;
         const int parent = ctx.skeleton->joint_parent(avatar, joint);
         const Quat parent_world =
             parent >= 0 ? rot_of(ctx.skeleton->joint_world(avatar, parent))
                         : rot_of(ctx.skeleton->joint_world(avatar, joint)) *
                               glm::inverse(ctx.skeleton->joint_local_rotation(
                                   avatar, joint));
-        ctx.skeleton->set_joint_rotation(
-            avatar, joint, glm::normalize(glm::inverse(parent_world) * want));
+        const Quat local = glm::normalize(glm::inverse(parent_world) * want);
+        if (!finite_quat(local)) return;
+        ctx.skeleton->set_joint_rotation(avatar, joint, local);
     }
 
     /** World rotation ``joint`` would have with its own local at bind. */
@@ -500,26 +623,70 @@ private:
         set_world_rotation(avatar, head_, remaining * head_bind, ctx);
     }
 
-    void drive_arms(std::uint32_t avatar, const InputSnapshot& input,
-                    MechanicContext& ctx) {
+    void drive_arms(World& world, std::uint32_t avatar,
+                    const InputSnapshot& input, MechanicContext& ctx,
+                    float dt) {
         const float s = scale();
         const Quat body_yaw = glm::angleAxis(body_yaw_, Vec3(0.0f, 1.0f, 0.0f));
+        // The avatar root, as plant_under_head just placed it: held poses
+        // and the diagnostics are kept relative to it.
+        const auto& rt = world.get<CTransform>(avatar).t;
+        const Mat4 root = glm::translate(Mat4(1.0f), rt.position) *
+                          glm::mat4_cast(rt.rotation);
+        const Mat4 root_inv = glm::inverse(root);
         for (int h = 0; h < 2; ++h) {
-            const auto& arm = arms_[static_cast<size_t>(h)];
+            auto& arm = arms_[static_cast<size_t>(h)];
+            // Set again only when this frame drives the arm to the end.
+            const bool had_prev_joints = arm.have_prev_joints;
+            arm.have_prev_joints = false;
             if (arm.upper < 0 || arm.fore < 0 || arm.hand < 0) continue;
-            const auto& hand = input.hands[h];
-            if (!hand.hand_valid) continue;
             if (arm.upper_len <= 1.0e-4f || arm.lower_len <= 1.0e-4f) continue;
+            const auto& hand = input.hands[h];
+
+            const float upper_len = arm.upper_len * s;
+            const float lower_len = arm.lower_len * s;
+
+            // --- Where the hand should be --------------------------------
+            // A tracked controller is the answer. A controller that drops
+            // out for a moment is held where it was last seen (moving with
+            // the body), then eased down to the side and handed back to
+            // the clip -- never dropped for single frames, which reads as
+            // the arm blinking out of existence.
+            Vec3 hand_pos;
+            Quat hand_rot;
+            float release = 0.0f;  // 0 = full IK, 1 = hand back to the clip
+            if (hand.hand_valid && finite_vec(hand.hand_position) &&
+                finite_quat(hand.hand_rotation)) {
+                hand_pos = hand.hand_position;
+                hand_rot = glm::normalize(hand.hand_rotation);
+                arm.held_pos_local = Vec3(root_inv * Vec4(hand_pos, 1.0f));
+                arm.held_rot_local =
+                    glm::normalize(glm::inverse(rt.rotation) * hand_rot);
+                arm.have_held = true;
+                arm.lost_s = 0.0f;
+            } else {
+                if (!arm.have_held) continue;
+                arm.lost_s += dt;
+                ++arm.held_frames;
+                release = std::clamp((arm.lost_s - kHoldTrackingLossS) /
+                                         kReleaseToClipS,
+                                     0.0f, 1.0f);
+                if (release >= 1.0f) continue;  // the clip owns the arm now
+                hand_pos = Vec3(root * Vec4(arm.held_pos_local, 1.0f));
+                hand_rot = glm::normalize(rt.rotation * arm.held_rot_local);
+            }
 
             // Wrist target: the controller's grip, through this rig's palm
             // frame, so the hand sits in the controller the way a real one
             // does rather than the wrist sitting on it.
-            const Quat wrist_rot =
-                glm::normalize(hand.hand_rotation * arm.grip_to_wrist);
-            const Vec3 wrist_target =
-                hand.hand_position - wrist_rot * (arm.palm_offset_local * s);
+            const Quat wrist_rot = glm::normalize(hand_rot * arm.grip_to_wrist);
+            Vec3 wrist_target =
+                hand_pos - wrist_rot * (arm.palm_offset_local * s);
+            if (!finite_vec(wrist_target)) continue;
 
-            // Reset the chain to bind so this frame's solve starts clean.
+            // Reset the WHOLE chain, clavicle included, to bind so this
+            // frame's solve starts clean and depends on nothing left over
+            // from the last one.
             ctx.skeleton->set_joint_rotation_from_bind(avatar, arm.upper,
                                                        Quat(1, 0, 0, 0));
             ctx.skeleton->set_joint_rotation_from_bind(avatar, arm.fore,
@@ -527,29 +694,38 @@ private:
             ctx.skeleton->set_joint_rotation_from_bind(avatar, arm.hand,
                                                        Quat(1, 0, 0, 0));
 
-            const float upper_len = arm.upper_len * s;
-            const float lower_len = arm.lower_len * s;
+            if (release > 0.0f) {
+                // Ease towards an arm hanging at the side.
+                const Vec3 sh(ctx.skeleton->joint_world(avatar, arm.upper)[3]);
+                const Vec3 rest =
+                    sh + Vec3(0.0f, -0.92f * (upper_len + lower_len), 0.0f) +
+                    body_yaw * Vec3(0.0f, 0.0f, -0.05f);
+                wrist_target = glm::mix(wrist_target, rest, release);
+            }
 
-            // Light clavicle assist on a long reach, so a fully extended arm
+            // Light shoulder assist on a long reach, so a fully extended arm
             // pulls the shoulder forward instead of dislocating visually.
+            // Built from the clavicle's bind pose every frame (see
+            // two_bone_ik::shoulder_assist for why it must be).
             if (arm.clavicle >= 0) {
-                const Vec3 clav = Vec3(ctx.skeleton->joint_world(avatar, arm.clavicle)[3]);
-                const Vec3 sh = Vec3(ctx.skeleton->joint_world(avatar, arm.upper)[3]);
+                const Quat clav_bind =
+                    bind_world_rotation(avatar, arm.clavicle, ctx);
+                const Vec3 clav(ctx.skeleton->joint_world(avatar, arm.clavicle)[3]);
+                const Vec3 sh(ctx.skeleton->joint_world(avatar, arm.upper)[3]);
+                const float arm_len = upper_len + lower_len;
                 const float reach = glm::length(wrist_target - sh);
-                const float t = std::clamp(
-                    (reach - 0.85f * (upper_len + lower_len)) /
-                        (0.3f * (upper_len + lower_len)),
-                    0.0f, 1.0f);
-                if (t > 0.0f) {
-                    const Quat swing = two_bone_ik::rotation_between(
-                        sh - clav, wrist_target - clav);
-                    const Quat cw = rot_of(
-                        ctx.skeleton->joint_world(avatar, arm.clavicle));
-                    set_world_rotation(
-                        avatar, arm.clavicle,
-                        glm::slerp(Quat(1, 0, 0, 0), swing, 0.2f * t) * cw,
-                        ctx);
-                }
+                const float target_w =
+                    two_bone_ik::shoulder_assist_weight(reach, arm_len);
+                arm.assist_w += (target_w - arm.assist_w) *
+                                (1.0f - std::exp(-std::max(0.0f, dt) /
+                                                 kShoulderAssistTau));
+                const Quat clav_world = two_bone_ik::shoulder_assist(
+                    clav_bind, clav, sh, wrist_target, arm.assist_w);
+                set_world_rotation(avatar, arm.clavicle, clav_world, ctx);
+                arm.reach_ratio = arm_len > 1.0e-5f ? reach / arm_len : 0.0f;
+                const Quat delta = clav_world * glm::inverse(clav_bind);
+                arm.assist_deg = glm::degrees(
+                    2.0f * std::acos(std::clamp(std::abs(delta.w), 0.0f, 1.0f)));
             }
 
             const Mat4 upper_w = ctx.skeleton->joint_world(avatar, arm.upper);
@@ -584,6 +760,55 @@ private:
             }
             // Wrist: exactly the controller's orientation.
             set_world_rotation(avatar, arm.hand, wrist_rot, ctx);
+
+            // --- Diagnostics: an arm joint that leaps in one frame --------
+            // Measured in the body's own frame, so walking, turning the
+            // torso and sliding do not count; teleports and snap turns are
+            // excluded outright.
+            const int joints[3] = {arm.upper, arm.fore, arm.hand};
+            std::array<Vec3, 3> now{};
+            for (int k = 0; k < 3; ++k) {
+                now[static_cast<size_t>(k)] = Vec3(
+                    root_inv * ctx.skeleton->joint_world(avatar, joints[k])[3]);
+            }
+            if (had_prev_joints && !body_jumped_ &&
+                jump_warnings_ < kMaxJumpWarnings) {
+                for (int k = 0; k < 3; ++k) {
+                    const float d = glm::length(
+                        now[static_cast<size_t>(k)] -
+                        arm.prev_joint_local[static_cast<size_t>(k)]);
+                    if (d > kJointJumpM) {
+                        static constexpr const char* kRole[3] = {
+                            "upper arm", "forearm", "hand"};
+                        ++jump_warnings_;
+                        PTV_WARN(
+                            "builtin.avatar_body: {} {} (joint {}) jumped "
+                            "{:.2f} m in one frame (reach {:.2f} of arm, "
+                            "shoulder assist {:.1f} deg, tracking {})",
+                            h == 0 ? "left" : "right", kRole[k], joints[k], d,
+                            arm.reach_ratio, arm.assist_deg,
+                            hand.hand_valid ? "valid" : "held");
+                        break;
+                    }
+                }
+            }
+            arm.prev_joint_local = now;
+            arm.have_prev_joints = true;
+        }
+
+        // 1 Hz proof of what the arms are doing, for on-device logcat.
+        arm_trace_accum_s_ += dt;
+        if (arm_trace_accum_s_ >= 1.0f) {
+            arm_trace_accum_s_ = 0.0f;
+            const auto& l = arms_[0];
+            const auto& r = arms_[1];
+            PTV_INFO(
+                "builtin.avatar_body arms L reach={:.2f} assist={:.1f}deg "
+                "held={} | R reach={:.2f} assist={:.1f}deg held={}",
+                l.reach_ratio, l.assist_deg, l.held_frames, r.reach_ratio,
+                r.assist_deg, r.held_frames);
+            arms_[0].held_frames = 0;
+            arms_[1].held_frames = 0;
         }
     }
 
@@ -604,11 +829,26 @@ private:
         }
     }
 
-    void drive_legs(World& world, std::uint32_t avatar, MechanicContext& ctx) {
+    void drive_legs(World& world, std::uint32_t avatar, MechanicContext& ctx,
+                    float dt) {
         const float height = locomotion_clips::body_height(world, avatar) *
                              calibrated_scale_;
-        clips_.update(world, avatar, speed_, /*sprint=*/false, height, tune_,
-                      ctx);
+        // Running is the player's INTENT (holding the stick in), published
+        // by the slide -- not a speed threshold the body happens to cross.
+        const bool sprint = ctx.locomotion->sprinting();
+        const float leg_speed = legs_moving_ ? speed_ : 0.0f;
+        clips_.update(world, avatar, leg_speed, sprint && legs_moving_, height,
+                      tune_, ctx);
+
+        // 1 Hz proof of what the legs are doing, for on-device logcat.
+        trace_accum_s_ += dt;
+        if (trace_accum_s_ >= 1.0f && speed_ > locomotion_clips::kIdleSpeedEpsilon) {
+            PTV_INFO("builtin.avatar_body gait={} speed={:.2f}m/s sprint={} "
+                     "neck_drift={:.2f}m",
+                     locomotion_clips::gait_intent(clips_.gait()), speed_,
+                     sprint ? "yes" : "no", glm::length(drift_.value()));
+            trace_accum_s_ = 0.0f;
+        }
     }
 
     /** Keep CSelfViewHide in agreement with the configured policy. */
@@ -651,20 +891,32 @@ private:
     Quat facing_{1.0f, 0.0f, 0.0f, 0.0f};
     Vec3 forward_model_{0.0f, 0.0f, 1.0f};
     Vec3 eye_model_{0.0f, 1.6f, 0.0f};
+    int drift_joint_{-1};
+    Vec3 drift_bind_model_{0.0f};
+    // The neck in model space, and the eyes' offset from it in the
+    // headset's own frame.
+    Vec3 pivot_model_{0.0f, 1.45f, 0.0f};
+    Vec3 eye_from_pivot_head_{0.0f, 0.15f, -0.08f};
+    avatar_body::NeckDrift drift_{};
     float sole_y_model_{0.0f};
     float height_m_{1.75f};
 
     // --- per-frame state ---
     float base_scale_{1.0f};
     float calibrated_scale_{1.0f};
-    bool calibration_done_{false};
-    float calibration_wait_s_{0.0f};
-    std::vector<float> calibration_samples_;
+    avatar_body::HeightCalibration calibration_{};
     float body_yaw_{0.0f};
     float last_rig_yaw_{0.0f};
-    Vec3 prev_root_{0.0f};
-    bool have_prev_root_{false};
+    Vec3 prev_pivot_{0.0f};
+    bool have_prev_pivot_{false};
+    bool legs_moving_{false};
     float speed_{0.0f};
+    float trace_accum_s_{0.0f};
+    float arm_trace_accum_s_{0.0f};
+    bool body_jumped_{false};
+    int jump_warnings_{0};
+    bool walk_speed_param_{false};
+    bool run_speed_param_{false};
     locomotion_clips::Tunables tune_{};
     locomotion_clips::Selector clips_;
 };

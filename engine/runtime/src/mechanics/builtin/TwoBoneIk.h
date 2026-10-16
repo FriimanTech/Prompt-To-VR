@@ -166,4 +166,56 @@ inline glm::quat rotation_between(const glm::vec3& from, const glm::vec3& to) {
     return glm::angleAxis(std::acos(std::clamp(d, -1.0f, 1.0f)), axis);
 }
 
+// ---------------------------------------------------------------------------
+// Shoulder (clavicle) assist on a long reach: the shoulder comes forward a
+// little so a fully extended arm does not look dislocated.
+//
+// It MUST be computed from the clavicle's bind pose every frame. Applied on
+// top of the clavicle's current rotation -- which still holds last frame's
+// assist -- it compounds: the shoulder winds towards the target frame after
+// frame, the reach shortens, the assist lets go, the shoulder snaps back,
+// and the arm whips in and out of view.
+// ---------------------------------------------------------------------------
+
+/** How much of the full assist a reach earns: 0 up to 85 % of the arm's
+ *  length, rising to 1 at 115 %. Continuous, so it never switches on with a
+ *  jump. */
+inline float shoulder_assist_weight(float reach, float arm_len) {
+    if (!(arm_len > 1.0e-5f) || !std::isfinite(reach)) return 0.0f;
+    return std::clamp((reach - 0.85f * arm_len) / (0.3f * arm_len), 0.0f, 1.0f);
+}
+
+/** Fraction of the clavicle->target swing a full-weight assist applies. */
+inline constexpr float kShoulderAssistFraction = 0.2f;
+/** Hard cap on how far the assist may turn the shoulder (radians). */
+inline constexpr float kShoulderAssistMaxRad = 25.0f * 3.14159265358979f / 180.0f;
+
+/** The clavicle's WORLD rotation this frame.
+ *
+ *  ``clav_bind_world``: its world rotation with its own local at bind;
+ *  ``clav_pos`` / ``shoulder_pos``: the clavicle and upper-arm joints in that
+ *  same pose; ``target``: where the wrist must reach; ``weight``: the
+ *  (smoothed) assist weight. Same inputs, same answer -- it has no memory. */
+inline glm::quat shoulder_assist(const glm::quat& clav_bind_world,
+                                 const glm::vec3& clav_pos,
+                                 const glm::vec3& shoulder_pos,
+                                 const glm::vec3& target, float weight) {
+    const float w = std::clamp(std::isfinite(weight) ? weight : 0.0f, 0.0f, 1.0f);
+    if (w <= 0.0f) return clav_bind_world;
+    const glm::quat swing =
+        rotation_between(shoulder_pos - clav_pos, target - clav_pos);
+    const float full = 2.0f * std::acos(std::clamp(std::abs(swing.w), 0.0f, 1.0f));
+    float frac = kShoulderAssistFraction * w;
+    if (full * frac > kShoulderAssistMaxRad && full > 1.0e-6f) {
+        frac = kShoulderAssistMaxRad / full;
+    }
+    const glm::quat out = glm::normalize(
+        glm::slerp(glm::quat(1, 0, 0, 0), swing, frac) * clav_bind_world);
+    if (!std::isfinite(out.w) || !std::isfinite(out.x) ||
+        !std::isfinite(out.y) || !std::isfinite(out.z)) {
+        return clav_bind_world;
+    }
+    return out;
+}
+
 }  // namespace ptv::two_bone_ik

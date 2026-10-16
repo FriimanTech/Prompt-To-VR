@@ -126,6 +126,8 @@ public:
         // virtual thumb, because that is where a Touch player's thumb sits
         // almost all the time.
         bool thumbstick_touch[2]{false, false};
+        // Pressing the stick down (L3 / R3).
+        bool thumbstick_click[2]{false, false};
         // Thumb resting on a face button (A/B right, X/Y left).
         bool button_a_touch{false};
         bool button_b_touch{false};
@@ -279,6 +281,7 @@ private:
     XrAction trigger_touch_action_{XR_NULL_HANDLE};    // capsense, per hand
     XrAction thumbrest_touch_action_{XR_NULL_HANDLE};  // capsense, per hand
     XrAction thumbstick_touch_action_{XR_NULL_HANDLE}; // capsense, per hand
+    XrAction thumbstick_click_action_{XR_NULL_HANDLE}; // stick press, per hand
     XrAction button_a_touch_action_{XR_NULL_HANDLE};   // capsense, right
     XrAction button_b_touch_action_{XR_NULL_HANDLE};   // capsense, right
     XrAction button_x_touch_action_{XR_NULL_HANDLE};   // capsense, left

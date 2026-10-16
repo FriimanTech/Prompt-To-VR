@@ -810,6 +810,15 @@ vignette settings go in the slide / smooth-turn ``config`` as
 A deterministic pass enforces all of this after you, so a plan that
 disagrees is corrected, not honoured.
 
+WALK / RUN IS BUILT IN. Both slides already run when the player holds the
+left stick IN while pushing forward (Hold / Toggle / Off is a settings-menu
+choice), at the avatar's measured run-clip speed, and the avatar's run clip
+plays only while sprinting. NEVER plan a generated sprint, run, dash-speed
+or "speed modifier" mechanic for the built-in slides -- the slide owns its
+speed and nothing else can change it. When the prompt names speeds or asks
+for no running, put it in the slide's ``config``: ``max_speed_mps`` (walk)
+and ``sprint: {enabled, speed_mps}`` (run).
+
 TEST FILES ARE UNUSED. ``code_task.test_files[]`` is intentionally
 ignored by the orchestrator. Leave it empty. Do not draft test stubs.
 
@@ -1357,8 +1366,11 @@ ptv/api/InputSnapshot.h) exposes:
 
   Helpers: input.trigger_pressed(hand) / trigger_released / trigger_down,
   grip_pressed / grip_released / grip_down, button_a_pressed()... (rising
-  edge), button_down("a"), button_pressed("a"), and
-  input.hand_holding(entity) -> 0/1/-1.
+  edge), button_down("a"), button_pressed("a"), the thumbstick presses
+  input.thumbstick_down(hand) / thumbstick_clicked(hand) (also
+  button_down("left_thumbstick" | "right_thumbstick" | "l3" | "r3")), and
+  input.hand_holding(entity) -> 0/1/-1. The LEFT stick press is the
+  built-in slide's sprint control in sliding games; do not reuse it there.
 
   Capsense helpers: input.trigger_touching(hand),
   input.trigger_resting(hand) (touched but NOT pulled -- the "finger laid
@@ -1419,8 +1431,15 @@ than breaking the player out of the world.
     ->set_input_lock(const char* owner, bool locked)  // a menu claims the
                        // sticks while open and MUST release them on close
     ->tunables()       // scene-authored comfort values -- default to these
-                       // (slide_max_speed_mps, teleport_max_horizontal_m,
-                       //  snap_turn_degrees, accel/decel taus, ...)
+                       // (slide_max_speed_mps = walk, sprint_speed_mps = run,
+                       //  teleport_max_horizontal_m, snap_turn_degrees,
+                       //  accel/decel taus, ...)
+    ->sprinting()      // READ-ONLY: true while the player is running (the
+                       // built-in slide owns sprint: hold the left stick in)
+    ->gait_speed_cap() // the slide's current top speed, walk -> run
+  Walking vs running belongs to the built-in slide. Do NOT write a sprint,
+  run or speed-modifier mechanic, and never call publish_sprint(): read
+  sprinting() if gameplay cares (stamina, noise, aim sway).
   NEVER feed a vertical component into a walking move (a look-direction
   vector with Y left in makes the player climb walls or sink). Flatten it:
   ``Vec3 fwd = head_fwd; fwd.y = 0; fwd = glm::normalize(fwd);``
