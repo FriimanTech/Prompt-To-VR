@@ -212,6 +212,42 @@ def _env_brief(job: EnvironmentJob, total: int) -> list[str]:
     return lines
 
 
+def _npc_brief(ctx: PipelineContext) -> list[str]:
+    """Tell the architect that NPCs arrive during play, so it declares the
+    entrances the encounter director spawns them through."""
+
+    try:
+        plan = ctx.npc_plan or ctx.store.load_npc_plan(ctx.project_id)
+    except Exception:  # noqa: BLE001 - an older project may have no plan
+        plan = None
+    if plan is None or not plan.npcs:
+        return []
+    encounters = getattr(plan, "encounters", None)
+    arriving = [
+        n.asset_id for n in plan.npcs
+        if n.role.value in ("enemy", "boss", "critter")
+    ]
+    if encounters is None and not arriving:
+        return []
+    lines = [
+        "NPCs ARRIVE DURING PLAY in this game "
+        f"({', '.join(arriving) or 'see the NPC plan'}). Declare at least 3 "
+        "npc_spawn_zone entrances spread around the level, each 12 m or more "
+        "from the player spawn, on walkable floor inside a nav_region."
+    ]
+    persistent = [
+        n.asset_id for n in plan.npcs
+        if getattr(n, "persistent_count", 0) and n.role.value in ("ally", "neutral")
+    ]
+    if persistent:
+        lines.append(
+            "Companions start beside the player "
+            f"({', '.join(persistent)}): keep 3 m around the player spawn "
+            "clear and walkable."
+        )
+    return lines
+
+
 def run_with_architect(
     ctx: PipelineContext, architect: Optional[WorldArchitect] = None
 ) -> StageResult:
@@ -350,6 +386,7 @@ def run_with_architect(
             )
         if job is not None:
             extra.extend(_env_brief(job, len(jobs)))
+        extra.extend(_npc_brief(ctx))
 
         inp = WorldAgentInput(
             project_id=project_id,

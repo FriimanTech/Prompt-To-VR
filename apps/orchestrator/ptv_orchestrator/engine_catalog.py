@@ -373,6 +373,96 @@ _BUILTINS: tuple[CatalogEntry, ...] = (
             "thing on a Quest 3, so respect the NpcPlan's max_concurrent."
         ),
     ),
+    CatalogEntry(
+        id="builtin.encounter_director",
+        summary=(
+            "The scene's NPC population: clones the hidden template of each "
+            "NPC type into live actors, in WAVES (or continuously, or a fixed "
+            "set), starting on a trigger (on load, after a delay, when the "
+            "player grabs a tagged item, or on a signal from game code), "
+            "with a cap on how many are alive at once, spawn points away from "
+            "the player and out of their sight, defeat counting and a "
+            "countdown between waves. Publishes everything through "
+            "ctx.encounters (phase, wave_index, wave_count, alive, "
+            "remaining_in_wave, defeated_total, countdown_s, start/pause/"
+            "reset) for a wave HUD or mission flow. The scene compiler binds "
+            "it automatically from the NpcPlan's encounters -- NEVER plan or "
+            "generate a wave spawner, an NPC pool or a spawn loop."
+        ),
+        category="npc",
+        params={
+            "mode": "'waves' (default) | 'continuous' (last wave repeats) | 'fixed'",
+            "start": "{kind: on_load | delay | player_grabs_tag | signal, delay_s, tag}",
+            "max_concurrent": "int, default 6 (also capped by the animated-agent budget)",
+            "spawn_interval_s": "float, default 1.5",
+            "inter_wave_delay_s": "float, default 6.0",
+            "min_player_distance_m": "float, default 10",
+            "waves": "[{groups: [{template: <entity id>, count}]}] -- compiled from the NpcPlan",
+            "zones": "[{id, position, radius, tags}] -- compiled from the world's npc_spawn_zones",
+        },
+        inputs=("NpcPlan.encounters (compiled)", "player grab state"),
+        comfort_notes=(
+            "Spawns outside the player's sight and at least "
+            "min_player_distance_m away, so nothing pops in at arm's length."
+        ),
+    ),
+    CatalogEntry(
+        id="builtin.npc.follow",
+        summary=(
+            "A companion that follows its leader (the player by default): "
+            "keeps a trailing band, routes around walls with the navigation "
+            "service, walks and runs to keep up, and -- when lost behind "
+            "geometry or left far behind by a teleport -- is re-placed behind "
+            "the leader, out of their view. Never fights. Bind together with "
+            "builtin.character_locomotion. Use it for 'an ally that follows "
+            "me around'; generate code only for behaviour it cannot express."
+        ),
+        category="npc",
+        params={
+            "leader_tag": "string, default 'player'",
+            "min_distance_m": "float, default 1.8 (stops when this close)",
+            "max_distance_m": "float, default 2.8 (starts moving when farther)",
+            "run_distance_m": "float, default 6.0 (runs when farther)",
+            "walk_speed_mps": "float, default 1.4",
+            "run_speed_mps": "float, default 3.5",
+            "catchup_distance_m": "float, default 18 (re-place when farther)",
+            "stuck_catchup_s": "float, default 4 (re-place when stuck this long)",
+            "catch_up": "bool, default true",
+        },
+        inputs=("leader position", "navigation"),
+    ),
+    CatalogEntry(
+        id="builtin.npc.melee_chase",
+        summary=(
+            "An enemy that chases its target (nearest hostile, or a tag such "
+            "as 'player'), routes around walls, telegraphs a melee attack "
+            "with a wind-up, lands the hit only if still in reach with a "
+            "clear line, respects a cooldown, and staggers briefly when hurt. "
+            "Plays the 'attack' and 'hurt' intents; death is the engine's. "
+            "Every number is a param, so the variants of one NPC family "
+            "(standard / tall-fast / big-bulky) are this one mechanic with "
+            "different settings. Bind together with "
+            "builtin.character_locomotion."
+        ),
+        category="npc",
+        params={
+            "target_tag": "string, default '' = nearest hostile by faction",
+            "sight_range_m": "float, default 30",
+            "chase_speed_mps": "float, default 3.5",
+            "walk_speed_mps": "float, default 1.4 (used when close)",
+            "sprint": "bool, default true (run clip while chasing)",
+            "attack_range_m": "float, default 1.6",
+            "windup_s": "float, default 0.5 (telegraph before the hit)",
+            "attack_cooldown_s": "float, default 1.5",
+            "damage": "float, default 10",
+            "hit_reach_m": "float, default attack_range_m + 0.6",
+            "stagger_s": "float, default 0.35",
+            "attack_clip": "intent, default 'attack'",
+            "hurt_clip": "intent, default 'hurt'",
+            "gait_variant_when_chasing": "string, optional (e.g. 'punching')",
+        },
+        inputs=("perception", "navigation", "combat"),
+    ),
     # ----- The player's own body -----
     CatalogEntry(
         id="builtin.avatar_body",

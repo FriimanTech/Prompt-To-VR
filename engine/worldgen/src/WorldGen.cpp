@@ -1,5 +1,6 @@
 #include "WorldGen.h"
 
+#include <algorithm>
 #include <cctype>
 #include <cmath>
 #include <map>
@@ -286,6 +287,17 @@ public:
         interactives_.push_back(std::move(i));
     }
 
+    void npc_spawn_zone(const NpcSpawnZoneDesc& d) override {
+        nlohmann::json tags = nlohmann::json::array();
+        for (const auto& t : d.tags) tags.push_back(t);
+        npc_spawn_zones_.push_back(nlohmann::json{
+            {"id", d.id},
+            {"position", vec3_json(d.position)},
+            {"radius", std::max(0.0f, d.radius)},
+            {"tags", tags},
+        });
+    }
+
     void spawn_point(const SpawnPointDesc& d) override {
         const float yaw = std::atan2(d.facing.x, -d.facing.z);
         const float hy = yaw * 0.5f;
@@ -328,6 +340,7 @@ public:
         // none", which a validator has to be able to tell apart from empty.
         if (!interactives_.empty()) doc_["interactives"] = interactives_;
         if (!spawn_points_.empty()) doc_["spawn_points"] = spawn_points_;
+        if (!npc_spawn_zones_.empty()) doc_["npc_spawn_zones"] = npc_spawn_zones_;
         if (!portals_.empty()) doc_["portals"] = portals_;
         return doc_;
     }
@@ -407,6 +420,7 @@ private:
     std::vector<nlohmann::json> nav_links_;
     std::vector<nlohmann::json> interactives_;
     std::vector<nlohmann::json> spawn_points_;
+    std::vector<nlohmann::json> npc_spawn_zones_;
     std::vector<nlohmann::json> portals_;
     /** Occurrences per slugified name, so a repeated name gets a stable
      *  suffix instead of every entity depending on call order. */

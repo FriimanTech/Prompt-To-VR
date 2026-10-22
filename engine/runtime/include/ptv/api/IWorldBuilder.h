@@ -312,6 +312,21 @@ struct SpawnPointDesc {
     Vec3 facing{0.0f, 0.0f, -1.0f};
 };
 
+/** Where NPCs enter the level: a gate the enemies pour through, a cave
+ * mouth, a landing pad, a ruined archway.
+ *
+ * The encounter director spawns each wave's NPCs inside these, away from
+ * the player and out of their sight. Declare several, spread around the
+ * level and AWAY from the player spawn (12 m or more), on walkable floor
+ * inside a declared nav_region. ``tags`` let a game send different NPC
+ * types in through different entrances ("enemy_entry", "boss_gate"). */
+struct NpcSpawnZoneDesc {
+    std::string id;           // "west_gate", "cave_mouth"
+    Vec3 position{};          // on the floor
+    float radius{2.0f};       // spawns scatter inside this disc
+    std::vector<std::string> tags{};
+};
+
 /** A way out of this environment and into another.
  *
  * This is what the author places -- the gate, the doorway, the fire truck --
@@ -364,6 +379,10 @@ public:
 
     // A way out of this environment into another.
     virtual void portal(const PortalDesc& desc) = 0;
+
+    // Where NPC waves enter the level. Declare these whenever the game has
+    // enemies or other NPCs that arrive during play. See NpcSpawnZoneDesc.
+    virtual void npc_spawn_zone(const NpcSpawnZoneDesc& desc) { (void)desc; }
 
     // A deterministic per-world seed (set by the host). Use it for any
     // pseudo-random variation so results are reproducible.

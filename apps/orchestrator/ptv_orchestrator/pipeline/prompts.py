@@ -146,6 +146,37 @@ prompt asks for belongs in the mechanic that triggers it, not in the
 asset list. A loudspeaker or an alarm bell IS an asset; the sound it
 makes is not.
 
+NPC ROSTER -- HOW MANY UNIQUE NPC TYPES TO CREATE. For every kind of
+non-player character the prompt names, emit one ``npc_roster`` family and
+decide its ``variants``: each variant is ONE unique 3D model and MUST have
+its own AssetEntry (``category`` "npc_character" / "enemy_character";
+``variants[].asset_id`` = that entry's id). Unique models are NOT the number
+of NPCs in play: the engine spawns any number of copies of each model, so
+never plan identical duplicate assets to get more of something.
+
+Read ``count_reading`` from the prompt, then plan EXACTLY this many variants:
+  * ``singular`` -- one specific character ("a friendly Green Lantern
+    ally", "the dragon boss"): 1 variant.
+  * ``single_type_requested`` -- the prompt wants them all alike ("all the
+    zombies are the same", "one goblin type"): 1 variant, reused.
+  * ``explicit_types`` -- the prompt names how many kinds ("three types of
+    drones"): set ``explicit_count`` and plan that many.
+  * ``explicit_number`` -- a count of individuals but not of kinds ("five
+    goblins"): set ``instance_hint``; plan min(3, that number).
+  * ``plural_unspecified`` -- plural with no number ("shoot goblin enemy
+    NPCs", "waves of zombies"): plan EXACTLY 3 variants.
+Make the variants genuinely different bodies that fit the fiction -- by
+default a ``standard`` one, a ``tall_lean`` one (faster) and a ``big_bulky``
+one (hits harder, takes more damage) -- and give each a ``physique``,
+``visual_notes`` describing how it looks different from its siblings, and
+stat multipliers relative to the standard one (``speed_scale``,
+``damage_scale``, ``health_scale``, ``size_scale``). A tall goblin might be
+speed 1.3 / damage 1.25; a big bulky one speed 0.8 / damage 2.0 / health
+2.5 / size 1.35. Each variant's AssetEntry summary must describe THAT body
+(height, build, gear) so the image and 3D models really differ. An enemy
+family's waves are planned later; you only decide the kinds. A deterministic
+check rejects a roster whose variant count breaks these rules.
+
 CAPTURE SCENES THE PROMPT DESCRIBES. For each location named in the
 prompt (e.g. "Central Battery Plaza", "Training Arena", "Asteroid
 Mining Outpost"), emit one SceneEntry. The ``summary`` should describe
@@ -604,6 +635,46 @@ crowd, and lean on waves rather than one enormous simultaneous fight.
 
 Numbers should be plausible for the fiction: a human walks ~1.4 m/s and runs
 ~4 m/s; a charging beast is faster; something huge is slower.
+
+UNIQUE TYPES vs INSTANCES. The BuildSpec ``npc_roster`` already decided how
+many UNIQUE NPC types (models) exist: one NpcSpec per roster variant, with
+``family`` set to the roster family_id and ``variant`` to its physique. A
+type is a MODEL, not a count -- the engine spawns as many copies of each as
+the game needs. Never ask for more models to get more NPCs.
+
+PER-TYPE STATS. Variants of one family share their behaviours and differ in
+numbers. Start from a standard variant that fits the fiction, then apply the
+roster's multipliers: ``speed_scale`` to walk/run speed, ``damage_scale`` to
+damage, ``health_scale`` to max_health. A tall-lean goblin runs faster and
+hits a little harder; a big-bulky one is slower, hits far harder and takes
+far more punishment. Make the differences big enough to FEEL in play.
+
+WHO IS PLACED, WHO ARRIVES. Two separate questions:
+  * ``persistent_count`` -- copies PLACED in the scene at load that stay: a
+    companion who follows the player is 1; guards at a gate might be 2. A
+    singular character is always placed once and never spawned in waves.
+  * ``encounters`` -- NPC types that ARRIVE during play. Set it whenever
+    enemies keep coming, attack in waves, or arrive after the start. Fields:
+      - ``mode``: ``waves`` (numbered, the last clear is victory),
+        ``continuous`` (the last wave repeats endlessly) or ``fixed``.
+      - ``start``: ``player_grabs_tag`` with ``start_tag`` (picking up the
+        weapon starts the fight -- usually best, the player is ready),
+        ``delay`` with ``start_delay_s``, ``on_load``, or ``signal`` (a
+        start button in the game's own UI).
+      - ``waves``: each a list of ``groups`` ``{asset_id, count}``.
+      - ``max_concurrent`` (alive at once, all types), ``spawn_interval_s``,
+        ``inter_wave_delay_s``, ``min_player_distance_m``.
+    Design a PROGRESSION that fits the prompt: introduce the standard type
+    first, mix in the next one, then let the strongest close it out. For a
+    ten-wave goblin game, one good shape is waves 1-5 standard only, 6-7
+    standard + tall, 8-9 tall only, 10 big-bulky only -- that is an example,
+    not a template; size and order the waves to the game asked for. If the
+    prompt gives no wave count, 3-5 waves is a good default. Counts per wave
+    may exceed ``max_concurrent``: the engine spawns the rest as earlier
+    ones are defeated.
+  The engine's encounter director runs all of this. NEVER describe pooling,
+  pre-placed copies or spawning in ``notes`` -- that is not code anyone
+  writes any more.
 """
 
 
@@ -652,6 +723,16 @@ OR promoted-from-past-games) is a reasonable foundation. The catalog
 grows over time: every mechanic listed under "PROMOTED FROM PAST
 GAMES" is real, compiled, and free to reference by id, just like a
 built-in.
+
+NPC POPULATION IS THE ENGINE'S. ``builtin.encounter_director`` spawns
+every NPC that arrives during play -- waves, counts, caps, where they
+appear -- from the NPC plan's ``encounters``; it is added to the plan
+automatically. NEVER plan a spawner, wave manager, pool or "wave flow"
+that creates NPCs. A mission / wave HUD is fine: it READS the director
+through ``ctx.encounters``. NPC behaviour: "follows the player" ->
+``builtin.npc.follow``; "chases and hits" -> ``builtin.npc.melee_chase``
+(the compiler tunes each NPC type's speed, damage and range from the NPC
+plan). Generate NPC AI only for behaviour those cannot express.
 
 CONTROLLER BINDINGS. Every mechanic that is driven by a controller
 control MUST carry a ``binding`` object: ``{"control": <trigger|grip|
@@ -909,6 +990,19 @@ prompt's stated purpose for that asset. Use ``AssetItem.category`` plus
   * ``character`` otherwise (NPC / merchant / quest-giver) -> static
     capsule, tags include ``["npc"]``, placed where the prompt
     describes (default: 1.5 m to the player's right).
+  * NPC POPULATION follows the NPC plan, one entity per NPC TYPE (asset):
+      - a type that ARRIVES during play (it appears in the NPC plan's
+        ``encounters`` waves) -> exactly ONE hidden entity tagged
+        ``"template"`` (plus its role tags), parked below the level at
+        y = -50, with its health, faction and that type's mechanic
+        bindings. The engine's encounter director clones it for every
+        wave. NEVER place several copies, never tag anything ``"pooled"``,
+        and never bind a spawner or wave mechanic to it.
+      - a type with ``persistent_count`` > 0 (a companion, gate guards)
+        -> that many entities, near the player spawn for a companion.
+    The scene compiler enforces these counts and fills in each type's
+    speeds and damage, so per-type differences come from the NPC plan,
+    not from you.
   * ``prop`` flagged grabbable / wearable / pickup in ``style_notes`` ->
     dynamic AABB or sphere, tags include ``["interactable"]`` (and
     ``"grabbable"`` or ``"wearable"`` as appropriate), placed within
@@ -1473,6 +1567,24 @@ than breaking the player out of the world.
     ->live_count(template_entity) -> int
                      // Clone a hidden scene entity tagged "template"; you
                      // cannot build a mesh, rig or collider from scratch.
+                     // NOT for NPC waves: the encounter director owns those.
+
+  ctx.encounters   // READ the NPC waves the engine's director runs
+    ->configured() -> bool       // false when the game has no waves
+    ->phase() -> EncounterPhase  // Idle, Active, InterWave, Victory, Failed
+    ->wave_index() / ->wave_count()      // 0-based current wave, total
+    ->alive() -> int             // director-spawned NPCs alive right now
+    ->remaining_in_wave() -> int // still to spawn + alive in this wave
+    ->defeated_total() -> int
+    ->countdown_s() -> float     // seconds until the next wave (InterWave)
+    ->wave_started_seq() / ->wave_cleared_seq() / ->victory_seq()
+                     // counters that tick up once per event: remember the
+                     // last value you saw and react when it changes
+    ->start()        // only for start "signal": begin the first wave
+    ->pause(bool) / ->paused() / ->reset()
+                     // a menu may pause; reset() restarts from wave 1
+  Wave HUDs, score panels and "victory" screens READ this. Never spawn,
+  pool, count or despawn NPCs yourself, and never write a wave loop.
 
   ctx.attach       // rigidly parent one entity to a point on another
     ->attach(child, parent, "hand_r", local_pos, local_rot) -> bool
@@ -1781,9 +1893,16 @@ Points worth copying:
 * Contact damage ("the ducks hurt you when they touch you") is
   ``ctx.contacts->began(self, player)`` plus ``apply_damage``. The
   invulnerability window is already handled, so do not add your own.
-* Spawning waves means cloning a hidden scene entity tagged ``"template"``
-  via ``ctx.spawn->instance(...)``, and respecting
-  ``ctx.spawn->live_count(...)``. You cannot construct a mesh or a rig.
+* NPC waves are NOT yours. ``builtin.encounter_director`` clones the hidden
+  per-type templates, places them out of sight, caps how many are alive and
+  advances the waves; a HUD reads ``ctx.encounters``. Never spawn, pool or
+  despawn NPCs, and never tag entities ``"pooled"``.
+* Following the player and chase-then-melee are built in
+  (``builtin.npc.follow``, ``builtin.npc.melee_chase``), tuned per NPC type
+  by the scene compiler. When an entity is bound to one of them, do not
+  write another mechanic that moves or attacks with it -- two mechanics
+  steering one character fight every frame. Generate AI only for what they
+  cannot express (ranged attacks, flight, special abilities).
 * If an NPC needs a motion Tripo has no clip for, ``has_clip`` returns false
   and you animate it yourself with ``set_joint_rotation``. The ABILITY must
   work either way -- a flying NPC still flies if it has no flight clip.
@@ -2155,6 +2274,23 @@ that link's ``gated_by`` to the interactive's id, plus the state that permits
 passage (``gate_state_key`` and ``gate_state_value``). Without it the link is
 an unconditional claim that the route exists, and an NPC will walk straight
 through a door the player just shut.
+
+DECLARE WHERE NPCs ENTER. When the brief says NPCs arrive during play
+(enemy waves, raiders, reinforcements, wildlife), call
+``w.npc_spawn_zone(ptv::world::NpcSpawnZoneDesc{id, position, radius, tags})``
+for each place they come from -- a gate, a cave mouth, a breach in a wall,
+the far end of a road. The engine's encounter director spawns every wave
+inside these zones, picking ones out of the player's sight. Rules:
+  * Declare at least 3, spread around the level, each 12 m or more from the
+    player spawn, so enemies arrive from different directions.
+  * Put each ON walkable floor inside a declared ``nav_region`` (the
+    position is on the floor; ``radius`` 1.5-4 m), never inside geometry.
+  * Make each one a believable entrance and dress it (an archway, a gap in a
+    palisade, a dark doorway), so arrivals read as coming FROM somewhere.
+  * ``tags`` may group them (``"enemy_entry"``, ``"boss_gate"``) when the
+    brief sends different NPC types through different entrances.
+A level with no zones still works -- NPCs then appear in a ring around the
+player -- but it never looks as good.
 
 USE THE TAGS THE ENGINE ALREADY READS. Tags on ``spawn_primitive`` /
 ``add_mesh`` / ``place_object`` cost nothing and wire real behaviour:

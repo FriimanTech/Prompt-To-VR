@@ -120,6 +120,8 @@ def run(ctx: PipelineContext) -> StageResult:
                 reused += 1
                 continue
             if animated_glb.is_file():
+                _repair_clip_map(ctx, item.id, prior, requests, cap,
+                                 rig_report.get(item.id), animated_glb)
                 produced.append(_rel(ctx, animated_glb))
                 reused += 1
                 continue
@@ -360,6 +362,45 @@ def run(ctx: PipelineContext) -> StageResult:
 # ---------------------------------------------------------------------------
 
 
+def _repair_clip_map(
+    ctx: PipelineContext,
+    asset_id: str,
+    prior: dict[str, Any],
+    requests: list[tuple[str, str | None]],
+    cap: int,
+    rig: Any,
+    animated_glb: Path,
+) -> None:
+    """Re-derive intent -> clip for an asset animated earlier.
+
+    Older runs paired clips by position and could map ``run`` onto the
+    ``fall`` clip. The presets and the GLB are already paid for and on disk,
+    so this costs nothing: the same preset resolution is repeated and paired
+    against the clip names actually in the file. ``prior`` is updated in
+    place.
+    """
+
+    clip_names = _glb_animation_names(animated_glb)
+    if not clip_names:
+        return
+    rig_type = str((rig or {}).get("rig_type") or prior.get("rig_type") or "biped")
+    rig_model = (rig or {}).get("model") or prior.get("model")
+    _presets, mapping, _dropped = resolve_tripo_motions(
+        requests[:cap], rig_type, rig_model
+    )
+    presets = list(prior.get("presets") or _presets)
+    fixed = _pair_intents_to_clips(mapping, presets, clip_names)
+    if fixed and fixed != prior.get("animations"):
+        msg = (
+            f"{asset_id}: corrected intent -> clip map "
+            f"{prior.get('animations')} -> {fixed}"
+        )
+        ctx.emit(_STAGE, "info", msg)
+        ctx.store.append_log(ctx.project_id, "asset_animation", msg)
+        prior["animations"] = fixed
+        prior["clip_names"] = clip_names
+
+
 def _make_client(ctx: PipelineContext) -> TripoClient:
     kwargs: dict[str, Any] = {"api_key": ctx.settings.tripo_api_key}
     if ctx.settings.tripo_base_url:
@@ -405,21 +446,53 @@ def _glb_animation_names(path: Path) -> list[str]:
     return names
 
 
+def _name_key(name: str) -> str:
+    """Comparable form of a preset or clip name.
+
+    ``preset:biped:slash``, ``Armature|preset_slash``, ``slash`` and
+    ``Slash`` all reduce to ``slash``.
+    """
+
+    tail = name.replace("|", ":").rsplit(":", 1)[-1].lower()
+    for prefix in ("preset_", "biped_", "quadruped_", "animation_"):
+        if tail.startswith(prefix):
+            tail = tail[len(prefix):]
+    return "".join(ch for ch in tail if ch.isalnum())
+
+
 def _pair_intents_to_clips(
     mapping: dict[str, str], presets: list[str], clip_names: list[str]
 ) -> dict[str, str]:
     """Map each requested intent onto the clip that fulfils it.
 
-    Tripo returns clips in the order the presets were sent, so preset i pairs
-    with clip i. Anything beyond what actually came back is left out entirely
-    -- an intent pointing at a clip that does not exist would make
-    ``play_clip`` fail at runtime for no visible reason.
+    By NAME: Tripo does not return clips in the order the presets were sent
+    (a request for run, slash, hurt, fall came back fall, hurt, run, slash),
+    so pairing by position sent a running goblin into its fall animation.
+    Each preset takes the clip whose name matches its own; only presets no
+    name accounts for fall back to the leftover clips in order. Anything
+    beyond what actually came back is left out entirely -- an intent pointing
+    at a clip that does not exist would make ``play_clip`` fail at runtime
+    for no visible reason.
     """
 
     preset_to_clip: dict[str, str] = {}
-    for i, preset in enumerate(presets):
-        if i < len(clip_names):
-            preset_to_clip[preset] = clip_names[i]
+    used: set[str] = set()
+    by_key: dict[str, list[str]] = {}
+    for clip in clip_names:
+        by_key.setdefault(_name_key(clip), []).append(clip)
+
+    unmatched: list[str] = []
+    for preset in presets:
+        candidates = [c for c in by_key.get(_name_key(preset), []) if c not in used]
+        if candidates:
+            preset_to_clip[preset] = candidates[0]
+            used.add(candidates[0])
+        else:
+            unmatched.append(preset)
+
+    leftovers = [c for c in clip_names if c not in used]
+    for preset, clip in zip(unmatched, leftovers):
+        preset_to_clip[preset] = clip
 
     out: dict[str, str] = {}
     for intent, preset in mapping.items():

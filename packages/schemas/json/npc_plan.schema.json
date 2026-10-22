@@ -30,6 +30,151 @@
       "title": "AnimationIntent",
       "type": "string"
     },
+    "EncounterGroup": {
+      "additionalProperties": false,
+      "description": "``count`` of one NPC type within a wave.",
+      "properties": {
+        "asset_id": {
+          "description": "Snake-case identifier, max 64 chars.",
+          "pattern": "^[a-z0-9][a-z0-9_.\\-]{0,63}$",
+          "title": "Asset Id",
+          "type": "string"
+        },
+        "count": {
+          "maximum": 200,
+          "minimum": 1,
+          "title": "Count",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "asset_id",
+        "count"
+      ],
+      "title": "EncounterGroup",
+      "type": "object"
+    },
+    "EncounterMode": {
+      "description": "How the population arrives over the game.",
+      "enum": [
+        "waves",
+        "continuous",
+        "fixed"
+      ],
+      "title": "EncounterMode",
+      "type": "string"
+    },
+    "EncounterPlan": {
+      "additionalProperties": false,
+      "description": "Which NPC types arrive during play, in what waves, under what caps.\n\nThe engine's ``builtin.encounter_director`` runs this: it clones each\ntype's hidden template, places it at a spawn zone out of the player's\nsight, caps how many are alive at once and counts defeats. Generated code\nnever spawns NPCs itself.",
+      "properties": {
+        "inter_wave_delay_s": {
+          "default": 8.0,
+          "maximum": 600.0,
+          "minimum": 0.0,
+          "title": "Inter Wave Delay S",
+          "type": "number"
+        },
+        "max_concurrent": {
+          "default": 6,
+          "maximum": 64,
+          "minimum": 1,
+          "title": "Max Concurrent",
+          "type": "integer"
+        },
+        "min_player_distance_m": {
+          "default": 10.0,
+          "maximum": 200.0,
+          "minimum": 0.0,
+          "title": "Min Player Distance M",
+          "type": "number"
+        },
+        "mode": {
+          "$ref": "#/$defs/EncounterMode",
+          "default": "waves"
+        },
+        "notes": {
+          "default": "",
+          "maxLength": 1000,
+          "title": "Notes",
+          "type": "string"
+        },
+        "spawn_interval_s": {
+          "default": 1.5,
+          "maximum": 60.0,
+          "minimum": 0.0,
+          "title": "Spawn Interval S",
+          "type": "number"
+        },
+        "start": {
+          "$ref": "#/$defs/EncounterStart",
+          "default": "on_load"
+        },
+        "start_delay_s": {
+          "default": 3.0,
+          "maximum": 600.0,
+          "minimum": 0.0,
+          "title": "Start Delay S",
+          "type": "number"
+        },
+        "start_tag": {
+          "default": "weapon",
+          "maxLength": 48,
+          "title": "Start Tag",
+          "type": "string"
+        },
+        "waves": {
+          "items": {
+            "$ref": "#/$defs/EncounterWave"
+          },
+          "maxItems": 50,
+          "minItems": 1,
+          "title": "Waves",
+          "type": "array"
+        }
+      },
+      "required": [
+        "waves"
+      ],
+      "title": "EncounterPlan",
+      "type": "object"
+    },
+    "EncounterStart": {
+      "description": "What begins the first wave.",
+      "enum": [
+        "on_load",
+        "delay",
+        "player_grabs_tag",
+        "signal"
+      ],
+      "title": "EncounterStart",
+      "type": "string"
+    },
+    "EncounterWave": {
+      "additionalProperties": false,
+      "properties": {
+        "groups": {
+          "items": {
+            "$ref": "#/$defs/EncounterGroup"
+          },
+          "maxItems": 8,
+          "minItems": 1,
+          "title": "Groups",
+          "type": "array"
+        },
+        "note": {
+          "default": "",
+          "maxLength": 300,
+          "title": "Note",
+          "type": "string"
+        }
+      },
+      "required": [
+        "groups"
+      ],
+      "title": "EncounterWave",
+      "type": "object"
+    },
     "MovementStyle": {
       "description": "How the character gets around, which decides whether it is rigged.",
       "enum": [
@@ -250,6 +395,19 @@
           "title": "Faction",
           "type": "string"
         },
+        "family": {
+          "anyOf": [
+            {
+              "maxLength": 64,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Family"
+        },
         "hostile_to": {
           "items": {
             "type": "string"
@@ -275,11 +433,31 @@
         "perception": {
           "$ref": "#/$defs/NpcPerception"
         },
+        "persistent_count": {
+          "default": 0,
+          "maximum": 50,
+          "minimum": 0,
+          "title": "Persistent Count",
+          "type": "integer"
+        },
         "role": {
           "$ref": "#/$defs/NpcRole"
         },
         "spawn": {
           "$ref": "#/$defs/NpcSpawn"
+        },
+        "variant": {
+          "anyOf": [
+            {
+              "maxLength": 32,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Variant"
         }
       },
       "required": [
@@ -292,6 +470,17 @@
   },
   "additionalProperties": false,
   "properties": {
+    "encounters": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/EncounterPlan"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
     "faction_notes": {
       "default": "",
       "maxLength": 2000,

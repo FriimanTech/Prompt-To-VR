@@ -36,6 +36,7 @@ from ptv_schemas import (
 from ptv_schemas.asset_manifest import AssetItem, CharacterRole
 
 from .context import PipelineContext, StageResult
+from .npc_population import npc_plan_violations, repair_npc_plan
 from .npc_plan_agent import (
     NpcDirector,
     NpcPlanAgentError,
@@ -166,6 +167,28 @@ def run_with_director(
         ctx.store.append_log(ctx.project_id, "npc_plan", message)
     else:
         plan = _drop_unknown_assets(ctx, plan, {i.id for i in candidates})
+        # The population has rules the engine depends on (every roster
+        # variant planned, companions placed once, waves naming real types).
+        # Ask once for a fix, then repair what is left deterministically.
+        problems = npc_plan_violations(plan, build_spec)
+        if problems:
+            ctx.emit(_STAGE, "warning",
+                     "NPC plan needs revising: " + "; ".join(problems)[:600])
+            try:
+                revised = director.run(
+                    build_director_message(inp)
+                    + "\n\nYour previous NpcPlan had these problems; return the"
+                    " COMPLETE plan with all of them fixed:\n"
+                    + "\n".join(f"- {p}" for p in problems)
+                )
+            except NpcPlanAgentError as exc:
+                ctx.store.append_log(ctx.project_id, "npc_plan",
+                                     f"revision failed: {exc}")
+            else:
+                plan = _drop_unknown_assets(ctx, revised, {i.id for i in candidates})
+        plan, repairs = repair_npc_plan(plan, build_spec)
+        for note in repairs:
+            ctx.emit(_STAGE, "info", note)
 
     art = ctx.store.save_npc_plan(ctx.project_id, plan)
     ctx.npc_plan = plan
@@ -186,6 +209,11 @@ def run_with_director(
         f"{len(plan.npcs)} NPC type(s), {animated} animated, {clips} clip(s) "
         "to retarget"
     )
+    if plan.encounters is not None:
+        message += (
+            f"; {len(plan.encounters.waves)} wave(s) of "
+            f"{len(plan.spawned_asset_ids())} type(s)"
+        )
     ctx.store.record_stage(
         state, _STAGE, ProjectStatus.succeeded, message=message,
         artifacts=[art.path],

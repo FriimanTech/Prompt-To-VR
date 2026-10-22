@@ -22,11 +22,12 @@ from typing import Iterable, List
 from ptv_schemas import (
     AssetCategory,
     AssetManifest,
+    BuildSpec,
     PlayerExperience,
     ProjectStage,
     ProjectStatus,
 )
-from ptv_schemas.asset_manifest import AssetItem
+from ptv_schemas.asset_manifest import AssetItem, CharacterRole
 
 from .context import PipelineContext, StageResult
 from .llm import make_llm
@@ -126,6 +127,43 @@ def _partition(
     return kept, environment, audio
 
 
+def missing_roster_assets(manifest: AssetManifest, build_spec: BuildSpec) -> list[str]:
+    """NPC roster variants with no manifest item."""
+    have = {i.id for i in manifest.items}
+    return [
+        v.asset_id
+        for fam in build_spec.npc_roster
+        for v in fam.variants
+        if v.asset_id not in have
+    ]
+
+
+def normalise_roster_items(
+    manifest: AssetManifest, build_spec: BuildSpec
+) -> tuple[AssetManifest, list[str]]:
+    """Roster variants are NPC characters: make the manifest say so, so they
+    get a T-pose reference, a rig and animations."""
+    variant_ids = {v.asset_id for fam in build_spec.npc_roster for v in fam.variants}
+    if not variant_ids:
+        return manifest, []
+    fixed: list[str] = []
+    items = []
+    for item in manifest.items:
+        if item.id in variant_ids and (
+            item.category != AssetCategory.character
+            or item.character_role != CharacterRole.npc
+        ):
+            item = item.model_copy(update={
+                "category": AssetCategory.character,
+                "character_role": CharacterRole.npc,
+            })
+            fixed.append(item.id)
+        items.append(item)
+    if fixed:
+        manifest = manifest.model_copy(update={"items": items})
+    return manifest, fixed
+
+
 def run(ctx: PipelineContext) -> StageResult:
     ctx.emit(ProjectStage.asset_manifest, "running", "Planning AssetManifest")
     state = ctx.store.load_state(ctx.project_id)
@@ -153,6 +191,46 @@ def run(ctx: PipelineContext) -> StageResult:
         model=ctx.settings.claude_light_model,
     )
     manifest = AssetManifest.model_validate(resp.data)
+
+    # Every NPC variant the BuildSpec planned is its own model. One dropped
+    # here is a whole kind of enemy that never exists, so ask again once.
+    missing = missing_roster_assets(manifest, build_spec)
+    if missing:
+        ctx.emit(
+            ProjectStage.asset_manifest,
+            "warning",
+            f"manifest is missing NPC variant asset(s) {missing}; asking again",
+        )
+        resp = client.generate_json(
+            prompt=(
+                "BuildSpec (JSON):\n"
+                + json.dumps(build_spec.model_dump(mode="json"), indent=2)
+                + "\n\nProduce an AssetManifest JSON object for the assets above."
+                + "\n\nYour previous manifest left out these NPC variants from"
+                f" the BuildSpec npc_roster: {missing}. Every roster variant"
+                " is its own character item (category 'character',"
+                " character_role 'npc') with its own look and size."
+            ),
+            schema=AssetManifest.model_json_schema(by_alias=True),
+            system=ASSET_MANIFEST_SYSTEM,
+            model=ctx.settings.claude_light_model,
+        )
+        manifest = AssetManifest.model_validate(resp.data)
+        still = missing_roster_assets(manifest, build_spec)
+        if still:
+            ctx.emit(
+                ProjectStage.asset_manifest,
+                "warning",
+                f"NPC variant asset(s) {still} still missing; those types will"
+                " not exist in the game",
+            )
+    manifest, fixed = normalise_roster_items(manifest, build_spec)
+    if fixed:
+        ctx.emit(
+            ProjectStage.asset_manifest,
+            "info",
+            f"marked NPC variant(s) {fixed} as rigged characters",
+        )
 
     # Drop what the pipeline cannot turn into a usable GLB. Only applied when
     # something survives, because AssetManifest requires at least one item and

@@ -480,6 +480,113 @@ public:
     virtual int live_count(std::uint32_t template_entity) const = 0;
 };
 
+/** Where an encounter (the scene's NPC waves) is in its life. */
+enum class EncounterPhase : int {
+    /** Configured but not started: waiting for its start trigger. */
+    Idle = 0,
+    /** A wave is in progress: NPCs are spawning and/or alive. */
+    Active = 1,
+    /** Between waves, counting down to the next one. */
+    InterWave = 2,
+    /** Every wave cleared. */
+    Victory = 3,
+    /** The player died; spawning has stopped. */
+    Failed = 4,
+};
+
+/** The state ``IEncounters`` reports, written by the encounter director.
+ *  Engine-internal: generated code reads it through ``IEncounters``. */
+struct EncounterState {
+    bool configured{false};
+    EncounterPhase phase{EncounterPhase::Idle};
+    int wave_index{0};
+    int wave_count{0};
+    int alive{0};
+    int remaining_in_wave{0};
+    int defeated_total{0};
+    float countdown_s{0.0f};
+    std::uint64_t wave_started_seq{0};
+    std::uint64_t wave_cleared_seq{0};
+    std::uint64_t victory_seq{0};
+    bool paused{false};
+    // Commands, consumed by the director.
+    bool start_requested{false};
+    bool reset_requested{false};
+};
+
+/**
+ * The scene's NPC population: who spawns, when, and how many are left.
+ *
+ * Owned by ``builtin.encounter_director``, which reads the scene's encounter
+ * plan (waves of NPC types, spawn zones, caps) and clones the hidden
+ * templates through ``ISpawn``. Generated code does NOT spawn or pool NPCs
+ * itself: it reads this to drive a wave HUD or mission flow, and may start,
+ * pause or reset the encounter. ``configured()`` is false in a scene with no
+ * encounter plan, and every other call is then inert.
+ */
+class IEncounters {
+public:
+    virtual ~IEncounters() = default;
+
+    virtual bool configured() const = 0;
+    virtual EncounterPhase phase() const = 0;
+    /** 0-based index of the current (or last finished) wave. */
+    virtual int wave_index() const = 0;
+    virtual int wave_count() const = 0;
+    /** Living NPCs this encounter spawned. */
+    virtual int alive() const = 0;
+    /** NPCs of the current wave not yet defeated (spawned or still to come). */
+    virtual int remaining_in_wave() const = 0;
+    virtual int defeated_total() const = 0;
+    /** Seconds until the next wave while ``InterWave``, or until the
+     *  delayed start while ``Idle``; 0 otherwise. */
+    virtual float countdown_s() const = 0;
+    /** Monotonic counters: compare with your last seen value to detect the
+     *  event once. */
+    virtual std::uint64_t wave_started_seq() const = 0;
+    virtual std::uint64_t wave_cleared_seq() const = 0;
+    virtual std::uint64_t victory_seq() const = 0;
+
+    /** Begin now (an encounter whose start trigger is ``signal`` waits for
+     *  this; any other trigger is simply pre-empted). */
+    virtual void start() = 0;
+    virtual void pause(bool paused) = 0;
+    virtual bool paused() const = 0;
+    /** Despawn everything this encounter spawned and wait for the start
+     *  trigger again (a "play again" button). */
+    virtual void reset() = 0;
+
+    /** Engine-internal: the state the director writes. Generated code must
+     *  not use it. */
+    virtual EncounterState* director_state() { return nullptr; }
+};
+
+/** The engine's IEncounters: a view over one EncounterState. */
+class EncounterBoard final : public IEncounters {
+public:
+    bool configured() const override { return s_.configured; }
+    EncounterPhase phase() const override { return s_.phase; }
+    int wave_index() const override { return s_.wave_index; }
+    int wave_count() const override { return s_.wave_count; }
+    int alive() const override { return s_.alive; }
+    int remaining_in_wave() const override { return s_.remaining_in_wave; }
+    int defeated_total() const override { return s_.defeated_total; }
+    float countdown_s() const override { return s_.countdown_s; }
+    std::uint64_t wave_started_seq() const override { return s_.wave_started_seq; }
+    std::uint64_t wave_cleared_seq() const override { return s_.wave_cleared_seq; }
+    std::uint64_t victory_seq() const override { return s_.victory_seq; }
+    void start() override { s_.start_requested = true; }
+    void pause(bool paused) override { s_.paused = paused; }
+    bool paused() const override { return s_.paused; }
+    void reset() override { s_.reset_requested = true; }
+    EncounterState* director_state() override { return &s_; }
+    /** Back to unconfigured, for a scene change. */
+    void clear() { s_ = EncounterState{}; }
+
+private:
+    EncounterState s_{};
+};
+
 /**
  * Rigidly parent one entity to a point on another.
  *
@@ -1363,6 +1470,9 @@ struct MechanicContext {
     ISceneTransition* transition{nullptr};
     IUi* ui{nullptr};
     IComfort* comfort{nullptr};
+    /** The scene's NPC waves (see IEncounters). Always set by the engine;
+     *  ``configured()`` is false when the scene has no encounter plan. */
+    IEncounters* encounters{nullptr};
 };
 
 }  // namespace ptv

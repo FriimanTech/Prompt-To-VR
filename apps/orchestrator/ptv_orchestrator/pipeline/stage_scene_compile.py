@@ -46,6 +46,14 @@ from ptv_schemas.asset_manifest import AssetCategory
 
 from ..engine_catalog import role_of
 from .context import PipelineContext, StageResult
+from .encounters import apply_npc_population, finalize_encounter_zones
+from .npc_population import repair_npc_plan
+from .gameplay_relocation import (
+    relocate_gameplay_layer,
+    resolve_overlaps,
+    spawn_pose,
+    yaw_from_direction,
+)
 from .player_bindings import bind_player_roles, player_block_fields
 
 
@@ -1389,14 +1397,46 @@ def _merge_world_into_scene(
     contracts: dict[str, dict[str, Any]] | None = None,
     manifest: AssetManifest | None = None,
     on_warning: Callable[[str], None] | None = None,
+    spec_yaw: float | None = None,
 ) -> dict:
     """Merge the C++-generated environment (world.scene.json) into a compiled
     gameplay scene doc: environment entities + sky + lights + spawn come from
-    the world; gameplay entities render on top of it."""
+    the world; gameplay entities render on top of it.
+
+    When the world starts the player somewhere other than where the SceneSpec
+    composed the gameplay layer, the layer moves with the player (see
+    gameplay_relocation). ``spec_yaw`` is the heading the SceneSpec composed
+    around; by default it is read from the compiled spawn rotation."""
     scales = (
         {a.id: float(a.target_scale_meters) for a in manifest.items}
         if manifest is not None
         else None
+    )
+    world_player = world_doc.get("player") or {}
+    world_spawn = (
+        world_player.get("spawn") if isinstance(world_player, dict) else None
+    )
+    w_pos, w_yaw = spawn_pose(world_spawn)
+    s_pos, s_yaw = spawn_pose((doc.get("player") or {}).get("spawn"))
+    if w_pos is not None and s_pos is not None:
+        relocate_gameplay_layer(
+            list(doc.get("entities") or []),
+            s_pos,
+            spec_yaw if spec_yaw is not None else (s_yaw or 0.0),
+            w_pos,
+            w_yaw or 0.0,
+            on_warning,
+        )
+    world_nav = world_doc.get("navigation")
+    regions = (
+        list(world_nav.get("regions") or [])
+        if isinstance(world_nav, dict) else []
+    )
+    resolve_overlaps(
+        list(doc.get("entities") or []),
+        list(world_doc.get("entities") or []),
+        regions,
+        on_warning,
     )
     world_entities = _repoint_world_meshes_to_lods(
         list(world_doc.get("entities") or []), nrep or {}, contracts, scales
@@ -1416,20 +1456,15 @@ def _merge_world_into_scene(
         doc["lights"] = list(world_lights) + list(doc.get("lights") or [])
     # Walkable topology the builder declared while placing the level. Without
     # it NPCs only have local steering, which cannot route through a doorway.
-    world_nav = world_doc.get("navigation")
     if isinstance(world_nav, dict) and world_nav.get("regions"):
         doc["navigation"] = world_nav
-    world_player = world_doc.get("player") or {}
-    world_spawn = (
-        world_player.get("spawn") if isinstance(world_player, dict) else None
-    )
     if isinstance(world_spawn, dict) and "position" in world_spawn:
         doc.setdefault("player", {})
         doc["player"]["spawn"] = world_spawn
 
     # Declared state, exits and named arrival points travel with the
     # environment that declared them.
-    for key in ("interactives", "spawn_points", "portals"):
+    for key in ("interactives", "spawn_points", "portals", "npc_spawn_zones"):
         if world_doc.get(key):
             doc[key] = world_doc[key]
 
@@ -1520,6 +1555,26 @@ def run(ctx: PipelineContext) -> StageResult:
     builds_dir.mkdir(parents=True, exist_ok=True)
     artifacts: list[str] = []
 
+    try:
+        npc_plan = ctx.npc_plan or ctx.store.load_npc_plan(ctx.project_id)
+    except Exception:  # noqa: BLE001 - projects from before the NPC plan
+        npc_plan = None
+    if npc_plan is not None and npc_plan.npcs:
+        # Same deterministic repairs the npc_plan stage applies, so a plan
+        # written before encounters existed still gets its companion placed
+        # and its waves run.
+        npc_plan, repairs = repair_npc_plan(npc_plan, build_spec)
+        for note in repairs:
+            ctx.emit(ProjectStage.scene_compile, "info", f"NPC plan: {note}")
+    # Generated mechanics that drive an NPC's movement: an NPC bound to one
+    # keeps it instead of also getting a built-in behaviour.
+    generated_ai_ids = {
+        f"generated.{it.code_task.id}"
+        for it in plan.items
+        if it.code_task is not None
+        and getattr(it.code_task.kind, "value", str(it.code_task.kind)) == "ai"
+    }
+
     # Accumulated, not written as we go: every scene's document needs the
     # index, and the index is not known until every scene has been compiled.
     compiled: list[tuple[str, dict]] = []
@@ -1543,6 +1598,34 @@ def run(ctx: PipelineContext) -> StageResult:
                 ProjectStage.scene_compile, "warning", f"{sid}: {m}"
             ),
         )
+        fd = scene_spec.player_spawn.face_direction
+        spec_yaw = yaw_from_direction([fd.x, fd.y, fd.z])
+        # The NPC population: one hidden template per spawned type, companions
+        # beside the player, per-type stats and behaviours, and the encounter
+        # director. In the SceneSpec's frame, so the relocation below carries
+        # companions to wherever the world starts the player.
+        npc_assets = {n.asset_id for n in (npc_plan.npcs if npc_plan else [])}
+        scene_has_npcs = scene_entry.id == entry_id or any(
+            e.mesh is not None and e.mesh.asset_id in npc_assets
+            for e in scene_spec.entities
+        )
+        if npc_plan is not None and scene_has_npcs:
+            pop = apply_npc_population(
+                doc, npc_plan, generated_ai_ids, spec_yaw=spec_yaw,
+                on_warning=(
+                    (lambda m, sid=scene_entry.id: ctx.emit(
+                        ProjectStage.scene_compile, "warning", f"{sid}: {m}"))
+                    if scene_entry.id == entry_id else None
+                ),
+            )
+            if pop.get("templates") or pop.get("persistent"):
+                ctx.store.append_log(
+                    ctx.project_id, "scene_compile",
+                    f"{scene_entry.id}: NPC templates {pop['templates']}, "
+                    f"placed {pop['persistent']}, built-in behaviours "
+                    f"{pop['behaviours']}",
+                )
+
         # Every scene gets its own environment now, not just the entry point.
         # Previously the other scenes compiled to gameplay entities floating
         # in an empty void, which is what a six-scene project actually
@@ -1554,7 +1637,17 @@ def run(ctx: PipelineContext) -> StageResult:
                 on_warning=lambda m, sid=scene_entry.id: ctx.emit(
                     ProjectStage.scene_compile, "warning", f"{sid}: {m}"
                 ),
+                spec_yaw=spec_yaw,
             )
+        zones = finalize_encounter_zones(
+            doc,
+            on_warning=lambda m, sid=scene_entry.id: ctx.emit(
+                ProjectStage.scene_compile, "warning", f"{sid}: {m}"
+            ),
+        )
+        if zones:
+            ctx.emit(ProjectStage.scene_compile, "info",
+                     f"{scene_entry.id}: encounter director has {zones} spawn zone(s)")
 
         # Every entity is now present -- authored, world-merged and
         # auto-instantiated alike -- so this is the one place a physics value

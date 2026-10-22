@@ -371,6 +371,95 @@ class TestEntry(StrictModel):
     automated: bool = False
 
 
+# ---------------------------------------------------------------------------
+# NPC roster: how many UNIQUE NPC types (assets) the game needs.
+#
+# Decided here, once, because assets are created from the BuildSpec. A game
+# that says "shoot goblin enemy NPCs" deserves a few kinds of goblin, not one
+# model cloned forever -- and a game that says "a friendly companion" needs
+# exactly one. How many of each type appear in play (instances, waves) is a
+# separate question the NPC plan answers; one asset can be spawned any
+# number of times.
+# ---------------------------------------------------------------------------
+
+
+class NpcCountReading(str, Enum):
+    """What the prompt said about how many KINDS of this NPC there are."""
+
+    #: One specific character ("a friendly Green Lantern ally"). 1 variant.
+    singular = "singular"
+    #: The prompt explicitly wants every one of them to look the same ("all
+    #: the zombies are the same model"). 1 variant, reused for every instance.
+    single_type_requested = "single_type_requested"
+    #: The prompt names how many kinds ("three types of drones"). Exactly
+    #: ``explicit_count`` variants.
+    explicit_types = "explicit_types"
+    #: The prompt gives a number of them but not of kinds ("five goblins").
+    #: min(3, that number) variants.
+    explicit_number = "explicit_number"
+    #: Plural with no number ("goblin enemy NPCs"). Exactly 3 variants.
+    plural_unspecified = "plural_unspecified"
+
+
+class NpcPhysique(str, Enum):
+    """The body archetype of one variant, which also suggests its stats."""
+
+    standard = "standard"
+    tall_lean = "tall_lean"
+    big_bulky = "big_bulky"
+    small_fast = "small_fast"
+    elite = "elite"
+    boss = "boss"
+    custom = "custom"
+
+
+class NpcVariantSpec(StrictModel):
+    """One unique NPC asset within a family."""
+
+    asset_id: IdStr = Field(..., description="The AssetEntry that is this variant's model.")
+    name: str = Field(..., max_length=128)
+    physique: NpcPhysique = NpcPhysique.standard
+    visual_notes: str = Field(
+        default="",
+        max_length=1500,
+        description="How this variant LOOKS different from its siblings.",
+    )
+    #: Relative to the family's standard variant. A tall-lean variant is
+    #: faster, a big-bulky one hits harder and soaks more damage.
+    speed_scale: float = Field(default=1.0, ge=0.2, le=4.0)
+    damage_scale: float = Field(default=1.0, ge=0.0, le=20.0)
+    health_scale: float = Field(default=1.0, ge=0.1, le=50.0)
+    size_scale: float = Field(default=1.0, ge=0.3, le=5.0)
+
+
+class NpcFamily(StrictModel):
+    """A kind of NPC the prompt names ("goblin enemies", "a companion")."""
+
+    family_id: IdStr
+    role: str = Field(
+        ..., max_length=16,
+        description="enemy | ally | neutral | critter | boss",
+    )
+    count_reading: NpcCountReading
+    #: The number of KINDS the prompt states (explicit_types only).
+    explicit_count: Optional[int] = Field(default=None, ge=1, le=8)
+    #: The number of individuals the prompt mentions, if any ("five
+    #: goblins" -> 5). Used by explicit_number and by the NPC plan.
+    instance_hint: Optional[int] = Field(default=None, ge=1, le=500)
+    reasoning: str = Field(default="", max_length=600)
+    variants: List[NpcVariantSpec] = Field(..., min_length=1, max_length=8)
+
+    def required_variant_count(self) -> int:
+        r = self.count_reading
+        if r in (NpcCountReading.singular, NpcCountReading.single_type_requested):
+            return 1
+        if r == NpcCountReading.explicit_types:
+            return int(self.explicit_count or len(self.variants))
+        if r == NpcCountReading.explicit_number:
+            return max(1, min(3, int(self.instance_hint or 3)))
+        return 3
+
+
 class BuildSpec(StrictModel):
     """Top-level specification for a generation run.
 
@@ -419,6 +508,9 @@ class BuildSpec(StrictModel):
     assets: List[AssetEntry] = Field(..., min_length=1, max_length=48)
 
     npc_summary: Optional[str] = Field(default=None, max_length=4000)
+    #: Every kind of NPC and its unique variants (one asset each). Empty for
+    #: a game with no NPCs.
+    npc_roster: List[NpcFamily] = Field(default_factory=list, max_length=16)
     hud_summary: Optional[str] = Field(default=None, max_length=4000)
     constraints: List[str] = Field(default_factory=list, max_length=50)
     acceptance_tests: List[TestEntry] = Field(..., min_length=1)

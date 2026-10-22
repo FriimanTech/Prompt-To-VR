@@ -41,6 +41,7 @@ from .mechanic_plan_agent import (
     build_planner_message,
 )
 from .movement import reconcile_mechanic_plan, required_roles
+from .npc_population import reconcile_npc_mechanics
 from .prompts import mechanic_plan_system
 
 
@@ -104,6 +105,14 @@ def run_with_planner(
             " NO other locomotion, turning, finger-posing, avatar-body or"
             " movement-menu mechanics): "
             + ", ".join(required_roles(build_spec)),
+            "NPC POPULATION: spawning, waves, pools and spawn loops belong to"
+            " builtin.encounter_director (added automatically when the NPC"
+            " plan has encounters) -- plan NO mechanic that spawns or pools"
+            " NPCs. Map 'follow the player' to builtin.npc.follow and"
+            " chase + melee attack to builtin.npc.melee_chase; generate code"
+            " only for NPC behaviour those cannot express (ranged attacks,"
+            " flight, special abilities), and for wave HUDs that READ"
+            " ctx.encounters.",
         ],
     )
 
@@ -137,6 +146,13 @@ def run_with_planner(
         ctx.emit(ProjectStage.mechanic_plan, "info", f"player roles: {note}"[:240])
         ctx.store.append_log(ctx.project_id, "mechanic_plan",
                              f"player roles: {note}")
+
+    # The NPC population runs on engine built-ins (spawning, following,
+    # chasing). Make sure the plan carries the ones the NPC plan needs.
+    plan, npc_notes = reconcile_npc_mechanics(plan, npc_plan)
+    for note in npc_notes:
+        ctx.emit(ProjectStage.mechanic_plan, "info", f"NPCs: {note}"[:240])
+        ctx.store.append_log(ctx.project_id, "mechanic_plan", f"NPCs: {note}")
 
     ctx.mechanic_plan = plan
     art = ctx.store.save_mechanic_plan(ctx.project_id, plan)

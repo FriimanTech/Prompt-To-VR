@@ -4,6 +4,7 @@
 #include <entt/entt.hpp>
 #include <memory>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 #include "ptv/core/QualityGovernor.h"
@@ -593,6 +594,11 @@ private:
     std::unique_ptr<PhysicsAccessService> physics_svc_;
     std::unique_ptr<ContactsService> contacts_svc_;
     std::unique_ptr<SpawnService> spawn_svc_;
+    // Gear entities cloned onto a spawned instance (a goblin's club): they
+    // are destroyed with that instance.
+    std::unordered_set<std::uint32_t> clone_children_;
+    // The scene's NPC waves, written by builtin.encounter_director.
+    EncounterBoard encounter_board_;
     std::unique_ptr<AttachService> attach_svc_;
     std::unique_ptr<CombatService> combat_svc_;
     std::unique_ptr<PerceptionService> perception_svc_;

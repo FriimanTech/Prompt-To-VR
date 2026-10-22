@@ -41,6 +41,7 @@
 #include "ptv/api/BodySlots.h"
 #include "ptv/api/IMechanic.h"
 #include "ptv/core/Logger.h"
+#include "ptv/ecs/Clone.h"
 #include "ptv/ecs/Skeleton.h"
 #include "ptv/ecs/World.h"
 #include "ptv/mechanics/MechanicRegistry.h"
@@ -3204,6 +3205,286 @@ PTV_REGISTER_MECHANIC("test.probe", ProbeMechanic)
 // exactly once. An enemy spawned mid-wave was therefore a ghost -- visible,
 // but with no collider and with none of its mechanics running. This checks
 // the per-entity attach path that replaces that.
+namespace {
+/** ISpawn over clone_entity_tree, without physics or a mechanic host. */
+struct FakeSpawn final : ptv::ISpawn {
+    ptv::World* world{nullptr};
+    std::vector<std::pair<std::uint32_t, std::uint32_t>> live;  // clone, template
+    std::uint32_t instance(std::uint32_t tmpl, const ptv::Vec3& pos,
+                           const ptv::Quat& rot) override {
+        std::vector<ptv::CloneRecord> made;
+        const auto e = ptv::clone_entity_tree(*world, static_cast<entt::entity>(tmpl),
+                                              pos, rot, made);
+        if (e == entt::null) return 0xFFFFFFFFu;
+        live.push_back({static_cast<std::uint32_t>(e), tmpl});
+        return static_cast<std::uint32_t>(e);
+    }
+    void despawn(std::uint32_t e) override {
+        if (world->valid(e)) world->registry().destroy(static_cast<entt::entity>(e));
+    }
+    int live_count(std::uint32_t tmpl) const override {
+        int n = 0;
+        for (const auto& [c, t] : live) {
+            if (t == tmpl && world->valid(c)) ++n;
+        }
+        return n;
+    }
+};
+
+entt::entity make_actor(ptv::World& world, const char* id, ptv::Vec3 pos,
+                        std::vector<std::string> tags, float hp_max) {
+    const auto e = world.create_entity(id);
+    ptv::Transform t{};
+    t.position = pos;
+    world.registry().emplace<ptv::CTransform>(e, ptv::CTransform{t});
+    world.registry().emplace<ptv::CTag>(e, ptv::CTag{std::move(tags)});
+    ptv::CHealth hp{};
+    hp.max = hp.current = hp_max;
+    hp.invuln_after_hit_s = 0.0f;
+    world.registry().emplace<ptv::CHealth>(e, hp);
+    return e;
+}
+}  // namespace
+
+// The engine's spawner: waves of a template, a cap on how many are alive,
+// defeats counted, a countdown between waves, victory, and a HUD-readable
+// board -- the machinery a generated game used to get wrong.
+static int case_encounter_director() {
+    ptv::World world;
+    make_actor(world, "player", ptv::Vec3(0.0f), {"player"}, 100.0f);
+    make_actor(world, "grunt_tmpl", ptv::Vec3(0.0f, -50.0f, 0.0f),
+               {"enemy", "template"}, 10.0f);
+    const auto host = world.create_entity("game_director");
+    world.registry().emplace<ptv::CTransform>(host, ptv::CTransform{});
+
+    FakeSpawn spawn;
+    spawn.world = &world;
+    ptv::EncounterBoard board;
+    ptv::MechanicContext ctx{};
+    ctx.spawn = &spawn;
+    ctx.encounters = &board;
+
+    const auto params = nlohmann::json::parse(R"({
+        "mode": "waves", "start": {"kind": "on_load"},
+        "max_concurrent": 2, "spawn_interval_s": 0.0, "inter_wave_delay_s": 1.0,
+        "min_player_distance_m": 5.0,
+        "waves": [{"groups": [{"template": "grunt_tmpl", "count": 3}]},
+                  {"groups": [{"template": "grunt_tmpl", "count": 1}]}],
+        "zones": [{"id": "gate", "position": [10, 0, 0], "radius": 1.0}]
+    })");
+    auto mech = ptv::MechanicRegistry::get().make_mechanic("builtin.encounter_director");
+    if (!mech) return fail("builtin.encounter_director is not registered");
+    const auto hid = static_cast<std::uint32_t>(host);
+    mech->on_attach(world, hid, params, ctx);
+    const ptv::InputSnapshot input{};
+    auto tick = [&](float s) {
+        const int n = std::max(1, static_cast<int>(s / 0.05f));
+        for (int i = 0; i < n; ++i) mech->on_update(world, hid, 0.05f, input, ctx);
+    };
+    auto kill_all = [&]() {
+        for (const auto& [c, t] : spawn.live) {
+            if (world.valid(c)) world.registry().get<ptv::CHealth>(static_cast<entt::entity>(c)).alive = false;
+        }
+    };
+
+    tick(0.05f);
+    if (board.phase() != ptv::EncounterPhase::Active || board.wave_index() != 0)
+        return fail("an on_load encounter did not start wave 1");
+    if (board.alive() != 2 || spawn.live.size() != 2)
+        return fail("the alive cap was not respected");
+    for (const auto& [c, t] : spawn.live) {
+        const auto p = world.registry().get<ptv::CTransform>(static_cast<entt::entity>(c)).t.position;
+        if (glm::length(p) < 5.0f) return fail("an NPC spawned inside the player's space");
+        bool templ = false;
+        for (const auto& tag : world.registry().get<ptv::CTag>(static_cast<entt::entity>(c)).tags)
+            templ = templ || tag == "template";
+        if (templ) return fail("a spawned NPC kept the template tag");
+    }
+    world.registry().get<ptv::CHealth>(static_cast<entt::entity>(spawn.live[0].first)).alive = false;
+    tick(0.1f);
+    if (board.defeated_total() != 1 || spawn.live.size() != 3 || board.alive() != 2)
+        return fail("a defeat did not free a slot for the rest of the wave");
+    kill_all();
+    tick(0.1f);
+    if (board.phase() != ptv::EncounterPhase::InterWave || board.wave_cleared_seq() != 1)
+        return fail("clearing wave 1 did not start the countdown");
+    tick(1.2f);
+    if (board.phase() != ptv::EncounterPhase::Active || board.wave_index() != 1 ||
+        board.wave_started_seq() != 2)
+        return fail("the second wave did not start after the countdown");
+    kill_all();
+    tick(0.1f);
+    if (board.phase() != ptv::EncounterPhase::Victory || board.victory_seq() != 1 ||
+        board.defeated_total() != 4)
+        return fail("clearing the last wave did not declare victory");
+
+    // A signal-started encounter waits for the game to say go; reset clears.
+    ptv::EncounterBoard board2;
+    ctx.encounters = &board2;
+    FakeSpawn spawn2;
+    spawn2.world = &world;
+    ctx.spawn = &spawn2;
+    auto p2 = params;
+    p2["start"] = {{"kind", "signal"}};
+    auto mech2 = ptv::MechanicRegistry::get().make_mechanic("builtin.encounter_director");
+    mech2->on_attach(world, hid, p2, ctx);
+    for (int i = 0; i < 20; ++i) mech2->on_update(world, hid, 0.05f, input, ctx);
+    if (!spawn2.live.empty() || board2.phase() != ptv::EncounterPhase::Idle)
+        return fail("a signal-started encounter began on its own");
+    board2.start();
+    mech2->on_update(world, hid, 0.05f, input, ctx);
+    if (spawn2.live.size() != 2) return fail("start() did not begin the encounter");
+    board2.reset();
+    mech2->on_update(world, hid, 0.05f, input, ctx);
+    for (const auto& [c, t] : spawn2.live) {
+        if (world.valid(c)) return fail("reset() left spawned NPCs behind");
+    }
+    if (board2.phase() != ptv::EncounterPhase::Idle)
+        return fail("reset() did not return to waiting");
+    return ok("encounter director: waves, alive cap, defeats, countdown, victory, "
+              "signal start and reset");
+}
+
+// Companions follow and catch up; enemies chase, wind up, hit, and flinch.
+static int case_npc_behaviors() {
+    ptv::World world;
+    const auto player = make_actor(world, "player", ptv::Vec3(10.0f, 0.0f, 0.0f),
+                                   {"player"}, 100.0f);
+    const auto grunt = make_actor(world, "grunt", ptv::Vec3(0.0f), {"enemy"}, 30.0f);
+    ptv::MechanicContext ctx{};
+    const ptv::InputSnapshot input{};
+    auto& reg = world.registry();
+    auto pos = [&](entt::entity e) -> ptv::Vec3& {
+        return reg.get<ptv::CTransform>(e).t.position;
+    };
+
+    // --- melee chase ------------------------------------------------------
+    auto chase = ptv::MechanicRegistry::get().make_mechanic("builtin.npc.melee_chase");
+    if (!chase) return fail("builtin.npc.melee_chase is not registered");
+    const auto gid = static_cast<std::uint32_t>(grunt);
+    chase->on_attach(world, gid, nlohmann::json::parse(R"({
+        "target_tag": "player", "chase_speed_mps": 4.0, "attack_range_m": 1.6,
+        "windup_s": 0.5, "attack_cooldown_s": 2.0, "damage": 15, "stagger_s": 0.4})"), ctx);
+    chase->on_update(world, gid, 0.05f, input, ctx);
+    const auto v = reg.get<ptv::CLocomotionIntent>(grunt).desired_velocity;
+    if (v.x < 3.9f) return fail("melee_chase did not run at the target");
+    pos(player) = ptv::Vec3(1.2f, 0.0f, 0.0f);
+    chase->on_update(world, gid, 0.05f, input, ctx);
+    if (glm::length(reg.get<ptv::CLocomotionIntent>(grunt).desired_velocity) > 1e-4f)
+        return fail("melee_chase kept moving in attack range");
+    if (reg.get<ptv::CHealth>(player).current != 100.0f)
+        return fail("damage landed with no wind-up");
+    for (int i = 0; i < 12; ++i) chase->on_update(world, gid, 0.05f, input, ctx);
+    if (reg.get<ptv::CHealth>(player).current != 85.0f)
+        return fail("the hit did not land at the end of the wind-up");
+    for (int i = 0; i < 10; ++i) chase->on_update(world, gid, 0.05f, input, ctx);
+    if (reg.get<ptv::CHealth>(player).current != 85.0f)
+        return fail("the attack ignored its cooldown");
+    reg.get<ptv::CHealth>(grunt).current = 20.0f;  // shot
+    pos(player) = ptv::Vec3(8.0f, 0.0f, 0.0f);
+    chase->on_update(world, gid, 0.05f, input, ctx);
+    if (glm::length(reg.get<ptv::CLocomotionIntent>(grunt).desired_velocity) > 1e-4f)
+        return fail("a hurt enemy did not stagger");
+
+    // --- follow -----------------------------------------------------------
+    const auto ally = make_actor(world, "ally", ptv::Vec3(0.0f, 0.0f, 5.0f), {"ally"}, 100.0f);
+    const auto aid = static_cast<std::uint32_t>(ally);
+    pos(player) = ptv::Vec3(10.0f, 0.0f, 5.0f);
+    auto follow = ptv::MechanicRegistry::get().make_mechanic("builtin.npc.follow");
+    if (!follow) return fail("builtin.npc.follow is not registered");
+    follow->on_attach(world, aid, nlohmann::json::parse(R"({
+        "walk_speed_mps": 1.4, "run_speed_mps": 3.5, "catchup_distance_m": 18})"), ctx);
+    follow->on_update(world, aid, 0.05f, input, ctx);
+    {
+        const auto& w = reg.get<ptv::CLocomotionIntent>(ally);
+        if (w.desired_velocity.x < 3.4f || !w.sprint)
+            return fail("a companion far behind did not run to catch up");
+    }
+    pos(ally) = ptv::Vec3(7.5f, 0.0f, 5.0f);  // 2.5 m: inside the band, still moving
+    follow->on_update(world, aid, 0.05f, input, ctx);
+    pos(ally) = ptv::Vec3(8.5f, 0.0f, 5.0f);  // 1.5 m: stop
+    follow->on_update(world, aid, 0.05f, input, ctx);
+    if (glm::length(reg.get<ptv::CLocomotionIntent>(ally).desired_velocity) > 1e-4f)
+        return fail("a companion did not stop beside its leader");
+    pos(player) = ptv::Vec3(60.0f, 0.0f, 5.0f);  // teleported far away
+    follow->on_update(world, aid, 0.05f, input, ctx);
+    if (glm::length(pos(ally) - pos(player)) > 4.0f)
+        return fail("a lost companion was not re-placed near its leader");
+    return ok("npc behaviors: chase, wind-up then hit, cooldown, hurt stagger; "
+              "follow, stop in band, catch up when lost");
+}
+
+// A spawned clone is a whole actor: shootable, hostile, holding its gear.
+static int case_clone_tree() {
+    ptv::World world;
+    auto& reg = world.registry();
+    const auto goblin = world.create_entity("goblin_template");
+    {
+        ptv::Transform t{};
+        t.position = ptv::Vec3(0.0f, -50.0f, 0.0f);
+        reg.emplace<ptv::CTransform>(goblin, ptv::CTransform{t});
+        ptv::CHealth hp{};
+        hp.max = 30.0f;
+        hp.current = 4.0f;  // a template must not leak a damaged state
+        hp.alive = false;
+        reg.emplace<ptv::CHealth>(goblin, hp);
+        reg.emplace<ptv::CFaction>(goblin, ptv::CFaction{"enemy", {"player"}});
+        reg.emplace<ptv::CTag>(goblin, ptv::CTag{{"enemy", "template"}});
+        ptv::CPhysics p{};
+        p.kind = "kinematic";
+        p.collision_shape = "capsule";
+        reg.emplace<ptv::CPhysics>(goblin, p);
+    }
+    const auto club = world.create_entity("club_template");
+    {
+        reg.emplace<ptv::CTransform>(club, ptv::CTransform{});
+        reg.emplace<ptv::CTag>(club, ptv::CTag{{"enemy_weapon", "template"}});
+        ptv::CPhysics p{};
+        p.kind = "dynamic";
+        reg.emplace<ptv::CPhysics>(club, p);
+        ptv::CAttachment a{};
+        a.parent = static_cast<std::uint32_t>(goblin);
+        a.anchor = "hand_r";
+        a.local_position = ptv::Vec3(0.0f, -0.05f, 0.05f);
+        reg.emplace<ptv::CAttachment>(club, a);
+    }
+
+    std::vector<ptv::CloneRecord> made;
+    const auto inst = ptv::clone_entity_tree(
+        world, goblin, ptv::Vec3(3.0f, 0.0f, 4.0f), ptv::Quat(1, 0, 0, 0), made);
+    if (inst == entt::null) return fail("clone_entity_tree returned null");
+    if (made.size() != 2 || made[0].entity != inst || made[0].gear || !made[1].gear)
+        return fail("clone tree did not report the instance then its gear");
+
+    const auto& hp = reg.get<ptv::CHealth>(inst);
+    if (!hp.alive || hp.current != 30.0f)
+        return fail("a clone did not start at full health");
+    if (!reg.all_of<ptv::CFaction>(inst) || reg.get<ptv::CFaction>(inst).id != "enemy")
+        return fail("a clone lost its faction");
+    for (const auto& t : reg.get<ptv::CTag>(inst).tags) {
+        if (t == "template") return fail("a clone kept the template tag");
+    }
+    if (reg.get<ptv::CTransform>(inst).t.position != ptv::Vec3(3.0f, 0.0f, 4.0f))
+        return fail("a clone is not where it was spawned");
+
+    const auto gear = made[1].entity;
+    if (!reg.all_of<ptv::CAttachment>(gear))
+        return fail("cloned gear is not attached");
+    const auto& att = reg.get<ptv::CAttachment>(gear);
+    if (att.parent != static_cast<std::uint32_t>(inst) || att.anchor != "hand_r")
+        return fail("cloned gear is attached to the template, not the clone");
+    if (reg.get<ptv::CPhysics>(gear).kind != "kinematic")
+        return fail("cloned gear would be simulated instead of carried");
+    for (const auto& t : reg.get<ptv::CTag>(gear).tags) {
+        if (t == "template") return fail("cloned gear kept the template tag");
+    }
+    // The templates are untouched.
+    if (reg.get<ptv::CAttachment>(club).parent != static_cast<std::uint32_t>(goblin))
+        return fail("cloning moved the template's own gear");
+    return ok("clone tree: full health, faction, no template tag, gear "
+              "re-attached to the clone and carried kinematically");
+}
+
 static int case_runtime_spawn() {
     ptv::World world;
     ptv::MechanicContext ctx{};
@@ -4169,6 +4450,9 @@ int main(int argc, char** argv) {
     if (what == "teleport_pitch") return case_teleport_pitch();
     if (what == "physics_overlap") return case_physics_overlap();
     if (what == "runtime_spawn") return case_runtime_spawn();
+    if (what == "clone_tree") return case_clone_tree();
+    if (what == "encounter_director") return case_encounter_director();
+    if (what == "npc_behaviors") return case_npc_behaviors();
     if (what == "character_locomotion") return case_character_locomotion();
     if (what == "locomotion_variants") return case_locomotion_variants();
     if (what == "attachment") return case_attachment();

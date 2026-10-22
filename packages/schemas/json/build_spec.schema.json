@@ -283,6 +283,166 @@
       "title": "NestedHost",
       "type": "object"
     },
+    "NpcCountReading": {
+      "description": "What the prompt said about how many KINDS of this NPC there are.",
+      "enum": [
+        "singular",
+        "single_type_requested",
+        "explicit_types",
+        "explicit_number",
+        "plural_unspecified"
+      ],
+      "title": "NpcCountReading",
+      "type": "string"
+    },
+    "NpcFamily": {
+      "additionalProperties": false,
+      "description": "A kind of NPC the prompt names (\"goblin enemies\", \"a companion\").",
+      "properties": {
+        "count_reading": {
+          "$ref": "#/$defs/NpcCountReading"
+        },
+        "explicit_count": {
+          "anyOf": [
+            {
+              "maximum": 8,
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Explicit Count"
+        },
+        "family_id": {
+          "description": "Snake-case identifier, max 64 chars.",
+          "pattern": "^[a-z0-9][a-z0-9_.\\-]{0,63}$",
+          "title": "Family Id",
+          "type": "string"
+        },
+        "instance_hint": {
+          "anyOf": [
+            {
+              "maximum": 500,
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Instance Hint"
+        },
+        "reasoning": {
+          "default": "",
+          "maxLength": 600,
+          "title": "Reasoning",
+          "type": "string"
+        },
+        "role": {
+          "description": "enemy | ally | neutral | critter | boss",
+          "maxLength": 16,
+          "title": "Role",
+          "type": "string"
+        },
+        "variants": {
+          "items": {
+            "$ref": "#/$defs/NpcVariantSpec"
+          },
+          "maxItems": 8,
+          "minItems": 1,
+          "title": "Variants",
+          "type": "array"
+        }
+      },
+      "required": [
+        "family_id",
+        "role",
+        "count_reading",
+        "variants"
+      ],
+      "title": "NpcFamily",
+      "type": "object"
+    },
+    "NpcPhysique": {
+      "description": "The body archetype of one variant, which also suggests its stats.",
+      "enum": [
+        "standard",
+        "tall_lean",
+        "big_bulky",
+        "small_fast",
+        "elite",
+        "boss",
+        "custom"
+      ],
+      "title": "NpcPhysique",
+      "type": "string"
+    },
+    "NpcVariantSpec": {
+      "additionalProperties": false,
+      "description": "One unique NPC asset within a family.",
+      "properties": {
+        "asset_id": {
+          "description": "The AssetEntry that is this variant's model.",
+          "pattern": "^[a-z0-9][a-z0-9_.\\-]{0,63}$",
+          "title": "Asset Id",
+          "type": "string"
+        },
+        "damage_scale": {
+          "default": 1.0,
+          "maximum": 20.0,
+          "minimum": 0.0,
+          "title": "Damage Scale",
+          "type": "number"
+        },
+        "health_scale": {
+          "default": 1.0,
+          "maximum": 50.0,
+          "minimum": 0.1,
+          "title": "Health Scale",
+          "type": "number"
+        },
+        "name": {
+          "maxLength": 128,
+          "title": "Name",
+          "type": "string"
+        },
+        "physique": {
+          "$ref": "#/$defs/NpcPhysique",
+          "default": "standard"
+        },
+        "size_scale": {
+          "default": 1.0,
+          "maximum": 5.0,
+          "minimum": 0.3,
+          "title": "Size Scale",
+          "type": "number"
+        },
+        "speed_scale": {
+          "default": 1.0,
+          "maximum": 4.0,
+          "minimum": 0.2,
+          "title": "Speed Scale",
+          "type": "number"
+        },
+        "visual_notes": {
+          "default": "",
+          "description": "How this variant LOOKS different from its siblings.",
+          "maxLength": 1500,
+          "title": "Visual Notes",
+          "type": "string"
+        }
+      },
+      "required": [
+        "asset_id",
+        "name"
+      ],
+      "title": "NpcVariantSpec",
+      "type": "object"
+    },
     "PlayerAvatarSpec": {
       "additionalProperties": false,
       "description": "What the player's own body is, and how it behaves.\n\nEvery field is an independent decision driven by the prompt. Nothing here\nmay be inferred from another field: a full head does not imply an\ninside-the-skull camera, and wanting a mirror does not imply wanting legs\nthat animate.",
@@ -618,6 +778,14 @@
     },
     "movement": {
       "$ref": "#/$defs/MovementSpec"
+    },
+    "npc_roster": {
+      "items": {
+        "$ref": "#/$defs/NpcFamily"
+      },
+      "maxItems": 16,
+      "title": "Npc Roster",
+      "type": "array"
     },
     "npc_summary": {
       "anyOf": [

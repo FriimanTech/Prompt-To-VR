@@ -177,7 +177,8 @@ inside `namespace ptv::world` in a `.cpp`.
 `WorldContext` (pure data builder): `sky`, `ground`, `light`, `player_spawn`,
 `spawn_primitive` (box/plane/cylinder/sphere/ramp), `add_mesh` (arbitrary
 procedural triangles), `place_object` (anchor a prop GLB), `nav_region` /
-`nav_link` (declare the walkable space), `seed()`. Header-only
+`nav_link` (declare the walkable space), `npc_spawn_zone` (declare where NPCs
+enter during play), `seed()`. Header-only
 convenience builders live in `ptv::world::helpers` (`building_grid`, `wall_shell`,
 `path`, `platform_set`).
 
@@ -188,6 +189,20 @@ cannot find a doorway. Reconstructing the topology from finished geometry
 (the Recast approach) would rebuild something the author already knew. A
 deterministic validator then checks the declaration against itself before the
 world is accepted. See [navigation.md](navigation.md).
+
+`npc_spawn_zone(NpcSpawnZoneDesc{id, position, radius, tags})` marks a gate,
+tunnel mouth or ridge where arriving NPCs appear. When the NPC plan has
+encounters, the architect's brief asks for at least three zones, 12 m or more
+from the player spawn, on walkable floor, and for 3 m around the spawn to be
+kept clear for companions. Zones are written to the world's `npc_spawn_zones`
+and copied into `scene.json` for the encounter director. A world with no zones
+still works: the scene compiler derives zones from the nav regions. See
+[npc-and-ai.md](npc-and-ai.md).
+
+The gameplay layer the SceneSpec composed (weapons, panels, companions) is
+authored around the origin. The scene compiler moves it rigidly to the world's
+`player_spawn`, position and yaw together, and nudges anything that lands
+inside a static collider out of it.
 
 `MeshDesc` (for `add_mesh`) uses FLAT float buffers: `positions` and `normals`
 are `std::vector<float>` xyz triples (`{x0,y0,z0, x1,y1,z1, ...}`), NOT

@@ -162,6 +162,92 @@ aiming at a corpse.
 
 `ctx.nav` answers "how do I get there". See [navigation.md](navigation.md).
 
+## Population: unique types, instances and waves
+
+"A goblin game" needs two different numbers, and conflating them is how a
+game ends up with one goblin or with fifty paid-for models:
+
+- **Unique types** are models. Each costs a reference image, a mesh, a rig
+  and animation clips. They are decided once, in the BuildSpec's
+  `npc_roster`.
+- **Instances** are copies of one rigged, animated model at runtime. They
+  cost nothing in the pipeline and are decided by the NPC plan.
+
+### Who decides what
+
+| Question | Stage | Artifact |
+|---|---|---|
+| Which NPC families exist and how many unique variants each | `build_spec` | `npc_roster` |
+| One model per variant | `asset_manifest` | one `AssetEntry` per variant |
+| Role, faction, stats and behaviour per variant | `npc_plan` | `NpcSpec` |
+| Copies placed at load (a companion) | `npc_plan` | `NpcSpec.persistent_count` |
+| Who arrives during play, in which waves, how many at once | `npc_plan` | `NpcPlan.encounters` |
+| Where NPCs may enter the level | `world_generation` | `npc_spawn_zones` |
+| One hidden template per spawned variant, the director, per-variant behaviour params | `scene_compile` | `scene.json` |
+| Spawning, wave progression, follow and melee behaviour at runtime | engine | the built-ins below |
+
+### Variants
+
+The prompt's wording sets the variant count (`NpcFamily.count_reading`):
+
+- **singular** ("a dragon", "Green Lantern as my ally") — 1 variant.
+- **explicit** ("two kinds of zombies") — that many.
+- **plural, unspecified** ("goblins", "waves of zombies") — exactly 3: a
+  `regular`, a `tall` and a `big_bulky` physique. Each variant carries stat
+  multipliers (health, damage, speed), so a bulky goblin is visibly slower
+  and hits harder.
+
+`stage_build_spec` checks the roster against these rules and retries;
+`stage_asset_manifest` checks that every variant has its own asset and retries
+once with the list of missing ones.
+
+### The NPC plan's population
+
+Each `NpcSpec` carries its family and variant and its own stats. Two fields
+say how many exist:
+
+- `persistent_count` — copies placed at load that stay. A singular character
+  and an ally are always placed once (`repair_npc_plan` enforces it).
+- `encounters` — the types that arrive during play: `mode` (`waves`,
+  `continuous`, `fixed`), a `start` trigger (`on_load`, `delay`,
+  `player_grabs_tag`, `signal`), a list of `waves` made of `{asset_id,
+  count}` groups, and the caps `max_concurrent`, `spawn_interval_s`,
+  `inter_wave_delay_s`, `min_player_distance_m`. A wave's count can exceed
+  `max_concurrent`; the rest arrive as earlier ones fall.
+
+When the director writes no encounters for spawned enemies,
+`default_encounters` builds a progression ordered by physique: the regular
+variant first, mixed with the next, then the strongest. A single type gets
+three growing waves. The same repair runs again in `scene_compile`, so a
+project planned before encounters existed still gets waves.
+
+### What the scene compiler does
+
+`encounters.apply_npc_population` makes `scene.json` hold exactly the plan's
+population, whatever the SceneSpec composed:
+
+- every spawned type gets **one** entity tagged `template`, parked at
+  y = -50, never `pooled`. Extra pre-placed copies are removed, because an
+  enemy the director did not spawn never counts toward its wave;
+- persistent NPCs are placed beside the player spawn (right and slightly
+  behind, never in front of the view);
+- each NPC gets health, faction, a kinematic capsule and **its own type's**
+  speeds and damage on `builtin.character_locomotion` and on the follow or
+  melee built-in. An NPC bound to a generated AI mechanic keeps it instead;
+  two mechanics writing one locomotion intent fight every frame;
+- a single `game_director` entity binds `builtin.encounter_director` with
+  the waves, which reference the template entity ids.
+
+After the world is merged, `finalize_encounter_zones` gives the director the
+world's `npc_spawn_zones`, or, when the world declared none, up to six zones
+derived from its nav regions, at least 12 m from the spawn and spread apart.
+
+The SceneSpec's gameplay layer is authored around the origin, but the
+generated world puts its own spawn somewhere else. `gameplay_relocation`
+moves the whole layer rigidly (position and yaw) to the world spawn, then
+nudges anything that lands inside a static collider out of it and onto a nav
+region. Templates, the avatar, the rig and attached gear are left alone.
+
 ## Spawning
 
 Generated code cannot build a mesh, a rig or a collider — all of that is
@@ -173,12 +259,81 @@ renderer skips and physics ignores.
 const std::uint32_t e = ctx.spawn->instance(template_entity, pos, rot);
 ```
 
-The clone carries the template's mesh, LOD chain, sockets, collider, skeleton,
-clips, tags and mechanic bindings, and — unlike an entity created by hand — it
-is registered with physics and the mechanic host, so it collides and its
-mechanics tick from the next frame. Before this existed, everything about an
-entity was decided once at scene load, and anything spawned mid-game was a
-ghost: visible, with no collider and no behaviour.
+The clone carries the template's mesh, LOD chain, sockets, collider, skeleton
+and clips (playback reset), tags (minus `template`), mechanic bindings,
+health (reset to full), faction, equip slots, movable and interactive state.
+Gear attached to the template — a goblin's club — is cloned too and attached
+to the copy, and it is destroyed with it. The clone is registered with physics
+and the mechanic host, so it collides and its mechanics tick from the next
+frame.
+
+Generated code does not spawn NPCs, though. That belongs to the director.
+
+## The encounter director
+
+`builtin.encounter_director` (one per game, on the `game_director` entity)
+runs the NPC plan's encounters:
+
+- **Start.** On load, after a delay, when the player grabs something with a
+  given tag (picking up the blaster), or on `ctx.encounters->start()`.
+- **Spawning.** It clones the wave's templates interleaved by type, one per
+  `spawn_interval_s`, while fewer than `max_concurrent` are alive and the
+  animated-agent budget allows. A refused spawn retries half a second later.
+- **Placement.** It picks a spawn zone at least `min_player_distance_m` away,
+  preferring one the player cannot see, and spawns facing the player. With no
+  zones it uses a ring around the player and keeps only reachable points.
+- **Progress.** A defeat is counted once, when an instance dies or is
+  destroyed. A cleared wave starts the inter-wave countdown; clearing the last
+  wave is victory (`waves`), the last wave repeats (`continuous`), or play
+  simply continues (`fixed`). The player's death stops it.
+
+Everything else reads it through `ctx.encounters`: `configured()`, `phase()`
+(`Idle`, `Active`, `InterWave`, `Victory`, `Failed`), `wave_index()`,
+`wave_count()`, `alive()`, `remaining_in_wave()`, `defeated_total()`,
+`countdown_s()`, and the counters `wave_started_seq()`, `wave_cleared_seq()`
+and `victory_seq()` that tick once per event. A menu may `pause()` or
+`reset()` it. A wave HUD is a generated mechanic that reads these; it never
+spawns, pools or counts NPCs itself.
+
+## Built-in NPC behaviours
+
+Two behaviours every game needs are built in, and the scene compiler tunes
+them per NPC type from the NPC plan:
+
+- **`builtin.npc.follow`** — a companion keeps a band behind its leader
+  (the player by default), walks when the gap is small and runs when it
+  grows, navigates around walls, and is placed behind the leader again when
+  it falls more than `catchup_distance_m` behind or stays stuck for
+  `stuck_catchup_s`.
+- **`builtin.npc.melee_chase`** — an enemy acquires the nearest visible
+  hostile (or a tagged target), chases it through the nav graph keeping clear
+  of its siblings, telegraphs an attack with a wind-up, deals damage if the
+  target is still within reach, then cools down. Taking damage staggers it.
+  Speed, damage, range, cooldown and sight come from that type's `NpcSpec`,
+  so the bulky variant really is slower and harder-hitting.
+
+Both only write `CLocomotionIntent`; `builtin.character_locomotion` moves and
+animates the body. The mechanic planner maps "follows the player" and
+"chases and hits" onto these, and generates code only for what they cannot
+express: ranged attacks, flight, special abilities.
+
+## Spawn zones
+
+The world architect declares where NPCs come in with
+`w.npc_spawn_zone(NpcSpawnZoneDesc{id, position, radius, tags})`: gates,
+tunnel mouths, the far side of a ridge. These are written to the world's
+`npc_spawn_zones` and copied into `scene.json`. The world-generation brief
+asks for at least three zones, 12 m or more from the spawn, whenever the NPC
+plan has encounters, and to keep 3 m around the spawn clear for companions.
+A world with no zones still works; see the fallback above.
+
+## Animation clip pairing
+
+Tripo returns a character's clips sorted by name, not in the order they were
+requested. `asset_animation` therefore pairs each requested intent (`run`,
+`attack`, `hurt`, `die`) with a clip by name and only falls back to order for
+what is left. A project animated before this fix is re-paired on the next
+run, from the files it already has, without paying Tripo again.
 
 ## Equipping: two shapes of the same problem
 
@@ -229,5 +384,9 @@ Three mechanisms keep that in bounds:
   `builtin.character_locomotion` owns both, and a second writer gets the
   foot-sliding wrong.
 - Write its own death timer, corpse cleanup or damage invulnerability.
+- Spawn, pool or despawn NPCs, or tag anything `pooled`. The encounter
+  director owns the population; a HUD reads `ctx.encounters`.
+- Steer an NPC that is bound to `builtin.npc.follow` or
+  `builtin.npc.melee_chase`.
 - Guess a raw glTF clip name. Ask for the intent; the engine resolves it.
 - Hard-code a socket offset. Ask for the socket by name.

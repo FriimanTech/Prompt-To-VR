@@ -67,7 +67,8 @@ orchestrator and a reusable Vulkan + OpenXR engine core.
    runtime spawning are engine services (`ctx.combat`, `ctx.perception`,
    `ctx.nav`, `ctx.attach`, `ctx.spawn`, `ctx.contacts`), not per-game
    inventions: an enemy from one CodeTask has to be able to hurt a player
-   set up by another. See `docs/npc-and-ai.md`.
+   set up by another. NPC waves are run by `builtin.encounter_director`
+   and read through `ctx.encounters`. See `docs/npc-and-ai.md`.
 6. Generated C++ (`.cpp`, `.h`, `.hpp`) is confined to
    `engine/generated/{mechanics,ai,dialogue,world}/`. It MUST NOT modify the
    renderer, XR session loop, platform layer, memory core, or base ECS.
@@ -150,6 +151,15 @@ orchestrator and a reusable Vulkan + OpenXR engine core.
    source of truth rather than two that drift. Also feeds `mechanic_plan`,
    `scene_spec` and codegen so all three describe the same game. A game
    with no characters emits an empty plan and makes no agent call.
+   POPULATION: unique NPC types are models, decided by the BuildSpec's
+   `npc_roster` (an unspecified plural such as "goblins" = 3 variants:
+   regular, tall, big_bulky); instances are free runtime copies decided
+   here — `persistent_count` (placed at load, e.g. a companion) and
+   `encounters` (waves of `{asset_id, count}` groups, start trigger, caps).
+   At runtime `builtin.encounter_director` clones one hidden template per
+   type into world-declared `npc_spawn_zones`; `builtin.npc.follow` and
+   `builtin.npc.melee_chase` carry per-type stats from the plan. Generated
+   code never spawns or pools NPCs; HUDs read `ctx.encounters`.
 3. AssetManifest + BuildSpec + NpcPlan → **MechanicPlan** (OpenAI Agents SDK agent,
    `gpt-5.6-sol` @ reasoning `high`, no tools). Each mechanic is classified `builtin`,
    `builtin+config`, `builtin+config_code_edit` (copy a built-in's source and

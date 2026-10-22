@@ -167,6 +167,15 @@ class NpcSpec(StrictModel):
         ..., description="The AssetManifest item this NPC uses."
     )
     role: NpcRole
+    #: The BuildSpec npc_roster family this type belongs to ("goblins"), and
+    #: its variant physique ("tall_lean"). Variants of one family share
+    #: behaviours and differ in stats.
+    family: Optional[str] = Field(default=None, max_length=64)
+    variant: Optional[str] = Field(default=None, max_length=32)
+    #: How many of this type are PLACED in the scene at load and stay -- a
+    #: companion, a shopkeeper, guards at a post. Types that arrive during
+    #: play are spawned by the encounter plan instead and have 0 here.
+    persistent_count: int = Field(default=0, ge=0, le=50)
     #: Short id used for target selection. Characters sharing a faction never
     #: fight each other.
     faction: str = Field(default="neutral", max_length=32)
@@ -203,6 +212,65 @@ class NpcSpec(StrictModel):
     )
 
 
+class EncounterMode(str, Enum):
+    """How the population arrives over the game."""
+
+    #: Numbered waves; clearing the last one is victory.
+    waves = "waves"
+    #: Waves, then the last one repeats for as long as the player survives.
+    continuous = "continuous"
+    #: One set, placed when the encounter starts; no progression.
+    fixed = "fixed"
+
+
+class EncounterStart(str, Enum):
+    """What begins the first wave."""
+
+    on_load = "on_load"
+    #: ``start_delay_s`` after the scene loads.
+    delay = "delay"
+    #: When the player first holds an item tagged ``start_tag`` (picking up
+    #: the weapon starts the fight).
+    player_grabs_tag = "player_grabs_tag"
+    #: When game code calls ``ctx.encounters->start()`` (a start button).
+    signal = "signal"
+
+
+class EncounterGroup(StrictModel):
+    """``count`` of one NPC type within a wave."""
+
+    asset_id: IdStr
+    count: int = Field(..., ge=1, le=200)
+
+
+class EncounterWave(StrictModel):
+    groups: List[EncounterGroup] = Field(..., min_length=1, max_length=8)
+    note: str = Field(default="", max_length=300)
+
+
+class EncounterPlan(StrictModel):
+    """Which NPC types arrive during play, in what waves, under what caps.
+
+    The engine's ``builtin.encounter_director`` runs this: it clones each
+    type's hidden template, places it at a spawn zone out of the player's
+    sight, caps how many are alive at once and counts defeats. Generated code
+    never spawns NPCs itself.
+    """
+
+    mode: EncounterMode = EncounterMode.waves
+    start: EncounterStart = EncounterStart.on_load
+    start_delay_s: float = Field(default=3.0, ge=0.0, le=600.0)
+    start_tag: str = Field(default="weapon", max_length=48)
+    #: Alive at once, across every type. Animated characters are the most
+    #: expensive thing a Quest renders; the engine also enforces its budget.
+    max_concurrent: int = Field(default=6, ge=1, le=64)
+    spawn_interval_s: float = Field(default=1.5, ge=0.0, le=60.0)
+    inter_wave_delay_s: float = Field(default=8.0, ge=0.0, le=600.0)
+    min_player_distance_m: float = Field(default=10.0, ge=0.0, le=200.0)
+    waves: List[EncounterWave] = Field(..., min_length=1, max_length=50)
+    notes: str = Field(default="", max_length=1000)
+
+
 class NpcPlan(StrictModel):
     prompt_id: IdStr
     npcs: List[NpcSpec] = Field(
@@ -215,6 +283,20 @@ class NpcPlan(StrictModel):
     )
     #: How the factions in this game relate, in prose, for the codegen agent.
     faction_notes: str = Field(default="", max_length=2000)
+    #: NPC types that arrive during play. None when every NPC is placed at
+    #: load (or there are none).
+    encounters: Optional[EncounterPlan] = None
+
+    def spawned_asset_ids(self) -> list[str]:
+        """Asset ids the encounter plan spawns, in first-appearance order."""
+        out: list[str] = []
+        if self.encounters is None:
+            return out
+        for w in self.encounters.waves:
+            for g in w.groups:
+                if g.asset_id not in out:
+                    out.append(g.asset_id)
+        return out
 
     def rigged_asset_ids(self) -> set[str]:
         """Assets that need a skeleton: anything that plays a clip."""

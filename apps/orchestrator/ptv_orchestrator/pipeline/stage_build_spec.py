@@ -23,6 +23,57 @@ from .prompts import build_spec_system
 from .target_device import sync_build_spec_device
 
 
+#: Extra BuildSpec calls allowed to fix a roster that breaks its rules.
+_ROSTER_RETRIES = 2
+
+_NPC_ASSET_CATEGORIES = ("npc", "enemy", "character", "creature", "ally", "boss")
+
+
+def roster_violations(spec: BuildSpec) -> list[str]:
+    """Every way the NPC roster breaks its rules, in words the planner can
+    act on. Empty when it is sound."""
+
+    problems: list[str] = []
+    assets = {a.id: a for a in spec.assets}
+    seen: dict[str, str] = {}
+    for fam in spec.npc_roster:
+        want = fam.required_variant_count()
+        have = len(fam.variants)
+        if have != want:
+            problems.append(
+                f"family '{fam.family_id}' is {fam.count_reading.value} and needs"
+                f" exactly {want} variant(s), not {have}"
+            )
+        if fam.count_reading.value == "explicit_types" and not fam.explicit_count:
+            problems.append(
+                f"family '{fam.family_id}' is explicit_types but has no explicit_count"
+            )
+        for v in fam.variants:
+            if v.asset_id in seen:
+                problems.append(
+                    f"asset '{v.asset_id}' is a variant of both '{seen[v.asset_id]}'"
+                    f" and '{fam.family_id}'; every variant is its own model"
+                )
+            seen[v.asset_id] = fam.family_id
+            asset = assets.get(v.asset_id)
+            if asset is None:
+                problems.append(
+                    f"variant '{v.asset_id}' of '{fam.family_id}' has no AssetEntry"
+                )
+            elif not any(c in asset.category.lower() for c in _NPC_ASSET_CATEGORIES):
+                problems.append(
+                    f"variant '{v.asset_id}' has AssetEntry category"
+                    f" '{asset.category}', not an NPC/character category"
+                )
+        if have > 1 and len({v.physique for v in fam.variants}) == 1 and \
+                fam.variants[0].physique.value != "custom":
+            problems.append(
+                f"family '{fam.family_id}' variants all share physique"
+                f" '{fam.variants[0].physique.value}'; make them different bodies"
+            )
+    return problems
+
+
 def _prompt_id_from_text(prompt: str) -> str:
     s = re.sub(r"[^a-zA-Z0-9]+", "-", prompt.strip().lower()).strip("-")
     return (s[:48] or "prompt")
@@ -96,12 +147,39 @@ def run(ctx: PipelineContext) -> StageResult:
             "BuildSpec dry-run requested: supply a canned BuildSpec via tests."
         )
 
-    resp = client.generate_json(
-        prompt=user_prompt,
-        schema=schema,
-        system=build_spec_system(state.target_device),
-    )
+    system = build_spec_system(state.target_device)
+    resp = client.generate_json(prompt=user_prompt, schema=schema, system=system)
     spec = BuildSpec.model_validate(resp.data)
+    # The NPC roster decides how many unique NPC models get made, which is
+    # both the game's variety and a real cost, so its rules are checked
+    # rather than trusted.
+    for attempt in range(_ROSTER_RETRIES):
+        problems = roster_violations(spec)
+        if not problems:
+            break
+        ctx.emit(
+            ProjectStage.build_spec,
+            "warning",
+            "NPC roster needs revising: " + "; ".join(problems)[:600],
+        )
+        retry_prompt = (
+            user_prompt
+            + "\n\nYour previous BuildSpec broke the NPC ROSTER rules:\n"
+            + "\n".join(f"  - {p}" for p in problems)
+            + "\nReturn the complete BuildSpec again with these fixed (add"
+            " the missing variant AssetEntries; keep everything else)."
+        )
+        resp = client.generate_json(prompt=retry_prompt, schema=schema, system=system)
+        spec = BuildSpec.model_validate(resp.data)
+    else:
+        problems = roster_violations(spec)
+        if problems:
+            ctx.emit(
+                ProjectStage.build_spec,
+                "warning",
+                "NPC roster still breaks its rules after retries; continuing: "
+                + "; ".join(problems)[:600],
+            )
     spec = _force_target_device(ctx, spec, state.target_device)
     spec = _force_player_experience(ctx, spec, state.player_experience)
     ctx.build_spec = spec

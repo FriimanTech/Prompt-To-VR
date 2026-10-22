@@ -58,6 +58,7 @@
 #include "mechanics/builtin/HandRig.h"
 #include "ptv/api/BodySlots.h"
 #include "ptv/core/Logger.h"
+#include "ptv/ecs/Clone.h"
 #include "ptv/ecs/Skeleton.h"
 #include "ptv/ecs/TransformOffset.h"
 #include "ptv/platform/AssetSource.h"
@@ -3910,6 +3911,8 @@ bool Application::load_scene_at(const std::string& path,
     // entities anyway, and unload_nested_scene would be walking a registry
     // that is about to be emptied.
     nested_scenes_.clear();
+    clone_children_.clear();
+    encounter_board_.clear();
     // Physics bodies are dropped by rebuild_from_world below, which tracks
     // them by body id rather than through the world, so it does not matter
     // that the entities are gone by then.
@@ -4307,65 +4310,23 @@ void Application::tick_combat(float dt) {
 entt::entity Application::clone_entity(std::uint32_t template_entity,
                                        const Vec3& position,
                                        const Quat& rotation) {
-    auto& reg = world_.registry();
     const auto src = static_cast<entt::entity>(template_entity);
-    if (!reg.valid(src) || !reg.all_of<CTransform>(src)) {
+    // The instance and every piece of gear attached to it (a club in its
+    // hand, a lantern) -- see ptv/ecs/Clone.h for what is copied and why.
+    std::vector<CloneRecord> made;
+    const auto dst = clone_entity_tree(world_, src, position, rotation, made);
+    if (dst == entt::null) {
         PTV_WARN("spawn: template entity {} is not a valid spawnable",
                  template_entity);
         return entt::null;
     }
-
-    const auto dst = world_.create_entity();
-
-    CTransform ct = reg.get<CTransform>(src);
-    ct.t.position = position;
-    ct.t.rotation = rotation;
-    reg.emplace<CTransform>(dst, ct);
-
-    // Copy every component that describes WHAT the thing is. Anything
-    // transient (CTransformOffset's spring state, grab bookkeeping) is
-    // deliberately left off so the clone starts clean.
-    if (const auto* m = reg.try_get<CMesh>(src)) reg.emplace<CMesh>(dst, *m);
-    if (const auto* p = reg.try_get<CPrimitive>(src))
-        reg.emplace<CPrimitive>(dst, *p);
-    if (const auto* im = reg.try_get<CInlineMesh>(src))
-        reg.emplace<CInlineMesh>(dst, *im);
-    if (const auto* ph = reg.try_get<CPhysics>(src))
-        reg.emplace<CPhysics>(dst, *ph);
-    if (const auto* mb = reg.try_get<CMechanicBinding>(src))
-        reg.emplace<CMechanicBinding>(dst, *mb);
-
-    // Tags come across minus "template": the clone is a real actor, and
-    // leaving the marker on would hide it from the renderer and make it
-    // spawnable from itself.
-    if (const auto* tg = reg.try_get<CTag>(src)) {
-        CTag tags{};
-        for (const auto& t : tg->tags) {
-            if (t == "template") continue;
-            tags.tags.push_back(t);
-        }
-        reg.emplace<CTag>(dst, std::move(tags));
+    // Physics bodies and mechanics only once the whole tree exists, so an
+    // instance's mechanic that looks for its gear on attach finds it.
+    for (const auto& rec : made) {
+        const auto id = static_cast<std::uint32_t>(rec.entity);
+        attach_entity_runtime(id);
+        if (rec.gear) clone_children_.insert(id);
     }
-
-    // The rig is copied wholesale rather than reloaded: the GLB is already
-    // parsed and its geometry already resident in the renderer, keyed by
-    // path, so a clone costs a vector copy instead of a file read. Playback
-    // state is reset so the clone starts from its own idle rather than
-    // inheriting the template's clip time.
-    if (const auto* sk = reg.try_get<CSkeleton>(src)) {
-        reg.emplace<CSkeleton>(dst, *sk);
-        if (const auto* an = reg.try_get<CAnimator>(src)) {
-            CAnimator anim = *an;
-            anim.time_s = 0.0f;
-            anim.blend_t = 0.0f;
-            anim.prev_clip = -1;
-            std::fill(anim.joint_overridden.begin(),
-                      anim.joint_overridden.end(), std::uint8_t{0});
-            reg.emplace<CAnimator>(dst, std::move(anim));
-        }
-    }
-
-    attach_entity_runtime(static_cast<std::uint32_t>(dst));
     return dst;
 }
 
@@ -4380,6 +4341,21 @@ void Application::destroy_entity_runtime(std::uint32_t entity) {
     if (entity == static_cast<std::uint32_t>(player_entity_)) {
         PTV_WARN("spawn: refusing to despawn the player");
         return;
+    }
+    // Gear that was cloned onto this instance goes with it; gear the scene
+    // authored on its own stays (it just stops following).
+    if (!clone_children_.empty()) {
+        std::vector<std::uint32_t> children;
+        auto view = world_.registry().view<CAttachment>();
+        for (const auto child : view) {
+            if (view.get<CAttachment>(child).parent != entity) continue;
+            const auto id = static_cast<std::uint32_t>(child);
+            if (clone_children_.count(id) != 0) children.push_back(id);
+        }
+        for (const auto c : children) {
+            clone_children_.erase(c);
+            destroy_entity_runtime(c);
+        }
     }
     mechanics_.detach_entity(world_, entity);
     physics_.remove_body(entity);
@@ -5268,6 +5244,7 @@ bool Application::initialize(const Config& cfg) {
     mech_ctx_.physics = physics_svc_.get();
     mech_ctx_.contacts = contacts_svc_.get();
     mech_ctx_.spawn = spawn_svc_.get();
+    mech_ctx_.encounters = &encounter_board_;
     mech_ctx_.attach = attach_svc_.get();
     mech_ctx_.combat = combat_svc_.get();
     mech_ctx_.perception = perception_svc_.get();
