@@ -25,6 +25,7 @@ import json
 import os
 import re
 import threading
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
@@ -47,6 +48,8 @@ from ptv_schemas import (
     TargetDevice,
 )
 
+from .fsutil import atomic_write_text
+
 _lock = threading.Lock()
 
 
@@ -65,6 +68,33 @@ def _sha256(path: Path) -> str:
         for chunk in iter(lambda: f.read(1 << 20), b""):
             h.update(chunk)
     return h.hexdigest()
+
+
+#: Large files modified this recently are skipped by the artifact listing.
+_IN_FLIGHT_S = 2.0
+_IN_FLIGHT_MIN_BYTES = 1 << 20
+_HASH_CACHE_MAX = 20000
+_hash_cache: dict[str, tuple[int, int, str]] = {}
+_hash_cache_lock = threading.Lock()
+
+
+def _cached_sha256(path: Path, st: os.stat_result) -> str:
+    """Content hash, recomputed only when size or mtime changed.
+
+    The UI refreshes the artifact list on every pipeline event, and hashing
+    every file each time kept handles open on files stages were about to
+    replace (and re-read a 100 MB APK several times a second)."""
+    key = str(path)
+    with _hash_cache_lock:
+        hit = _hash_cache.get(key)
+    if hit is not None and hit[0] == st.st_size and hit[1] == st.st_mtime_ns:
+        return hit[2]
+    digest = _sha256(path)
+    with _hash_cache_lock:
+        if len(_hash_cache) >= _HASH_CACHE_MAX:
+            _hash_cache.clear()
+        _hash_cache[key] = (st.st_size, st.st_mtime_ns, digest)
+    return digest
 
 
 def _sha256_text(s: str) -> str:
@@ -128,10 +158,7 @@ class ProjectStore:
         state.updated_at = _now()
         path = proj_dir / "project_state.json"
         with _lock:
-            path.write_text(
-                state.model_dump_json(indent=2, by_alias=True),
-                encoding="utf-8",
-            )
+            atomic_write_text(path, state.model_dump_json(indent=2, by_alias=True))
 
     # ------------------------------------------------------------------
     # Create
@@ -170,7 +197,7 @@ class ProjectStore:
         path = self.dir_for(project_id) / filename
         path.parent.mkdir(parents=True, exist_ok=True)
         text = model.model_dump_json(indent=2, by_alias=True)
-        path.write_text(text, encoding="utf-8")
+        atomic_write_text(path, text)
         return ArtifactMetadata(
             id=_artifact_id(filename),
             kind=ArtifactKind.json,
@@ -185,16 +212,23 @@ class ProjectStore:
         if not root.exists():
             return []
         items: list[ArtifactMetadata] = []
+        now = time.time()
         for p in _walk(root):
             rel_from_repo = p.relative_to(self.projects_dir.parent).as_posix()
             try:
+                st = p.stat()
+                if st.st_size > _IN_FLIGHT_MIN_BYTES and now - st.st_mtime < _IN_FLIGHT_S:
+                    # A large file still being written or moved by a stage:
+                    # hashing it holds a handle long enough to block that
+                    # stage's rename on Windows. It shows up next refresh.
+                    continue
                 items.append(
                     ArtifactMetadata(
                         id=_artifact_id(p.name),
                         kind=_kind_for(p),
                         path=rel_from_repo,
-                        size_bytes=p.stat().st_size,
-                        sha256=_sha256(p),
+                        size_bytes=st.st_size,
+                        sha256=_cached_sha256(p, st),
                         stage=_stage_for(p, root),
                         description=None,
                     )
@@ -332,8 +366,20 @@ _PRUNED_ARTIFACT_DIR_NAMES = frozenset(
 
 def _is_pruned_artifact_dir(name: str) -> bool:
     # Per-target intermediate dirs are named ``<target>.dir`` (this is where
-    # the locked ``*.obj`` files live).
-    return name in _PRUNED_ARTIFACT_DIR_NAMES or name.endswith(".dir")
+    # the locked ``*.obj`` files live). Dot-dirs are staging areas
+    # (``.rig_download``, ``.anim_download``, ``.superseded``) and
+    # ``previous_runs`` holds archived runs, not this run's artifacts.
+    return (
+        name in _PRUNED_ARTIFACT_DIR_NAMES
+        or name.endswith(".dir")
+        or name.startswith(".")
+        or name == "previous_runs"
+    )
+
+
+def _is_transient_file(name: str) -> bool:
+    """Half-written files a stage is about to rename into place."""
+    return name.endswith((".tmp", ".download")) or name.startswith(".")
 
 
 def _walk(root: Path):
@@ -342,6 +388,8 @@ def _walk(root: Path):
         dirnames[:] = [d for d in dirnames if not _is_pruned_artifact_dir(d)]
         base = Path(dirpath)
         for fname in filenames:
+            if _is_transient_file(fname):
+                continue
             p = base / fname
             if p.is_file():
                 yield p

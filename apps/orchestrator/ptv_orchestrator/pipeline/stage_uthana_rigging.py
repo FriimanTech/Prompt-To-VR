@@ -29,18 +29,20 @@ riggable, otherwise to no rig.
 
 from __future__ import annotations
 
-import shutil
 from pathlib import Path
 from typing import Any, Optional
 
 from ptv_providers import AutoRigFlags, UthanaClient, UthanaClientError
 from ptv_schemas import CharacterRoute, ProjectStage, ProjectStatus, RigProvider
 
+from ..fsutil import move_with_retry
 from .character_artifacts import (
     UTHANA_RIG_NAME,
     UTHANA_RIGGED_GLB,
     load_json,
     load_routing,
+    manifest_asset_ids,
+    prune_to_assets,
     rel,
     save_json,
     save_routing,
@@ -156,6 +158,7 @@ def run_with(ctx: PipelineContext, *, client: Any = None) -> StageResult:
                  f"{route.asset_id}: rigged by Uthana (confidence "
                  f"{entry.get('auto_rig_confidence')}, character_id {entry['character_id']})")
 
+    prune_to_assets(ledger, manifest_asset_ids(ctx))
     save_json(ledger_path, ledger)
     save_routing(ctx.project_dir, routing)  # type: ignore[arg-type]
     _sync_manifest(ctx, routing)
@@ -206,7 +209,7 @@ def _rig_one(
 
     staging = final.with_suffix(".download")
     staging.write_bytes(client.download_character(created.character_id))
-    shutil.move(str(staging), str(final))
+    move_with_retry(staging, final)
 
     glb = Glb.load(final)
     check = validate_rig(glb)
@@ -273,7 +276,7 @@ def supersede_tripo_outputs(ctx: PipelineContext, asset_id: str) -> list[str]:
             continue
         dest_dir = item_dir / ".superseded"
         dest_dir.mkdir(exist_ok=True)
-        shutil.move(str(p), str(dest_dir / name))
+        move_with_retry(p, dest_dir / name)
         moved.append(name)
     for report_name in ("asset_rig.json", "asset_animation.json"):
         path = ctx.project_dir / report_name

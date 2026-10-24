@@ -43,6 +43,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import subprocess
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -190,8 +191,24 @@ def run_with_runner(
     # ------------------------------------------------------------------
     max_agents = max(1, int(getattr(ctx.settings, "codegen_max_parallel_agents", 3)))
     board = CodegenBoard.load_or_init(
-        project_dir, plan, max_agents=max_agents
+        project_dir, plan, max_agents=max_agents, repo_root=repo_root
     )
+    if board.dropped_tasks:
+        ctx.emit(
+            ProjectStage.code_generation,
+            "info",
+            "dropped tasks the current MechanicPlan no longer has: "
+            + ",".join(board.dropped_tasks)
+            + (f" (deleted {len(board.deleted_files)} of their files)"
+               if board.deleted_files else ""),
+        )
+    if board.changed_tasks:
+        ctx.emit(
+            ProjectStage.code_generation,
+            "info",
+            "regenerating tasks whose CodeTask changed since they were written: "
+            + ",".join(board.changed_tasks),
+        )
     # Resume policy: reset anything left stuck in ``in_progress`` from a
     # crashed previous run, so a new worker can claim it again.
     reset = board.reset_stuck_in_progress()
@@ -342,7 +359,7 @@ def run_with_runner(
         and getattr(ctx.settings, "codegen_verify_compile", True)
         and (runtime.produced or done_with_files)
     ):
-        verifier = compile_verifier or (lambda: _default_verify_compile(ctx))
+        verifier = compile_verifier or (lambda: _verify_all_targets(ctx))
         max_rounds = max(0, int(getattr(ctx.settings, "codegen_max_repair_rounds", 2)))
         verify_ok, verify_log, failing_after = runtime.verify_and_repair(
             verifier=verifier, max_rounds=max_rounds
@@ -368,6 +385,14 @@ def run_with_runner(
     # ------------------------------------------------------------------
     # Wrap up
     # ------------------------------------------------------------------
+    if not board.flush():
+        ctx.emit(
+            ProjectStage.code_generation,
+            "warning",
+            f"codegen_board.json could not be written ({board.last_save_error}); "
+            "this run's results are intact, but a Resume may redo finished tasks",
+        )
+
     final_counts = board.status_counts()
     produced: list[str] = []
     with runtime._produced_lock:
@@ -797,7 +822,10 @@ class _StageRuntime:
             except Exception as exc:
                 # Stamp the failure and continue with the next task.
                 err = f"{type(exc).__name__}: {exc}"
-                self.board.mark_failed(task_id, error=err)
+                try:
+                    self.board.mark_failed(task_id, error=err)
+                except KeyError:
+                    pass  # the row is gone; nothing left to stamp
                 self.ctx.emit(
                     ProjectStage.code_generation,
                     "task_failed",
@@ -1372,6 +1400,163 @@ def _error_excerpt(log_text: str) -> str:
 # ---------------------------------------------------------------------------
 
 
+def _verify_all_targets(ctx: PipelineContext) -> tuple[bool, str]:
+    """MSVC build-and-link, then (Quest projects) a clang syntax pass.
+
+    Clang only runs once MSVC is clean, so one repair round never mixes the
+    two compilers' opinions of the same line."""
+    ok, log = _default_verify_compile(ctx)
+    if not ok:
+        return ok, log
+    try:
+        device = ctx.store.load_state(ctx.project_id).target_device
+    except Exception:  # noqa: BLE001
+        device = None
+    if device != TargetDevice.quest or not getattr(
+            ctx.settings, "codegen_quest_syntax_check", True):
+        return ok, log
+    clang = quest_syntax_check(ctx)
+    if clang is None:
+        return ok, log
+    clang_ok, clang_log = clang
+    return clang_ok, log + "\n" + clang_log
+
+
+#: Kept in step with PTV_COMPILE_DEFS / PTV_COMPILE_OPTS in
+#: engine/android/app/src/main/cpp/CMakeLists.txt.
+_ANDROID_DEFINES = (
+    "GLM_FORCE_DEPTH_ZERO_TO_ONE", "GLM_FORCE_RADIANS", "GLM_ENABLE_EXPERIMENTAL",
+    "VK_NO_PROTOTYPES", "VK_USE_PLATFORM_ANDROID_KHR", "XR_USE_GRAPHICS_API_VULKAN",
+    "XR_USE_PLATFORM_ANDROID", 'PTV_SHADER_DIR="shaders"', 'PTV_ENGINE_ASSET_DIR="engine"',
+)
+_ANDROID_WARNING_FLAGS = (
+    "-Wno-nullability-completeness", "-Wno-nullability-extension",
+    "-Wno-deprecated-literal-operator",
+)
+
+
+def resolve_ndk(settings: Any) -> Optional[Path]:
+    """The NDK the Quest build uses: ``android_ndk_home``, ``$ANDROID_NDK_HOME``,
+    then ``<sdk>/ndk/<android_ndk_version>`` with the SDK from
+    ``android_sdk_root``, ``$ANDROID_HOME`` or the Android Studio default."""
+    candidates: list[Path] = []
+    for value in (getattr(settings, "android_ndk_home", None),
+                  os.environ.get("ANDROID_NDK_HOME")):
+        if value:
+            candidates.append(Path(value))
+    version = str(getattr(settings, "android_ndk_version", "") or "")
+    sdk_roots = [getattr(settings, "android_sdk_root", None), os.environ.get("ANDROID_HOME"),
+                 os.environ.get("ANDROID_SDK_ROOT")]
+    if os.environ.get("LOCALAPPDATA"):
+        sdk_roots.append(str(Path(os.environ["LOCALAPPDATA"]) / "Android" / "Sdk"))
+    for root in sdk_roots:
+        if root and version:
+            candidates.append(Path(root) / "ndk" / version)
+    for c in candidates:
+        if _ndk_clang(c) is not None:
+            return c
+    return None
+
+
+def _ndk_clang(ndk: Path) -> Optional[Path]:
+    prebuilt = ndk / "toolchains" / "llvm" / "prebuilt"
+    for host in ("windows-x86_64", "linux-x86_64", "darwin-x86_64"):
+        for name in ("clang++.exe", "clang++"):
+            exe = prebuilt / host / "bin" / name
+            if exe.is_file():
+                return exe
+    return None
+
+
+def quest_syntax_check(ctx: PipelineContext) -> Optional[tuple[bool, str]]:
+    """Compile every generated .cpp of this game with the NDK's clang,
+    syntax only. Returns ``(ok, log)``, or None when it cannot run (no NDK).
+
+    Third-party headers come from the project's desktop vcpkg tree (EnTT,
+    GLM, nlohmann, VMA are header-only and identical); the compile-verify
+    build has already installed it."""
+    ndk = resolve_ndk(ctx.settings)
+    clang = _ndk_clang(ndk) if ndk else None
+    if clang is None:
+        ctx.emit(ProjectStage.code_generation, "warning",
+                 "Quest syntax check skipped: no Android NDK found "
+                 "(set ANDROID_HOME or android_ndk_home)")
+        return None
+    repo_root: Path = ctx.settings.repo_root
+    gen_root = repo_root / "engine" / "generated"
+    sources: list[Path] = []
+    for kind in ("mechanics", "ai", "dialogue"):
+        d = gen_root / kind / ctx.project_id
+        if d.is_dir():
+            sources.extend(sorted(d.glob("*.cpp")))
+    extra = dict(generated_sources_cache(ctx)).get("PTV_GENERATED_EXTRA_SOURCES", "")
+    sources.extend(Path(p) for p in extra.split(";") if p)
+    if not sources:
+        return True, "quest syntax check: no generated sources"
+
+    vcpkg_inc = (ctx.project_dir / "builds" / "cmake-current" / "vcpkg_installed"
+                 / "x64-windows" / "include")
+    includes = [ctx.settings.engine_dir / "runtime" / "include",
+                ctx.settings.engine_dir / "runtime" / "src"]
+    if vcpkg_inc.is_dir():
+        includes.append(vcpkg_inc)
+        if (vcpkg_inc / "vma").is_dir():
+            includes.append(vcpkg_inc / "vma")
+    base_cmd = [str(clang), "--target=aarch64-linux-android32", "-std=c++20",
+                "-fsyntax-only", *_ANDROID_WARNING_FLAGS]
+    base_cmd += [f"-D{d}" for d in _ANDROID_DEFINES]
+    base_cmd += [f"-I{p}" for p in includes]
+
+    ctx.emit(ProjectStage.code_generation, "verify",
+             f"Quest compiler check: {len(sources)} file(s) with {clang.name}")
+
+    def _one(src: Path) -> tuple[Path, int, str]:
+        try:
+            proc = subprocess.run(base_cmd + [str(src)], capture_output=True, text=True,
+                                  encoding="utf-8", errors="replace", timeout=300)
+        except subprocess.TimeoutExpired:
+            return src, 1, f"{src}: error: quest syntax check timed out"
+        return src, proc.returncode, (proc.stdout or "") + (proc.stderr or "")
+
+    results: list[tuple[Path, int, str]] = []
+    with ThreadPoolExecutor(max_workers=max(1, min(8, os.cpu_count() or 4))) as pool:
+        for res in pool.map(_one, sources):
+            results.append(res)
+    failed = [(src, out) for src, code, out in results if code != 0]
+    lines = [f"quest syntax check ({clang}): {len(sources) - len(failed)}/{len(sources)} ok"]
+    seen: set[str] = set()  # a header's errors repeat once per includer
+    for src, out in failed:
+        lines.append(f"--- {src.name}")
+        for l in out.splitlines():
+            if not (" error:" in l or "fatal error:" in l or "note:" in l):
+                continue
+            if l in seen:
+                continue
+            seen.add(l)
+            lines.append(l)
+    log = "\n".join(lines)
+    for line in lines[:40]:
+        ctx.emit(ProjectStage.code_generation, "log", line[:400])
+    return not failed, log
+
+
+def generated_sources_cache(ctx: PipelineContext) -> tuple[tuple[str, str], ...]:
+    """CMake cache entries selecting THIS game's generated C++ (plus any
+    promoted mechanics it reuses). Without them the build would compile every
+    game's code together, and two games' same-named tasks collide at link."""
+    from ..engine_catalog import promoted_sources_for_plan
+
+    try:
+        plan = ctx.mechanic_plan or ctx.store.load_mechanic_plan(ctx.project_id)
+    except Exception:  # noqa: BLE001 - no plan, no promoted reuse
+        plan = None
+    extra = promoted_sources_for_plan(ctx.settings.repo_root, plan, ctx.project_id)
+    return (
+        ("PTV_GENERATED_PROJECT_ID", ctx.project_id),
+        ("PTV_GENERATED_EXTRA_SOURCES", ";".join(extra)),
+    )
+
+
 def _default_verify_compile(ctx: PipelineContext) -> tuple[bool, str]:
     """Configure the engine and build the ``ptv_starter_room`` executable,
     which links ``ptv_runtime`` (with every generated mechanic force-linked
@@ -1406,7 +1591,7 @@ def _default_verify_compile(ctx: PipelineContext) -> tuple[bool, str]:
         platform=ctx.settings.cmake_generator_platform,
         config=ctx.settings.cmake_build_config,
         vcpkg_root=ctx.settings.vcpkg_root,
-        extra_cache=(("PTV_GENERATED_PROJECT_ID", ctx.project_id),),
+        extra_cache=generated_sources_cache(ctx),
         build_target="ptv_starter_room",
         on_line=_sink,
         # Force a full recompile of the generated sources. Without this, an

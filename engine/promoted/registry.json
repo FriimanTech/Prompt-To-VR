@@ -11,6 +11,17 @@
       "project_id": "20260706-212302-vr-environment-test",
       "promoted_at": "2026-07-06T23:25:35.850167+00:00",
       "params": {}
+    },
+    {
+      "id": "promoted.grabbable_pistol_pickup",
+      "summary": "Copy and edit builtin.grab into generated.grabbable_pistol_pickup, bound to survival_pistol in alien_survival_zone. Preserve overlap-based either-hand grabbing and grip-socket alignment. Frame by frame, an eligible free hand squeezing Grip within params radius_m may acquire the pistol; align the asset's named 'grip' socket to that hand and record exclusive ownership so a second hand cannot attach. Releasing the same Grip immediately detaches the pistol and gives it modest smoothed inherited hand linear/angular velocity scaled by params drop_velocity_scale; this is a drop, not a powerful throw.",
+      "category": "mechanic",
+      "kind": "mechanics",
+      "source_path": "engine/generated/mechanics/20261023-205949-humans-vs-aliens-survival/grabbable_pistol_pickup.cpp",
+      "code_task_id": "grabbable_pistol_pickup",
+      "project_id": "20261023-205949-humans-vs-aliens-survival",
+      "promoted_at": "2026-10-24T16:27:40.381444+00:00",
+      "params": {}
     }
   ]
 }

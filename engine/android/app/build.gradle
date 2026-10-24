@@ -31,6 +31,7 @@ android {
                 arguments '-DANDROID_STL=c++_shared',
                           '-DPTV_ENGINE_DIR=@PTV_ENGINE_DIR@',
                           '-DPTV_PROJECT_ID=@PTV_PROJECT_ID@',
+                          '-DPTV_GENERATED_EXTRA_SOURCES=@PTV_GENERATED_EXTRA_SOURCES@',
                           '-DPTV_APP_LIB_NAME=ptv_quest'
                 cppFlags '-std=c++20'
             }

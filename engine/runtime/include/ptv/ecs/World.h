@@ -249,14 +249,6 @@ struct CSelfViewHide {
     float scale{0.0f};
 };
 
-/** Declared, changeable state on a world object.
- *
- * Attached by the scene loader from the ``interactives`` block the world
- * builder emitted. Its presence is what turns a box in a doorway into a door
- * the engine understands: nothing else tells navigation that the crossing is
- * conditional, or tells persistence what "unchanged" looks like.
- *
- * ``pristine`` is the load-time value and is never written again. Everything
 /** One selectable line on a virtual panel. */
 struct UiRow {
     /** Human-readable, and deliberately NOT drawn: the engine has no in-world

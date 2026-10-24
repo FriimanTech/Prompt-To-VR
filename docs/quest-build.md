@@ -62,6 +62,14 @@ native `.so` (`libptv_quest.so`) is built by
 `app/src/main/cpp/CMakeLists.txt` (NDK), linking the shared engine runtime +
 this project's generated mechanics + the Khronos OpenXR Android loader.
 
+### Catching Quest-only compile errors early
+
+Code generation's compile check builds with MSVC, but this APK is built with the NDK's clang, and the two disagree on some code. For Quest projects, code generation therefore also runs `quest_syntax_check`: the NDK `clang++ --target=aarch64-linux-android32 -fsyntax-only` over every generated `.cpp`, with this CMakeLists' defines and warning flags. Errors go to the repair loop like any compile error.
+
+The NDK is found through `android_ndk_home`, `$ANDROID_NDK_HOME`, or `<SDK>/ndk/<android_ndk_version>`; without one, the check is skipped with a warning. Turn it off with `codegen_quest_syntax_check=false`.
+
+`quest_build` writes the full Gradle output to `logs/gradle.log`. The live UI shows only progress, diagnostics and the verdict, and a failure message quotes the first compiler errors.
+
 Required Meta manifest entries (see `AndroidManifest.xml`): the
 `android.hardware.vr.headtracking` uses-feature, the
 `com.oculus.intent.category.VR` intent category, `com.oculus.supportedDevices`,

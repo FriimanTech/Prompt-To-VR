@@ -35,13 +35,14 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
 from ptv_schemas import MechanicPlan
+
+from ..fsutil import atomic_write_text, unlink_with_retry
 
 
 _VALID_STATES = {"pending", "blocked", "in_progress", "done", "failed"}
@@ -65,6 +66,17 @@ def socket_fingerprint(sockets_by_asset: dict[str, list[str]]) -> str:
         asset_id: sorted(names)
         for asset_id, names in (sockets_by_asset or {}).items()
         if names
+    }
+    blob = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:16]
+
+
+def task_fingerprint(item: Any) -> str:
+    """Digest of what a plan item asks the codegen agent to write."""
+    payload = {
+        "classification": getattr(item.classification, "value", str(item.classification)),
+        "base_builtin_id": item.base_builtin_id or item.builtin_id or "",
+        "code_task": item.code_task.model_dump(mode="json") if item.code_task else None,
     }
     blob = json.dumps(payload, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:16]
@@ -116,6 +128,14 @@ class CodegenBoard:
         self.path = self.project_dir / "codegen_board.json"
         self.max_agents = max_agents
         self._lock = threading.Lock()
+        # Set when a save could not reach disk; the in-memory board stays
+        # authoritative and the next save (or flush) writes it.
+        self._dirty = False
+        self.last_save_error: str | None = None
+        # What load_or_init pruned or reset, for the stage to report.
+        self.dropped_tasks: list[str] = []
+        self.deleted_files: list[str] = []
+        self.changed_tasks: list[str] = []
         self._data: dict[str, Any] = {
             "version": self.VERSION,
             "max_agents": max_agents,
@@ -133,12 +153,15 @@ class CodegenBoard:
         plan: MechanicPlan,
         *,
         max_agents: int = 3,
+        repo_root: Path | None = None,
     ) -> "CodegenBoard":
         """Load an existing board (resume) or initialise a new one from
         ``plan``. New tasks from the plan are appended in plan order.
         Existing rows in ``done`` / ``failed`` / ``in_progress`` are left
-        alone; rows in ``pending`` / ``blocked`` have their status
-        recomputed against the latest ``depends_on``.
+        alone unless their CodeTask changed; rows in ``pending`` /
+        ``blocked`` have their status recomputed against the latest
+        ``depends_on``. Rows for tasks the plan no longer has are dropped,
+        and (given ``repo_root``) so are the files only they wrote.
         """
         board = cls(project_dir, max_agents=max_agents)
         if board.path.exists():
@@ -158,6 +181,8 @@ class CodegenBoard:
         board._data.setdefault("task_order", [])
         board._data.setdefault("tasks", {})
         board._merge_plan_locked(plan)
+        board._drop_tasks_not_in_plan(plan, repo_root)
+        board._reset_dependents_of_changed()
         with board._lock:
             board._refresh_blocked_locked()
             board._save_locked()
@@ -196,6 +221,7 @@ class CodegenBoard:
                 order.append(task_id)
                 seen_order.add(task_id)
 
+            fingerprint = task_fingerprint(item)
             row = tasks.get(task_id)
             if row is None:
                 tasks[task_id] = {
@@ -203,6 +229,7 @@ class CodegenBoard:
                     "status": "pending" if not depends else "blocked",
                     "depends_on": depends,
                     "required_sockets": required_sockets,
+                    "task_fingerprint": fingerprint,
                     "agent_id": None,
                     "claimed_at": None,
                     "completed_at": None,
@@ -213,26 +240,107 @@ class CodegenBoard:
                 continue
 
             # Existing row: refresh deps + plan link, but never demote a
-            # terminal or in-flight task.
+            # terminal or in-flight task -- unless the task it was written
+            # for has changed, in which case its code answers a question
+            # nobody is asking any more.
             row["mechanic_plan_item_id"] = item.id
             row["depends_on"] = depends
             row["required_sockets"] = required_sockets
+            previous = row.get("task_fingerprint")
+            row["task_fingerprint"] = fingerprint
+            if (previous is not None and previous != fingerprint
+                    and row.get("status") in ("done", "failed")):
+                row.update(status="pending", agent_id=None, claimed_at=None,
+                           completed_at=None, error=None)
+                self.changed_tasks.append(task_id)
             if row.get("status") not in ("done", "failed", "in_progress"):
                 row["status"] = "pending" if not depends else "blocked"
+
+    def _reset_dependents_of_changed(self) -> None:
+        """A task written against exports that are about to be rewritten has
+        to be rewritten too (transitively)."""
+        if not self.changed_tasks:
+            return
+        tasks: dict[str, Any] = self._data["tasks"]
+        invalid = set(self.changed_tasks)
+        growing = True
+        while growing:
+            growing = False
+            for tid, row in tasks.items():
+                if tid in invalid or row.get("status") != "done":
+                    continue
+                if any(d in invalid for d in row.get("depends_on", [])):
+                    row.update(status="pending", agent_id=None, claimed_at=None,
+                               completed_at=None, error=None)
+                    invalid.add(tid)
+                    self.changed_tasks.append(tid)
+                    growing = True
+        done_ids = {t for t, r in tasks.items() if r.get("status") == "done"}
+        for tid in invalid:
+            row = tasks[tid]
+            if not all(d in done_ids for d in row.get("depends_on", [])):
+                row["status"] = "blocked"
+
+    def _drop_tasks_not_in_plan(self, plan: MechanicPlan, repo_root: Path | None) -> None:
+        """Forget tasks an earlier plan had and this one does not.
+
+        Left on the board they are claimed, fail with "not present in plan"
+        and fail the stage; left on disk their C++ is still swept into the
+        build by the generated-sources glob. A file is only deleted when no
+        current task lists it or is named by it -- shared headers are
+        sometimes recorded by a sibling task."""
+        current = {it.code_task.id for it in plan.items if it.code_task is not None}
+        tasks: dict[str, Any] = self._data["tasks"]
+        stale = [tid for tid in tasks if tid not in current]
+        if not stale:
+            return
+        owned: set[str] = set()
+        for tid in current:
+            owned.update((tasks.get(tid) or {}).get("files_written") or [])
+        for tid in stale:
+            row = tasks.pop(tid)
+            self.dropped_tasks.append(tid)
+            if repo_root is None:
+                continue
+            for rel in row.get("files_written") or []:
+                name = Path(rel).name
+                if rel in owned or any(
+                    name.startswith(f"{c}_") or name.startswith(f"{c}.") for c in current
+                ):
+                    continue
+                path = Path(rel) if Path(rel).is_absolute() else Path(repo_root) / rel
+                if path.is_file() and unlink_with_retry(path):
+                    self.deleted_files.append(rel)
+        self._data["task_order"] = [t for t in self._data["task_order"] if t in current]
+        for row in tasks.values():
+            row["depends_on"] = [d for d in row.get("depends_on", []) if d in current]
 
     # ------------------------------------------------------------------
     # Persistence
     # ------------------------------------------------------------------
     def _save_locked(self) -> None:
         """Persist the board to disk atomically. Caller MUST hold
-        ``self._lock``."""
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = self.path.with_suffix(self.path.suffix + ".tmp")
-        tmp.write_text(
-            json.dumps(self._data, indent=2, sort_keys=True),
-            encoding="utf-8",
-        )
-        os.replace(tmp, self.path)
+        ``self._lock``.
+
+        Never raises for a file another process is holding: the board in
+        memory is what the workers act on, and the file is only the ledger a
+        later Resume reads. A failed save marks the board dirty and the next
+        save writes everything."""
+        try:
+            atomic_write_text(self.path, json.dumps(self._data, indent=2, sort_keys=True))
+        except OSError as exc:
+            self._dirty = True
+            self.last_save_error = f"{type(exc).__name__}: {exc}"
+            return
+        self._dirty = False
+
+    def flush(self) -> bool:
+        """Write the board if a save was missed. Returns True when the file
+        on disk matches memory."""
+        with self._lock:
+            if self._dirty:
+                self._save_locked()
+            return not self._dirty
 
     # ------------------------------------------------------------------
     # Read-only views

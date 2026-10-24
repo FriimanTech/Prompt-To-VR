@@ -29,6 +29,7 @@ from ..build.cmake_runner import (
     STATUS_CONTROL_C_EXIT_SIGNED,
 )
 from .context import PipelineContext, StageResult
+from .stage_code_generation import generated_sources_cache
 
 
 _CTRL_C_EXITS = {STATUS_CONTROL_C_EXIT, STATUS_CONTROL_C_EXIT_SIGNED}
@@ -117,7 +118,7 @@ def run(ctx: PipelineContext) -> StageResult:
             config=ctx.settings.cmake_build_config,
             vcpkg_root=ctx.settings.vcpkg_root,
             extra_cache=(
-                ("PTV_GENERATED_PROJECT_ID", ctx.project_id),
+                *generated_sources_cache(ctx),
                 ("PTV_SCENE_JSON", str(ctx.project_dir / "scene.json").replace("\\", "/")),
                 ("PTV_PROJECT_DIR", str(ctx.project_dir).replace("\\", "/")),
                 ("PTV_APP_NAME", app_name),

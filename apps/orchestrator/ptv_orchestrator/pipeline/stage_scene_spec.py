@@ -160,6 +160,18 @@ def _default_composer_factory(
     )
 
 
+def _remove_stale_scene_specs(ctx: PipelineContext, build_spec: Any) -> None:
+    """Delete SceneSpecs of scenes the BuildSpec no longer has; later stages
+    glob ``scene_spec*.json`` and would read them as part of this game."""
+    from .run_reset import remove_stale_scene_files
+
+    removed = remove_stale_scene_files(
+        ctx.project_dir, "scene_spec", [s.id for s in build_spec.scenes])
+    if removed:
+        ctx.emit(ProjectStage.scene_spec, "info",
+                 f"removed SceneSpecs of scenes no longer planned: {', '.join(removed)}")
+
+
 def run(ctx: PipelineContext) -> StageResult:
     return run_with_composer_factory(ctx, _default_composer_factory)
 
@@ -380,6 +392,7 @@ def run_with_composer_factory(
         scenes.append(job.scene_spec)
         artifacts.extend(job.artifacts)
 
+    _remove_stale_scene_specs(ctx, build_spec)
     ctx.scene_specs = scenes
     ctx.store.record_stage(
         state,
@@ -530,6 +543,7 @@ def _finalize_all_existing(
             f"({len(scene_spec.entities)} entities, no LLM call)",
         )
 
+    _remove_stale_scene_specs(ctx, build_spec)
     ctx.scene_specs = scenes
     ctx.store.record_stage(
         state,

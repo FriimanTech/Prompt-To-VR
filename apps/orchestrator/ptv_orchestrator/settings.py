@@ -39,6 +39,11 @@ class Settings(BaseSettings):
     engine_dir: Path = REPO_ROOT / "engine"
     samples_dir: Path = REPO_ROOT / "samples"
 
+    # "Run full pipeline" moves the previous run's output into
+    # projects/<id>/previous_runs/<stamp>/ before starting. How many of those
+    # archives to keep (0 = delete the previous run instead of keeping it).
+    full_run_archive_keep: int = Field(default=1, ge=0, le=20)
+
     # --- Provider keys ---------------------------------------------------
     anthropic_api_key: str | None = None
     # ChatGPT fallback used automatically when Claude is unavailable.
@@ -144,6 +149,14 @@ class Settings(BaseSettings):
     # independent defects (compile errors, cross-task duplicate symbols, and
     # signature mismatches) in a single code-generation run.
     codegen_max_repair_rounds: int = Field(default=3, ge=0, le=10)
+    # Quest projects: after the MSVC compile check passes, also syntax-check
+    # the generated C++ with the NDK's clang (the compiler the APK is built
+    # with). The two disagree on real code -- MSVC accepts a requires-probe of
+    # a function signature that does not exist; clang rejects it -- and
+    # without this the error only surfaces in quest_build, after code
+    # generation has stopped repairing. Skipped (with a warning) when no NDK
+    # is installed.
+    codegen_quest_syntax_check: bool = True
     # Codegen has its OWN model knobs rather than borrowing
     # ``openai_hard_model``. That field means "which OpenAI model do we use
     # when Claude is unavailable"; codegen is not a fallback, it always runs

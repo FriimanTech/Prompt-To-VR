@@ -15,8 +15,8 @@ class World;
 
 /** Global registry of mechanic / behaviour / dialogue-hook factories.
  *
- * Built-ins register themselves at static-init time from
- * engine/runtime/src/mechanics/*.cpp. Generated code registers via the
+ * Built-ins register themselves at static-init time from the .cpp files
+ * under engine/runtime/src/mechanics/. Generated code registers via the
  * ``PTV_REGISTER_MECHANIC`` macro. The engine core never links against
  * anything under ``engine/generated/``; instead, we rely on every TU
  * referencing ``register_mechanic`` to live in the same binary.

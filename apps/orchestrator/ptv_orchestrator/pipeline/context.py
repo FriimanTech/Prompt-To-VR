@@ -60,11 +60,15 @@ class PipelineContext:
             self.run.forget_process(proc)
 
     def emit(self, stage: ProjectStage, status: str, message: str = "") -> None:
-        self.bus.publish(
-            PipelineEvent(
-                project_id=self.project_id,
-                stage=stage.value,
-                status=status,
-                message=message,
+        # Progress reporting must never fail the stage it reports on.
+        try:
+            self.bus.publish(
+                PipelineEvent(
+                    project_id=self.project_id,
+                    stage=stage.value,
+                    status=status,
+                    message=message,
+                )
             )
-        )
+        except Exception:  # noqa: BLE001
+            pass

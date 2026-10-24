@@ -2857,7 +2857,7 @@ void Application::create_hand_entities() {
     // top of the body's. builtin.avatar_body points the finger targets at
     // the avatar once it has found its finger bones.
     if (scene_.hands_source == "avatar") {
-        for (int h = 0; h < 2; ++h) {
+    for (int h = 0; h < 2; ++h) {
             const auto e = world_.create_entity(std::string("__") + names[h]);
             world_.registry().emplace<CTransform>(e, CTransform{});
             world_.registry().emplace<CTag>(
@@ -5326,7 +5326,7 @@ void Application::apply_player_settings_from_scene() {
     } else if (m.find("head") != std::string::npos || m.find("slide") !=
                                                           std::string::npos) {
         locomotion_ = LocomotionMode::SlideHeadRelative;
-    } else {
+        } else {
         locomotion_ = LocomotionMode::Teleport;
     }
     turn_mode_ = (lower(scene_.default_turn_mode) == "smooth")

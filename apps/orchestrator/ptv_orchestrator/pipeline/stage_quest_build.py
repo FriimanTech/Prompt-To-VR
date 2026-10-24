@@ -21,6 +21,7 @@ to need on-device iteration; see engine/android/README.md.
 from __future__ import annotations
 
 import hashlib
+import re
 import shutil
 from pathlib import Path
 
@@ -29,6 +30,7 @@ from ptv_schemas import ProjectStage, ProjectStatus
 from ..build import assemble_debug, find_debug_apk
 from ..quest_ids import quest_package_name
 from .context import PipelineContext, StageResult
+from .stage_code_generation import generated_sources_cache
 from .proc import proc_hooks
 
 _SHADER_EXTS = (".vert", ".frag", ".comp")
@@ -64,6 +66,27 @@ def _app_label(ctx: PipelineContext) -> str:
     except Exception:
         title = ""
     return (title or ctx.project_id).strip() or ctx.project_id
+
+
+_PROGRESS_RE = re.compile(r"^\s*\[\d+/\d+\]")
+
+
+def is_compile_error_line(line: str) -> bool:
+    """A compiler diagnostic that is an error (clang ``file:1:2: error:``)."""
+    return ": error:" in line or ": fatal error:" in line
+
+
+def is_notable_gradle_line(line: str) -> bool:
+    """Lines worth streaming live: build progress, task boundaries,
+    diagnostics and the final verdict."""
+    s = line.strip()
+    if not s:
+        return False
+    if _PROGRESS_RE.match(s) or s.startswith(("> Task", "BUILD ", "FAILURE", "FAILED",
+                                              "* What went wrong", "Execution failed")):
+        return True
+    low = s.lower()
+    return ": error:" in low or ": fatal error:" in low or ": warning:" in low
 
 
 def _substitute_tokens(build_dir: Path, tokens: dict[str, str]) -> None:
@@ -257,6 +280,8 @@ def run(ctx: PipelineContext) -> StageResult:
         "@PTV_APP_LABEL@": _app_label(ctx),
         "@PTV_ENGINE_DIR@": str(s.engine_dir).replace("\\", "/"),
         "@PTV_PROJECT_ID@": ctx.project_id,
+        "@PTV_GENERATED_EXTRA_SOURCES@": dict(generated_sources_cache(ctx))[
+            "PTV_GENERATED_EXTRA_SOURCES"],
         "@PTV_MIN_SDK@": str(s.android_min_sdk),
         "@PTV_TARGET_SDK@": str(s.android_target_sdk),
         "@PTV_COMPILE_SDK@": str(s.android_compile_sdk),
@@ -273,10 +298,20 @@ def run(ctx: PipelineContext) -> StageResult:
     log_path.parent.mkdir(parents=True, exist_ok=True)
     log_path.write_text("", encoding="utf-8")
 
+    first_errors: list[str] = []
+
     def _sink(line: str) -> None:
+        # Everything goes to gradle.log; the live view gets what a person
+        # watching wants (progress, warnings, errors). Streaming every line of
+        # a native build is thousands of events for no reader.
         with log_path.open("a", encoding="utf-8") as f:
             f.write(line + "\n")
-        ctx.emit(ProjectStage.quest_build, "log", line[:512])
+        if is_compile_error_line(line) and len(first_errors) < 6:
+            text = line.strip().removeprefix("C/C++:").strip()
+            if text not in first_errors:
+                first_errors.append(text)
+        if is_notable_gradle_line(line):
+            ctx.emit(ProjectStage.quest_build, "log", line[:512])
 
     result = assemble_debug(
         project_dir=build_dir, on_line=_sink, **proc_hooks(ctx)
@@ -301,11 +336,18 @@ def run(ctx: PipelineContext) -> StageResult:
         ctx.emit(ProjectStage.quest_build, "succeeded", f"APK built: {apk}")
         return StageResult(stage=ProjectStage.quest_build, artifacts=[rel] if rel else [])
 
-    msg = (
-        f"Gradle build failed (exit={result.exit_code}). See logs/gradle.log. "
-        "First-time arm64-android dependency builds and native bring-up often "
-        "need iteration; see engine/android/README.md."
-    )
+    if first_errors:
+        msg = (
+            f"Gradle build failed (exit={result.exit_code}): the Quest compiler "
+            f"rejected the C++. First errors: {' | '.join(first_errors[:3])}. "
+            "See logs/gradle.log."
+        )
+    else:
+        msg = (
+            f"Gradle build failed (exit={result.exit_code}). See logs/gradle.log. "
+            "First-time arm64-android dependency builds and native bring-up often "
+            "need iteration; see engine/android/README.md."
+        )
     ctx.store.record_stage(
         state, ProjectStage.quest_build, ProjectStatus.failed, message=msg
     )

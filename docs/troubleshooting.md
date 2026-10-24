@@ -14,6 +14,39 @@ The orchestrator now reconciles this at startup, so restarting the server
 clears it. The **Abort** button does the same thing on demand. See
 [`run-lifecycle.md`](run-lifecycle.md).
 
+## `PermissionError: [WinError 5] Access is denied` or `[WinError 32] ... being used by another process`
+
+On Windows, a file another process has open cannot be renamed over, renamed away or deleted.
+
+The web panel caused this. It refreshed the artifact list on every pipeline event, and the server answered by opening and hashing every file in the project, including the codegen ledger mid-replace and freshly downloaded GLBs mid-move. The codegen stage crashed on `codegen_board.json`, and a paid Tripo rig was recorded as failed because its staging file could not be deleted.
+
+What changed:
+
+- **Writers retry.** Every replace and move goes through `ptv_orchestrator/fsutil.py`, which retries a locked file for about 3 s.
+- **JSON writes are atomic.** Each one uses a unique temp name.
+- **A codegen board save never kills a worker.** The board stays authoritative in memory and is flushed at the end of the stage.
+- **Readers back off.** The artifact listing skips temp and staging files, caches hashes by size and modification time, and skips large files modified in the last 2 s. The panel refreshes the list only when a stage starts or finishes.
+
+If it still happens, something outside the pipeline is holding the file, such as an Explorer preview pane, an open GLB viewer or an antivirus scan. Close it and use **Resume**; finished work is kept.
+
+## A stage fails with just `QueueFull`
+
+That was the live-progress feed, not the stage. Each open browser tab had a 256-event queue, and stages run on worker threads that pushed into it with `put_nowait`. An `asyncio.Queue` is not thread-safe, so the server never woke up to drain it. A burst of output, such as Gradle printing a failed native build, filled it and raised `QueueFull` through `ctx.emit`, which failed `quest_build` and hid the real Gradle error.
+
+`events.py` now hands each event to the subscriber's own loop (`call_soon_threadsafe`). When a reader falls behind it drops the oldest log line, never a stage status, and `publish()` never raises. `quest_build` also streams only progress, diagnostics and the verdict; the full output is still in `logs/gradle.log`.
+
+## Code generation passed but `quest_build` fails with clang errors
+
+The PC compile check uses MSVC, and the APK is built with the NDK's clang. They disagree on real code. A probe such as `if constexpr (requires { dep::f(weapon); })` with ordinary arguments is quietly "false" on MSVC and a hard error on clang ("too few arguments to function call").
+
+For Quest projects, code generation now runs a clang syntax check (`quest_syntax_check`) after the MSVC build passes. Its errors go through the same repair loop, so the owning task is fixed before packaging. The code-task prompt also forbids probing a dependency's API. If the NDK is not installed, the check is skipped with a warning. A failed `quest_build` now quotes the first compiler errors in its message.
+
+## Compile verification fails with `LNK2005 ... already defined` for a generated mechanic
+
+The desktop build used to compile every game's generated C++ under `engine/generated/` into one library. Two games that both planned a task with the same name both defined the same classes, for example `ptv::shooting_hub_detail::ShootingHub` in the goblin shooter and the shooting range. The link failed even though each game's code was correct, and the repair loop could never fix it, because the other copy belongs to another project.
+
+`engine/generated/CMakeLists.txt` now compiles only `PTV_GENERATED_PROJECT_ID` (the orchestrator always passes it), plus any promoted mechanics the plan reuses. The Quest build already worked this way. An engine-only build with no project id compiles no generated code; pass `-DPTV_GENERATED_PROJECT_ID=*` for the old everything-at-once behavior.
+
 ## CMake says "Visual Studio 18 2026 could not find any instance"
 
 - Confirm VS Community 2026 is installed (not just 2022).

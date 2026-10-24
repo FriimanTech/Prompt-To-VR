@@ -71,6 +71,8 @@ from ptv_schemas.asset_manifest import AssetCategory, AssetItem, CharacterRole, 
 from .character_artifacts import (
     RIG_CHECK_NAME,
     load_json,
+    manifest_asset_ids,
+    prune_to_assets,
     rel,
     save_json,
     save_routing,
@@ -262,6 +264,7 @@ def _rig_checks(
             ctx.emit(_STAGE, "warning", f"{item.id}: Tripo rig-check failed ({exc})")
         out[item.id] = record
         cache[item.id] = {**record.model_dump(), "source_sha256": digest}
+    prune_to_assets(cache, manifest_asset_ids(ctx))
     save_json(cache_path, cache)
     return out
 

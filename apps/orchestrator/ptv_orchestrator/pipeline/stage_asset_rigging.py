@@ -32,13 +32,13 @@ never re-bills. Delete that file (and ``model_rigged.glb``) to force a re-rig.
 from __future__ import annotations
 
 import json
-import shutil
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 from ptv_providers import TripoClient, TripoConfig
 from ptv_schemas import ProjectStage, ProjectStatus
 
+from ..fsutil import atomic_write_text, move_with_retry, rmtree_with_retry
 from .context import PipelineContext, StageResult
 
 _STAGE = ProjectStage.asset_rigging
@@ -62,6 +62,7 @@ def run(ctx: PipelineContext) -> StageResult:
     assets_dir = ctx.project_dir / "assets"
     report_path = ctx.project_dir / _RIG_REPORT_NAME
     report: dict[str, Any] = _load_report(report_path)
+    manifest_ids = [it.id for it in manifest.items]
 
     if not ctx.settings.tripo_rigging_enabled:
         message = "Rigging disabled (tripo_rigging_enabled=false)"
@@ -88,6 +89,21 @@ def run(ctx: PipelineContext) -> StageResult:
         rigged_glb = item_dir / _RIGGED_GLB_NAME
 
         prior = report.get(item.id)
+        if isinstance(prior, dict) and prior.get("status") == "downloaded":
+            # Paid for and downloaded, but the file never reached its final
+            # name (another process held it). Finish the move; no new rig.
+            staged = item_dir / ".rig_download" / "model.glb"
+            try:
+                if staged.is_file():
+                    move_with_retry(staged, rigged_glb)
+                if rigged_glb.is_file():
+                    rmtree_with_retry(item_dir / ".rig_download")
+                    prior = dict(prior, status="rigged", rigged_glb=_rel(ctx, rigged_glb))
+                    prior.pop("staged_glb", None)
+                    report[item.id] = prior
+            except OSError as exc:
+                ctx.emit(_STAGE, "warning",
+                         f"{item.id}: could not finish moving the rigged GLB: {exc}")
         if isinstance(prior, dict) and prior.get("status") in ("rigged", "not_riggable"):
             # A previous run already paid for the answer. Trust it unless the
             # file it points at has since disappeared.
@@ -115,7 +131,7 @@ def run(ctx: PipelineContext) -> StageResult:
         )
 
     if not pending:
-        _save_report(report_path, report)
+        _save_report(report_path, report, manifest_ids)
         message = (
             f"{len(produced)} rigged asset(s) already on disk; no Tripo calls made"
             if produced
@@ -215,7 +231,7 @@ def run(ctx: PipelineContext) -> StageResult:
             # would destroy the original and a re-run would then rig an
             # already-rigged mesh.
             staging = item_dir / ".rig_download"
-            shutil.rmtree(staging, ignore_errors=True)
+            rmtree_with_retry(staging)
             result = client.rig(
                 out_dir=staging,
                 task_id=task_id,
@@ -231,10 +247,27 @@ def run(ctx: PipelineContext) -> StageResult:
             if downloaded is None:
                 raise RuntimeError("rig task returned no GLB")
 
+            # Record the paid rig BEFORE touching files: animation can only
+            # retarget onto a rig task id, so losing it means paying again.
+            entry = {
+                "status": "downloaded",
+                "provider": "tripo",
+                "rig_check_task_id": check.task_id,
+                "rig_task_id": result.task_id,
+                "rig_type": check.rig_type,
+                "model": rig_model,
+                "spec": "tripo",
+                "out_format": "glb",
+                "source_glb": _rel(ctx, source),
+                "staged_glb": _rel(ctx, downloaded),
+                "credits_estimate": _CREDITS_PER_RIG,
+            }
+            report[item.id] = entry
+            _save_report(report_path, report, manifest_ids)
+
             final = item_dir / _RIGGED_GLB_NAME
-            final.unlink(missing_ok=True)
-            shutil.move(str(downloaded), str(final))
-            shutil.rmtree(staging, ignore_errors=True)
+            move_with_retry(downloaded, final)
+            rmtree_with_retry(staging)
 
             produced.append(_rel(ctx, final))
             report[item.id] = {
@@ -256,9 +289,14 @@ def run(ctx: PipelineContext) -> StageResult:
             ctx.store.append_log(ctx.project_id, "asset_rigging", f"{item.id}: {exc}")
             ctx.emit(_STAGE, "warning", f"{item.id}: {exc}")
             errors.append(f"{item.id}: {exc}")
-            report[item.id] = {"status": "failed", "error": str(exc)}
+            prior = report.get(item.id)
+            if isinstance(prior, dict) and prior.get("status") == "downloaded":
+                # Keep the paid rig; the next run finishes the move.
+                report[item.id] = dict(prior, error=str(exc))
+            else:
+                report[item.id] = {"status": "failed", "error": str(exc)}
 
-    _save_report(report_path, report)
+    _save_report(report_path, report, manifest_ids)
 
     # A failed rig is recoverable -- the un-rigged GLB is still on disk and the
     # asset renders as static geometry, it just cannot be animated. That is a
@@ -375,7 +413,9 @@ def _load_report(path: Path) -> dict[str, Any]:
     return data if isinstance(data, dict) else {}
 
 
-def _save_report(path: Path, report: dict[str, Any]) -> None:
-    path.write_text(
-        json.dumps(report, indent=2, sort_keys=True), encoding="utf-8"
-    )
+def _save_report(path: Path, report: dict[str, Any],
+                 manifest_ids: Iterable[str] = ()) -> None:
+    from .character_artifacts import prune_to_assets
+
+    prune_to_assets(report, manifest_ids)
+    atomic_write_text(path, json.dumps(report, indent=2, sort_keys=True))

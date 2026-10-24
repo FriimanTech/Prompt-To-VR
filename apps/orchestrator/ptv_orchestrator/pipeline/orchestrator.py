@@ -49,6 +49,7 @@ from . import (
 )
 from .context import PipelineContext, StageResult
 from .player_experience import sync_build_spec_experience
+from .run_reset import archive_previous_run
 from .target_device import sync_build_spec_device
 
 
@@ -322,6 +323,9 @@ def run_pipeline(project_id: str, settings: Settings | None = None) -> None:
     with _claimed_run(project_id, settings, ProjectStage.build_spec) as ctx:
         if ctx is None:
             return
+        # A full run starts from the prompt: the previous run's artifacts,
+        # ledgers and generated C++ are moved aside so no stage reuses them.
+        archive_previous_run(ctx)
         _mark_running(ctx)
         device = ctx.store.load_state(project_id).target_device
         for stage, fn in _stages_for(device):

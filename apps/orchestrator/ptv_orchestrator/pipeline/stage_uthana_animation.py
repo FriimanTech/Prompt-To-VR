@@ -35,6 +35,8 @@ from .character_artifacts import (
     UTHANA_RIGGED_GLB,
     load_json,
     load_motion_plan,
+    manifest_asset_ids,
+    prune_to_assets,
     rel,
     save_json,
     sha256_file,
@@ -194,6 +196,9 @@ def run_with(ctx: PipelineContext, *, client: Any = None) -> StageResult:
         produced.append(rel(ctx.settings.repo_root, out))
         done += 1
 
+    keep_ids = manifest_asset_ids(ctx)
+    prune_to_assets(ledger, keep_ids)
+    prune_to_assets(anim_report, keep_ids)
     save_json(ledger_path, ledger)
     save_json(anim_path, anim_report)
     parts = [f"{done} animated"]

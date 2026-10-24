@@ -46,6 +46,7 @@ from ptv_schemas.asset_manifest import AssetCategory
 
 from ..engine_catalog import role_of
 from .context import PipelineContext, StageResult
+from ..fsutil import atomic_write_text
 from .encounters import apply_npc_population, finalize_encounter_zones
 from .npc_population import repair_npc_plan
 from .gameplay_relocation import (
@@ -1714,6 +1715,14 @@ def run(ctx: PipelineContext) -> StageResult:
     # reach a scene no portal in the current room points at.
     # ------------------------------------------------------------------
     index = {scene_id: f"scene.{scene_id}.json" for scene_id, _doc in compiled}
+    # The Quest packager ships every scene.<id>.json beside scene.json; one
+    # left by an earlier plan would ride along into the APK.
+    from .run_reset import remove_stale_scene_files
+
+    stale_scenes = remove_stale_scene_files(ctx.project_dir, "scene", index)
+    if stale_scenes:
+        ctx.emit(ProjectStage.scene_compile, "info",
+                 f"removed compiled scenes no longer planned: {', '.join(stale_scenes)}")
     for scene_id, doc in compiled:
         doc["scene_index"] = index
 
@@ -1721,7 +1730,7 @@ def run(ctx: PipelineContext) -> StageResult:
         # relative to and what the APK packages.
         runtime_path = ctx.project_dir / f"scene.{scene_id}.json"
         payload = json.dumps(doc, indent=2, sort_keys=True)
-        runtime_path.write_text(payload, encoding="utf-8")
+        atomic_write_text(runtime_path, payload)
         artifacts.append(
             str(runtime_path.relative_to(ctx.settings.repo_root)).replace("\\", "/")
         )
@@ -1741,7 +1750,7 @@ def run(ctx: PipelineContext) -> StageResult:
     # point, sitting alongside its siblings so the index resolves from it.
     if entry_scene_json is not None:
         top = ctx.project_dir / "scene.json"
-        top.write_text(entry_scene_json, encoding="utf-8")
+        atomic_write_text(top, entry_scene_json)
         state.latest_scene_json = str(top)
         ctx.store.save_state(state)
         artifacts.append(str(top.relative_to(ctx.settings.repo_root)).replace("\\", "/"))

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { useParams } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../api/client";
@@ -13,16 +13,21 @@ import {
   stagesFor,
 } from "../lib/stages";
 
-/** Pick a stage to resume from: that stage and everything after it re-runs.
+/** Pick a stage: either resume from it (it and everything after re-runs) or
+ *  run only it.
  *
  *  Grouped and cost-marked because the choice is a spending decision as much
  *  as a scheduling one -- resuming from reference images re-bills every image,
  *  every mesh, every rig and every clip downstream of it. */
-function ResumeFromMenu({
+function StageMenu({
+  label,
+  help,
   targetDevice,
   disabled,
   onPick,
 }: {
+  label: string;
+  help: ReactNode;
   targetDevice: string;
   disabled: boolean;
   onPick: (stage: string) => void;
@@ -57,7 +62,7 @@ function ResumeFromMenu({
         disabled={disabled}
         onClick={() => setOpen((o) => !o)}
       >
-        Resume from…
+        {label}
         <span aria-hidden className="text-xs">
           ▾
         </span>
@@ -67,10 +72,7 @@ function ResumeFromMenu({
           role="menu"
           className="absolute right-0 z-30 mt-1 max-h-[70vh] w-[26rem] overflow-auto ptv-card p-1"
         >
-          <div className="px-3 py-2 text-xs text-muted">
-            Runs the chosen stage <strong className="text-white">and every
-            stage after it</strong>. Anything before is skipped.
-          </div>
+          <div className="px-3 py-2 text-xs text-muted">{help}</div>
           {STAGE_GROUPS.map((group) => {
             const groupStages = stages.filter((s) => s.group === group.id);
             if (groupStages.length === 0) return null;
@@ -144,6 +146,9 @@ function ProviderHealth() {
   );
 }
 
+/** Events that mean a stage started or finished, i.e. its artifacts moved. */
+const STAGE_STATUS_EVENTS = new Set(["running", "succeeded", "failed", "aborted", "skipped"]);
+
 type Tab = "pipeline" | "prompt" | "artifacts" | "logs";
 
 const TAB_LABELS: Record<Tab, string> = {
@@ -173,21 +178,37 @@ export default function ProjectDetailPage() {
   useEffect(() => {
     if (!id) return;
     const src = eventStream(id);
+    // The artifact list walks and hashes the whole project on the server.
+    // Refreshing it on every log line kept files open while stages were
+    // replacing them, so it refreshes only when a stage changes state, and
+    // at most once per burst.
+    let artifactsTimer: ReturnType<typeof setTimeout> | undefined;
+    const refreshArtifactsSoon = () => {
+      if (artifactsTimer) clearTimeout(artifactsTimer);
+      artifactsTimer = setTimeout(() => {
+        void qc.invalidateQueries({ queryKey: ["artifacts", id] });
+      }, 1500);
+    };
     const push = (e: MessageEvent) => {
       try {
         const data = JSON.parse(e.data) as PipelineEvent;
         setEvents((prev) => [...prev.slice(-399), data]);
+        return data;
       } catch {
         /* a malformed frame must not break the stream */
+        return undefined;
       }
     };
     src.onmessage = (e) => {
-      push(e);
+      const data = push(e);
       void qc.invalidateQueries({ queryKey: ["project", id] });
-      void qc.invalidateQueries({ queryKey: ["artifacts", id] });
+      if (data && STAGE_STATUS_EVENTS.has(data.status)) refreshArtifactsSoon();
     };
     src.addEventListener("pipeline", push as EventListener);
-    return () => src.close();
+    return () => {
+      if (artifactsTimer) clearTimeout(artifactsTimer);
+      src.close();
+    };
   }, [id, qc]);
 
   /** Every run button funnels through here so a failure is reported once,
@@ -283,7 +304,7 @@ export default function ProjectDetailPage() {
             title={
               busy
                 ? "A run is already in progress"
-                : "Run every stage from the beginning. Re-bills all asset generation."
+                : "Start this game over from the prompt. The previous run is moved to previous_runs/ and every stage runs fresh, so all asset generation is billed again."
             }
             onClick={() => start({}, "a full run")}
           >
@@ -301,10 +322,31 @@ export default function ProjectDetailPage() {
           >
             Resume
           </button>
-          <ResumeFromMenu
+          <StageMenu
+            label="Resume from…"
+            help={
+              <>
+                Runs the chosen stage <strong className="text-white">and every
+                stage after it</strong>. Anything before is skipped.
+              </>
+            }
             targetDevice={p.target_device}
             disabled={busy}
             onPick={(s) => start({ resume_from: s }, `resume from ${stageName(s)}`)}
+          />
+          <StageMenu
+            label="Run only…"
+            help={
+              <>
+                Runs <strong className="text-white">only the chosen stage</strong>,
+                reusing everything else. Useful to repair one step (e.g. a
+                single failed rig); follow it with Resume to rebuild what
+                depends on it.
+              </>
+            }
+            targetDevice={p.target_device}
+            disabled={busy}
+            onPick={(s) => start({ stage: s }, `${stageName(s)} only`)}
           />
           <button
             className={

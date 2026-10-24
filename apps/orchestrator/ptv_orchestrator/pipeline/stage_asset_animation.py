@@ -34,14 +34,14 @@ records every outcome and a Resume never re-pays. Delete that file and
 from __future__ import annotations
 
 import json
-import shutil
 import struct
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 from ptv_providers import TripoClient, TripoConfig, resolve_tripo_motions
 from ptv_schemas import ProjectStage, ProjectStatus
 
+from ..fsutil import atomic_write_text, move_with_retry, rmtree_with_retry
 from .character_artifacts import load_routing
 from .context import PipelineContext, StageResult
 
@@ -71,6 +71,7 @@ def run(ctx: PipelineContext) -> StageResult:
     report_path = ctx.project_dir / _ANIMATION_REPORT_NAME
     report: dict[str, Any] = _load_json(report_path)
     rig_report: dict[str, Any] = _load_json(ctx.project_dir / _RIG_REPORT_NAME)
+    manifest_ids = [it.id for it in manifest.items]
 
     if not ctx.settings.tripo_animation_enabled:
         message = "Animation disabled (tripo_animation_enabled=false)"
@@ -111,6 +112,23 @@ def run(ctx: PipelineContext) -> StageResult:
         animated_glb = item_dir / _ANIMATED_GLB_NAME
 
         prior = report.get(item.id)
+        if isinstance(prior, dict) and prior.get("status") == "downloaded":
+            # Paid for and downloaded; only the move to its final name failed.
+            staged = item_dir / ".anim_download"
+            glbs = sorted(staged.glob("*.glb")) if staged.is_dir() else []
+            try:
+                if glbs:
+                    prior = _finish_download(ctx, item.id, item_dir, glbs[0], prior)
+                    report[item.id] = prior
+            except Exception as exc:  # noqa: BLE001 - retried next run
+                ctx.emit(_STAGE, "warning",
+                         f"{item.id}: could not finish the animated download: {exc}")
+        rig_now = rig_report.get(item.id)
+        rigged_now = isinstance(rig_now, dict) and rig_now.get("status") == "rigged"
+        if (isinstance(prior, dict) and prior.get("status") == "not_rigged"
+                and rigged_now):
+            # It has been rigged since (a repaired or re-run rig): animate it.
+            prior = None
         if isinstance(prior, dict) and prior.get("status") in (
             "animated",
             "no_presets",
@@ -197,7 +215,7 @@ def run(ctx: PipelineContext) -> StageResult:
         )
 
     if not pending:
-        _save_json(report_path, report)
+        _save_json(report_path, report, manifest_ids)
         message = (
             f"{len(produced)} animated asset(s) already on disk; no Tripo calls made"
             if produced
@@ -269,7 +287,7 @@ def run(ctx: PipelineContext) -> StageResult:
                 f"{job['rig_type']} rig",
             )
             staging = item_dir / ".anim_download"
-            shutil.rmtree(staging, ignore_errors=True)
+            rmtree_with_retry(staging)
             result = client.retarget(
                 out_dir=staging,
                 rig_task_id=job["rig_task_id"],
@@ -287,31 +305,11 @@ def run(ctx: PipelineContext) -> StageResult:
             if downloaded is None:
                 raise RuntimeError("retarget task returned no GLB")
 
-            final = item_dir / _ANIMATED_GLB_NAME
-            final.unlink(missing_ok=True)
-            shutil.move(str(downloaded), str(final))
-            shutil.rmtree(staging, ignore_errors=True)
-
-            # Read the clip names that are ACTUALLY in the file rather than
-            # assuming the batch call honoured every preset. Tripo names the
-            # clips, and the whole downstream contract depends on those names.
-            clip_names = _glb_animation_names(final)
-            intent_to_clip = _pair_intents_to_clips(job["mapping"], presets,
-                                                    clip_names)
-
-            if len(clip_names) < len(presets):
-                warn = (
-                    f"{item.id}: asked for {len(presets)} animation(s) but the "
-                    f"returned GLB contains {len(clip_names)} "
-                    f"({', '.join(clip_names) or 'none'}). Only the clips "
-                    "present are exposed to gameplay."
-                )
-                ctx.emit(_STAGE, "warning", warn)
-                ctx.store.append_log(ctx.project_id, "asset_animation", warn)
-
-            produced.append(_rel(ctx, final))
+            # Record the paid retarget BEFORE touching files, so a move that
+            # fails (another process holding the download) is finished on the
+            # next run instead of being paid for again.
             report[item.id] = {
-                "status": "animated",
+                "status": "downloaded",
                 "provider": "tripo",
                 "retarget_task_id": result.task_id,
                 "rig_task_id": job["rig_task_id"],
@@ -320,25 +318,32 @@ def run(ctx: PipelineContext) -> StageResult:
                 "requested_intents": job["requested"],
                 "dropped_intents": job["dropped"],
                 "presets": presets,
-                "clip_names": clip_names,
-                "animations": intent_to_clip,
-                "animated_glb": _rel(ctx, final),
-                "animate_in_place": True,
-                "credits_estimate": len(presets) * _CREDITS_PER_ANIMATION,
+                "mapping": job["mapping"],
+                "staged_glb": _rel(ctx, downloaded),
             }
+            _save_json(report_path, report, manifest_ids)
+
+            entry = _finish_download(ctx, item.id, item_dir, downloaded,
+                                     report[item.id])
+            report[item.id] = entry
+            produced.append(entry["animated_glb"])
             animated += 1
             ctx.emit(
                 _STAGE,
                 "info",
-                f"{item.id}: animated with {len(clip_names)} clip(s)",
+                f"{item.id}: animated with {len(entry['clip_names'])} clip(s)",
             )
         except Exception as exc:  # noqa: BLE001 - one bad asset must not stop the rest
             ctx.store.append_log(ctx.project_id, "asset_animation", f"{item.id}: {exc}")
             ctx.emit(_STAGE, "warning", f"{item.id}: {exc}")
             errors.append(f"{item.id}: {exc}")
-            report[item.id] = {"status": "failed", "error": str(exc)}
+            prior = report.get(item.id)
+            if isinstance(prior, dict) and prior.get("status") == "downloaded":
+                report[item.id] = dict(prior, error=str(exc))
+            else:
+                report[item.id] = {"status": "failed", "error": str(exc)}
 
-    _save_json(report_path, report)
+    _save_json(report_path, report, manifest_ids)
 
     # A failed retarget is recoverable: the rigged GLB is still on disk and
     # the asset renders as a static skinned mesh. Far better than failing the
@@ -512,7 +517,49 @@ def _load_json(path: Path) -> dict[str, Any]:
     return data if isinstance(data, dict) else {}
 
 
-def _save_json(path: Path, payload: dict[str, Any]) -> None:
-    path.write_text(
-        json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8"
-    )
+def _save_json(path: Path, payload: dict[str, Any],
+               manifest_ids: Iterable[str] = ()) -> None:
+    from .character_artifacts import prune_to_assets
+
+    prune_to_assets(payload, manifest_ids)
+    atomic_write_text(path, json.dumps(payload, indent=2, sort_keys=True))
+
+
+def _finish_download(ctx: PipelineContext, item_id: str, item_dir: Path,
+                     downloaded: Path, pending: dict[str, Any]) -> dict[str, Any]:
+    """Move a retargeted download into place and read its real clip names.
+
+    ``pending`` is the ``downloaded`` report entry, which carries everything
+    the final entry needs."""
+    final = item_dir / _ANIMATED_GLB_NAME
+    move_with_retry(downloaded, final)
+    rmtree_with_retry(item_dir / ".anim_download")
+
+    # Read the clip names that are ACTUALLY in the file rather than assuming
+    # the batch call honoured every preset. Tripo names the clips, and the
+    # whole downstream contract depends on those names.
+    presets = list(pending.get("presets") or [])
+    clip_names = _glb_animation_names(final)
+    intent_to_clip = _pair_intents_to_clips(pending.get("mapping") or {}, presets,
+                                            clip_names)
+    if len(clip_names) < len(presets):
+        warn = (
+            f"{item_id}: asked for {len(presets)} animation(s) but the "
+            f"returned GLB contains {len(clip_names)} "
+            f"({', '.join(clip_names) or 'none'}). Only the clips "
+            "present are exposed to gameplay."
+        )
+        ctx.emit(_STAGE, "warning", warn)
+        ctx.store.append_log(ctx.project_id, "asset_animation", warn)
+
+    entry = {k: v for k, v in pending.items()
+             if k not in ("status", "mapping", "staged_glb", "error")}
+    entry.update({
+        "status": "animated",
+        "clip_names": clip_names,
+        "animations": intent_to_clip,
+        "animated_glb": _rel(ctx, final),
+        "animate_in_place": True,
+        "credits_estimate": len(presets) * _CREDITS_PER_ANIMATION,
+    })
+    return entry

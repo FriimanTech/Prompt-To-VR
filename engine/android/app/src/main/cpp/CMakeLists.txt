@@ -11,6 +11,7 @@ cmake_minimum_required(VERSION 3.22.1)
 # Cache vars passed from app/build.gradle:
 #   PTV_ENGINE_DIR    absolute path to <repo>/engine
 #   PTV_PROJECT_ID    the project id (selects engine/generated/**/<id>)
+#   PTV_GENERATED_EXTRA_SOURCES  promoted .cpp files from other projects
 #   PTV_APP_LIB_NAME  output lib name (must match android.app.lib_name)
 # ---------------------------------------------------------------------------
 project(ptv_quest LANGUAGES C CXX)
@@ -96,6 +97,12 @@ file(GLOB_RECURSE PTV_GENERATED_SOURCES CONFIGURE_DEPENDS
   "${PTV_GENERATED_DIR}/mechanics/${PTV_PROJECT_ID}/*.cpp"
   "${PTV_GENERATED_DIR}/ai/${PTV_PROJECT_ID}/*.cpp"
   "${PTV_GENERATED_DIR}/dialogue/${PTV_PROJECT_ID}/*.cpp")
+# Mechanics promoted from another game that this game's plan reuses.
+foreach(_ptv_extra IN LISTS PTV_GENERATED_EXTRA_SOURCES)
+  if(EXISTS "${_ptv_extra}")
+    list(APPEND PTV_GENERATED_SOURCES "${_ptv_extra}")
+  endif()
+endforeach()
 
 # Shared compile definitions applied to both the engine runtime and the
 # generated gameplay code (they must agree on the Vulkan/OpenXR platform and
@@ -128,9 +135,12 @@ set(PTV_INCLUDE_DIRS
 # harmful: a one-line compile error sat invisible in a 2,377-line build log,
 # and diagnosing the build that produced it needed the APK timestamp rather
 # than the log. Silencing the pair here keeps real diagnostics findable.
+# EnTT's `operator"" _hs` trips -Wdeprecated-literal-operator in every file
+# that includes the ECS, for the same nothing-to-fix reason.
 set(PTV_COMPILE_OPTS
   -Wno-nullability-completeness
-  -Wno-nullability-extension)
+  -Wno-nullability-extension
+  -Wno-deprecated-literal-operator)
 
 # Third-party usage requirements shared by the runtime and generated code.
 # NOTE: JoltPhysics via FetchContent exposes the plain target name "Jolt" (the

@@ -16,9 +16,11 @@ from __future__ import annotations
 import hashlib
 import json
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Iterable, Optional
 
 from ptv_schemas import CharacterRoutingPlan, UthanaMotionPlan
+
+from ..fsutil import atomic_write_text
 
 ROUTING_NAME = "character_routing.json"
 RIG_CHECK_NAME = "tripo_rig_check.json"
@@ -42,7 +44,32 @@ def load_json(path: Path) -> dict[str, Any]:
 
 
 def save_json(path: Path, payload: dict[str, Any]) -> None:
-    path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+    atomic_write_text(path, json.dumps(payload, indent=2, sort_keys=True))
+
+
+def manifest_asset_ids(ctx: Any) -> list[str]:
+    """Asset ids in the current manifest; empty when there is none (then
+    nothing is pruned)."""
+    try:
+        manifest = ctx.asset_manifest or ctx.store.load_asset_manifest(ctx.project_id)
+    except Exception:  # noqa: BLE001 - no manifest means no pruning
+        return []
+    return [it.id for it in manifest.items]
+
+
+def prune_to_assets(ledger: dict[str, Any], asset_ids: Iterable[str]) -> list[str]:
+    """Drop entries for assets the current manifest no longer has.
+
+    Ledgers keyed by asset id outlive the manifest that wrote them; an entry
+    for an asset from an earlier plan is at best noise and at worst reused.
+    Mutates ``ledger``; returns the removed ids."""
+    keep = set(asset_ids)
+    if not keep:
+        return []
+    stale = sorted(k for k in ledger if k not in keep)
+    for k in stale:
+        del ledger[k]
+    return stale
 
 
 def sha256_file(path: Path) -> str:
@@ -65,7 +92,7 @@ def load_routing(project_dir: Path) -> Optional[CharacterRoutingPlan]:
 
 def save_routing(project_dir: Path, plan: CharacterRoutingPlan) -> Path:
     path = project_dir / ROUTING_NAME
-    path.write_text(plan.model_dump_json(indent=2), encoding="utf-8")
+    atomic_write_text(path, plan.model_dump_json(indent=2))
     return path
 
 
@@ -81,7 +108,7 @@ def load_motion_plan(project_dir: Path) -> Optional[UthanaMotionPlan]:
 
 def save_motion_plan(project_dir: Path, plan: UthanaMotionPlan) -> Path:
     path = project_dir / MOTION_PLAN_NAME
-    path.write_text(plan.model_dump_json(indent=2), encoding="utf-8")
+    atomic_write_text(path, plan.model_dump_json(indent=2))
     return path
 
 

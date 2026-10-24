@@ -83,10 +83,14 @@ engine/promoted/registry.json
 ```
 
 Each entry there shows up on the next pipeline run as a `promoted.<id>`
-catalog entry. The C++ source itself never moves — it stays under
-`engine/generated/<kind>/<project_id>/`, where the existing engine CMake
-glob already links it into `ptv_runtime`. Promotion just makes the
-mechanic discoverable to future planners.
+catalog entry. The C++ source itself never moves: it stays under
+`engine/generated/<kind>/<project_id>/`. Builds compile only the current
+game's generated code (`PTV_GENERATED_PROJECT_ID`), because different games
+routinely pick the same task names and would collide at link time. So when
+a plan reuses a `promoted.<id>` from another game, the orchestrator passes
+that task's `.cpp` files in `PTV_GENERATED_EXTRA_SOURCES`
+(`engine_catalog.promoted_sources_for_plan`). This happens for the
+compile-verify build, the PC VR build and the Quest build.
 
 ## Worked example: Superman Flight Sim
 

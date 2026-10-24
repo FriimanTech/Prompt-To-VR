@@ -1040,6 +1040,34 @@ def promoted_catalog(repo_root: Path) -> list[dict[str, object]]:
     return [it for it in items if isinstance(it, dict) and "id" in it]
 
 
+def promoted_sources_for_plan(repo_root: Path, plan: object, project_id: str) -> list[str]:
+    """The .cpp files of promoted mechanics this plan reuses from OTHER games.
+
+    Builds compile only the current game's generated code, so a mechanic
+    promoted from another game has to be handed to the build explicitly: all
+    of its task's translation units (``<code_task_id>*.cpp`` beside the
+    registered source). Returned as absolute forward-slash paths."""
+    used = set()
+    for item in getattr(plan, "items", None) or []:
+        for attr in ("builtin_id", "base_builtin_id"):
+            value = getattr(item, attr, None)
+            if isinstance(value, str) and value.startswith("promoted."):
+                used.add(value)
+    if not used:
+        return []
+    out: list[str] = []
+    for entry in promoted_catalog(repo_root):
+        if entry.get("id") not in used or entry.get("project_id") == project_id:
+            continue
+        source = repo_root / str(entry.get("source_path") or "")
+        task_id = str(entry.get("code_task_id") or source.stem)
+        if not source.parent.is_dir():
+            continue
+        for cpp in sorted(source.parent.glob(f"{task_id}*.cpp")):
+            out.append(str(cpp.resolve()).replace("\\", "/"))
+    return out
+
+
 def _render_entries(entries: Iterable[dict[str, object]]) -> str:
     lines: list[str] = []
     for e in entries:

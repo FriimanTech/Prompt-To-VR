@@ -2092,6 +2092,17 @@ the macro called EXACTLY ONCE across the entire file set).
     MUST ``#include "projectile_system_visible_shared.h"`` and call its
     real ``spawn_projectile(World&, const CProjectileSpawnParams&)`` --
     it must NOT invent ``extern void spawn_projectile(World&, Vec3, ...)``.
+    NEVER GUESS A SIGNATURE WITH A PROBE. Do not write
+    ``if constexpr (requires { dep::f(world, weapon); }) ... else if
+    constexpr (requires { dep::f(weapon); })`` (or SFINAE / ``std::is_invocable``
+    chains) to try several possible shapes of a dependency's function. The
+    header is in your context: read it and call the one declared signature.
+    Probes with ordinary (non-template) arguments compile on Windows (MSVC
+    treats a wrong guess as "false") but are a HARD ERROR on the Quest
+    compiler (clang: "too few arguments to function call"), so the game
+    builds on PC and the APK does not. Where you genuinely need data you do
+    not have (the ``InputSnapshot`` a function takes), pass it down from
+    your ``tick`` rather than probing for an overload without it.
 12. NO DUPLICATE GLOBAL SYMBOLS ACROSS TASKS. Many tasks are generated in
     parallel and ALL link into the same executable. If two tasks each
     define a free function OR a struct/enum with the SAME name in

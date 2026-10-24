@@ -5,6 +5,37 @@ web panel starts runs through `POST /api/projects/{id}/run` in four modes
 (full, resume, resume-from, single stage), all of which land in
 `apps/orchestrator/ptv_orchestrator/pipeline/orchestrator.py`.
 
+## Full run, Resume, Resume from, Run only
+
+| Button | Runs | Reuses earlier output? |
+|---|---|---|
+| **Run full pipeline** | every stage, from the prompt | No. The previous run is archived first |
+| **Resume** | from the first stage whose latest record is not `succeeded` | Yes |
+| **Resume from…** | the chosen stage and everything after it | Yes, for stages before it |
+| **Run only…** | just the chosen stage | Yes |
+
+Every stage is written to make a Resume cheap:
+
+- the codegen board keeps finished tasks;
+- asset stages reuse any image, mesh, rig or clip already on disk under the same asset id;
+- ledgers remember paid results.
+
+On a full run the same reuse would leak the previous game into the new one. Old codegen tasks would be claimed and fail the stage, assets with a recycled id would be reused even though their description changed, and scene files of scenes the new plan dropped would be globbed in. So `run_pipeline` first calls `run_reset.archive_previous_run`, which moves the following into `projects/<id>/previous_runs/<UTC stamp>/`:
+
+- every top-level project file except `prompt.txt` and `project_state.json`;
+- `logs/`, `images/`, `assets/` and `generated_code/`;
+- `engine/generated/{mechanics,ai,dialogue,world}/<id>/`, which must leave the tree the desktop and Android builds glob;
+- the stage history. Records from the archived run would otherwise make Resume skip stages this run has not reached.
+
+`builds/` stays: it holds only build caches, rebuilt from sources. `full_run_archive_keep` (default 1) sets how many archives are kept; 0 deletes the previous run instead. If a file stays locked, the run stops before any paid stage, naming the file.
+
+Resume paths also defend themselves against leftovers:
+
+- **The codegen board** drops tasks the current MechanicPlan no longer has, deletes the files only they wrote, and regenerates a finished task (and its dependents) when its CodeTask changed.
+- **Stale scene files:** `scene_spec` removes `scene_spec.<id>.json` and `scene_compile` removes `scene.<id>.json` for scenes the BuildSpec no longer has.
+- **Ledgers keyed by asset id** (`asset_rig.json`, `asset_animation.json`, `tripo_rig_check.json` and the Uthana ledgers) drop assets the manifest no longer has.
+- **Paid results are recorded before files move.** Rigging and animation store the provider task id as `downloaded` before moving the file into place, so a move that fails is finished on the next run instead of being paid for again.
+
 ## One run per project
 
 `apps/orchestrator/ptv_orchestrator/runs.py` holds a `RunRegistry` mapping a
