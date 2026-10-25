@@ -4,6 +4,7 @@
 #include <entt/entt.hpp>
 #include <memory>
 #include <string>
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
@@ -652,6 +653,34 @@ private:
     float telemetry_work_accum_s_{0.0f};
     int telemetry_frames_{0};
     float telemetry_worst_frame_ms_{0.0f};
+
+    // --- NPC telemetry + on-device verification --------------------------
+    // One ``npc_manifest`` line per NPC at scene load and one ``npc`` status
+    // line per NPC per second, so ``adb logcat -s ptv`` shows whether each
+    // character exists, stands on the floor, moves and animates. The
+    // quest_runtime_verify stage parses exactly these lines.
+    float npc_telemetry_accum_s_{0.0f};
+    double npc_telemetry_clock_s_{0.0};
+    bool npc_manifest_logged_{false};
+    // Position at the previous status line, per NPC, for its measured speed.
+    std::unordered_map<std::uint32_t, Vec3> npc_last_pos_{};
+    void log_npc_manifest();
+    void tick_npc_telemetry(float dt);
+    // Verification mode (Android system property ``debug.ptv.verify`` = 1,
+    // or env ``PTV_VERIFY`` = 1 on desktop): the player walks a scripted loop
+    // so followers and chasers have something to react to, and cannot die,
+    // so one run watches a whole encounter. Hits are still recorded.
+    bool verify_mode_{false};
+    // Verification only: an enemy that landed a hit on the (protected)
+    // player is defeated shortly after, so the waves keep advancing and every
+    // NPC type in the plan actually appears during one unattended run.
+    std::vector<std::pair<std::uint32_t, float>> verify_defeats_{};
+    float verify_time_s_{0.0f};
+    Vec3 verify_origin_{0.0f};
+    bool verify_origin_set_{false};
+    void read_verify_mode();
+    /** This frame's scripted walk, added to the locomotion request. */
+    void tick_verify_autopilot(float dt);
 };
 
 }  // namespace ptv

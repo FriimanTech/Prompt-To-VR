@@ -4,7 +4,9 @@
 #include <chrono>
 #include <cmath>
 #include <cctype>
+#include <cstdio>
 #include <cstdlib>
+#include <deque>
 #include <filesystem>
 #include <stdexcept>
 #include <string>
@@ -55,6 +57,7 @@
 #include <glm/gtc/quaternion.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 
+#include "core/NpcRuntime.h"
 #include "mechanics/builtin/HandRig.h"
 #include "ptv/api/BodySlots.h"
 #include "ptv/core/Logger.h"
@@ -81,6 +84,7 @@
 #include "ptv/debug/DebugUI.h"
 #else
 #include <android_native_app_glue.h>
+#include <sys/system_properties.h>
 
 #include "../platform/android/AndroidPlatform.h"
 #endif
@@ -625,6 +629,30 @@ public:
         return true;
     }
 
+    bool raycast_excluding(std::uint32_t self, const Vec3& origin,
+                           const Vec3& dir, float max_dist, PhysicsRayHit& out,
+                           bool floor_only) const override {
+        out = PhysicsRayHit{};
+        if (!is_finite(origin) || !is_finite(dir) || !std::isfinite(max_dist)) {
+            return false;
+        }
+        PhysicsWorld::RayFilter filter{};
+        if (self != InputSnapshot::kInvalidEntity) filter.ignore.push_back(self);
+        filter.skip_characters = floor_only;
+        Vec3 hit(0.0f);
+        Vec3 normal(0.0f, 1.0f, 0.0f);
+        std::uint32_t entity = InputSnapshot::kInvalidEntity;
+        if (!app_->physics_.raycast(origin, dir, max_dist, filter, hit, normal,
+                                    entity)) {
+            return false;
+        }
+        out.point = hit;
+        out.normal = normal;
+        out.entity = entity;
+        out.hit = true;
+        return true;
+    }
+
     bool has_body(std::uint32_t entity) const override {
         return app_->physics_.has_body(entity);
     }
@@ -1042,6 +1070,11 @@ public:
         if (created == entt::null) return InputSnapshot::kInvalidEntity;
         const auto id = static_cast<std::uint32_t>(created);
         spawned_[id] = template_entity;
+        const std::string* tname =
+            app_->world_.id_of(static_cast<entt::entity>(template_entity));
+        PTV_INFO("spawn: {} -> entity {} at {:.2f},{:.2f},{:.2f}",
+                 tname ? *tname : std::string("?"), id, position.x, position.y,
+                 position.z);
         return id;
     }
 
@@ -1845,7 +1878,6 @@ public:
 
     bool apply_damage(std::uint32_t target, float amount,
                       std::uint32_t instigator) override {
-        (void)instigator;
         World& w = app_->world_;
         if (!w.valid(target) || !w.has<CHealth>(target)) return false;
         if (!std::isfinite(amount) || amount <= 0.0f) return false;
@@ -1854,8 +1886,17 @@ public:
         if (!hp.alive || hp.death_timer_s >= 0.0f) return false;
         if (hp.invuln_s > 0.0f) return false;
 
-        hp.current = std::max(0.0f, hp.current - amount);
+        // Verification keeps the player alive so a test run can watch the
+        // whole encounter; the hit is still recorded below.
+        const bool protect = app_->verify_mode_ &&
+                             target == static_cast<std::uint32_t>(app_->player_entity_);
+        if (!protect) hp.current = std::max(0.0f, hp.current - amount);
         hp.invuln_s = std::max(0.0f, hp.invuln_after_hit_s);
+        // A protected hit is published with no damage, so generated health
+        // that mirrors the feed stays full too -- otherwise it would end the
+        // run the engine is keeping alive. It is still logged and counted.
+        record(w, target, instigator, protect ? 0.0f : amount, amount,
+               hp.current, hp.current <= 0.0f);
 
         if (hp.current <= 0.0f) {
             app_->begin_death(target);
@@ -1921,8 +1962,61 @@ public:
         return factions_hostile(w.get<CFaction>(a), w.get<CFaction>(b));
     }
 
+    std::uint64_t damage_seq(std::uint32_t entity) const override {
+        return log_.last_seq(entity);
+    }
+
+    int damage_events_since(std::uint32_t entity, std::uint64_t after_seq,
+                            DamageEvent* out, int max_out) const override {
+        return log_.since(entity, after_seq, out, max_out);
+    }
+
+    /** Hits that landed on the player since the scene loaded. */
+    int player_hits() const { return player_hits_; }
+
+    void clear() {
+        log_.clear();
+        player_hits_ = 0;
+    }
+
 private:
+    void record(const World& w, std::uint32_t target, std::uint32_t instigator,
+                float amount, float dealt, float health_after, bool killed) {
+        DamageEvent ev{};
+        ev.target = target;
+        ev.instigator = instigator;
+        ev.amount = amount;
+        ev.health_after = health_after;
+        ev.killed = killed;
+        const std::uint32_t src =
+            (instigator != InputSnapshot::kInvalidEntity && w.valid(instigator) &&
+             w.has<CTransform>(instigator))
+                ? instigator
+                : target;
+        if (w.has<CTransform>(src)) ev.source_position = w.get<CTransform>(src).t.position;
+        log_.record(ev);
+        const bool on_player =
+            target == static_cast<std::uint32_t>(app_->player_entity_);
+        if (on_player) ++player_hits_;
+        if (on_player && app_->verify_mode_ &&
+            instigator != InputSnapshot::kInvalidEntity) {
+            auto& q = app_->verify_defeats_;
+            const bool queued = std::any_of(q.begin(), q.end(), [&](const auto& p) {
+                return p.first == instigator;
+            });
+            // Long enough for the attack clip to read in a capture.
+            if (!queued) q.emplace_back(instigator, 0.8f);
+        }
+        // Hits are rare enough to log every one, and the on-device
+        // verification counts them.
+        PTV_INFO("combat: {} hit {}{} for {:.1f} (health {:.1f}{})", instigator,
+                 target, on_player ? " (player)" : "", dealt, health_after,
+                 killed ? ", killed" : "");
+    }
+
     Application* app_;
+    DamageLog log_{};
+    int player_hits_{0};
 };
 
 class Application::PerceptionService final : public IPerception {
@@ -2020,16 +2114,17 @@ private:
         Vec3 hit(0.0f);
         Vec3 normal(0.0f, 1.0f, 0.0f);
         std::uint32_t blocker = InputSnapshot::kInvalidEntity;
-        // Start just outside the looker's own collider, or the first hit is
-        // always itself.
-        const float skin = 0.15f;
-        if (!app_->physics_.raycast(from + d * skin, d,
-                                    std::max(0.0f, dist - skin), hit, normal,
+        // Both endpoints' own bodies are passed through. The eye sits inside
+        // the looker's capsule, so without that the first hit was always the
+        // looker itself -- which then counted as "clear" and let every NPC
+        // see (and hit) through walls.
+        PhysicsWorld::RayFilter filter{};
+        filter.ignore = {self, target};
+        if (!app_->physics_.raycast(from, d, dist, filter, hit, normal,
                                     blocker)) {
             return true;
         }
-        return blocker == target || blocker == self ||
-               blocker == InputSnapshot::kInvalidEntity;
+        return blocker == InputSnapshot::kInvalidEntity;
     }
 
     template <typename Fn>
@@ -2112,9 +2207,10 @@ public:
         const Vec3 from(position.x, position.y + kGroundProbeUp,
                         position.z);
         if (!app_->physics_svc_) return position;
-        if (!app_->physics_svc_->raycast(from, Vec3(0.0f, -1.0f, 0.0f),
-                                         kGroundProbeUp + kGroundProbeDown,
-                                         hit)) {
+        // The floor, not a character standing on it (or the one asking).
+        if (!app_->physics_svc_->raycast_excluding(
+                InputSnapshot::kInvalidEntity, from, Vec3(0.0f, -1.0f, 0.0f),
+                kGroundProbeUp + kGroundProbeDown, hit, /*floor_only=*/true)) {
             return position;
         }
         return Vec3(position.x, hit.point.y, position.z);
@@ -2127,7 +2223,11 @@ public:
         if (dist < 1.0e-4f) return true;
         d /= dist;
         PhysicsRayHit hit{};
-        return !app_->physics_svc_->raycast(from, d, dist, hit);
+        // Characters do not block sight here: the usual caller is a point at
+        // the player's eye, which sits inside the player's own capsule.
+        return !app_->physics_svc_->raycast_excluding(
+            InputSnapshot::kInvalidEntity, from, d, dist, hit,
+            /*floor_only=*/true);
     }
 
 private:
@@ -2186,10 +2286,10 @@ private:
             const Vec3 left = rotate_y(desired, glm::radians(35.0f));
             const Vec3 right = rotate_y(desired, glm::radians(-35.0f));
 
-            const float ahead = clearance(eye, desired);
+            const float ahead = clearance(agent, eye, desired);
             if (ahead < kWhiskerMeters) {
-                const float cl = clearance(eye, left);
-                const float cr = clearance(eye, right);
+                const float cl = clearance(agent, eye, left);
+                const float cr = clearance(agent, eye, right);
                 // Turn toward the side with more room. Blending rather than
                 // replacing keeps the agent making progress along its
                 // original heading instead of orbiting the obstacle.
@@ -2221,9 +2321,16 @@ private:
         return (len > 1.0e-4f) ? (out / len) : desired;
     }
 
-    float clearance(const Vec3& from, const Vec3& dir) const {
+    /** Free distance along ``dir``. The whisker starts inside the agent's own
+     *  capsule, so that body -- and other characters, which separation
+     *  handles -- are passed through; otherwise every whisker read zero and
+     *  every agent veered left forever. */
+    float clearance(std::uint32_t agent, const Vec3& from,
+                    const Vec3& dir) const {
         PhysicsRayHit hit{};
-        if (!app_->physics_svc_->raycast(from, dir, kWhiskerMeters, hit)) {
+        if (!app_->physics_svc_->raycast_excluding(agent, from, dir,
+                                                   kWhiskerMeters, hit,
+                                                   /*floor_only=*/true)) {
             return kWhiskerMeters;
         }
         return glm::length(hit.point - from);
@@ -2947,7 +3054,24 @@ void Application::create_player_body() {
     player_capsule_height_ = std::clamp(scene_.player_height_meters, 0.6f,
                                         2.6f);
 
-    const auto e = world_.create_entity("__player");
+    // The scene's own player rig, when it has one, IS the player. A second
+    // engine-made "__player" next to it meant two entities tagged "player":
+    // the rig stood still at its authored spot while the real body moved, so
+    // generated code that looked the player up by name chased the wrong one,
+    // and health bound to the rig never saw the damage enemies dealt.
+    entt::entity e = find_adoptable_player_rig(world_);
+    const bool adopted = e != entt::null;
+    if (adopted) {
+        // Authored colliders on the rig are replaced by the player capsule.
+        physics_.remove_body(static_cast<std::uint32_t>(e));
+        world_.registry().remove<CPhysics>(e);
+        auto& tags = world_.registry().get<CTag>(e).tags;
+        if (std::find(tags.begin(), tags.end(), "player") == tags.end()) {
+            tags.push_back("player");
+        }
+    } else {
+        e = world_.create_entity("__player");
+    }
     CTransform ct{};
     // Until the first HMD pose arrives the capsule stands on the spawn point.
     // World space, via rig_world_position: the rig's own coordinates are
@@ -2961,7 +3085,7 @@ void Application::create_player_body() {
     // No CMesh on this entity, so the capsule builder reads its height from
     // the transform scale.
     ct.t.scale = player_capsule_height_;
-    world_.registry().emplace<CTransform>(e, ct);
+    world_.registry().emplace_or_replace<CTransform>(e, ct);
 
     CPhysics cp{};
     // Kinematic, not dynamic: the user's real movement drives this body, and
@@ -2975,21 +3099,27 @@ void Application::create_player_body() {
     cp.restitution = 0.0f;
     world_.registry().emplace<CPhysics>(e, cp);
 
-    world_.registry().emplace<CTag>(e, CTag{{"player"}});
+    if (!adopted) world_.registry().emplace<CTag>(e, CTag{{"player"}});
 
     // The player is an ordinary combatant. Without health nothing can hurt
     // them, and without a faction an enemy cannot tell them apart from a
-    // crate -- both of which the "ducks damage the player" case needs.
-    CHealth hp{};
-    hp.current = hp.max = 100.0f;
-    world_.registry().emplace<CHealth>(e, hp);
-
-    CFaction faction{};
-    faction.id = "player";
-    faction.hostile_to = {"enemy"};
-    world_.registry().emplace<CFaction>(e, std::move(faction));
+    // crate -- both of which the "ducks damage the player" case needs. An
+    // adopted rig keeps whatever health and faction the scene authored.
+    if (!world_.registry().all_of<CHealth>(e)) {
+        CHealth hp{};
+        hp.current = hp.max = 100.0f;
+        world_.registry().emplace<CHealth>(e, hp);
+    }
+    if (!world_.registry().all_of<CFaction>(e)) {
+        CFaction faction{};
+        faction.id = "player";
+        faction.hostile_to = {"enemy"};
+        world_.registry().emplace<CFaction>(e, std::move(faction));
+    }
 
     player_entity_ = e;
+    PTV_INFO("Player entity: {} ({})", static_cast<std::uint32_t>(e),
+             adopted ? "the scene's player_rig" : "engine-made __player");
     player_capsule_center_ = ct.t.position;
     physics_.add_body_for(world_, static_cast<std::uint32_t>(e));
 
@@ -3961,6 +4091,12 @@ bool Application::load_scene_at(const std::string& path,
     vignette_level_ = 0.0f;
     check_player_mechanic_roles();
     mechanics_.attach_bindings(world_, mech_ctx_);
+    // The new scene's NPCs get their own manifest and fresh hit history.
+    npc_manifest_logged_ = false;
+    npc_last_pos_.clear();
+    if (combat_svc_) combat_svc_->clear();
+    verify_origin_set_ = false;
+    verify_defeats_.clear();
 
     PTV_INFO("transition: now in scene '{}' ({} entities)", scene_.scene_id,
              static_cast<int>(scene_.entities.size()));
@@ -4305,6 +4441,250 @@ void Application::tick_combat(float dt) {
         destroy_entity_runtime(e);
         if (spawn_svc_) spawn_svc_->forget(e);
     }
+}
+
+// ---------------------------------------------------------------------------
+// NPC telemetry + verification mode
+// ---------------------------------------------------------------------------
+
+namespace {
+
+/** Characters the telemetry reports: anything with a mesh that is an NPC by
+ *  tag, faction or locomotion -- never the player, their avatar or hands. */
+bool is_npc_entity(const World& w, std::uint32_t e) {
+    if (!w.valid(e) || !w.has<CMesh>(e) || !w.has<CTransform>(e)) return false;
+    for (const char* t : {"player", "player_avatar", "player_rig", "player_hand"}) {
+        if (has_tag(w, e, t)) return false;
+    }
+    if (w.has<CLocomotionIntent>(e) || w.has<CFaction>(e)) return true;
+    for (const char* t : {"npc", "enemy", "ally", "neutral", "critter", "boss"}) {
+        if (has_tag(w, e, t)) return true;
+    }
+    return false;
+}
+
+std::string fmt_vec(const Vec3& v) {
+    char buf[64];
+    std::snprintf(buf, sizeof(buf), "%.2f,%.2f,%.2f", v.x, v.y, v.z);
+    return buf;
+}
+
+std::string join(const std::vector<std::string>& parts) {
+    std::string out;
+    for (const auto& p : parts) {
+        if (!out.empty()) out += ',';
+        out += p;
+    }
+    return out.empty() ? "-" : out;
+}
+
+}  // namespace
+
+void Application::read_verify_mode() {
+    bool on = false;
+#if defined(__ANDROID__)
+    char value[PROP_VALUE_MAX] = {0};
+    if (__system_property_get("debug.ptv.verify", value) > 0) {
+        on = value[0] == '1' || value[0] == 't' || value[0] == 'y';
+    }
+#else
+    if (const char* v = std::getenv("PTV_VERIFY")) {
+        on = v[0] == '1' || v[0] == 't' || v[0] == 'y';
+    }
+#endif
+    verify_mode_ = on;
+    verify_time_s_ = 0.0f;
+    verify_origin_set_ = false;
+    if (on) {
+        PTV_INFO("verify: mode on (scripted player walk, player cannot die)");
+    }
+}
+
+void Application::tick_verify_autopilot(float dt) {
+    if (!verify_mode_ || player_entity_ == entt::null || dt <= 0.0f) return;
+    verify_time_s_ += dt;
+    // Settle first: spawn, ground the body, let the scene's start delay run.
+    constexpr float kSettleS = 3.0f;
+    if (verify_time_s_ < kSettleS) return;
+    if (!verify_origin_set_) {
+        verify_origin_ = rig_world_position();
+        verify_origin_set_ = true;
+        PTV_INFO("verify: autopilot start at {}", fmt_vec(verify_origin_));
+    }
+    // A 6 m square, walked one side at a time with a pause after each, so a
+    // follower has to start, walk, stop and idle every side, and a chaser
+    // has a moving target. Walls are fine: the motor sweeps the body.
+    constexpr float kWalkS = 5.0f;
+    constexpr float kPauseS = 3.0f;
+    constexpr float kSpeed = 1.2f;
+    const float t = verify_time_s_ - kSettleS;
+    const int seg = static_cast<int>(t / (kWalkS + kPauseS));
+    const float in_seg = t - static_cast<float>(seg) * (kWalkS + kPauseS);
+    static const Vec3 kDirs[4] = {Vec3(1, 0, 0), Vec3(0, 0, 1), Vec3(-1, 0, 0),
+                                  Vec3(0, 0, -1)};
+    if (in_seg >= kWalkS) return;
+    pending_move_ += kDirs[seg % 4] * (kSpeed * dt);
+}
+
+void Application::log_npc_manifest() {
+    int npcs = 0;
+    int templates = 0;
+    auto view = world_.registry().view<CMesh, CTransform>();
+    for (const auto ent : view) {
+        const auto e = static_cast<std::uint32_t>(ent);
+        if (!is_npc_entity(world_, e)) continue;
+        const bool tmpl = has_tag(world_, e, "template");
+        (tmpl ? templates : npcs) += 1;
+        const auto& cm = view.get<CMesh>(ent);
+        const std::string* name = world_.id_of(ent);
+        std::vector<std::string> clips;
+        const auto* anim = world_.registry().try_get<CAnimator>(ent);
+        for (const auto& [intent, clip] : cm.animations) {
+            bool found = false;
+            if (anim != nullptr) {
+                for (const auto& c : anim->clips) {
+                    if (c.name == clip) {
+                        found = true;
+                        break;
+                    }
+                }
+            }
+            clips.push_back(intent + (found ? ":ok" : ":missing"));
+        }
+        // A template's mechanics attach to each clone, so list what is bound
+        // rather than what is attached (nothing, by design).
+        std::vector<std::string> bound;
+        if (const auto* mb = world_.registry().try_get<CMechanicBinding>(ent)) {
+            for (const auto& b : mb->entries) {
+                bound.push_back(b.builtin_id.empty() ? b.id : b.builtin_id);
+            }
+        }
+        std::vector<std::string> unresolved;
+        for (const auto& id : bound) {
+            if (mechanics_.unresolved().count(id) != 0) unresolved.push_back(id);
+        }
+        PTV_INFO(
+            "npc_manifest id={} e={} asset={} template={} skeleton={} skinned={} "
+            "clips={} mechanics={} attached={} unresolved={} pos={}",
+            name ? *name : std::string("?"), e, cm.asset_id, tmpl ? 1 : 0,
+            world_.registry().all_of<CSkeleton>(ent) ? 1 : 0, cm.skinned ? 1 : 0,
+            join(clips), join(bound), join(mechanics_.attached_ids(e)),
+            join(unresolved), fmt_vec(view.get<CTransform>(ent).t.position));
+    }
+    std::vector<std::string> unresolved_all;
+    for (const auto& [id, n] : mechanics_.unresolved()) {
+        unresolved_all.push_back(id + "x" + std::to_string(n));
+    }
+    PTV_INFO("npc_manifest_summary scene={} npcs={} templates={} unresolved={} "
+             "player={} verify={}",
+             scene_.scene_id, npcs, templates, join(unresolved_all),
+             player_entity_ == entt::null
+                 ? std::string("none")
+                 : std::to_string(static_cast<std::uint32_t>(player_entity_)),
+             verify_mode_ ? 1 : 0);
+}
+
+void Application::tick_npc_telemetry(float dt) {
+    if (dt <= 0.0f) return;
+    npc_telemetry_clock_s_ += dt;
+    if (!verify_defeats_.empty() && combat_svc_) {
+        for (auto it = verify_defeats_.begin(); it != verify_defeats_.end();) {
+            it->second -= dt;
+            if (it->second > 0.0f) {
+                ++it;
+                continue;
+            }
+            if (world_.valid(it->first) && combat_svc_->is_alive(it->first)) {
+                combat_svc_->kill(it->first);
+                PTV_INFO("verify: defeated entity {} after it hit the player",
+                         it->first);
+            }
+            it = verify_defeats_.erase(it);
+        }
+    }
+    if (!npc_manifest_logged_) {
+        npc_manifest_logged_ = true;
+        log_npc_manifest();
+    }
+    npc_telemetry_accum_s_ += dt;
+    if (npc_telemetry_accum_s_ < 1.0f) return;
+    const float window = npc_telemetry_accum_s_;
+    npc_telemetry_accum_s_ = 0.0f;
+
+    const Vec3 player = player_capsule_center_;
+    constexpr int kMaxLines = 16;
+    int lines = 0;
+    int live = 0;
+    auto view = world_.registry().view<CMesh, CTransform>();
+    for (const auto ent : view) {
+        const auto e = static_cast<std::uint32_t>(ent);
+        if (!is_npc_entity(world_, e) || has_tag(world_, e, "template")) continue;
+        ++live;
+        if (lines >= kMaxLines) continue;
+        ++lines;
+        const auto& cm = view.get<CMesh>(ent);
+        const Vec3 pos = view.get<CTransform>(ent).t.position;
+        float speed = 0.0f;
+        if (auto it = npc_last_pos_.find(e); it != npc_last_pos_.end()) {
+            const Vec3 d(pos.x - it->second.x, 0.0f, pos.z - it->second.z);
+            speed = glm::length(d) / window;
+        }
+        npc_last_pos_[e] = pos;
+        // Height of the soles above whatever floor is below: ~0 when the
+        // character is standing, large when something launched it.
+        const float h = cm.target_scale_meters > 1.0e-4f ? cm.target_scale_meters
+                                                         : 1.8f;
+        const float foot = cm.foot_offset_m > 1.0e-4f ? cm.foot_offset_m : 0.5f * h;
+        PhysicsWorld::RayFilter filter{};
+        filter.ignore.push_back(e);
+        filter.skip_characters = true;
+        Vec3 hit(0.0f), n(0.0f, 1.0f, 0.0f);
+        std::uint32_t what = InputSnapshot::kInvalidEntity;
+        std::string feet_gap = "none";
+        if (physics_.raycast(pos + Vec3(0.0f, 0.5f * h, 0.0f), Vec3(0, -1, 0),
+                             200.0f, filter, hit, n, what)) {
+            char buf[32];
+            std::snprintf(buf, sizeof(buf), "%.2f", pos.y - foot - hit.y);
+            feet_gap = buf;
+        }
+        std::string clip = "-";
+        if (const auto* anim = world_.registry().try_get<CAnimator>(ent)) {
+            if (anim->active_clip >= 0 &&
+                anim->active_clip < static_cast<int>(anim->clips.size())) {
+                clip = anim->clips[static_cast<std::size_t>(anim->active_clip)].name;
+            }
+        }
+        float intent = 0.0f;
+        if (const auto* li = world_.registry().try_get<CLocomotionIntent>(ent)) {
+            intent = glm::length(Vec3(li->desired_velocity.x, 0.0f,
+                                      li->desired_velocity.z));
+        }
+        const bool alive = !world_.registry().all_of<CHealth>(ent) ||
+                           world_.registry().get<CHealth>(ent).alive;
+        const Vec3 to_player(player.x - pos.x, 0.0f, player.z - pos.z);
+        const std::string* name = world_.id_of(ent);
+        PTV_INFO(
+            "npc t={:.1f} id={} e={} asset={} pos={} feet_gap={} speed={:.2f} "
+            "intent={:.2f} clip=\"{}\" alive={} dist_player={:.2f}",
+            npc_telemetry_clock_s_, name ? *name : std::string("clone"), e,
+            cm.asset_id, fmt_vec(pos), feet_gap, speed, intent, clip,
+            alive ? 1 : 0, glm::length(to_player));
+    }
+    // Forget NPCs that no longer exist so a reused entity id starts clean.
+    for (auto it = npc_last_pos_.begin(); it != npc_last_pos_.end();) {
+        if (!world_.valid(it->first)) {
+            it = npc_last_pos_.erase(it);
+        } else {
+            ++it;
+        }
+    }
+    PTV_INFO(
+        "npc_summary t={:.1f} live={} encounter_phase={} alive={} wave={}/{} "
+        "defeated={} player_hits={} player_pos={}",
+        npc_telemetry_clock_s_, live, static_cast<int>(encounter_board_.phase()),
+        encounter_board_.alive(), encounter_board_.wave_index() + 1,
+        encounter_board_.wave_count(), encounter_board_.defeated_total(),
+        combat_svc_ ? combat_svc_->player_hits() : 0, fmt_vec(player));
 }
 
 entt::entity Application::clone_entity(std::uint32_t template_entity,
@@ -4782,6 +5162,7 @@ int Application::run(const Config& cfg) {
             mechanics_.update(world_, dt, provisional, mech_ctx_,
                               MechanicPhase::Input);
         }
+        tick_verify_autopilot(dt);
 
         // ------------------------------------------------------------
         // Player motor.
@@ -4895,6 +5276,7 @@ int Application::run(const Config& cfg) {
         // Age invulnerability windows and clear away anything whose death
         // animation has finished playing.
         tick_combat(dt);
+        tick_npc_telemetry(dt);
 
         // Is the player standing in a way out? Checked here, after physics and
         // locomotion have settled where they actually are this frame.
@@ -5209,6 +5591,7 @@ bool Application::initialize(const Config& cfg) {
     // locomotion sweeps against it and gameplay code looks the user up by
     // the "player" tag. Created after the scene so it picks up the authored
     // height and spawn point.
+    read_verify_mode();
     create_player_body();
 
     // Cache the renderer environment (sky/sun/ambient/fog/point lights) from

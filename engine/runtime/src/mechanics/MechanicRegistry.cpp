@@ -73,15 +73,84 @@ bool register_dialogue_hook(const std::string& id, DialogueHookFactory f) {
 // Host
 // ---------------------------------------------------------------------------
 
+namespace {
+
+/** Runs an IBehaviour as a Simulate-phase, per-entity mechanic.
+ *
+ *  Behaviours used to register into a factory map nothing ever read, so
+ *  every generated NPC AI compiled, linked and then silently did nothing:
+ *  the scene asked for "generated.friendly_ally_follow", the host found no
+ *  MECHANIC by that id, logged a warning and moved on. */
+class BehaviourAdapter final : public IMechanic {
+public:
+    explicit BehaviourAdapter(std::unique_ptr<IBehaviour> b) : b_(std::move(b)) {}
+
+    using IMechanic::on_attach;
+    using IMechanic::on_update;
+
+    void on_attach(World& world, std::uint32_t entity,
+                   const nlohmann::json& params, MechanicContext& ctx) override {
+        b_->on_attach(world, entity, params, ctx);
+    }
+    void on_update(World& world, std::uint32_t entity, float dt,
+                   const InputSnapshot& input, MechanicContext& ctx) override {
+        b_->on_tick(world, entity, dt, input, ctx);
+    }
+    void on_detach(World& world, std::uint32_t entity) override {
+        b_->on_detach(world, entity);
+    }
+    std::string id() const override { return b_->id(); }
+
+private:
+    std::unique_ptr<IBehaviour> b_;
+};
+
+bool is_template(const World& world, std::uint32_t entity) {
+    return has_tag(world, entity, "template");
+}
+
+}  // namespace
+
 void MechanicHost::attach_bindings(World& world, MechanicContext& ctx) {
     detach_all(world);
+    unresolved_.clear();
 
     auto view = world.registry().view<CMechanicBinding>();
+    int templates = 0;
     for (auto entity : view) {
-        attach_one(world, static_cast<std::uint32_t>(entity), ctx);
+        const auto id = static_cast<std::uint32_t>(entity);
+        // A spawn template is a blueprint, not an actor: it is hidden, has
+        // no collider, and is parked off the map. Ticking its mechanics ran
+        // an invisible enemy under the floor that chased -- and could hit --
+        // the player. Each clone attaches its own copy when it is spawned.
+        if (is_template(world, id)) {
+            ++templates;
+            continue;
+        }
+        attach_one(world, id, ctx);
     }
     sort_by_order();
-    PTV_INFO("Attached {} mechanic instances", instances_.size());
+    PTV_INFO("Attached {} mechanic instances ({} spawn template(s) left inert)",
+             instances_.size(), templates);
+    if (!unresolved_.empty()) {
+        std::string list;
+        for (const auto& [id, n] : unresolved_) {
+            if (!list.empty()) list += ", ";
+            list += id + " x" + std::to_string(n);
+        }
+        PTV_ERROR("Unresolved mechanic bindings (these do nothing): {}", list);
+    }
+}
+
+std::vector<std::string> MechanicHost::attached_ids(std::uint32_t entity) const {
+    std::vector<std::string> out;
+    for (const auto& [eid, inst] : instances_) {
+        if (std::find(inst.entities.begin(), inst.entities.end(), entity) !=
+            inst.entities.end()) {
+            out.push_back(inst.id);
+        }
+    }
+    return out;
 }
 
 void MechanicHost::sort_by_order() {
@@ -127,7 +196,19 @@ void MechanicHost::attach_one(World& world, std::uint32_t entity,
 
         auto impl = MechanicRegistry::get().make_mechanic(resolved);
         if (!impl) {
-            PTV_WARN("No mechanic registered for id: {}", resolved);
+            if (auto behaviour = MechanicRegistry::get().make_behaviour(resolved)) {
+                impl = std::make_unique<BehaviourAdapter>(std::move(behaviour));
+            }
+        }
+        if (!impl) {
+            if (MechanicRegistry::get().make_dialogue_hook(resolved)) {
+                PTV_WARN("'{}' is a dialogue hook; bound as a mechanic it does "
+                         "nothing (there is no dialogue system to run it)",
+                         resolved);
+            } else {
+                PTV_WARN("No mechanic registered for id: {}", resolved);
+            }
+            ++unresolved_[resolved];
             continue;
         }
         const bool is_player_scoped = impl->scope() == MechanicScope::Player;

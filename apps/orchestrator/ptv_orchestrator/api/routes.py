@@ -294,6 +294,31 @@ def launch(project_id: str, req: LaunchRequest):
     return {"ok": True, "exe": str(exe)}
 
 
+@router.post("/projects/{project_id}/verify")
+def verify(project_id: str, background: BackgroundTasks):
+    """Run the on-headset verification again (Quest projects only).
+
+    Same stage the Quest pipeline runs after the APK build: install, launch
+    in verification mode, read the NPC telemetry, write
+    ``runtime_verification.json``. Report-only; skipped when no headset is
+    connected. PC VR projects are refused -- there is no headset to sideload
+    to and nothing to verify this way."""
+    from ptv_schemas import ProjectStage, TargetDevice
+
+    store = _store()
+    try:
+        state = store.load_state(project_id)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="project not found")
+    if getattr(state, "target_device", TargetDevice.pcvr) != TargetDevice.quest:
+        raise HTTPException(
+            status_code=400,
+            detail="runtime verification is Quest-only; this is a PC VR project",
+        )
+    background.add_task(run_stage, project_id, ProjectStage.quest_runtime_verify)
+    return {"ok": True, "mode": "stage", "stage": "quest_runtime_verify"}
+
+
 # ---------------------------------------------------------------------------
 # Engine catalog (built-in + promoted mechanics)
 # ---------------------------------------------------------------------------

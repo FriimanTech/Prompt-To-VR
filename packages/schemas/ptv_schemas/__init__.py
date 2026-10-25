@@ -117,6 +117,12 @@ from .project_state import (
 )
 from .artifact import ArtifactMetadata, ArtifactKind
 from .acceptance import AcceptanceTestPlan, AcceptanceCheck
+from .runtime_verification import (
+    CheckOutcome,
+    RuntimeVerification,
+    VerificationCheck,
+    VerificationStatus,
+)
 
 __all__ = [
     "BuildSpec",
@@ -211,4 +217,8 @@ __all__ = [
     "ArtifactKind",
     "AcceptanceTestPlan",
     "AcceptanceCheck",
+    "CheckOutcome",
+    "RuntimeVerification",
+    "VerificationCheck",
+    "VerificationStatus",
 ]

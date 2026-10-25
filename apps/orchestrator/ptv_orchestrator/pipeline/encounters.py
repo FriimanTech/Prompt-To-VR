@@ -178,9 +178,14 @@ def apply_npc_population(
         return out
 
     drop: list[dict] = []
+    summary["missing"] = []
     for aid, npc in npcs.items():
         ents = by_asset(aid)
         if not ents:
+            # The asset safety net already instantiates every asset whose GLB
+            # exists, so reaching here means the model itself is missing.
+            if int(npc.persistent_count or 0) > 0 or aid in spawned:
+                summary["missing"].append(aid)
             warn(f"NPC '{aid}' has no entity in the scene (its model may have "
                  "failed); it will not appear")
             continue
@@ -280,6 +285,127 @@ def apply_npc_population(
                              "director": director["id"]}
         summary["director"] = params
     return summary
+
+
+def _region_at(regions: list[dict], pos: list[float]) -> Optional[dict]:
+    for r in regions:
+        lo, hi = r.get("min") or [0, 0, 0], r.get("max") or [0, 0, 0]
+        if lo[0] <= pos[0] <= hi[0] and lo[2] <= pos[2] <= hi[2]:
+            return r
+    return None
+
+
+def _nearest_inside(regions: list[dict], pos: list[float],
+                    margin: float = 0.6) -> tuple[Optional[dict], list[float]]:
+    """The closest point that lies inside a region, ``margin`` from its edge."""
+    best: tuple[float, Optional[dict], list[float]] = (math.inf, None, pos)
+    for r in regions:
+        lo, hi = r.get("min") or [0, 0, 0], r.get("max") or [0, 0, 0]
+        mx = min(margin, 0.5 * (float(hi[0]) - float(lo[0])))
+        mz = min(margin, 0.5 * (float(hi[2]) - float(lo[2])))
+        x = min(max(pos[0], float(lo[0]) + mx), float(hi[0]) - mx)
+        z = min(max(pos[2], float(lo[2]) + mz), float(hi[2]) - mz)
+        d = math.hypot(x - pos[0], z - pos[2])
+        if d < best[0]:
+            best = (d, r, [x, pos[1], z])
+    return best[1], best[2]
+
+
+def _yaw_quat(facing: Any) -> list[float]:
+    """Quaternion [x, y, z, w] turning -Z (forward) toward ``facing``."""
+    try:
+        fx, fz = float(facing[0]), float(facing[2])
+    except (TypeError, IndexError, ValueError):
+        return [0.0, 0.0, 0.0, 1.0]
+    if math.hypot(fx, fz) < 1e-6:
+        return [0.0, 0.0, 0.0, 1.0]
+    yaw = math.atan2(-fx, -fz)
+    return [0.0, math.sin(0.5 * yaw), 0.0, math.cos(0.5 * yaw)]
+
+
+def place_persistent_npcs(
+    doc: dict,
+    persistent: dict[str, list[str]],
+    npc_plan: Any,
+    on_warning: Optional[WarnFn] = None,
+) -> list[str]:
+    """Put every NPC placed at load somewhere valid IN THE MERGED WORLD.
+
+    The population step places a companion beside the SceneSpec's spawn, and
+    the relocation carries it to the world's spawn. Only now, with the world
+    merged, can it be checked against the world itself:
+
+    * a world ``npc_anchor`` that names this NPC (its asset id, family or
+      role in ``tags``, or ``asset_id``) wins -- the guard stands at the
+      gate the architect built for it;
+    * it must stand on declared walkable floor, or it is moved to the
+      nearest point that is;
+    * its origin is set to floor height plus its foot offset, so the feet
+      touch the floor on frame one. That matters most for a STATIONARY NPC,
+      which has no locomotion to snap it down later.
+
+    Returns notes describing every change."""
+
+    warn = on_warning or (lambda _m: None)
+    notes: list[str] = []
+    if not persistent or npc_plan is None:
+        return notes
+    ents = {e.get("id"): e for e in doc.get("entities") or []}
+    regions = [r for r in ((doc.get("navigation") or {}).get("regions") or [])
+               if isinstance(r, dict)]
+    spawn = (((doc.get("player") or {}).get("spawn")) or {}).get("position") or [0, 0, 0]
+    anchors = [a for a in doc.get("npc_anchors") or [] if isinstance(a, dict)
+               and isinstance(a.get("position"), list) and len(a["position"]) >= 3]
+    used: set[str] = set()
+    npcs = {n.asset_id: n for n in npc_plan.npcs}
+
+    for aid, ids in persistent.items():
+        npc = npcs.get(aid)
+        keys = {aid}
+        if npc is not None:
+            keys.add(npc.role.value)
+            if npc.family:
+                keys.add(npc.family)
+        for eid in ids:
+            e = ents.get(eid)
+            if e is None:
+                continue
+            t = e.setdefault("transform", {})
+            pos = [float(v) for v in (t.get("position") or [0, 0, 0])[:3]]
+            anchor = next(
+                (a for a in anchors if str(a.get("id")) not in used and (
+                    a.get("asset_id") == aid
+                    or keys & set(a.get("tags") or []))),
+                None)
+            if anchor is not None:
+                used.add(str(anchor.get("id")))
+                pos = [float(v) for v in anchor["position"][:3]]
+                t["rotation"] = _yaw_quat(anchor.get("facing"))
+                notes.append(f"{eid}: placed at world anchor '{anchor.get('id')}'")
+            floor = pos[1]
+            if regions:
+                region = _region_at(regions, pos)
+                if region is None:
+                    region, moved = _nearest_inside(regions, pos)
+                    notes.append(
+                        f"{eid}: was off the walkable floor at "
+                        f"({pos[0]:.1f}, {pos[2]:.1f}); moved to "
+                        f"({moved[0]:.1f}, {moved[2]:.1f})")
+                    pos = moved
+                if region is not None:
+                    lo = region.get("min") or [0, 0, 0]
+                    floor = float(region.get("floor_y", lo[1] if len(lo) > 1 else 0.0))
+            mesh = e.get("mesh") or {}
+            height = float(mesh.get("target_scale_meters") or 1.8)
+            foot = float(mesh.get("foot_offset_m") or 0.0) or 0.5 * height
+            pos[1] = floor + foot
+            t["position"] = pos
+            if (npc is not None and npc.role.value == "ally" and anchor is None
+                    and math.hypot(pos[0] - float(spawn[0]),
+                                   pos[2] - float(spawn[2])) > 8.0):
+                warn(f"companion '{eid}' starts {math.hypot(pos[0] - float(spawn[0]), pos[2] - float(spawn[2])):.1f} m "
+                     "from the player spawn; the player may not see it")
+    return notes
 
 
 def finalize_encounter_zones(doc: dict, on_warning: Optional[WarnFn] = None) -> int:

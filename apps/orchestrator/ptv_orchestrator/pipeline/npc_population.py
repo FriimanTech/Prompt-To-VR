@@ -187,6 +187,144 @@ def reconcile_npc_mechanics(mech_plan: Any, npc_plan: Optional[NpcPlan]) -> tupl
         f"added {b} for the NPC plan" for b in added]
 
 
+#: What each built-in NPC behaviour fully implements. An NPC whose
+#: behaviours all fall inside one of these needs no generated AI at all.
+BUILTIN_BEHAVIOUR_COVERAGE: dict[str, frozenset[str]] = {
+    "builtin.npc.follow": frozenset({"follow_leader", "idle"}),
+    "builtin.npc.melee_chase": frozenset(
+        {"chase", "melee_attack", "react_to_damage", "idle"}),
+}
+
+#: Params each built-in reads (see its source header). Anything else in a
+#: plan item's config is a code-edit invention the built-in would ignore.
+BUILTIN_BEHAVIOUR_PARAMS: dict[str, frozenset[str]] = {
+    "builtin.npc.follow": frozenset({
+        "leader_tag", "min_distance_m", "max_distance_m", "run_distance_m",
+        "walk_speed_mps", "run_speed_mps", "catchup_distance_m",
+        "stuck_catchup_s", "catch_up",
+    }),
+    "builtin.npc.melee_chase": frozenset({
+        "target_tag", "sight_range_m", "chase_speed_mps", "walk_speed_mps",
+        "sprint", "attack_range_m", "windup_s", "attack_cooldown_s", "damage",
+        "hit_reach_m", "stagger_s", "attack_clip", "hurt_clip",
+        "gait_variant_when_chasing",
+    }),
+}
+
+
+def _npcs_driven_by(item: Any, npc_plan: NpcPlan,
+                    scene_specs: Optional[list[Any]]) -> list[Any]:
+    """The NpcSpecs a plan item's AI is bound to.
+
+    From the SceneSpecs when they exist (the entity carrying the binding
+    names its asset), otherwise from the asset ids the CodeTask names --
+    the mechanic planner always says which character a behaviour is for."""
+
+    by_asset = {n.asset_id: n for n in npc_plan.npcs}
+    task_id = item.code_task.id if item.code_task is not None else item.id
+    ids = {item.id, task_id, f"generated.{task_id}", f"generated.{item.id}"}
+    found: dict[str, Any] = {}
+    for spec in scene_specs or []:
+        for e in getattr(spec, "entities", None) or []:
+            mesh = getattr(e, "mesh", None)
+            if mesh is None or mesh.asset_id not in by_asset:
+                continue
+            if any(getattr(b, "mechanic_id", "") in ids
+                   for b in getattr(e, "mechanic_bindings", None) or []):
+                found[mesh.asset_id] = by_asset[mesh.asset_id]
+    if found or scene_specs:
+        return list(found.values())
+    if item.code_task is None:
+        return []
+    import re
+
+    text = f"{item.code_task.title} {item.code_task.description}"
+    for aid, npc in by_asset.items():
+        if re.search(rf"\b{re.escape(aid)}\b", text):
+            found[aid] = npc
+    return list(found.values())
+
+
+def reconcile_npc_ai_items(
+    mech_plan: Any,
+    npc_plan: Optional[NpcPlan],
+    scene_specs: Optional[list[Any]] = None,
+) -> tuple[Any, list[str]]:
+    """Turn generated NPC AI that a built-in already implements into that
+    built-in.
+
+    The mechanic planner sometimes asks for a code edit of
+    ``builtin.npc.follow`` just to change a parameter the built-in already
+    has (``catch_up: false``). The copy then has to be written, compiled
+    and kept in step with the engine forever -- and in the game this was
+    found in, the copy was the one thing that never ran. A behaviour set
+    the built-in fully covers is configuration, not code.
+
+    An item converts only when EVERY NPC it drives is covered, the NPC walks
+    (not flying / stationary), and the item is AI-kind. Its config carries
+    over, minus keys the built-in does not read (named in the notes). Other
+    CodeTasks that depended on the dropped task lose that dependency."""
+
+    from ptv_schemas import MechanicClassification
+
+    if npc_plan is None or not npc_plan.npcs:
+        return mech_plan, []
+    notes: list[str] = []
+    converted: set[str] = set()
+    items = []
+    for it in mech_plan.items:
+        task = it.code_task
+        if task is None or getattr(task.kind, "value", str(task.kind)) != "ai":
+            items.append(it)
+            continue
+        npcs = _npcs_driven_by(it, npc_plan, scene_specs)
+        if not npcs or any(
+                n.movement_style.value not in ("animated_locomotion",
+                                               "slide_no_animation")
+                for n in npcs):
+            items.append(it)
+            continue
+        wanted = set().union(*({getattr(b, "value", str(b)) for b in n.behaviors}
+                               for n in npcs))
+        base = it.base_builtin_id or it.builtin_id or ""
+        candidates = [base] if base in BUILTIN_BEHAVIOUR_COVERAGE else list(
+            BUILTIN_BEHAVIOUR_COVERAGE)
+        builtin = next((b for b in candidates
+                        if wanted <= BUILTIN_BEHAVIOUR_COVERAGE[b]), None)
+        if builtin is None:
+            items.append(it)
+            continue
+        allowed = BUILTIN_BEHAVIOUR_PARAMS[builtin]
+        config = {k: v for k, v in (it.config or {}).items() if k in allowed}
+        dropped = sorted(k for k in (it.config or {}) if k not in allowed)
+        items.append(it.model_copy(update={
+            "classification": MechanicClassification.builtin_config,
+            "builtin_id": builtin,
+            "base_builtin_id": None,
+            "code_task": None,
+            "config": config,
+        }))
+        converted.add(task.id)
+        notes.append(
+            f"'{it.id}' drives {[n.asset_id for n in npcs]} whose behaviours "
+            f"{sorted(wanted)} {builtin} already implements: using it as "
+            "builtin+config instead of generating a copy"
+            + (f" (dropped params it does not read: {dropped})" if dropped else "")
+        )
+    if not converted:
+        return mech_plan, []
+    # Nobody may wait on a task that no longer exists.
+    final = []
+    for it in items:
+        if it.code_task is not None and set(it.code_task.depends_on) & converted:
+            task = it.code_task.model_copy(update={
+                "depends_on": [d for d in it.code_task.depends_on
+                               if d not in converted]})
+            it = it.model_copy(update={"code_task": task})
+        final.append(it)
+    return mech_plan.model_copy(update={"items": final}), notes
+
+
 def repair_npc_plan(
     plan: NpcPlan,
     spec: Optional[BuildSpec],

@@ -40,6 +40,7 @@ writes, no CMake test targets, no planner prompts for tests.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import os
 import re
@@ -80,7 +81,13 @@ from .codegen_agent import (
     run_codegen_agent,
 )
 from .codegen_board import CodegenBoard
+from .codegen_contracts import (
+    API_CONTRACT_VERSION,
+    find_dead_contracts,
+    lint_task_sources,
+)
 from .context import PipelineContext, StageResult
+from .npc_population import reconcile_npc_ai_items
 from .proc import proc_hooks
 from .prompts import code_task_system
 
@@ -91,6 +98,12 @@ _KIND_DIR: dict[CodeTaskKind, str] = {
     CodeTaskKind.ai: "ai",
     CodeTaskKind.dialogue: "dialogue",
 }
+
+
+class CodegenContractError(CodegenAgentError):
+    """Generated code that compiles but breaks an engine contract
+    (see ``codegen_contracts``). Repaired once with the violations as
+    feedback before the task is failed."""
 
 
 # A compile verifier builds the generated C++ and reports ``(ok, log)``.
@@ -169,6 +182,24 @@ def run_with_runner(
     )
 
     plan = ctx.mechanic_plan or ctx.store.load_mechanic_plan(ctx.project_id)
+
+    # A plan written before the behaviour-coverage rule may still ask for a
+    # generated copy of a built-in NPC behaviour. Converting it here, with the
+    # SceneSpecs to say which NPC each item drives, is what lets a resume
+    # from code_generation drop that task (the board deletes its files).
+    try:
+        npc_plan = ctx.npc_plan or ctx.store.load_npc_plan(ctx.project_id)
+    except Exception:  # noqa: BLE001 - projects from before the NPC plan
+        npc_plan = None
+    plan, covered_notes = reconcile_npc_ai_items(
+        plan, npc_plan, _load_scene_specs(ctx.store.dir_for(ctx.project_id)))
+    if covered_notes:
+        ctx.mechanic_plan = plan
+        ctx.store.save_mechanic_plan(ctx.project_id, plan)
+        for note in covered_notes:
+            ctx.emit(ProjectStage.code_generation, "info", f"NPCs: {note}"[:300])
+            ctx.store.append_log(ctx.project_id, "code_generation", f"NPCs: {note}")
+
     codegen_items = [it for it in plan.items if it.code_task is not None]
 
     if not codegen_items:
@@ -232,6 +263,21 @@ def run_with_runner(
             "info",
             "asset socket contract changed since these tasks were generated; "
             f"regenerating: {','.join(socket_resets)}",
+        )
+
+    # Same idea for the engine contract (codegen_contracts): code written
+    # before a rule existed -- an AI with no MechanicContext, a private
+    # damage inbox -- compiled, shipped and silently did nothing.
+    api_resets = board.invalidate_on_api_contract_change(
+        API_CONTRACT_VERSION, repo_root,
+        lambda files: lint_task_sources("", files),
+    )
+    for tid, why in api_resets:
+        ctx.emit(
+            ProjectStage.code_generation,
+            "info",
+            f"regenerating {tid}: "
+            + ("; ".join(why)[:400] if why else "depends on a regenerated task"),
         )
 
     # Also retry previously failed tasks. A failure may have been caused by
@@ -323,6 +369,25 @@ def run_with_runner(
             # on the board; an exception escaping here means a hard
             # bug in the driver itself.
             fut.result()
+
+    # Cross-task wiring: an entry point one task offers that no other task
+    # calls is a producer that was never written. Reported, not fatal --
+    # the per-task rules already reject the damage-inbox case outright.
+    task_sources: dict[str, dict[str, str]] = {}
+    for tid in board.task_order():
+        row = board.task(tid) or {}
+        files: dict[str, str] = {}
+        for rel in row.get("files_written") or []:
+            try:
+                files[Path(rel).name] = (repo_root / rel).read_text(
+                    encoding="utf-8", errors="ignore")
+            except OSError:
+                continue
+        if files:
+            task_sources[tid] = files
+    for warning in find_dead_contracts(task_sources):
+        ctx.emit(ProjectStage.code_generation, "warning", f"dead contract: {warning}")
+        ctx.store.append_log(ctx.project_id, "code_generation", f"dead contract: {warning}")
 
     # ------------------------------------------------------------------
     # Compile-verification + repair loop
@@ -598,6 +663,19 @@ def _sockets_by_asset(project_dir: Path) -> dict[str, list[str]]:
         names = sorted((entry or {}).get("sockets") or {})
         if names:
             out[asset_id] = names
+    return out
+
+
+def _load_scene_specs(project_dir: Path) -> list[SceneSpec]:
+    """Every per-scene SceneSpec on disk (the canonical copy is skipped: it
+    duplicates the entry scene)."""
+    out: list[SceneSpec] = []
+    for p in sorted(project_dir.glob("scene_spec.*.json")):
+        try:
+            out.append(SceneSpec.model_validate(
+                json.loads(p.read_text(encoding="utf-8"))))
+        except Exception:  # noqa: BLE001 - a broken spec just maps nothing
+            continue
     return out
 
 
@@ -909,9 +987,35 @@ class _StageRuntime:
         # ``shooting_hub_shared.h``).
         dep_headers = _dep_header_names(snapshot, list(task.depends_on))
 
-        files_written_abs, files_written_rel = self._write_files(
-            task, result, dep_headers=dep_headers
-        )
+        try:
+            files_written_abs, files_written_rel = self._write_files(
+                task, result, dep_headers=dep_headers
+            )
+        except CodegenContractError as exc:
+            # One repair round with the rules it broke. Code that compiles
+            # but cannot work at runtime is exactly what the agent can fix
+            # when told precisely why.
+            self.ctx.emit(
+                ProjectStage.code_generation,
+                "info",
+                f"{task.id}: engine contract violations; asking the agent to "
+                f"fix them ({str(exc)[:240]})",
+            )
+            produced = "\n\n".join(
+                f"// FILE: {e.path}\n{_strip_code_fences(e.contents)}"
+                for e in result.files
+            )
+            inp = dataclasses.replace(
+                inp,
+                repair_context=(
+                    f"{exc}\n\nRewrite the task so none of these apply. The "
+                    f"files you produced:\n\n{produced}"
+                ),
+            )
+            result = self._run_agent_with_retry(task.id, inp)
+            files_written_abs, files_written_rel = self._write_files(
+                task, result, dep_headers=dep_headers
+            )
 
         # Update the .codetask.json sidecar with the final files[]
         # content so downstream tools (promotion stage) see exactly
@@ -1045,6 +1149,17 @@ class _StageRuntime:
             raise CodegenAgentError(
                 f"Include / content violations in {task.id!r}:\n"
                 + "\n".join(all_violations)
+            )
+
+        # Engine-contract rules: things that compile but cannot work.
+        kind_value = getattr(task.kind, "value", str(task.kind))
+        contract = lint_task_sources(
+            kind_value, {Path(rel).name: code for rel, code in normalised}
+        )
+        if contract:
+            raise CodegenContractError(
+                f"Engine contract violations in {task.id!r}:\n"
+                + "\n".join(f"- {c}" for c in contract)
             )
 
         # -- Second pass: write validated files to disk.

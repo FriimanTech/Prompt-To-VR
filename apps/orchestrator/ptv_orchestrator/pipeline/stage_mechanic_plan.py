@@ -41,7 +41,7 @@ from .mechanic_plan_agent import (
     build_planner_message,
 )
 from .movement import reconcile_mechanic_plan, required_roles
-from .npc_population import reconcile_npc_mechanics
+from .npc_population import reconcile_npc_ai_items, reconcile_npc_mechanics
 from .prompts import mechanic_plan_system
 
 
@@ -150,6 +150,9 @@ def run_with_planner(
     # The NPC population runs on engine built-ins (spawning, following,
     # chasing). Make sure the plan carries the ones the NPC plan needs.
     plan, npc_notes = reconcile_npc_mechanics(plan, npc_plan)
+    # Generated AI for an NPC a built-in already fully covers is config.
+    plan, covered_notes = reconcile_npc_ai_items(plan, npc_plan)
+    npc_notes = list(npc_notes) + covered_notes
     for note in npc_notes:
         ctx.emit(ProjectStage.mechanic_plan, "info", f"NPCs: {note}"[:240])
         ctx.store.append_log(ctx.project_id, "mechanic_plan", f"NPCs: {note}")

@@ -54,6 +54,8 @@ prompt
   → 14. Asset optimization (LOD decimation + performance profile)
   → 15. Scene compile (merge world + gameplay → scene.json)
   → 16. pcvr: cmake_build (.exe)  |  quest: quest_build (APK)
+        quest only: quest_runtime_verify (run on the headset, check the NPCs;
+        report-only, skipped with no headset)
   → 17. Engine promotion (registry of reusable generated modules)
 ```
 

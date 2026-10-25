@@ -205,6 +205,15 @@ during play was a ghost — visible with no collider. Entities tagged
 `"template"` are skipped: they are hidden spawn sources parked off-map and
 should not leave invisible obstacles lying around.
 
+`raycast(origin, dir, max, RayFilter, ...)` takes a filter: bodies to pass
+through (`ignore`), `static_only`, and `skip_characters` (every capsule body:
+NPCs and the player's contact capsule). Jolt treats convex shapes as solid, so
+a ray that starts inside or on a body hits it at fraction 0 -- any probe cast
+on behalf of an entity must ignore that entity. Gameplay reaches this through
+`IPhysicsAccess::raycast_excluding(self, ..., floor_only)`; the character
+locomotion floor snap, perception sight lines and the navigation whiskers,
+ground projection and point-to-point line of sight all use it.
+
 Two queries exist beyond the raycast:
 
 - `slide_character(centre, height, delta, ignore)` sweeps a capsule and
@@ -219,10 +228,19 @@ Two queries exist beyond the raycast:
   wants to know about — the player and an NPC — is kinematic on both sides,
   because their motion is authored rather than simulated.
 
-The player is an ordinary kinematic capsule entity (`__player`, tagged
-`"player"`) that follows the headset horizontally and the rig vertically.
-Before that they were a bare transform, so nothing could collide *with* them
-and an enemy that charged the user simply passed through.
+The player is an ordinary kinematic capsule entity, tagged `"player"`, that
+follows the headset horizontally and the rig vertically. When the scene has a
+`player_rig` entity the engine adopts it as that entity (keeping its id,
+tags, health, faction and bindings; its authored collider is replaced by the
+capsule); only a scene without one gets an engine-made `__player`. Before
+this, both existed and the rig stood still, so code that found the player by
+name followed the world origin. Before that the player was a bare transform,
+so nothing could collide *with* them and an enemy that charged the user
+simply passed through.
+
+`ICombat` records every hit that lands (`DamageLog`, 64 most recent, in
+`src/core/NpcRuntime.h`): `damage_seq(entity)` and `damage_events_since`.
+Each hit is also logged as a `combat:` line.
 
 ### Navigation (`ptv::nav::NavGraph`)
 
@@ -245,7 +263,12 @@ are referenced by nothing but their static constructors).
 
 `MechanicHost::attach_bindings(world, ctx)` walks every `CMechanicBinding`
 and instantiates the matching mechanic, collapsing `MechanicScope::Player`
-mechanics to a single shared instance.
+mechanics to a single shared instance. An id with no mechanic factory falls
+back to the behaviour registry: an `IBehaviour` is wrapped in an adapter and
+runs as a Simulate-phase, per-entity mechanic (its context-taking `on_tick`
+gets the same `MechanicContext`). Entities tagged `template` are skipped --
+their clones attach at spawn. Ids that resolve to nothing are collected in
+`unresolved()` and logged once as an error.
 `update(world, dt, input, ctx, phase)` ticks the instances in one phase; the
 frame calls it twice, `Input` before the snapshot freezes and the physics
 step, `Simulate` after. See [`docs/input-and-bindings.md`](input-and-bindings.md).

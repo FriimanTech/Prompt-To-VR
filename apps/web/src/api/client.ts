@@ -126,6 +126,11 @@ export const api = {
         body: JSON.stringify({ scene_json: scene_json ?? null }),
       },
     ),
+  /** Quest only: re-run the on-headset verification (report-only). */
+  verify: (id: string) =>
+    req<{ ok: boolean; mode: string; stage: string }>(`/projects/${id}/verify`, {
+      method: "POST",
+    }),
   launchSample: () =>
     req<{ ok: boolean; exe: string }>("/sample/launch", { method: "POST" }),
 };

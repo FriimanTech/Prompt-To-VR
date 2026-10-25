@@ -237,6 +237,39 @@ the re-billing is visible rather than inferred. The same
 `_sockets_by_asset()` helper feeds both the fingerprint and the agent
 context, so the thing being hashed is the thing the agent saw.
 
+### Engine-contract checks and invalidation
+
+`codegen_contracts.py` checks what the C++ DOES with the headers `bounds.py`
+let it include -- code that compiles, links, ships and silently does nothing:
+
+- an AI registered with `PTV_REGISTER_BEHAVIOUR` that only implements the
+  context-free `on_tick(world, entity, dt)` (no navigation, perception or
+  combat -- it cannot even find the real player);
+- `world.find("player_rig")` (or `"__player"`): the player is
+  `ctx.hands->player_entity()`;
+- a private damage channel (`struct *HitInbox` / `*DamageQueue` / `*Mailbox`):
+  built-in enemies and other tasks damage through `ctx.combat`, and hits are
+  read with `ctx.combat->damage_seq` / `damage_events_since`;
+- a private health pool: a `current_health` the task subtracts damage from
+  while never reading `ctx.combat` (a display copy is fine). The engine's
+  health is the health; mirror `ctx.combat->health` / `max_health`, defeat is
+  `!is_alive`. (Caught after a regenerated player-health mechanic swapped its
+  rejected `MeleeHitInbox` for an `apply_melee_hit()` nobody called.)
+
+A violation raises `CodegenContractError` from `_write_files`; the task gets
+ONE repair round with the violations and its own files as `repair_context`
+before it fails. The same rules re-check finished tasks whenever
+`API_CONTRACT_VERSION` moves (`board.invalidate_on_api_contract_change`):
+stale tasks and their transitive dependents go back to `pending`, each with
+an `info` event naming why. After the workers finish, `find_dead_contracts`
+warns about entry points a task's header offers (`submit_*`, `push_*`,
+`report_*`, ...) that no other task calls.
+
+The coverage reconcile (`reconcile_npc_ai_items`, see
+[npc-and-ai.md](npc-and-ai.md#built-in-npc-behaviours)) runs at the start of
+the stage too: an AI item a built-in NPC behaviour fully covers becomes
+`builtin+config`, and the board drops its task and deletes its files.
+
 ## OpenAI Agents SDK driver
 
 `pipeline/codegen_agent.py` wraps the [OpenAI Agents SDK]

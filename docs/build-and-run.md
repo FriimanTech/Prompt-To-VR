@@ -60,7 +60,10 @@ On success:
 ## Quest standalone (APK)
 
 When `ProjectState.target_device` is `quest`, stage 16 runs `quest_build` instead
-of `cmake_build`. The web panel's **Launch latest build** uses `adb install -r`
+of `cmake_build`, followed by `quest_runtime_verify`, which runs the APK on the
+connected headset and checks the NPCs this game asked for (report-only; skipped
+when no headset is connected; never part of PC VR). **Verify on headset** in the
+web panel re-runs it. The web panel's **Launch latest build** uses `adb install -r`
 and starts the NativeActivity on a connected Quest 3.
 
 Prerequisites: Android SDK/NDK, `adb`, and a USB-connected headset. See

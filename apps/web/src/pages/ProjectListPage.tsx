@@ -17,8 +17,8 @@ import {
 function progressFraction(currentStage: string): number {
   const meta = STAGE_META[currentStage];
   if (!meta) return currentStage === "created" ? 0 : 1;
-  // Device is unknown here, and the tails are the same length either way.
-  return meta.step / stagesFor("pcvr").length;
+  // Device is unknown here; the Quest tail is one stage longer, so clamp.
+  return Math.min(1, meta.step / stagesFor("pcvr").length);
 }
 
 export default function ProjectListPage() {

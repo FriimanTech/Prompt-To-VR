@@ -298,6 +298,19 @@ public:
         });
     }
 
+    void npc_anchor(const NpcAnchorDesc& d) override {
+        nlohmann::json tags = nlohmann::json::array();
+        for (const auto& t : d.tags) tags.push_back(t);
+        nlohmann::json a{
+            {"id", d.id},
+            {"position", vec3_json(d.position)},
+            {"facing", vec3_json(d.facing)},
+            {"tags", tags},
+        };
+        if (!d.asset_id.empty()) a["asset_id"] = d.asset_id;
+        npc_anchors_.push_back(std::move(a));
+    }
+
     void spawn_point(const SpawnPointDesc& d) override {
         const float yaw = std::atan2(d.facing.x, -d.facing.z);
         const float hy = yaw * 0.5f;
@@ -341,6 +354,7 @@ public:
         if (!interactives_.empty()) doc_["interactives"] = interactives_;
         if (!spawn_points_.empty()) doc_["spawn_points"] = spawn_points_;
         if (!npc_spawn_zones_.empty()) doc_["npc_spawn_zones"] = npc_spawn_zones_;
+        if (!npc_anchors_.empty()) doc_["npc_anchors"] = npc_anchors_;
         if (!portals_.empty()) doc_["portals"] = portals_;
         return doc_;
     }
@@ -421,6 +435,7 @@ private:
     std::vector<nlohmann::json> interactives_;
     std::vector<nlohmann::json> spawn_points_;
     std::vector<nlohmann::json> npc_spawn_zones_;
+    std::vector<nlohmann::json> npc_anchors_;
     std::vector<nlohmann::json> portals_;
     /** Occurrences per slugified name, so a repeated name gets a stable
      *  suffix instead of every entity depending on call order. */

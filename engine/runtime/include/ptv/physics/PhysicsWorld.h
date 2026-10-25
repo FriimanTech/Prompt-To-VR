@@ -196,6 +196,24 @@ public:
                  Vec3& out_hit, Vec3& out_normal,
                  std::uint32_t& out_entity) const;
 
+    /** What a filtered ray may hit. */
+    struct RayFilter {
+        /** Entities whose bodies the ray passes through. A probe cast on
+         *  behalf of an entity must list that entity: Jolt treats convex
+         *  shapes as solid, so a ray that starts inside or on the caller's
+         *  own capsule hits it at fraction 0. */
+        std::vector<std::uint32_t> ignore{};
+        /** Only STATIC-layer bodies (level geometry). */
+        bool static_only{false};
+        /** Skip every capsule body: NPCs and the player's contact capsule.
+         *  Ground probes want the floor, not a character standing on it. */
+        bool skip_characters{false};
+    };
+
+    bool raycast(const Vec3& origin, const Vec3& dir, float max_dist,
+                 const RayFilter& filter, Vec3& out_hit, Vec3& out_normal,
+                 std::uint32_t& out_entity) const;
+
 private:
     /** Replace a static body with an identical movable one.
      *

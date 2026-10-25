@@ -38,6 +38,7 @@ from . import (
     stage_engine_promotion,
     stage_mechanic_plan,
     stage_quest_build,
+    stage_quest_verify,
     stage_reference_images,
     stage_scene_compile,
     stage_scene_spec,
@@ -127,9 +128,12 @@ _PCVR_TAIL: list[tuple[ProjectStage, StageFn]] = [
     (ProjectStage.engine_promotion, stage_engine_promotion.run),
 ]
 
-# Quest: build a standalone Android APK with Gradle + the NDK.
+# Quest: build a standalone Android APK with Gradle + the NDK, then (report-
+# only, skipped when no headset is connected) run it on the headset and check
+# the game does what it asked for. Quest only: never in the PC VR tail.
 _QUEST_TAIL: list[tuple[ProjectStage, StageFn]] = [
     (ProjectStage.quest_build, stage_quest_build.run),
+    (ProjectStage.quest_runtime_verify, stage_quest_verify.run),
     (ProjectStage.engine_promotion, stage_engine_promotion.run),
 ]
 

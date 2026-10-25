@@ -276,12 +276,34 @@ const STAGES: StageMeta[] = [
     device: "quest",
   },
   {
+    id: "quest_runtime_verify",
+    step: 21,
+    label: "Verify on headset",
+    group: "ship",
+    cost: "free",
+    blurb:
+      "Runs the APK on the connected Quest and checks the NPCs this game asked for appear, move and attack. Report-only; skipped when no headset is connected.",
+    device: "quest",
+  },
+  // One entry per device: the Quest tail has one more stage before it, and
+  // the step number is what the timeline shows.
+  {
     id: "engine_promotion",
     step: 21,
     label: "Engine promotion",
     group: "ship",
     cost: "free",
     blurb: "Promotes anything reusable this project produced back into the engine.",
+    device: "pcvr",
+  },
+  {
+    id: "engine_promotion",
+    step: 22,
+    label: "Engine promotion",
+    group: "ship",
+    cost: "free",
+    blurb: "Promotes anything reusable this project produced back into the engine.",
+    device: "quest",
   },
 ];
 
@@ -308,7 +330,7 @@ export const RESUMABLE_STAGES = resumableStages("pcvr");
  *  non-stage lifecycle markers. */
 export const STAGE_ORDER = [
   "created",
-  ...STAGES.map((s) => s.id),
+  ...Array.from(new Set(STAGES.map((s) => s.id))),
   "ready_to_launch",
   "failed",
 ] as const;

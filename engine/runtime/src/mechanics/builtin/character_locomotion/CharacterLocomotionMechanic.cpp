@@ -107,7 +107,8 @@ public:
         Vec3 next = transform.position + delta;
 
         if (ground_snap_ && ctx.physics != nullptr) {
-            next = snap_to_ground(ctx, next, height, foot_offset(world, self, height));
+            next = snap_to_ground(ctx, self, next, height,
+                                  foot_offset(world, self, height), dt);
         }
 
         // The speed ACHIEVED, not the speed requested. A character pressed
@@ -148,20 +149,37 @@ private:
      *  Ray starts above the head so a step up is found, and reaches below the
      *  feet so a step down is too. No hit means there is nothing underneath
      *  (a ledge, or a scene with no floor), and the safe answer is to leave
-     *  the height alone rather than drop the character into the void. */
-    Vec3 snap_to_ground(MechanicContext& ctx, const Vec3& position,
-                        float height, float feet_below_origin) const {
+     *  the height alone rather than drop the character into the void.
+     *
+     *  The ray starts on the top of the character's own capsule, so it must
+     *  pass through that body and every other character: hitting itself at
+     *  distance zero lifted every NPC by its own height each frame. The
+     *  per-frame rise is capped as well, so no probe result can launch a
+     *  character -- a real step is climbed over a few frames instead. */
+    Vec3 snap_to_ground(MechanicContext& ctx, std::uint32_t self,
+                        const Vec3& position, float height,
+                        float feet_below_origin, float dt) const {
         const float half = 0.5f * height;
         const Vec3 from(position.x, position.y + half, position.z);
         PhysicsRayHit hit{};
         const float reach = 2.0f * height;
-        if (!ctx.physics->raycast(from, Vec3(0.0f, -1.0f, 0.0f), reach, hit)) {
+        if (!ctx.physics->raycast_excluding(self, from, Vec3(0.0f, -1.0f, 0.0f),
+                                            reach, hit, /*floor_only=*/true)) {
             return position;
         }
         // The entity origin sits at the body's middle, so resting on the
         // ground means the origin-to-sole distance above the contact point.
-        return Vec3(position.x, hit.point.y + feet_below_origin, position.z);
+        float y = hit.point.y + feet_below_origin;
+        const float max_rise =
+            std::max(kMaxStepUpM, kMaxRiseMps * std::max(0.0f, dt));
+        if (y > position.y + max_rise) y = position.y + max_rise;
+        return Vec3(position.x, y, position.z);
     }
+
+    /** A step this high is climbed in one frame; anything taller rises at
+     *  ``kMaxRiseMps``. Generous enough for stairs and spawn settling. */
+    static constexpr float kMaxStepUpM = 0.35f;
+    static constexpr float kMaxRiseMps = 6.0f;
 
     /** How far below the origin the soles are: measured by the pipeline when
      *  known, otherwise half the height (a symmetric body). */

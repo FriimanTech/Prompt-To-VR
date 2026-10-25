@@ -380,6 +380,25 @@ export default function ProjectDetailPage() {
           >
             {launchLabel}
           </button>
+          {isQuest && (
+            <button
+              className={
+                canLaunch && !busy
+                  ? "ptv-button"
+                  : "ptv-button cursor-not-allowed opacity-40"
+              }
+              disabled={!canLaunch || busy}
+              title="Run the APK on the connected headset and check the NPCs this game asked for appear, move and attack. Writes runtime_verification.json. Skipped if no headset is connected."
+              onClick={() =>
+                api
+                  .verify(id)
+                  .then(() => setNotice("Verifying on the headset; see the events log."))
+                  .catch((e) => setNotice(String(e)))
+              }
+            >
+              Verify on headset
+            </button>
+          )}
         </div>
       </div>
 

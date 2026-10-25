@@ -95,6 +95,69 @@ Gradle install is required -- `gradlew` self-bootstraps the Gradle distribution
 using `JAVA_HOME` (Android Studio's bundled JBR works). Gradle 8.9 is the
 minimum required by the template's AGP 8.7.
 
+## On-headset verification
+
+`quest_runtime_verify` runs after `quest_build` in the Quest tail ONLY
+(`_QUEST_TAIL` in `orchestrator.py`; PC VR never runs it, the on-demand
+`POST /projects/{id}/verify` route returns 400 for a PC VR project, and the
+stage skips itself if it ever runs on one). It is **report-only**: it never
+repairs anything or reruns earlier stages.
+
+1. `adb devices`. No adb, no device, an `unauthorized` / `offline` device,
+   or several devices with none named in `quest_verify_device_serial`: the
+   stage is SKIPPED -- recorded as a successful stage with a "skipped" event
+   and reason, `runtime_verification.json` gets `status: "skipped"`, and the
+   pipeline continues. A headset that disconnects mid-run is also a skip.
+2. `adb shell am broadcast -a com.oculus.vrpowermanager.prox_close` keeps the
+   XR session running with the headset on a desk (Meta's scriptable-testing
+   docs), `setprop debug.oculus.guardian_pause 1` pauses Guardian (an
+   unworn headset that "looks worn" has no boundary, and Horizon OS's Guardian
+   setup flow then makes every launch time out in window placement; the
+   previous value is restored afterwards), `setprop debug.ptv.verify 1` turns
+   on the engine's verification mode (scripted player walk, player cannot
+   die), then `install -r`, `logcat -c` and a plain `am start` confirmed with
+   `pidof` (up to 6 attempts with a wake/back key between them; `-W` waits for
+   a launch-complete a VR NativeActivity never reports). Optionally,
+   `quest_verify_store_pin` lets the stage use Meta's Scriptable Testing
+   service to disable Guardian, dialogs and auto-sleep for the run.
+3. Stream `adb logcat -v time -s ptv:*` to `logs/runtime/verify_<ts>.log`
+   for the encounter start delay plus `quest_verify_capture_seconds` (40 s;
+   20 s for a game with no NPCs), plus 35 s for every wave before the one in
+   which the last NPC type first appears (capped at 240 s). Verification mode
+   defeats an enemy shortly after it hits the player, so later waves arrive
+   without anyone holding the controllers. Streamed, not read once at the end: the
+   headset's log ring buffer holds well under a minute of NPC telemetry, so
+   a final `logcat -d` has already lost the start-up and manifest lines.
+4. Force-stop, `setprop debug.ptv.verify 0` and
+   `vrpowermanager.automation_disable` -- always, even after a failure.
+
+Checks come from THIS game's `npc_plan.json` and `scene.json`, and each runs
+only when the game calls for it:
+
+- **Every Quest game (base):** launched, scene loaded, frame loop ran, no
+  crash, every mechanic binding resolves, every GLB loaded. A game with no
+  NPCs runs only these; its NPC section reads "not applicable: this game has
+  no NPCs".
+- **Placed at load (`persistent_count > 0`):** present, skeleton and clips
+  resolved, feet within 0.3 m of the floor, inside the walkable area.
+- **Stationary (`movement_style: stationary`):** stays within 0.25 m of where
+  it was placed, plays `idle` if it has one; with combat behaviours it must
+  land hits on the player from its spot. Follow / chase movement checks never
+  apply to it.
+- **Followers (`follow_leader`):** within the trailing band (plus slack)
+  while the scripted player walks, walks, and plays a walk/run clip while
+  moving.
+- **Encounters:** waves start; enough enemies spawn within the start delay
+  plus 15 s.
+- **Enemies hostile to the player with chase/melee:** on the floor, close
+  the distance, play a gait clip while moving, land hits on the player.
+
+Output: `runtime_verification.json` (`RuntimeVerification` in
+`packages/schemas`) with `passed` / `failed` / `skipped`, every check with
+pass / fail / not applicable and its evidence, plus
+`logs/runtime/verify_<timestamp>.log`. A failed check fails the stage with
+the exact list.
+
 ## Validation ladder (on-device)
 
 1. Build the starter-room scene as an APK (no LLM), `adb install -r`, confirm

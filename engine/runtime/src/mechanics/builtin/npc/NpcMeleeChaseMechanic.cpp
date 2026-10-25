@@ -99,7 +99,12 @@ public:
         const Vec3 them = target_position(world, ctx, target);
         Vec3 flat = them - me;
         flat.y = 0.0f;
-        const float d = glm::length(flat);
+        // Reach is horizontal, but only on roughly the same level: a target
+        // on a balcony above, or one standing on the roof the NPC is under,
+        // is out of reach however close it is in plan.
+        const bool same_level = std::fabs(them.y - me.y) <= kMaxReachHeightM;
+        const float d = same_level ? glm::length(flat)
+                                   : std::max(glm::length(flat), reach_ + 1.0f);
 
         // Mid-swing: hold still, keep facing, land the hit at the end.
         if (windup_t_ >= 0.0f) {
@@ -226,6 +231,8 @@ private:
         if (ctx.perception == nullptr) return true;
         return ctx.perception->line_of_sight(self, target);
     }
+
+    static constexpr float kMaxReachHeightM = 2.0f;
 
     std::string target_tag_;
     float sight_{30.0f}, chase_{3.5f}, walk_{1.4f};

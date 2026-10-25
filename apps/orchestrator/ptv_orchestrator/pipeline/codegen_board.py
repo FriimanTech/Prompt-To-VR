@@ -573,41 +573,93 @@ class CodegenBoard:
                 if (tasks.get(tid) or {}).get("status") == "done"
                 and _row_reads_sockets(tasks[tid], repo_root)
             }
-            # Transitive closure over ``depends_on``: a task written against
-            # an export that is about to change has to be rewritten too.
-            growing = True
-            while growing:
-                growing = False
-                for tid in order:
-                    row = tasks.get(tid)
-                    if row is None or tid in invalid:
-                        continue
-                    if row.get("status") != "done":
-                        continue
-                    if any(d in invalid for d in row.get("depends_on", [])):
-                        invalid.add(tid)
-                        growing = True
+            return self._reset_with_dependents_locked(invalid)
 
-            for tid in invalid:
-                tasks[tid].update(
-                    status="pending",
-                    agent_id=None,
-                    claimed_at=None,
-                    completed_at=None,
-                    error=None,
-                )
-            # Anything now waiting on a dep that is no longer done goes back
-            # to blocked, so the DAG order is preserved on the re-run.
-            done_ids = {
-                tid for tid, row in tasks.items() if row.get("status") == "done"
-            }
-            for tid in invalid:
-                row = tasks[tid]
-                if not all(d in done_ids for d in row.get("depends_on", [])):
-                    row["status"] = "blocked"
+    def invalidate_on_api_contract_change(
+        self, version: int, repo_root: Path, is_stale: Any
+    ) -> list[tuple[str, list[str]]]:
+        """Reset ``done`` tasks whose C++ breaks a newer engine contract.
 
-            self._save_locked()
-            return [tid for tid in order if tid in invalid]
+        ``is_stale(files)`` maps {file name: contents} -> reasons (empty when
+        the code still satisfies the contract); see ``codegen_contracts``.
+        Checked only when ``version`` differs from what the board last saw,
+        so a resume with nothing new costs one dict lookup. A task whose
+        files are missing is left to the normal resume path.
+
+        Returns ``(task_id, reasons)`` for every reset task, dependents
+        included (with an empty reason list).
+        """
+        with self._lock:
+            previous = self._data.get("api_contract_version")
+            self._data["api_contract_version"] = int(version)
+            if previous == int(version):
+                return []
+            tasks = self._data["tasks"]
+            order = list(self._data.get("task_order", []))
+            reasons: dict[str, list[str]] = {}
+            for tid in order:
+                row = tasks.get(tid) or {}
+                if row.get("status") != "done":
+                    continue
+                files: dict[str, str] = {}
+                for rel in row.get("files_written") or []:
+                    path = Path(rel)
+                    if not path.is_absolute():
+                        path = repo_root / path
+                    try:
+                        files[path.name] = path.read_text(
+                            encoding="utf-8", errors="ignore")
+                    except OSError:
+                        continue
+                found = list(is_stale(files)) if files else []
+                if found:
+                    reasons[tid] = found
+            if not reasons:
+                self._save_locked()
+                return []
+            reset = self._reset_with_dependents_locked(set(reasons))
+            return [(tid, reasons.get(tid, [])) for tid in reset]
+
+    def _reset_with_dependents_locked(self, invalid: set[str]) -> list[str]:
+        """Reset ``invalid`` and every done task depending on one of them
+        back to pending/blocked. Caller holds the lock."""
+        tasks = self._data["tasks"]
+        order = list(self._data.get("task_order", []))
+        # Transitive closure over ``depends_on``: a task written against an
+        # export that is about to change has to be rewritten too.
+        growing = True
+        while growing:
+            growing = False
+            for tid in order:
+                row = tasks.get(tid)
+                if row is None or tid in invalid:
+                    continue
+                if row.get("status") != "done":
+                    continue
+                if any(d in invalid for d in row.get("depends_on", [])):
+                    invalid.add(tid)
+                    growing = True
+
+        for tid in invalid:
+            tasks[tid].update(
+                status="pending",
+                agent_id=None,
+                claimed_at=None,
+                completed_at=None,
+                error=None,
+            )
+        # Anything now waiting on a dep that is no longer done goes back to
+        # blocked, so the DAG order is preserved on the re-run.
+        done_ids = {
+            tid for tid, row in tasks.items() if row.get("status") == "done"
+        }
+        for tid in invalid:
+            row = tasks[tid]
+            if not all(d in done_ids for d in row.get("depends_on", [])):
+                row["status"] = "blocked"
+
+        self._save_locked()
+        return [tid for tid in order if tid in invalid]
 
     def reset_failed(self) -> list[str]:
         """Reset ``failed`` tasks back to ``pending`` (or ``blocked`` if

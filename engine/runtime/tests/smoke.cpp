@@ -38,7 +38,9 @@
 #include "../src/mechanics/builtin/slide/SlideComfort.h"
 #include "../src/mechanics/builtin/avatar_body/NeckDrift.h"
 #include "../src/mechanics/builtin/avatar_body/HeightCalibration.h"
+#include "../src/core/NpcRuntime.h"
 #include "ptv/api/BodySlots.h"
+#include "ptv/api/IBehaviour.h"
 #include "ptv/api/IMechanic.h"
 #include "ptv/core/Logger.h"
 #include "ptv/ecs/Clone.h"
@@ -3716,6 +3718,7 @@ public:
     float speed{1.0f};
     int play_calls{0};
     bool have_run{true};
+    bool have_walk{true};
     bool have_idle{true};
     /** Gait-variant clips ("run.punching") this fake asset has. */
     std::vector<std::string> variants;
@@ -3762,6 +3765,7 @@ public:
         if (name == nullptr) return false;
         const std::string n(name);
         if (n == "run") return have_run;
+        if (n == "walk") return have_walk;
         if (n == "idle") return have_idle;
         if (n.find('.') != std::string::npos) {
             return std::find(variants.begin(), variants.end(), n) != variants.end();
@@ -3870,6 +3874,15 @@ static int case_character_locomotion() {
     drive(ptv::Vec3(0.0f, 0.0f, -9.0f), 5);
     if (skeleton.requested != "walk")
         return fail("a rig without a run clip did not fall back to walk");
+
+    // --- ...and one with no walk clip runs slowly, not idles ---------------
+    skeleton.have_run = true;
+    skeleton.have_walk = false;
+    drive(ptv::Vec3(0.0f), 3);
+    drive(ptv::Vec3(0.0f, 0.0f, -1.4f), 10);
+    if (skeleton.requested != "run")
+        return fail("a rig without a walk clip played idle while walking");
+    skeleton.have_walk = true;
 
     // --- animated:false still moves, but plays nothing --------------------
     {
@@ -4427,6 +4440,293 @@ static int case_openxr() {
     return ok("openxr: xrCreateInstance succeeded");
 }
 
+// ---------------------------------------------------------------------------
+// NPC runtime against REAL physics.
+//
+// The fakes above answer every raycast with "floor at y = 0", which is why
+// they never noticed that a ground probe starting on top of an NPC's own
+// capsule hits that capsule first and lifts the NPC by its height every
+// frame. These cases run Jolt.
+// ---------------------------------------------------------------------------
+namespace {
+
+class RealPhysicsAccess final : public ptv::IPhysicsAccess {
+public:
+    RealPhysicsAccess(ptv::PhysicsWorld& p, ptv::World& w) : p_(p), w_(w) {}
+
+    bool raycast(const ptv::Vec3& origin, const ptv::Vec3& dir, float max_dist,
+                 ptv::PhysicsRayHit& out) const override {
+        out = {};
+        ptv::Vec3 n(0.0f, 1.0f, 0.0f);
+        if (!p_.raycast(origin, dir, max_dist, out.point, n, out.entity)) return false;
+        out.normal = n;
+        out.hit = true;
+        return true;
+    }
+    bool raycast_excluding(std::uint32_t self, const ptv::Vec3& origin,
+                           const ptv::Vec3& dir, float max_dist,
+                           ptv::PhysicsRayHit& out, bool floor_only) const override {
+        out = {};
+        ptv::PhysicsWorld::RayFilter f{};
+        f.ignore.push_back(self);
+        f.skip_characters = floor_only;
+        ptv::Vec3 n(0.0f, 1.0f, 0.0f);
+        if (!p_.raycast(origin, dir, max_dist, f, out.point, n, out.entity)) return false;
+        out.normal = n;
+        out.hit = true;
+        return true;
+    }
+    bool has_body(std::uint32_t e) const override { return p_.has_body(e); }
+    void set_kinematic(std::uint32_t e, bool k) override { p_.set_kinematic(e, k); }
+    void move_kinematic(std::uint32_t e, const ptv::Vec3& pos, const ptv::Quat& rot,
+                        float dt) override {
+        p_.move_kinematic(e, pos, rot, dt);
+    }
+    void apply_impulse(std::uint32_t e, const ptv::Vec3& i) override {
+        p_.apply_impulse(e, i);
+    }
+    ptv::Vec3 slide_move(std::uint32_t e, const ptv::Vec3& delta) const override {
+        const auto& t = w_.get<ptv::CTransform>(e).t;
+        const float h = w_.get<ptv::CMesh>(e).target_scale_meters;
+        return p_.slide_character(t.position, h, delta, e);
+    }
+
+private:
+    ptv::PhysicsWorld& p_;
+    ptv::World& w_;
+};
+
+void add_floor(ptv::World& world) {
+    const auto e = world.create_entity("floor");
+    ptv::Transform t{};
+    t.position = ptv::Vec3(0.0f, -0.1f, 0.0f);
+    world.registry().emplace<ptv::CTransform>(e, ptv::CTransform{t});
+    world.registry().emplace<ptv::CPrimitive>(
+        e, ptv::CPrimitive{"box", ptv::Vec3(40.0f, 0.2f, 40.0f), ptv::Vec3(0.5f)});
+    ptv::CPhysics p{};
+    p.kind = "static";
+    p.collision_shape = "box";
+    world.registry().emplace<ptv::CPhysics>(e, p);
+}
+
+std::uint32_t add_npc(ptv::World& world, const char* id, const ptv::Vec3& pos,
+                      float height, float foot_offset) {
+    const auto e = world.create_entity(id);
+    ptv::Transform t{};
+    t.position = pos;
+    world.registry().emplace<ptv::CTransform>(e, ptv::CTransform{t});
+    ptv::CMesh m{};
+    m.asset_id = id;
+    m.target_scale_meters = height;
+    m.foot_offset_m = foot_offset;
+    m.skinned = true;
+    world.registry().emplace<ptv::CMesh>(e, std::move(m));
+    ptv::CPhysics p{};
+    p.kind = "kinematic";
+    p.mass_kg = 70.0f;
+    p.collision_shape = "capsule";
+    world.registry().emplace<ptv::CPhysics>(e, p);
+    return static_cast<std::uint32_t>(e);
+}
+
+}  // namespace
+
+static int case_npc_ground_snap_real_physics() {
+    ptv::World world;
+    add_floor(world);
+    // The two placements the scene compiler produces: an Uthana companion
+    // put down AT the floor (origin at the hips, foot offset 0.86 m), and a
+    // Tripo enemy spawned onto a zone on the floor (half-height fallback).
+    const auto ally = add_npc(world, "ally", ptv::Vec3(0.0f, 0.05f, 0.0f), 1.72f, 0.86f);
+    const auto enemy = add_npc(world, "enemy", ptv::Vec3(4.0f, 0.0f, 0.0f), 1.45f, 0.0f);
+
+    ptv::PhysicsWorld physics;
+    if (!physics.initialize()) return fail("physics failed to initialize");
+    physics.rebuild_from_world(world);
+    RealPhysicsAccess access(physics, world);
+    FakeSkeleton skeleton;
+    ptv::MechanicContext ctx{};
+    ctx.physics = &access;
+    ctx.skeleton = &skeleton;
+
+    auto loco_a = ptv::MechanicRegistry::get().make_mechanic("builtin.character_locomotion");
+    auto loco_e = ptv::MechanicRegistry::get().make_mechanic("builtin.character_locomotion");
+    if (!loco_a || !loco_e) return fail("builtin.character_locomotion is not registered");
+    loco_a->on_attach(world, ally, nlohmann::json::object(), ctx);
+    loco_e->on_attach(world, enemy, nlohmann::json::object(), ctx);
+    // The enemy walks the whole time; the ally stands still.
+    world.registry().emplace<ptv::CLocomotionIntent>(static_cast<entt::entity>(enemy))
+        .desired_velocity = ptv::Vec3(-1.0f, 0.0f, 0.0f);
+
+    const ptv::InputSnapshot input{};
+    const float dt = 1.0f / 72.0f;
+    for (int i = 0; i < 300; ++i) {
+        physics.step(dt);
+        physics.sync_to_world(world);
+        loco_a->on_update(world, ally, dt, input, ctx);
+        loco_e->on_update(world, enemy, dt, input, ctx);
+    }
+    const auto& ta = world.get<ptv::CTransform>(ally).t;
+    const auto& te = world.get<ptv::CTransform>(enemy).t;
+    std::fprintf(stderr, "  ally y=%.3f (want 0.86), enemy y=%.3f (want 0.725) x=%.2f\n",
+                 ta.position.y, te.position.y, te.position.x);
+    if (std::fabs(ta.position.y - 0.86f) > 0.08f)
+        return fail("a standing NPC did not settle with its feet on the floor");
+    if (std::fabs(te.position.y - 0.725f) > 0.08f)
+        return fail("a walking NPC did not stay on the floor");
+    if (te.position.x > 1.0f) return fail("the walking NPC did not move");
+
+    // A ray from inside a capsule must not report that capsule.
+    ptv::PhysicsRayHit hit{};
+    if (!access.raycast_excluding(ally, ta.position, ptv::Vec3(0, -1, 0), 5.0f, hit, true))
+        return fail("excluding raycast found no floor under the ally");
+    if (hit.entity == ally) return fail("excluding raycast hit the caster");
+    if (std::fabs(hit.point.y) > 0.02f) return fail("excluding raycast missed the floor");
+    physics.shutdown();
+    return ok("npc ground snap: real-physics NPCs stand on the floor instead of "
+              "climbing their own capsules");
+}
+
+namespace {
+
+int g_bprobe_attach = 0;
+int g_bprobe_ticks = 0;
+bool g_bprobe_had_ctx = false;
+
+class ProbeBehaviour final : public ptv::IBehaviour {
+public:
+    void on_attach(ptv::World&, std::uint32_t, const nlohmann::json&,
+                   ptv::MechanicContext&) override {
+        ++g_bprobe_attach;
+    }
+    void on_tick(ptv::World& world, std::uint32_t entity, float,
+                 const ptv::InputSnapshot&, ptv::MechanicContext& ctx) override {
+        ++g_bprobe_ticks;
+        g_bprobe_had_ctx = ctx.hands == nullptr;  // the test passes an empty ctx
+        world.registry().get_or_emplace<ptv::CLocomotionIntent>(
+            static_cast<entt::entity>(entity)).desired_velocity = ptv::Vec3(1.0f, 0, 0);
+    }
+    void on_detach(ptv::World&, std::uint32_t) override {}
+    std::string id() const override { return "test.probe_behaviour"; }
+};
+
+/** The context-free form a project generated before the context existed. */
+class LegacyBehaviour final : public ptv::IBehaviour {
+public:
+    using ptv::IBehaviour::on_tick;
+    void on_tick(ptv::World&, std::uint32_t, float) override { ++ticks; }
+    void on_detach(ptv::World&, std::uint32_t) override {}
+    std::string id() const override { return "test.legacy_behaviour"; }
+    static int ticks;
+};
+int LegacyBehaviour::ticks = 0;
+
+PTV_REGISTER_BEHAVIOUR("test.probe_behaviour", ProbeBehaviour)
+PTV_REGISTER_BEHAVIOUR("test.legacy_behaviour", LegacyBehaviour)
+
+std::uint32_t bound_entity(ptv::World& world, const char* id,
+                           std::vector<std::string> mechanics,
+                           std::vector<std::string> tags) {
+    const auto e = world.create_entity(id);
+    world.registry().emplace<ptv::CTransform>(e, ptv::CTransform{});
+    ptv::CMechanicBinding mb{};
+    for (auto& m : mechanics) mb.entries.push_back({m, "", "{}"});
+    world.registry().emplace<ptv::CMechanicBinding>(e, std::move(mb));
+    world.registry().emplace<ptv::CTag>(e, ptv::CTag{std::move(tags)});
+    return static_cast<std::uint32_t>(e);
+}
+
+}  // namespace
+
+static int case_mechanic_host_npc() {
+    g_bprobe_attach = g_bprobe_ticks = 0;
+    LegacyBehaviour::ticks = 0;
+    ptv::World world;
+    const auto live = bound_entity(world, "ally", {"test.probe_behaviour"}, {"npc"});
+    const auto tmpl = bound_entity(world, "enemy_template",
+                                   {"test.probe_behaviour", "test.legacy_behaviour"},
+                                   {"enemy", "template"});
+    bound_entity(world, "old_ai", {"test.legacy_behaviour", "generated.not_real"}, {"npc"});
+
+    ptv::MechanicContext ctx{};
+    ptv::MechanicHost host;
+    host.attach_bindings(world, ctx);
+    const ptv::InputSnapshot input{};
+    for (int i = 0; i < 5; ++i) {
+        host.update(world, 1.0f / 60.0f, input, ctx, ptv::MechanicPhase::Simulate);
+    }
+    if (g_bprobe_attach != 1)
+        return fail("a behaviour bound to a template was attached (templates must be inert)");
+    if (g_bprobe_ticks != 5) return fail("a registered IBehaviour was not ticked");
+    if (!g_bprobe_had_ctx) return fail("the behaviour did not receive the context");
+    if (LegacyBehaviour::ticks != 5)
+        return fail("a legacy context-free IBehaviour was not ticked");
+    if (!world.registry().all_of<ptv::CLocomotionIntent>(static_cast<entt::entity>(live)))
+        return fail("the behaviour's locomotion intent was lost");
+    if (world.registry().all_of<ptv::CLocomotionIntent>(static_cast<entt::entity>(tmpl)))
+        return fail("a template's behaviour ran");
+    if (host.unresolved().count("generated.not_real") != 1)
+        return fail("an unresolved binding was not reported");
+
+    // A clone of the template (tags minus "template") attaches at spawn.
+    std::vector<ptv::CloneRecord> made;
+    const auto clone = ptv::clone_entity_tree(world, static_cast<entt::entity>(tmpl),
+                                              ptv::Vec3(1, 0, 1), ptv::Quat(1, 0, 0, 0), made);
+    host.attach_entity(world, static_cast<std::uint32_t>(clone), ctx);
+    if (g_bprobe_attach != 2) return fail("a spawned clone did not attach its behaviour");
+    return ok("mechanic host: behaviours are hosted, templates stay inert, "
+              "unresolved ids are reported");
+}
+
+static int case_player_rig_adoption() {
+    ptv::World world;
+    const auto rig = bound_entity(world, "player_rig", {}, {"player_rig", "player_system"});
+    bound_entity(world, "player_avatar", {}, {"player_avatar"});
+    if (ptv::find_adoptable_player_rig(world) != static_cast<entt::entity>(rig))
+        return fail("the scene's player_rig was not chosen as the player");
+    ptv::World none;
+    bound_entity(none, "crate", {}, {"grabbable"});
+    if (ptv::find_adoptable_player_rig(none) != entt::null)
+        return fail("a scene without a player_rig adopted something else");
+    ptv::World meshed;
+    const auto m = bound_entity(meshed, "statue_rig", {}, {"player_rig"});
+    ptv::CMesh cm{};
+    cm.glb_path = "statue.glb";
+    meshed.registry().emplace<ptv::CMesh>(static_cast<entt::entity>(m), cm);
+    if (ptv::find_adoptable_player_rig(meshed) != entt::null)
+        return fail("a drawable entity was adopted as the invisible player body");
+    return ok("player entity: the scene's player_rig is the one live player");
+}
+
+static int case_damage_log() {
+    ptv::DamageLog log;
+    ptv::DamageEvent a{};
+    a.target = 7;
+    a.instigator = 3;
+    a.amount = 12.0f;
+    const auto s1 = log.record(a);
+    a.target = 9;
+    log.record(a);
+    a.target = 7;
+    a.amount = 5.0f;
+    const auto s3 = log.record(a);
+    if (s1 == 0 || s3 <= s1) return fail("damage sequence numbers are not increasing");
+    if (log.last_seq(7) != s3) return fail("last_seq does not report the newest hit");
+    if (log.last_seq(42) != 0) return fail("an entity never hit has a nonzero seq");
+    ptv::DamageEvent out[8];
+    if (log.since(7, 0, out, 8) != 2) return fail("since() miscounted one target's hits");
+    if (out[0].amount != 12.0f || out[1].amount != 5.0f)
+        return fail("since() did not return hits oldest first");
+    if (log.since(7, s1, out, 8) != 1) return fail("since() did not honour the cursor");
+    if (log.since(0xFFFFFFFFu, 0, out, 8) != 3) return fail("since(any) missed hits");
+    for (int i = 0; i < 100; ++i) log.record(a);
+    if (log.since(0xFFFFFFFFu, 0, out, 8) != 8) return fail("since() overran max_out");
+    log.clear();
+    const auto after = log.record(a);
+    if (after <= s3) return fail("clear() reset the sequence, old cursors would break");
+    return ok("damage log: hits are observable by sequence, whoever dealt them");
+}
+
 int main(int argc, char** argv) {
     if (argc < 2) {
         std::fprintf(
@@ -4458,6 +4758,10 @@ int main(int argc, char** argv) {
     if (what == "attachment") return case_attachment();
     if (what == "combat_factions") return case_combat_factions();
     if (what == "nav_graph") return case_nav_graph();
+    if (what == "npc_ground_snap") return case_npc_ground_snap_real_physics();
+    if (what == "mechanic_host_npc") return case_mechanic_host_npc();
+    if (what == "player_rig_adoption") return case_player_rig_adoption();
+    if (what == "damage_log") return case_damage_log();
     if (what == "animation_lod") {
         if (argc < 3) {
             std::fprintf(stderr,

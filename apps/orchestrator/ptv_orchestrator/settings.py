@@ -362,6 +362,22 @@ class Settings(BaseSettings):
     # different NDK is on the machine (must be installed under $ANDROID_HOME/ndk).
     android_ndk_version: str = "30.0.15729638"
 
+    # --- Quest on-device verification (quest_runtime_verify) ------------
+    # Quest projects only. After the APK builds, install it on the connected
+    # headset, run it in verification mode (scripted player walk, player
+    # cannot die) and check the NPC telemetry against the NPC plan.
+    # Report-only; skipped when no headset is connected.
+    quest_runtime_verify: bool = True
+    # How long to watch after launch, on top of the encounter start delay.
+    quest_verify_capture_seconds: float = 40.0
+    # Which device to use when several are connected (``adb devices``).
+    quest_verify_device_serial: str | None = None
+    # Optional Meta Store PIN. When set, the stage uses Meta's Scriptable
+    # Testing service (content://com.oculus.rc SET_PROPERTY) to disable
+    # Guardian, system dialogs and auto-sleep for the run and restores them
+    # afterwards -- the reliable way to launch on a headset nobody is wearing.
+    quest_verify_store_pin: str | None = None
+
     # --- Validation ------------------------------------------------------
     # Reasoning effort and verbosity are plain strings so they can come from
     # ``.env``, which means a typo (or a value a newer model dropped) would

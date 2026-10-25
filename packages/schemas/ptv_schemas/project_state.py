@@ -55,6 +55,11 @@ class ProjectStage(str, Enum):
     # Quest (standalone Android APK) build path. Used instead of
     # cmake_configure/cmake_build when target_device == quest.
     quest_build = "quest_build"
+    # Quest only, report-only: install + launch the APK on the connected
+    # headset in verification mode and check, from the engine's NPC
+    # telemetry, that what the game asked for actually happens. Skipped --
+    # never failed -- when no headset is connected.
+    quest_runtime_verify = "quest_runtime_verify"
     quest_install = "quest_install"
     engine_promotion = "engine_promotion"
     ready_to_launch = "ready_to_launch"

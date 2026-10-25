@@ -1366,8 +1366,31 @@ fails. Correct pattern:
     PTV_REGISTER_MECHANIC("generated.my_mechanic", MyMechanic)
     }  // namespace ptv
 
-For kind=ai replace IMechanic with IBehaviour (`on_tick` instead of
-`on_update`) and `PTV_REGISTER_BEHAVIOUR`. For kind=dialogue use
+For kind=ai implement IBehaviour and register with `PTV_REGISTER_BEHAVIOUR`.
+The engine hosts it exactly like a mechanic (attached per bound entity,
+ticked once per frame after physics). Override the CONTEXT-TAKING forms --
+the context-free `on_attach(world, entity, params)` / `on_tick(world,
+entity, dt)` exist only so old projects keep compiling, and an AI written
+against them has no navigation, perception or combat and is REJECTED:
+
+    namespace ptv {
+    class World;
+    class IBehaviour {
+    public:
+        virtual void on_attach(World& world, std::uint32_t entity,
+                               const nlohmann::json& params,
+                               MechanicContext& ctx);
+        virtual void on_tick(World& world, std::uint32_t entity, float dt,
+                             const InputSnapshot& input,
+                             MechanicContext& ctx);
+        virtual void on_detach(World& world, std::uint32_t entity) = 0;
+        virtual std::string id() const = 0;
+    };
+    }
+
+    PTV_REGISTER_BEHAVIOUR("generated.<code_task_id>", YourClassName)
+
+For kind=dialogue use
 IDialogueHook with `on_enter` / `on_line` / `on_exit` and
 `PTV_REGISTER_DIALOGUE_HOOK`.
 
@@ -1601,6 +1624,20 @@ than breaking the player out of the world.
     ->kill(entity)
     ->faction(entity) -> const char*
     ->is_hostile(a, b) -> bool
+    ->damage_seq(entity) -> uint64_t
+                     // seq of the latest hit that LANDED on entity (0 =
+                     // never). Remember the value you saw; when it grows,
+                     // the entity was hit -- by ANYONE: a built-in enemy,
+                     // another task's projectile, a trap.
+    ->damage_events_since(entity, after_seq, DamageEvent* out, max_out) -> int
+                     // the hits themselves, oldest first: seq, target,
+                     // instigator, amount, health_after, source_position,
+                     // killed. entity 0xFFFFFFFF = any target.
+                     // A health bar, damage vignette, hit haptic or
+                     // game-over flow READS these. Never build a private
+                     // "hit inbox" component that only your own task writes:
+                     // the built-in enemies never call it, so the HUD would
+                     // never move and the run would never end.
                      // Death is handled FOR you: reaching zero health plays
                      // the "die" clip, stops the entity colliding, and
                      // removes it. Do not schedule any of that yourself.
@@ -1887,7 +1924,14 @@ A complete chase-and-attack behaviour, which is most of what enemies do:
 Points worth copying:
 
 * The player is ``ctx.hands->player_entity()`` -- an ordinary entity with
-  health and a faction. Do not special-case them.
+  health and a faction. Do not special-case them, and never look them up
+  by name or tag (``world.find("player_rig")``, a scan for ``"player"``):
+  their position is ``ctx.locomotion->body_position()``.
+* To react to the player being hurt, poll ``ctx.combat->damage_seq(player)``
+  or ``damage_events_since``. Never define your own damage/hit inbox, and
+  never keep a health pool of your own that your code subtracts damage from:
+  the engine's health IS the health. Display ``ctx.combat->health(e)`` /
+  ``max_health(e)``; the player is defeated when ``!ctx.combat->is_alive(e)``.
 * Damage, death and corpse removal are the engine's. Reaching zero health
   plays the ``die`` clip and cleans up; never write your own death timer.
 * Contact damage ("the ducks hurt you when they touch you") is
@@ -2302,6 +2346,15 @@ inside these zones, picking ones out of the player's sight. Rules:
     brief sends different NPC types through different entrances.
 A level with no zones still works -- NPCs then appear in a ring around the
 player -- but it never looks as good.
+
+POST THE NPCs THAT START IN THE LEVEL. When the brief lists NPCs that are
+PLACED AT LOAD (a guard, a shopkeeper, a turret, a captive), call
+``w.npc_anchor(ptv::world::NpcAnchorDesc{id, position, facing, asset_id,
+tags})`` once per copy, where it belongs in the place you built: the guard
+beside the gate, the vendor behind the counter. ``asset_id`` names the NPC;
+``position`` is ON walkable floor inside a ``nav_region``; ``facing`` is the
+direction it looks. You never create or spawn the NPC -- the scene compiler
+puts it on your anchor. Companions that follow the player need no anchor.
 
 USE THE TAGS THE ENGINE ALREADY READS. Tags on ``spawn_primitive`` /
 ``add_mesh`` / ``place_object`` cost nothing and wire real behaviour:

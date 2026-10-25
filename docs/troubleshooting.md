@@ -35,6 +35,28 @@ That was the live-progress feed, not the stage. Each open browser tab had a 256-
 
 `events.py` now hands each event to the subscriber's own loop (`call_soon_threadsafe`). When a reader falls behind it drops the oldest log line, never a stage status, and `publish()` never raises. `quest_build` also streams only progress, diagnostics and the verdict; the full output is still in `logs/gradle.log`.
 
+## NPCs are created but do not appear (or stand still) in the game
+
+Read the headset log: `adb logcat -s ptv` (or the latest
+`projects/<id>/logs/runtime/verify_*.log` written by `quest_runtime_verify`).
+
+- `npc ... feet_gap=` far from 0: something moved the character off the
+  floor. The classic cause -- the floor probe hitting the NPC's own capsule
+  and lifting it by its height every frame, so every NPC left the level on
+  frame one -- is fixed in `builtin.character_locomotion`; a generated
+  mechanic writing `CTransform` would do the same.
+- `Unresolved mechanic bindings` / `No mechanic registered for id`: a binding
+  names something the build does not contain. Generated AI used to be
+  registered as `IBehaviour` and never hosted; it is now. `scene_compile`
+  fails on any remaining unresolved `builtin.*` / `generated.*` binding.
+- An ally walking off toward the world origin: generated code following the
+  scene's `player_rig` by name before it became the live player. Re-run
+  `code_generation`; the contract checks regenerate such tasks.
+- No `spawn:` lines after `encounter: wave 1/N started`: check
+  `npc_summary ... alive=` and the `spawn:` refusals (budget, blocked spot).
+- HUD health never drops although enemies attack: the health mechanic was
+  listening to a private hit inbox. Re-run `code_generation`.
+
 ## Code generation passed but `quest_build` fails with clang errors
 
 The PC compile check uses MSVC, and the APK is built with the NDK's clang. They disagree on real code. A probe such as `if constexpr (requires { dep::f(weapon); })` with ordinary arguments is quietly "false" on MSVC and a hard error on clang ("too few arguments to function call").

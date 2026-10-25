@@ -25,6 +25,7 @@ from . import (
     NpcPlan,
     PerformanceProfile,
     ProjectState,
+    RuntimeVerification,
     SceneSpec,
     UthanaMotionPlan,
 )
@@ -43,6 +44,7 @@ _EXPORTS: dict[str, Type[BaseModel]] = {
     "artifact_metadata": ArtifactMetadata,
     "acceptance_test_plan": AcceptanceTestPlan,
     "performance_profile": PerformanceProfile,
+    "runtime_verification": RuntimeVerification,
 }
 
 

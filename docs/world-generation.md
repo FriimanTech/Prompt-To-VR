@@ -178,7 +178,8 @@ inside `namespace ptv::world` in a `.cpp`.
 `spawn_primitive` (box/plane/cylinder/sphere/ramp), `add_mesh` (arbitrary
 procedural triangles), `place_object` (anchor a prop GLB), `nav_region` /
 `nav_link` (declare the walkable space), `npc_spawn_zone` (declare where NPCs
-enter during play), `seed()`. Header-only
+enter during play), `npc_anchor` (declare where an NPC placed at load
+stands), `seed()`. Header-only
 convenience builders live in `ptv::world::helpers` (`building_grid`, `wall_shell`,
 `path`, `platform_set`).
 
@@ -198,6 +199,23 @@ kept clear for companions. Zones are written to the world's `npc_spawn_zones`
 and copied into `scene.json` for the encounter director. A world with no zones
 still works: the scene compiler derives zones from the nav regions. See
 [npc-and-ai.md](npc-and-ai.md).
+
+`npc_anchor(NpcAnchorDesc{id, position, facing, asset_id, tags})` marks where
+an NPC that is PLACED AT LOAD stands: a guard by the gate, a vendor behind the
+counter, a turret on the wall. The brief asks for one per copy whenever the
+NPC plan places NPCs that are not companions. Anchors are written to the
+world's `npc_anchors`, validated to sit inside a declared `nav_region` (as
+spawn zones now are too), and copied into `scene.json`, where the scene
+compiler puts each matching NPC on one. Companions that follow the player
+need none; they start beside the spawn.
+
+**Who places NPCs.** The world architect never spawns, names or counts NPCs:
+it declares SPACE (walkable regions, entrances, posts) because it is the only
+stage that knows the layout it just built. The NPC plan decides who exists and
+how many; the scene compiler joins the two and validates every placed NPC
+against the merged world (walkable floor, floor height + foot offset); the
+runtime encounter director spawns arrivals into the zones. See
+[npc-and-ai.md](npc-and-ai.md#placing-npcs-in-the-world).
 
 The gameplay layer the SceneSpec composed (weapons, panels, companions) is
 authored around the origin. The scene compiler moves it rigidly to the world's

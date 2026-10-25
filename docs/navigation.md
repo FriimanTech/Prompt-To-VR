@@ -75,7 +75,9 @@ The declaration comes from an LLM, so it is checked before it can ship. The
   the JSON, sends every NPC into a wall);
 - the player spawn is not inside any region;
 - any region is unreachable from the spawn;
-- a region is too small to stand in, which is almost always a units mistake.
+- a region is too small to stand in, which is almost always a units mistake;
+- an `npc_spawn_zone` or `npc_anchor` lies outside every region (enemies
+  would appear inside geometry, a guard would stand in a wall).
 
 The failure text goes straight back into the architect's repair loop, so the
 agent fixes its own declaration. Each of these produces a level that looks
@@ -84,6 +86,12 @@ rather than warn.
 
 Declaring **no** navigation is legitimate and not an error: an open arena
 needs none, and NPCs fall back to steering.
+
+Every physics probe the navigation service casts on behalf of an agent --
+the steering whiskers, `project_to_ground`, point-to-point `line_of_sight` --
+passes through character capsules (`raycast_excluding`). The whiskers start
+inside the agent's own capsule; before this they always read zero clearance
+and every agent veered left whatever was ahead.
 
 ## Data flow
 

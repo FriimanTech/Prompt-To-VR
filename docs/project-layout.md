@@ -89,6 +89,7 @@ Prompt-To-VR/
 │       ├── codegen_board.json
 │       ├── world.scene.json
 │       ├── scene.json
+│       ├── runtime_verification.json     # Quest only: on-headset NPC checks
 │       ├── images/<asset_id>/*.png
 │       ├── assets/<asset_id>/
 │       │   ├── model.glb                 # raw Tripo source (kept, not shipped)
@@ -98,6 +99,7 @@ Prompt-To-VR/
 │       │   ├── <id>_lod0..3.glb          # decimated LOD chain (shipped)
 │       │   └── <id>_lod.json             # decimation stamp (idempotency)
 │       ├── logs/*.log
+│       ├── logs/runtime/verify_*.log     # headset logcat from quest_runtime_verify
 │       ├── builds/cmake-current/         # PC VR exe (symlink-like stamp)
 │       └── builds/quest/                 # Quest Gradle tree + APK output
 │

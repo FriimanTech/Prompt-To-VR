@@ -327,6 +327,22 @@ struct NpcSpawnZoneDesc {
     std::vector<std::string> tags{};
 };
 
+/** Where one NPC that is PLACED AT LOAD (not spawned in waves) should stand:
+ * the guard at the gate you built, the shopkeeper behind the counter, the
+ * companion waiting on the porch.
+ *
+ * The scene compiler puts each placed NPC at the first unused anchor that
+ * names it -- by ``asset_id``, or by a tag equal to its asset id, family or
+ * role (``"ally"``, ``"neutral"``, ``"enemy"``) -- and otherwise beside the
+ * player spawn. Put the position ON walkable floor inside a nav_region. */
+struct NpcAnchorDesc {
+    std::string id;                        // "gate_guard_left"
+    Vec3 position{};                       // on the floor
+    Vec3 facing{0.0f, 0.0f, -1.0f};        // which way it looks
+    std::string asset_id{};                // optional: exactly this NPC
+    std::vector<std::string> tags{};       // or any NPC matching a tag
+};
+
 /** A way out of this environment and into another.
  *
  * This is what the author places -- the gate, the doorway, the fire truck --
@@ -383,6 +399,10 @@ public:
     // Where NPC waves enter the level. Declare these whenever the game has
     // enemies or other NPCs that arrive during play. See NpcSpawnZoneDesc.
     virtual void npc_spawn_zone(const NpcSpawnZoneDesc& desc) { (void)desc; }
+
+    // Where an NPC placed at load stands (a guard post, a shop counter).
+    // See NpcAnchorDesc. Optional: without one it starts beside the player.
+    virtual void npc_anchor(const NpcAnchorDesc& desc) { (void)desc; }
 
     // A deterministic per-world seed (set by the host). Use it for any
     // pseudo-random variation so results are reproducible.

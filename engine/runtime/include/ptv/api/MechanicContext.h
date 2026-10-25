@@ -295,6 +295,22 @@ public:
     virtual bool raycast(const Vec3& origin, const Vec3& dir, float max_dist,
                          PhysicsRayHit& out) const = 0;
 
+    /** Cast a ray on behalf of ``self``, passing through its own body.
+     *
+     *  Use this for any probe that starts on or inside the caster: convex
+     *  shapes are solid, so a plain ``raycast`` from an NPC's chest or head
+     *  hits that NPC's own capsule at distance zero. ``floor_only`` also
+     *  skips every character capsule (NPCs and the player), which is what a
+     *  ground probe wants -- the floor, not someone standing on it. */
+    virtual bool raycast_excluding(std::uint32_t self, const Vec3& origin,
+                                   const Vec3& dir, float max_dist,
+                                   PhysicsRayHit& out,
+                                   bool floor_only = false) const {
+        (void)self;
+        (void)floor_only;
+        return raycast(origin, dir, max_dist, out);
+    }
+
     /** True when this entity has a physics body at all. */
     virtual bool has_body(std::uint32_t entity) const = 0;
 
@@ -638,9 +654,47 @@ public:
  * ``die`` clip if it has one, stops it colliding, and removes it once the
  * animation has finished. A mechanic does not need to schedule any of that.
  */
+/** One hit that landed, as recorded by :meth:`ICombat::apply_damage`. */
+struct DamageEvent {
+    /** Strictly increasing across the whole game; never 0 for a real hit. */
+    std::uint64_t seq{0};
+    std::uint32_t target{0xFFFFFFFFu};
+    std::uint32_t instigator{0xFFFFFFFFu};
+    float amount{0.0f};
+    float health_after{0.0f};
+    /** Where the instigator stood when the hit landed (the target's own
+     *  position when there is no instigator) -- for a directional hit cue. */
+    Vec3 source_position{0.0f, 0.0f, 0.0f};
+    bool killed{false};
+};
+
 class ICombat {
 public:
     virtual ~ICombat() = default;
+
+    /** ``seq`` of the most recent hit that landed on ``entity``; 0 = never.
+     *
+     *  This is how a health bar, a damage vignette or a game-over flow
+     *  learns that the player was hit, WHOEVER hit them: a built-in enemy,
+     *  another task's projectile, a trap. Read it every frame and compare
+     *  with the value you saw last; never invent a private hit inbox that
+     *  only your own code writes to. */
+    virtual std::uint64_t damage_seq(std::uint32_t entity) const {
+        (void)entity;
+        return 0;
+    }
+
+    /** Copy up to ``max_out`` hits on ``entity`` (``0xFFFFFFFF`` = any
+     *  target) with ``seq > after_seq``, oldest first. Returns how many were
+     *  written. The engine keeps the most recent 64 hits. */
+    virtual int damage_events_since(std::uint32_t entity, std::uint64_t after_seq,
+                                    DamageEvent* out, int max_out) const {
+        (void)entity;
+        (void)after_seq;
+        (void)out;
+        (void)max_out;
+        return 0;
+    }
 
     /** Deal damage. Returns true if it landed -- false when the target has
      *  no health, is already dead, or is still inside the invulnerability

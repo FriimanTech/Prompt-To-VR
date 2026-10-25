@@ -14,7 +14,10 @@ alwaysApply: true
 - Generated code MUST implement one of the abstract interfaces in
   `engine/runtime/include/ptv/api/`:
   - `IMechanic` for gameplay mechanics.
-  - `IBehaviour` for NPC / AI behavior.
+  - `IBehaviour` for NPC / AI behavior, overriding the context-taking
+   `on_attach(..., MechanicContext&)` / `on_tick(..., const InputSnapshot&,
+   MechanicContext&)` (the engine hosts behaviours like mechanics; the
+   context-free forms are legacy and rejected for new code).
   - `IDialogueHook` for dialogue logic.
   - `IWorldBuilder` for VR environment generation (world/ only).
 - Generated files register themselves with `PTV_REGISTER_MECHANIC("id")` (or

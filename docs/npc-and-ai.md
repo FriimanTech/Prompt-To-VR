@@ -68,7 +68,13 @@ want.desired_velocity = direction * speed;
 The built-in then, every frame:
 
 1. sweeps the body through the world so it cannot walk through walls, and
-   snaps it to the floor;
+   snaps it to the floor. The floor probe starts on top of the character's
+   own capsule, so it passes through that body and every other character
+   (`IPhysicsAccess::raycast_excluding(self, ..., floor_only=true)`): Jolt
+   treats convex shapes as solid, and a plain ray hit the NPC's own capsule
+   at distance zero and lifted it by its height every frame -- every NPC in
+   every game left the level on its first frame. The rise per frame is also
+   capped, so no probe result can launch a character;
 2. turns it toward travel at a configured rate (or toward `face_target`, for
    an enemy that strafes while keeping its weapon on you);
 3. picks idle, walk or run from the speed it **achieved** — a character
@@ -151,14 +157,32 @@ whatever restart flow the prompt asked for is gameplay, not engine policy.
 
 The player is an ordinary combat entity — `ctx.hands->player_entity()`, with
 health, a faction and a collision capsule that follows the headset. Nothing
-special-cases them.
+special-cases them. It is ONE entity: when the scene has a `player_rig` (it
+always does for compiled games), the engine adopts that entity as the player,
+keeping its id, tags, health, faction and bindings, and drives its transform
+from the headset every frame. It used to create a separate `__player`, so two
+entities were tagged `player` and the scene's rig stood still at its authored
+spot -- generated code that found "the player" by name chased the world
+origin, and health bound to the rig never saw a hit.
+
+Damage is observable. `ctx.combat->damage_seq(entity)` is the sequence number
+of the latest hit that landed on it, and `damage_events_since(entity, seq,
+out, max)` returns the hits themselves (instigator, amount, health after,
+where the hit came from). A health bar, damage vignette, hit haptic or
+game-over flow reads these, so it reacts to a built-in enemy, another task's
+projectile or a trap alike. A private "hit inbox" only its own task writes,
+or a private health pool that never reads `ctx.combat`, is rejected at
+codegen -- the built-in enemies never touch either.
 
 ## Perception and navigation
 
 `ctx.perception` answers "who can I see": nearest hostile, hostiles in range,
 field-of-view and line-of-sight checks. All of it skips dead entities, which
 is the difference between a squad that advances and a squad standing around
-aiming at a corpse.
+aiming at a corpse. Sight rays pass through the looker's and the target's own
+bodies; the eye sits inside the looker's capsule, and a self-hit used to count
+as "clear", so NPCs saw and hit through walls. Melee reach is horizontal but
+only on roughly the same level (within 2 m vertically).
 
 `ctx.nav` answers "how do I get there". See [navigation.md](navigation.md).
 
@@ -183,8 +207,16 @@ game ends up with one goblin or with fifty paid-for models:
 | Copies placed at load (a companion) | `npc_plan` | `NpcSpec.persistent_count` |
 | Who arrives during play, in which waves, how many at once | `npc_plan` | `NpcPlan.encounters` |
 | Where NPCs may enter the level | `world_generation` | `npc_spawn_zones` |
+| Where a placed-at-load NPC stands (a guard post, a counter) | `world_generation` | `npc_anchors` (optional) |
 | One hidden template per spawned variant, the director, per-variant behaviour params | `scene_compile` | `scene.json` |
+| That each placed NPC stands on walkable floor, at floor + foot offset | `scene_compile` | `scene.json` |
 | Spawning, wave progression, follow and melee behaviour at runtime | engine | the built-ins below |
+| That it all actually happens on the headset (Quest only, report-only) | `quest_runtime_verify` | `runtime_verification.json` |
+
+World generation never spawns or names NPCs. It declares SPACE -- walkable
+regions, entrances, posts -- because it is the only stage that knows the
+layout; the NPC plan decides who exists; the scene compiler joins the two and
+validates the result against the merged world; the runtime director spawns.
 
 ### Variants
 
@@ -317,6 +349,99 @@ animates the body. The mechanic planner maps "follows the player" and
 "chases and hits" onto these, and generates code only for what they cannot
 express: ranged attacks, flight, special abilities.
 
+That is enforced, not just requested. `reconcile_npc_ai_items`
+([npc_population.py](../apps/orchestrator/ptv_orchestrator/pipeline/npc_population.py))
+runs after the mechanic-plan agent AND at the start of code generation: an
+AI item (`generate` or a code edit) whose NPCs' behaviours a built-in fully
+covers -- `follow_leader` (follow); `chase`, `melee_attack`,
+`react_to_damage` (melee chase) -- becomes `builtin+config` of that
+built-in. Its config carries over, minus keys the built-in does not read
+(named in the run log). Stationary and flying NPCs, and anything with an
+uncovered behaviour (`reposition`, `ranged_attack`, `flee`, `patrol`, ...),
+keep their generated AI. Running it at codegen start is what lets a project
+planned before the rule resume from `code_generation`: the board drops the
+task and deletes its files.
+
+## Generated NPC AI
+
+Generated AI (`kind: ai`) implements `IBehaviour` and registers with
+`PTV_REGISTER_BEHAVIOUR`. The engine hosts it exactly like a mechanic --
+`MechanicHost` falls back to the behaviour registry and wraps the result --
+attached per bound entity and ticked once per frame after physics. It used to
+register into a factory map nothing ever read: every generated AI compiled,
+linked, logged "No mechanic registered" at load and did nothing.
+
+Behaviours override the context-taking forms,
+`on_attach(world, e, params, MechanicContext&)` and
+`on_tick(world, e, dt, const InputSnapshot&, MechanicContext&)`, and so get
+the same services a mechanic does. The context-free forms remain only so old
+projects keep compiling; `codegen_contracts.py` rejects a new AI written
+against them, a player looked up by name (`find("player_rig")`), and a private
+damage inbox, and feeds the violations back to the agent once. The same rules
+mark already-generated code stale (`API_CONTRACT_VERSION` on the codegen
+board), so fixing a rule regenerates exactly the tasks it applies to.
+
+Unresolvable bindings no longer pass silently either: the scene compiler
+checks every `builtin.*` / `generated.*` binding against the registrations in
+the engine source and this project's generated code, drops generated NPC AI
+that is not in the build (so the NPC gets the built-in behaviour instead of
+standing still) and fails the stage, listing every binding that would do
+nothing. At load the engine logs the same list as an error.
+
+## Templates are inert
+
+A spawn template is a blueprint: hidden, without a collider, parked at
+y = -50. Its mechanics are not attached either -- `MechanicHost` skips
+entities tagged `template`, and each clone attaches its own copy when the
+director spawns it. Ticking the template's mechanics used to run an invisible
+enemy under the floor that chased the player.
+
+## Placing NPCs in the world
+
+After the world is merged, `place_persistent_npcs`
+([encounters.py](../apps/orchestrator/ptv_orchestrator/pipeline/encounters.py))
+puts every NPC placed at load:
+
+- at the first unused world `npc_anchor` naming it (by `asset_id`, or a tag
+  equal to its asset id, family or role) -- the guard at the gate;
+- otherwise where the population step put it (a companion beside the spawn,
+  carried there by the gameplay relocation);
+- moved onto the nearest declared walkable floor if it is off it;
+- with its origin at floor height plus its foot offset, so its feet touch
+  the floor on frame one. That matters most for a STATIONARY NPC, which has
+  no locomotion to snap it down later.
+
+An NPC the game requires whose model is missing fails `scene_compile` (the
+asset safety net already re-adds any NPC the SceneSpec forgot, so reaching
+this means the GLB itself is gone), and `quest_build` refuses to package a
+scene whose NPC GLBs (mesh or LOD) are not in the APK.
+
+## Verifying on the headset
+
+Every NPC bug above built, packaged and installed cleanly, so the engine now
+reports what its NPCs do:
+
+- once per scene, an `npc_manifest` line per NPC (skeleton loaded, each
+  animation intent resolved to a clip, bound and attached mechanics, any that
+  did not resolve) and an `npc_manifest_summary`;
+- every second, an `npc` line per live NPC (position, `feet_gap` above the
+  floor, measured speed, intent speed, current clip, alive, distance to the
+  player) and an `npc_summary` (encounter phase, alive, wave, hits on the
+  player);
+- a `spawn:` line per clone and a `combat:` line per hit that lands.
+
+Verification mode (Android property `debug.ptv.verify` = 1, or `PTV_VERIFY=1`
+on desktop) walks the player around a 6 m square (5 s per side, then a 3 s
+pause) and keeps them alive while still recording hits (published to the
+damage feed with amount 0, so generated health that mirrors the feed stays
+full and does not end the run the engine is keeping alive). An enemy that lands a
+hit on the player is defeated 0.8 s later (`verify: defeated ...`), standing
+in for the player's weapon, so the waves keep advancing and every NPC type in
+the plan appears during one unattended run.
+
+The `quest_runtime_verify` stage (Quest projects only) uses both; see
+[quest-build.md](quest-build.md#on-headset-verification).
+
 ## Spawn zones
 
 The world architect declares where NPCs come in with
@@ -390,3 +515,7 @@ Three mechanisms keep that in bounds:
   `builtin.npc.melee_chase`.
 - Guess a raw glTF clip name. Ask for the intent; the engine resolves it.
 - Hard-code a socket offset. Ask for the socket by name.
+- Find the player by name or tag. Use `ctx.hands->player_entity()`.
+- Invent a damage inbox or a health pool of its own. Read
+  `ctx.combat->health` / `damage_seq` / `damage_events_since`.
+- Implement only the context-free `IBehaviour` forms.

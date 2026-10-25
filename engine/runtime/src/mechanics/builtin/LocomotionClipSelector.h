@@ -157,7 +157,11 @@ public:
             gait = Gait::Walk;
         }
         if (gait == Gait::Walk && !ctx.skeleton->has_clip(entity, walk_key.c_str())) {
-            gait = Gait::Idle;
+            // ...and the other way: a rig retargeted with idle + run only
+            // (a charging enemy) plays its run, slowed to the clamp, at walk
+            // pace. Idle there is a statue gliding toward you.
+            gait = ctx.skeleton->has_clip(entity, run_key.c_str()) ? Gait::Run
+                                                                    : Gait::Idle;
         }
 
         // play_clip is a no-op when this clip is already running, so calling

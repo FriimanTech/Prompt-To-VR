@@ -83,7 +83,8 @@ flowchart TD
   CppGen --> CMake
   CppGen --> QuestApk
   CMake --> Promote[engine_promotion]
-  QuestApk --> Promote
+  QuestApk --> QuestVerify["quest_runtime_verify (report-only)"]
+  QuestVerify --> Promote
   CMake --> Launch[OpenXR via Quest Link]
   QuestApk --> AdbLaunch[adb install + NativeActivity]
 ```

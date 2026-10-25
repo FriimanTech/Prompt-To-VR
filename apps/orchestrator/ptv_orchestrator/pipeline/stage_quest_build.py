@@ -252,6 +252,47 @@ def _package_assets(ctx: PipelineContext, build_dir: Path) -> list[str]:
     return notes
 
 
+_NPC_TAGS = {"npc", "enemy", "ally", "neutral", "critter", "boss", "template"}
+
+
+def missing_packaged_meshes(
+    assets_dir: Path, project_id: str
+) -> tuple[list[str], list[str]]:
+    """GLBs the packaged scenes reference that are not in the APK assets.
+
+    Returns ``(npc_missing, other_missing)`` as ``"<scene>/<entity>: <path>"``.
+    Inside the APK a ``projects/<id>/assets/<rest>`` path is read from
+    ``assets/<rest>`` (AndroidAssetSource strips the project prefix), so that
+    is where each one has to be. An NPC is anything with an NPC tag or a
+    skinned mesh -- the characters whose absence is the bug this stops."""
+    import json
+
+    prefix = f"projects/{project_id}/"
+    npc_missing: list[str] = []
+    other_missing: list[str] = []
+    for scene in sorted(assets_dir.glob("scene*.json")):
+        try:
+            doc = json.loads(scene.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        for e in doc.get("entities") or []:
+            mesh = e.get("mesh") if isinstance(e, dict) else None
+            if not isinstance(mesh, dict):
+                continue
+            paths = [mesh.get("glb_path")] + list(mesh.get("lod_paths") or [])
+            is_npc = bool(mesh.get("skinned")) or bool(
+                _NPC_TAGS & set(e.get("tags") or []))
+            for p in dict.fromkeys(x for x in paths if isinstance(x, str) and x):
+                rel = p.replace("\\", "/")
+                if rel.startswith(prefix):
+                    rel = rel[len(prefix):]
+                if (assets_dir / rel).is_file():
+                    continue
+                entry = f"{scene.name}/{e.get('id', '?')}: {p}"
+                (npc_missing if is_npc else other_missing).append(entry)
+    return npc_missing, other_missing
+
+
 def run(ctx: PipelineContext) -> StageResult:
     ctx.emit(ProjectStage.quest_build, "running", "Building Quest APK")
     state = ctx.store.load_state(ctx.project_id)
@@ -293,6 +334,25 @@ def run(ctx: PipelineContext) -> StageResult:
     asset_notes = _package_assets(ctx, build_dir)
     for note in asset_notes:
         ctx.emit(ProjectStage.quest_build, "info", note)
+
+    # Before spending minutes in Gradle: is every model the scenes draw
+    # actually in the APK? A missing character GLB loads as nothing at all.
+    npc_missing, other_missing = missing_packaged_meshes(
+        build_dir / "app" / "src" / "main" / "assets", ctx.project_id)
+    for entry in other_missing:
+        ctx.emit(ProjectStage.quest_build, "warning", f"not packaged: {entry}")
+    if npc_missing:
+        msg = (
+            f"{len(npc_missing)} NPC model file(s) the scene uses are not in "
+            "the APK, so those characters would be invisible: "
+            + "; ".join(npc_missing[:8])
+            + ". Re-run asset_optimization and scene_compile."
+        )
+        ctx.store.record_stage(
+            state, ProjectStage.quest_build, ProjectStatus.failed, message=msg
+        )
+        ctx.emit(ProjectStage.quest_build, "failed", msg)
+        raise RuntimeError(msg)
 
     log_path = ctx.project_dir / "logs" / "gradle.log"
     log_path.parent.mkdir(parents=True, exist_ok=True)

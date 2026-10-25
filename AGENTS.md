@@ -61,8 +61,19 @@ orchestrator and a reusable Vulkan + OpenXR engine core.
    generated AI writes a desired velocity into `CLocomotionIntent` and the
    built-in moves the body, turns it, picks idle/walk/run from the achieved
    speed and scales clip playback so the stride matches the ground covered.
-   Generated code must NEVER move a character by writing `CTransform` or
-   play its locomotion clips — a second writer gets the foot-sliding wrong.
+ Generated code must NEVER move a character by writing `CTransform` or
+ play its locomotion clips — a second writer gets the foot-sliding wrong.
+ Generated NPC AI implements `IBehaviour` with the CONTEXT-TAKING
+ `on_attach` / `on_tick` (they receive `MechanicContext` + `InputSnapshot`);
+ the engine hosts behaviours exactly like mechanics, and the context-free
+ forms exist only for old projects (`codegen_contracts.py` rejects new AI
+ written against them). An AI item whose NPCs a built-in fully covers
+ (`follow_leader` -> `builtin.npc.follow`; chase / melee / react ->
+ `builtin.npc.melee_chase`) is reconciled to `builtin+config`, never
+ generated. The player is ONE entity, `ctx.hands->player_entity()` (the
+ scene's `player_rig`, adopted by the engine); never look it up by name.
+ Hits are observed with `ctx.combat->damage_seq` / `damage_events_since`,
+ never through a private inbox.
    Health, factions, damage, death, perception, navigation, attachment and
    runtime spawning are engine services (`ctx.combat`, `ctx.perception`,
    `ctx.nav`, `ctx.attach`, `ctx.spawn`, `ctx.contacts`), not per-game
@@ -85,11 +96,15 @@ orchestrator and a reusable Vulkan + OpenXR engine core.
    surface has a tighter whitelist (only `ptv/api/IWorldBuilder.h` + std +
    glm) and is compiled + run OFFLINE in the `ptv_worldgen` host (no
    Vulkan/OpenXR/Jolt/renderer/ECS linked), emitting `scene.json`. The
-   environment is NOT a Tripo GLB. The world builder also DECLARES the
-   walkable space it creates via `nav_region` / `nav_link`; NPC routing
-   reads that instead of reconstructing topology the author already knew,
-   and a declaration that contradicts the geometry fails the stage. See
-   `docs/navigation.md`.
+ environment is NOT a Tripo GLB. The world builder also DECLARES the
+ walkable space it creates via `nav_region` / `nav_link`; NPC routing
+ reads that instead of reconstructing topology the author already knew,
+ and a declaration that contradicts the geometry fails the stage. See
+ `docs/navigation.md`. It declares NPC SPACE too -- `npc_spawn_zone`
+ (where arrivals enter) and `npc_anchor` (where an NPC placed at load
+ stands) -- but never spawns, names or counts NPCs: the NPC plan decides
+ who exists, `scene_compile` places them and validates the placement
+ against the merged world, and the runtime director spawns.
 7. Use Claude for the hardest gameplay planning and hardest C++ generation
    (`claude-opus-4-7`). Use `claude-sonnet-4-6` for lighter work. If Claude
    is unavailable (missing key or API error) the pipeline transparently
@@ -341,8 +356,17 @@ orchestrator and a reusable Vulkan + OpenXR engine core.
     - `quest`: `quest_build` instantiates `engine/android`, packages
       `scene.json` + GLBs + `.spv` into the APK assets, and runs
       `gradlew assembleDebug` (NDK) → standalone APK. See `docs/quest-build.md`.
+10b. **On-headset verification** (`quest_runtime_verify`, Quest tail ONLY,
+ never PC VR, report-only): installs and launches the APK on the connected
+ headset in verification mode (`debug.ptv.verify`: scripted player walk,
+ player cannot die), reads the engine's NPC telemetry and checks only what
+ this game's NPC plan asks for -- base checks for every game (including one
+ with no NPCs), floor / no-drift checks for stationary NPCs, band checks for
+ followers, spawn and close-and-hit checks for enemies. Writes
+ `runtime_verification.json`. SKIPPED, never failed, when no headset is
+ connected. See `docs/quest-build.md`.
 11. Launch (branches on target_device): `pcvr` runs the `.exe` through OpenXR
-    (Quest Link); `quest` does `adb install -r` + `am start` the NativeActivity.
+ (Quest Link); `quest` does `adb install -r` + `am start` the NativeActivity.
 
 ## Verified model / SDK choices (September 2026)
 

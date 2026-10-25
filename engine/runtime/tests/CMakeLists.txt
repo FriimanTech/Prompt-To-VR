@@ -156,3 +156,7 @@ add_test(NAME ptv_smoke_character_locomotion
 add_test(NAME ptv_smoke_attachment COMMAND ptv_smoke attachment)
 add_test(NAME ptv_smoke_combat_factions COMMAND ptv_smoke combat_factions)
 add_test(NAME ptv_smoke_nav_graph COMMAND ptv_smoke nav_graph)
+add_test(NAME ptv_smoke_npc_ground_snap COMMAND ptv_smoke npc_ground_snap)
+add_test(NAME ptv_smoke_mechanic_host_npc COMMAND ptv_smoke mechanic_host_npc)
+add_test(NAME ptv_smoke_player_rig_adoption COMMAND ptv_smoke player_rig_adoption)
+add_test(NAME ptv_smoke_damage_log COMMAND ptv_smoke damage_log)

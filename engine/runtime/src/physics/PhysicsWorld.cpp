@@ -1020,6 +1020,36 @@ bool PhysicsWorld::raycast(const Vec3& origin, const Vec3& dir, float max_dist,
 bool PhysicsWorld::raycast(const Vec3& origin, const Vec3& dir, float max_dist,
                            Vec3& out_hit, Vec3& out_normal,
                            std::uint32_t& out_entity) const {
+    static const RayFilter kNoFilter{};
+    return raycast(origin, dir, max_dist, kNoFilter, out_hit, out_normal,
+                   out_entity);
+}
+
+namespace {
+
+/** Body filter for :meth:`PhysicsWorld::raycast` with a RayFilter. */
+class RayBodyFilter final : public JPH::BodyFilter {
+public:
+    std::vector<JPH::BodyID> ids;
+    bool skip_characters{false};
+    bool ShouldCollide(const JPH::BodyID& id) const override {
+        return std::find(ids.begin(), ids.end(), id) == ids.end();
+    }
+    bool ShouldCollideLocked(const JPH::Body& body) const override {
+        if (body.IsSensor()) return false;
+        if (skip_characters && body.GetShape() != nullptr &&
+            body.GetShape()->GetSubType() == JPH::EShapeSubType::Capsule) {
+            return false;
+        }
+        return true;
+    }
+};
+
+}  // namespace
+
+bool PhysicsWorld::raycast(const Vec3& origin, const Vec3& dir, float max_dist,
+                           const RayFilter& filter, Vec3& out_hit,
+                           Vec3& out_normal, std::uint32_t& out_entity) const {
     out_entity = kInvalidEntity;
     if (!impl_) return false;
     const float len = std::sqrt(dir.x * dir.x + dir.y * dir.y + dir.z * dir.z);
@@ -1028,7 +1058,26 @@ bool PhysicsWorld::raycast(const Vec3& origin, const Vec3& dir, float max_dist,
                       dir.z / len * max_dist};
     JPH::RRayCast ray{JPH::RVec3{origin.x, origin.y, origin.z}, d};
     JPH::RayCastResult hit;
-    if (!impl_->system.GetNarrowPhaseQuery().CastRay(ray, hit)) return false;
+
+    RayBodyFilter body_filter;
+    body_filter.skip_characters = filter.skip_characters;
+    for (const std::uint32_t e : filter.ignore) {
+        if (auto it = impl_->entity_to_body.find(e);
+            it != impl_->entity_to_body.end()) {
+            body_filter.ids.push_back(it->second);
+        }
+    }
+    bool any_hit = false;
+    if (filter.static_only) {
+        const JPH::SpecifiedBroadPhaseLayerFilter bp_filter(BPLayers::STATIC);
+        const JPH::SpecifiedObjectLayerFilter obj_filter(Layers::STATIC);
+        any_hit = impl_->system.GetNarrowPhaseQuery().CastRay(
+            ray, hit, bp_filter, obj_filter, body_filter);
+    } else {
+        any_hit = impl_->system.GetNarrowPhaseQuery().CastRay(
+            ray, hit, {}, {}, body_filter);
+    }
+    if (!any_hit) return false;
 
     JPH::RVec3 p = ray.GetPointOnRay(hit.mFraction);
     out_hit = Vec3{(float)p.GetX(), (float)p.GetY(), (float)p.GetZ()};

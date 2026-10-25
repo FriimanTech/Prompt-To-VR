@@ -223,28 +223,41 @@ def _npc_brief(ctx: PipelineContext) -> list[str]:
     if plan is None or not plan.npcs:
         return []
     encounters = getattr(plan, "encounters", None)
+    spawned = set(plan.spawned_asset_ids())
     arriving = [
         n.asset_id for n in plan.npcs
-        if n.role.value in ("enemy", "boss", "critter")
+        if n.asset_id in spawned or (
+            encounters is None and n.role.value in ("enemy", "boss", "critter")
+            and not getattr(n, "persistent_count", 0))
     ]
-    if encounters is None and not arriving:
-        return []
-    lines = [
-        "NPCs ARRIVE DURING PLAY in this game "
-        f"({', '.join(arriving) or 'see the NPC plan'}). Declare at least 3 "
-        "npc_spawn_zone entrances spread around the level, each 12 m or more "
-        "from the player spawn, on walkable floor inside a nav_region."
-    ]
-    persistent = [
-        n.asset_id for n in plan.npcs
-        if getattr(n, "persistent_count", 0) and n.role.value in ("ally", "neutral")
-    ]
-    if persistent:
+    lines: list[str] = []
+    if arriving:
+        lines.append(
+            "NPCs ARRIVE DURING PLAY in this game "
+            f"({', '.join(arriving)}). Declare at least 3 npc_spawn_zone "
+            "entrances spread around the level, each 12 m or more from the "
+            "player spawn, on walkable floor inside a nav_region.")
+    placed = [n for n in plan.npcs if getattr(n, "persistent_count", 0)]
+    companions = [n.asset_id for n in placed
+                  if n.role.value == "ally" and n.movement_style.value != "stationary"]
+    posted = [n for n in placed if n.asset_id not in companions]
+    if companions:
         lines.append(
             "Companions start beside the player "
-            f"({', '.join(persistent)}): keep 3 m around the player spawn "
-            "clear and walkable."
-        )
+            f"({', '.join(companions)}): keep 3 m around the player spawn "
+            "clear and walkable.")
+    if posted:
+        lines.append(
+            "These NPCs are PLACED AT LOAD and stay where they start: "
+            + "; ".join(
+                f"{n.asset_id} ({n.role.value}, {n.movement_style.value}, "
+                f"x{n.persistent_count})" for n in posted)
+            + ". Give each copy a post with w.npc_anchor(ptv::world::"
+            "NpcAnchorDesc{id, position, facing, asset_id, tags}) -- set "
+            "asset_id to that NPC's id -- somewhere it belongs (a guard at "
+            "the gate, a vendor behind the counter), ON walkable floor inside "
+            "a nav_region and facing where it should look. Without an anchor "
+            "it starts beside the player.")
     return lines
 
 
@@ -1384,6 +1397,27 @@ def _validate_navigation(doc: dict) -> list[str]:
                 "no route from the spawn to region(s): "
                 + ", ".join(stranded[:5])
             )
+
+    # NPC entrances and posts are only useful on floor an NPC can walk.
+    def _inside(point: list) -> bool:
+        return any(
+            float(r["min"][0]) <= float(point[0]) <= float(r["max"][0])
+            and float(r["min"][2]) <= float(point[2]) <= float(r["max"][2])
+            for r in by_id.values())
+
+    for key, label in (("npc_spawn_zones", "npc_spawn_zone"),
+                       ("npc_anchors", "npc_anchor")):
+        for item in doc.get(key) or []:
+            if not isinstance(item, dict):
+                continue
+            pos = item.get("position") or []
+            if len(pos) < 3:
+                problems.append(f"{label} '{item.get('id')}' has no position")
+            elif not _inside(pos):
+                problems.append(
+                    f"{label} '{item.get('id')}' at ({float(pos[0]):.1f}, "
+                    f"{float(pos[2]):.1f}) is not inside any declared nav region"
+                )
 
     return problems
 

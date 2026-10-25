@@ -82,6 +82,17 @@ public:
      *  their attachment list. */
     void detach_entity(World& world, std::uint32_t entity);
 
+    /** Binding ids that resolved to nothing registered, with how many
+     *  entities named each. Logged once per scene load; the NPC telemetry
+     *  and the on-device verification read it too. */
+    const std::unordered_map<std::string, int>& unresolved() const {
+        return unresolved_;
+    }
+
+    /** Ids of the instances attached to ``entity`` (shared player-scoped
+     *  instances included). */
+    std::vector<std::string> attached_ids(std::uint32_t entity) const;
+
 private:
     /** Attach one entity's bindings without touching ``player_scoped_``
      *  bookkeeping beyond adding to it. */
@@ -96,6 +107,7 @@ private:
      *  across calls so an entity spawned mid-game joins the existing shared
      *  instance instead of starting a second copy of, say, grab. */
     std::unordered_map<std::string, std::size_t> player_scoped_;
+    std::unordered_map<std::string, int> unresolved_;
 };
 
 }  // namespace ptv

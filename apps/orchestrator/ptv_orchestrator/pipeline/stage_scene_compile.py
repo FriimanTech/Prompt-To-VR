@@ -47,7 +47,16 @@ from ptv_schemas.asset_manifest import AssetCategory
 from ..engine_catalog import role_of
 from .context import PipelineContext, StageResult
 from ..fsutil import atomic_write_text
-from .encounters import apply_npc_population, finalize_encounter_zones
+from .binding_resolution import (
+    drop_unhosted_npc_ai,
+    registered_ids,
+    unresolved_bindings,
+)
+from .encounters import (
+    apply_npc_population,
+    finalize_encounter_zones,
+    place_persistent_npcs,
+)
 from .npc_population import repair_npc_plan
 from .gameplay_relocation import (
     relocate_gameplay_layer,
@@ -141,6 +150,14 @@ class EquipSlotContractError(RuntimeError):
     runtime symptom is an item that simply refuses to holster, with no error
     anywhere.
     """
+
+
+class MissingNpcError(RuntimeError):
+    """An NPC the game requires has no model to put in the scene."""
+
+
+class UnresolvedBindingError(RuntimeError):
+    """The scene binds mechanics the build does not contain."""
 
 
 class SceneAssetMismatchError(RuntimeError):
@@ -834,6 +851,12 @@ def compile_scene_json(
                     MechanicClassification.builtin_config,
                 ):
                     resolved["builtin_id"] = item.builtin_id or b.mechanic_id
+                    # A SceneSpec composed while this item was still a
+                    # generated copy names "generated.<id>"; nothing by that
+                    # name is built any more.
+                    if (item.builtin_id and item.code_task is None
+                            and b.mechanic_id.startswith("generated.")):
+                        resolved["id"] = item.builtin_id
                 # Merge item.config with per-entity params; per-entity wins.
                 # (config is typically empty for builtin / generate, non-empty
                 # for builtin+config and code_edit tuning.)
@@ -1465,7 +1488,8 @@ def _merge_world_into_scene(
 
     # Declared state, exits and named arrival points travel with the
     # environment that declared them.
-    for key in ("interactives", "spawn_points", "portals", "npc_spawn_zones"):
+    for key in ("interactives", "spawn_points", "portals", "npc_spawn_zones",
+                "npc_anchors"):
         if world_doc.get(key):
             doc[key] = world_doc[key]
 
@@ -1575,6 +1599,11 @@ def run(ctx: PipelineContext) -> StageResult:
         if it.code_task is not None
         and getattr(it.code_task.kind, "value", str(it.code_task.kind)) == "ai"
     }
+    # What this build actually registers. Empty only without engine source
+    # (test fixtures), in which case the resolution checks are skipped.
+    registered = registered_ids(ctx.settings.repo_root, ctx.project_id)
+    unresolved_all: list[str] = []
+    missing_npcs: dict[str, list[str]] = {}
 
     # Accumulated, not written as we go: every scene's document needs the
     # index, and the index is not known until every scene has been compiled.
@@ -1610,9 +1639,19 @@ def run(ctx: PipelineContext) -> StageResult:
             e.mesh is not None and e.mesh.asset_id in npc_assets
             for e in scene_spec.entities
         )
+        pop: dict = {}
         if npc_plan is not None and scene_has_npcs:
+            # Generated AI that never made it into the build would leave its
+            # NPC standing still; drop it so the built-in behaviour binds.
+            hosted_ai = generated_ai_ids
+            if registered:
+                hosted_ai, ai_notes = drop_unhosted_npc_ai(
+                    doc.get("entities") or [], registered, generated_ai_ids)
+                for note in ai_notes:
+                    ctx.emit(ProjectStage.scene_compile, "warning",
+                             f"{scene_entry.id}: {note}")
             pop = apply_npc_population(
-                doc, npc_plan, generated_ai_ids, spec_yaw=spec_yaw,
+                doc, npc_plan, hosted_ai, spec_yaw=spec_yaw,
                 on_warning=(
                     (lambda m, sid=scene_entry.id: ctx.emit(
                         ProjectStage.scene_compile, "warning", f"{sid}: {m}"))
@@ -1626,6 +1665,8 @@ def run(ctx: PipelineContext) -> StageResult:
                     f"placed {pop['persistent']}, built-in behaviours "
                     f"{pop['behaviours']}",
                 )
+            if pop.get("missing"):
+                missing_npcs[scene_entry.id] = list(pop["missing"])
 
         # Every scene gets its own environment now, not just the entry point.
         # Previously the other scenes compiled to gameplay entities floating
@@ -1640,6 +1681,17 @@ def run(ctx: PipelineContext) -> StageResult:
                 ),
                 spec_yaw=spec_yaw,
             )
+        # Placed-at-load NPCs, checked against the merged world itself.
+        if npc_plan is not None and pop.get("persistent"):
+            for note in place_persistent_npcs(
+                doc, pop["persistent"], npc_plan,
+                on_warning=lambda m, sid=scene_entry.id: ctx.emit(
+                    ProjectStage.scene_compile, "warning", f"{sid}: {m}"),
+            ):
+                ctx.emit(ProjectStage.scene_compile, "info",
+                         f"{scene_entry.id}: {note}")
+                ctx.store.append_log(ctx.project_id, "scene_compile",
+                                     f"{scene_entry.id}: {note}")
         zones = finalize_encounter_zones(
             doc,
             on_warning=lambda m, sid=scene_entry.id: ctx.emit(
@@ -1696,9 +1748,33 @@ def run(ctx: PipelineContext) -> StageResult:
                 ctx.project_id, "scene_compile",
                 f"{scene_entry.id}: {over_budget}",
             )
+        if registered:
+            unresolved_all.extend(
+                f"{scene_entry.id}/{p}"
+                for p in unresolved_bindings(doc.get("entities") or [], registered))
         compiled.append((scene_entry.id, doc))
         if scene_entry.entry_point or entry_id_written is None:
             entry_id_written = scene_entry.id
+
+    # Both checks name every problem at once, and both stop the stage: a
+    # scene that ships either one loads fine and quietly lacks what the
+    # prompt asked for.
+    if missing_npcs:
+        msg = (
+            "NPCs the game requires have no model to place: "
+            + "; ".join(f"{sid}: {ids}" for sid, ids in missing_npcs.items())
+            + ". Re-run tripo_models / rigging for them before scene_compile."
+        )
+        ctx.store.append_log(ctx.project_id, "scene_compile", msg)
+        raise MissingNpcError(msg)
+    if unresolved_all:
+        msg = (
+            f"{len(unresolved_all)} mechanic binding(s) would do nothing at "
+            "runtime:\n  " + "\n  ".join(unresolved_all)
+            + "\nRe-run code_generation (or fix the mechanic plan) first."
+        )
+        ctx.store.append_log(ctx.project_id, "scene_compile", msg)
+        raise UnresolvedBindingError(msg)
 
     # ------------------------------------------------------------------
     # The scene index.
