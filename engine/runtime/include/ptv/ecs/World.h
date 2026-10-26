@@ -187,9 +187,19 @@ struct CMesh {
     float unit_scale{0.0f};
     /** Distance in metres from the origin DOWN to the soles in the rest pose,
      *  at the asset's in-scene size. A grounded character is planted this far
-     *  above the floor. 0 = unknown: half the body height is assumed, which
-     *  is right for a symmetric mesh and a few centimetres off otherwise. */
+     *  above the floor. For a character with a model frame this is always
+     *  half its height (the frame pivots the soles there). 0 = unknown: the
+     *  character locomotion measures the loaded bind pose instead. */
     float foot_offset_m{0.0f};
+    /** Measured model frame (``asset_contract``), GLB units. When set, the
+     *  mesh is scaled by HEIGHT (``unit_scale``), rotated so its face points
+     *  down -Z and dropped so its soles sit ``foot_offset_m`` below the
+     *  origin. Rigged meshes get it folded into their root joints at load;
+     *  static ones get it on the draw's model matrix. */
+    bool has_model_frame{false};
+    float model_yaw_offset_rad{0.0f};
+    float model_sole_y{0.0f};
+    float model_height{0.0f};
 };
 
 /** Skeleton for a rigged ``CMesh``, plus the palette the renderer uploads.
@@ -251,9 +261,7 @@ struct CSelfViewHide {
 
 /** One selectable line on a virtual panel. */
 struct UiRow {
-    /** Human-readable, and deliberately NOT drawn: the engine has no in-world
-     *  text rendering. Kept because it is what logs, tests and any future text
-     *  pass need, and because a row with no name is unreviewable. */
+    /** Drawn on the row by the panel's text pass ("Try Again"). */
     std::string label;
     /** Stable identifier the caller matches events against. Using this rather
      *  than the row INDEX is what lets a panel be rebuilt -- an inventory that
@@ -341,6 +349,9 @@ struct CUiPanel {
     /** Clicks not yet read. Bounded: an unread queue is a caller bug, and
      *  growing without limit would turn it into a leak. */
     std::vector<UiEvent> events;
+    /** Drawn above the rows (``IUi::set_title``). Empty = no heading. */
+    std::string title;
+    std::string subtitle;
 };
 
 /**
@@ -581,9 +592,19 @@ struct CLocomotionIntent {
     /** Play a gait VARIANT clip at the current tier -- "punching" plays
      *  ``run.punching`` while running -- when the asset has one. The body
      *  still moves at the walk/run speed; only the clip changes. Empty plays
-     *  the plain walk/run clip. Last member so positional initializers stay
-     *  valid. */
+     *  the plain walk/run clip. */
     std::string gait_variant{};
+    /** One-shot: launch upward at this speed (m/s) if standing on ground.
+     *  The built-in clears it once consumed, plays the asset's ``jump`` clip
+     *  when it has one, and lets gravity bring the body back down. Ignored by
+     *  flying characters, which already move vertically through
+     *  ``desired_velocity.y``. */
+    float jump_velocity{0.0f};
+    /** Turn only the HEAD toward this world point, clamped to +/-60 degrees
+     *  of the body's facing, without turning the body. A guard watching the
+     *  player walk past, while its feet stay put. */
+    Vec3 look_target{0.0f};
+    bool has_look_target{false};
 };
 
 struct CPhysics {

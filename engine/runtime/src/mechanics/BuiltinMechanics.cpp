@@ -40,6 +40,8 @@ extern "C" int ptv_force_link_builtin_movement_settings_menu;
 extern "C" int ptv_force_link_builtin_encounter_director;
 extern "C" int ptv_force_link_builtin_npc_follow;
 extern "C" int ptv_force_link_builtin_npc_melee_chase;
+extern "C" int ptv_force_link_builtin_game_flow;
+extern "C" int ptv_force_link_builtin_game_hud;
 
 namespace {
 int sum_builtin_module_anchors() {
@@ -59,7 +61,8 @@ int sum_builtin_module_anchors() {
            ptv_force_link_builtin_movement_settings_menu +
            ptv_force_link_builtin_encounter_director +
            ptv_force_link_builtin_npc_follow +
-           ptv_force_link_builtin_npc_melee_chase;
+           ptv_force_link_builtin_npc_melee_chase +
+           ptv_force_link_builtin_game_flow + ptv_force_link_builtin_game_hud;
 }
 // Deliberately ``volatile``: a const, unused aggregate of the same values
 // gets constant-folded away and the modules go missing from the link again.

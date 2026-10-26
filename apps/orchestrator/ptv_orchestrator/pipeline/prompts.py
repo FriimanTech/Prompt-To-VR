@@ -92,7 +92,12 @@ is a *minimum*, not a *maximum*.
 CAPTURE EVERY MECHANIC THE PROMPT NAMES. Read the prompt end-to-end and
 emit one MechanicEntry per distinct gameplay system (movement, hover,
 flight, recharge, construct creation, each construct family / weapon,
-combat targeting, enemy AI, mission flow, HUD, save / load, ...). The
+combat targeting, enemy AI, mission flow, HUD, save / load, ...). Lives,
+respawn, win/lose conditions, end screens and restart are decided by the
+next planning stage (game design) and run by the engine's game loop: still
+NAME them in ``hud_summary`` / a mission-flow entry when the prompt asks
+for them, but keep their exact rules (counts, timers, what each button
+does) in the prompt's own words, because that stage quotes them. The
 ``summary`` for each mechanic MUST include:
 
   * what the mechanic does,
@@ -578,7 +583,12 @@ MOVEMENT STYLE IS THE EXPENSIVE DECISION. Choose it first.
     no gait: a drone, a floating orb, a rolling boulder. Skips rigging
     entirely, so it must have an EMPTY ``animation_intents``.
   * ``stationary`` - never leaves its spot. A turret, a shopkeeper.
-  * ``flying`` - moves in three dimensions rather than over the floor.
+  * ``flying`` - moves in three dimensions rather than over the floor. When
+    the prompt says it HOVERS at a height (a drone, a ghost floating above
+    the floor) set ``locomotion.hover_height_m`` to that gap in metres; leave
+    it 0 for something that genuinely flies around. Grounded characters
+    (everything else) are kept on the floor by the engine, climb steps, fall
+    off ledges and land -- never pick ``flying`` to work around terrain.
 
 READ THE PROMPT AT TWO LEVELS.
   * Explicit instructions win, always. If the prompt says the enemies should
@@ -678,6 +688,82 @@ WHO IS PLACED, WHO ARRIVES. Two separate questions:
 """
 
 
+GAME_DESIGN_SYSTEM = """You are the GAME DESIGNER for a native VR game (Meta Quest 3 standalone or
+PC VR). You decide the rules of the game LOOP and emit one GameDesign JSON
+object. The engine's ``builtin.game_flow`` runs your document directly: it
+owns health reaching zero, lives, respawn, the win and lose checks, the end
+screens and every button on them, the pause menu, and resetting everything
+for a new attempt. Nothing you leave out exists; nothing you add is free.
+
+ANSWER THESE, IN ORDER, FROM THE PROMPT:
+  1. What kind of experience is this? (``experience``: combat, puzzle,
+     exploration, narrative, sandbox, score_attack, simulation, media.)
+  2. Can the player be hurt or die? Only when something in the game can hurt
+     them -- an NPC whose NpcPlan entry is hostile to "player" and attacks, a
+     hazard, a fall. ``player_vitality.has_health``. A training mode the
+     prompt calls invincible sets ``invulnerable``.
+  3. What is the player trying to do? (``objectives``: survive_time with
+     ``duration_s``; defeat_count with ``count`` and optional NPC
+     ``target_ids``; clear_waves when the NpcPlan has encounters;
+     reach_location naming a spawn point id the world builder will place at
+     the destination; collect naming manifest asset ids; interact naming
+     interactive ids; custom for anything game-specific, which generated
+     code reports through ``ctx.game``.)
+  4. How does it end? ``victory`` (all_objectives / any_objective / none)
+     and ``failure`` (lives_exhausted, timer_expired, custom).
+  5. What happens when the player loses a life? ``lives.count`` (null =
+     unlimited) and ``on_life_lost``: where they come back, after how long,
+     whether health is restored and the loadout kept, how long they are
+     invulnerable afterwards, and what happens to nearby enemies.
+  6. What does the player see when it ends? ``end_screens``: one per way the
+     game can end -- ``game_over`` (must offer try_again), ``victory`` (a
+     challenge won), ``completed`` (a non-combat ending: the book is
+     finished). Buttons: try_again, play_again, keep_playing, leave_game.
+     At most three buttons; every screen needs at least one.
+  7. ``reset_policy``: what Try Again / Play Again puts back. Normally
+     everything. ``hud``: show only what exists (no lives counter in a game
+     without lives).
+
+EXPLICIT BEATS INFERRED, ALWAYS. If the USER'S PROMPT says it, the decision
+has ``provenance.source = "explicit"`` and ``prompt_quote`` holds the
+prompt's EXACT words (they are checked verbatim against the prompt). Text
+that only appears in the BuildSpec or NpcPlan is NOT explicit -- those are
+earlier stages' interpretations -- so a decision based on them is
+``inferred`` with a one-sentence ``rationale``. Never contradict an explicit
+instruction to make the design tidier. Numbers that do not apply to an
+objective kind (a radius on a timer, a count on a location) are left out.
+
+DO NOT INVENT SYSTEMS. A book reader has no health, no lives, no enemies and
+no Game Over; it ends in ``completed`` (or is ``free_play``) and offers Leave
+Game. A sandbox with no goal is ``free_play`` with the pause menu's Leave
+Game. Record every system you deliberately left out in ``omitted`` with the
+reason ("no health: nothing in a book reader can hurt the reader").
+
+NO DEAD ENDS. Every way the game can end has a screen; every screen has a way
+out; something always offers Leave Game (the pause menu does by default).
+A game whose player can die with limited lives MUST have a game_over screen.
+
+VR COMFORT. Respawn fades to black and back; never spin or drop the camera.
+Keep ``on_life_lost.delay_s`` between 1.5 and 3 s and give 2-4 s of
+invulnerability after a respawn so the player is not killed again on arrival.
+
+WORKED EXAMPLE (not a template): "Goblin Shooter -- survive the goblin waves
+for 3 minutes, you have 3 lives." -> experience combat; has_health true
+(goblins attack, inferred); lives 3 (explicit, quote "you have 3 lives");
+on_life_lost: respawn at spawn, restore health, keep the blaster, 3 s
+invulnerable, clear_nearby; objective survive_time 180 s (explicit, quote
+"survive the goblin waves for 3 minutes"); victory all_objectives; failure
+lives_exhausted; screens: game_over "Game Over" [try_again, leave_game] and
+victory "You Win!" [play_again, leave_game]; hud health, lives, timer.
+
+WORKED EXAMPLE: "A cozy VR library where I can read a picture book." ->
+experience media; no health, no lives, no failure; objective interact
+(finish the book) or none with free_play; screen completed "The End"
+[play_again, leave_game] if there is an ending; omitted: ["health: nothing can
+hurt the reader", "lives: nothing to lose", "game over: there is no failure"].
+"""
+
+
 _MECHANIC_PLAN_TMPL = """You are the mechanic planner. For every mechanic in the BuildSpec emit a
 matching MechanicPlanItem. There is NO upper bound on the number of plan
 items -- a full VR game can map to dozens of mechanics (movement,
@@ -733,6 +819,17 @@ through ``ctx.encounters``. NPC behaviour: "follows the player" ->
 ``builtin.npc.follow``; "chases and hits" -> ``builtin.npc.melee_chase``
 (the compiler tunes each NPC type's speed, damage and range from the NPC
 plan). Generate NPC AI only for behaviour those cannot express.
+
+THE GAME LOOP IS THE ENGINE'S. The game_design stage has already decided
+health, lives, respawn, objectives, how the game is won or lost and its end
+screens; ``builtin.game_flow`` runs that and ``builtin.game_hud`` shows the
+health / lives / timer / objective. A BuildSpec mechanic that IS the loop --
+a run / round / mission flow, lives, respawn, player health, Game Over or
+victory or results screens, restart, pause or quit -- is ``builtin+config``
+of ``builtin.game_flow`` (the HUD of those numbers: ``builtin.game_hud``),
+with no params: the scene compiler fills them from game_design.json. Plan a
+generated mechanic only for what is specific to this game (a weapon, an
+ammo counter, a custom objective that calls ctx.game->add_progress).
 
 CONTROLLER BINDINGS. Every mechanic that is driven by a controller
 control MUST carry a ``binding`` object: ``{"control": <trigger|grip|
@@ -1606,8 +1703,9 @@ than breaking the player out of the world.
     ->start()        // only for start "signal": begin the first wave
     ->pause(bool) / ->paused() / ->reset()
                      // a menu may pause; reset() restarts from wave 1
-  Wave HUDs, score panels and "victory" screens READ this. Never spawn,
-  pool, count or despawn NPCs yourself, and never write a wave loop.
+  Wave HUDs and score panels READ this. Never spawn, pool, count or despawn
+  NPCs yourself, and never write a wave loop. Victory, Game Over and their
+  screens are builtin.game_flow's (ctx.game), never yours.
 
   ctx.attach       // rigidly parent one entity to a point on another
     ->attach(child, parent, "hand_r", local_pos, local_rot) -> bool
@@ -1641,6 +1739,34 @@ than breaking the player out of the world.
                      // Death is handled FOR you: reaching zero health plays
                      // the "die" clip, stops the entity colliding, and
                      // removes it. Do not schedule any of that yourself.
+                     // The PLAYER's death is the game loop's (ctx.game).
+
+  ctx.game         // the game loop, run by builtin.game_flow from
+                   // game_design.json: lives, respawn, Game Over, victory,
+                   // pause, Try Again / Play Again, Leave Game. NEVER write
+                   // any of those yourself.
+    ->configured() -> bool        // false = this game has no loop
+    ->state() -> GameFlowState    // Playing, Paused, LifeLost, Respawning,
+                                  // GameOver, Victory, Completed, Exiting
+    ->state_seq() -> uint64_t     // changes on every transition
+    ->gameplay_active() -> bool   // CHECK THIS before firing a weapon,
+                                  // counting down your own timer or
+                                  // spending a resource: false under the
+                                  // Game Over / pause screens
+    ->lives() / ->elapsed_s() / ->time_remaining_s() / ->score()
+    ->add_score(points)
+    ->add_progress("objective_id", delta) / ->set_progress(id, value)
+    ->complete("objective_id")    // a custom / interact objective is done
+    ->progress(id) / ->objective_complete(id)
+    ->fail("reason")              // a game-specific loss (reactor meltdown)
+
+  ctx.text         // world-space text for THIS frame (SDF, crisp in VR)
+    ->text("Ammo 12", position, rotation, cap_height_m, color, TextAlign)
+                     // rotation's +Z faces the reader; size it by angle:
+                     // ITextDraw::height_for_angle(distance_m, 1.4f)
+    ->measure(utf8, cap_height_m) -> float  // width in metres
+
+  ctx.app          // ->platform() "quest" | "pcvr", ->uptime_s()
 
   ctx.perception   // what an NPC can see. Ignores dead entities.
     ->nearest_hostile(self, max_range) -> entity
@@ -1934,6 +2060,15 @@ Points worth copying:
   ``max_health(e)``; the player is defeated when ``!ctx.combat->is_alive(e)``.
 * Damage, death and corpse removal are the engine's. Reaching zero health
   plays the ``die`` clip and cleans up; never write your own death timer.
+* The game LOOP is the engine's. ``builtin.game_flow`` handles the player's
+  health reaching zero, lives, respawn, the objectives in game_design.json,
+  the Game Over / victory / completion screens, the pause menu, Try Again,
+  Play Again and Leave Game; ``builtin.game_hud`` shows health, lives, the
+  timer and the objective. Never keep a lives counter, write a respawn,
+  restart the scene, open a results screen or add a quit button. Report a
+  game-specific objective with ``ctx.game->add_progress`` / ``complete``,
+  a game-specific loss with ``ctx.game->fail``, and gate weapons and your
+  own timers on ``ctx.game->gameplay_active()``.
 * Contact damage ("the ducks hurt you when they touch you") is
   ``ctx.contacts->began(self, player)`` plus ``apply_damage``. The
   invulnerability window is already handled, so do not add your own.

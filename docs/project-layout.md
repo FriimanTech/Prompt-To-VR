@@ -79,6 +79,7 @@ Prompt-To-VR/
 │       ├── build_spec.json
 │       ├── asset_manifest.json
 │       ├── npc_plan.json
+│       ├── game_design.json
 │       ├── mechanic_plan.json
 │       ├── scene_spec.<scene_id>.json
 │       ├── scene_spec.json

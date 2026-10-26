@@ -84,13 +84,21 @@ def _apply_npc_stats(e: dict, npc: Any, generated_ai: set[str]) -> list[str]:
     )
     behaviours = _behaviour_values(npc)
     bound: list[str] = []
-    moves = npc.movement_style.value in ("animated_locomotion", "slide_no_animation")
+    style = npc.movement_style.value
+    moves = style in ("animated_locomotion", "slide_no_animation", "flying")
     if moves:
         loco = _ensure_binding(e, LOCOMOTION_ID)["params"]
         loco.setdefault("walk_speed_mps", float(npc.locomotion.walk_speed_mps))
         loco.setdefault("run_speed_mps", float(npc.locomotion.run_speed_mps))
         loco.setdefault("turn_rate_deg_s", float(npc.locomotion.turn_rate_deg_s))
-        loco.setdefault("animated", npc.movement_style.value == "animated_locomotion")
+        # A flying character with a rig still animates (wing flaps play as
+        # its "walk"); only slide_no_animation is explicitly un-animated.
+        loco.setdefault("animated", style != "slide_no_animation" and bool(
+            (e.get("mesh") or {}).get("skinned", style == "animated_locomotion")))
+        loco.setdefault("motor", "flying" if style == "flying" else "grounded")
+        hover = float(getattr(npc.locomotion, "hover_height_m", 0.0) or 0.0)
+        if style == "flying" and hover > 0.0:
+            loco.setdefault("hover_height_m", hover)
     if has_ai or not moves:
         return bound
     if "follow_leader" in behaviours and not behaviours & {"chase", "melee_attack"}:
@@ -397,7 +405,11 @@ def place_persistent_npcs(
                     floor = float(region.get("floor_y", lo[1] if len(lo) > 1 else 0.0))
             mesh = e.get("mesh") or {}
             height = float(mesh.get("target_scale_meters") or 1.8)
-            foot = float(mesh.get("foot_offset_m") or 0.0) or 0.5 * height
+            # scene_compile always writes foot_offset_m for a framed
+            # character: the runtime pivots its soles to half its height
+            # below the origin (the capsule centre), so half height is the
+            # CONTRACT for anything framed, not a guess about the mesh.
+            foot = float(mesh.get("foot_offset_m") or 0.5 * height)
             pos[1] = floor + foot
             t["position"] = pos
             if (npc is not None and npc.role.value == "ally" and anchor is None

@@ -27,6 +27,7 @@
 
 #include "../BuiltinMechanicBase.h"
 #include "EncounterPlan.h"
+#include "ptv/api/Facing.h"
 #include "ptv/core/Logger.h"
 
 #include <glm/gtc/quaternion.hpp>
@@ -322,7 +323,7 @@ private:
         to.y = 0.0f;
         Quat facing(1.0f, 0.0f, 0.0f, 0.0f);
         if (glm::length(to) > 1e-3f) {
-            facing = glm::angleAxis(std::atan2(-to.x, -to.z), Vec3(0, 1, 0));
+            facing = rotation_facing(to);
         }
         const std::uint32_t e = ctx.spawn->instance(tmpl, pos, facing);
         if (e != kInvalid) ++spawn_counter_;

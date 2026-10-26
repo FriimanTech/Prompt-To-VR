@@ -225,6 +225,20 @@ class Settings(BaseSettings):
     # attached (see mechanic_plan_max_retries).
     npc_plan_max_retries: int = Field(default=1, ge=0, le=4)
 
+    # --- Game design stage (the rules of the game loop) ------------------
+    # Health, lives, respawn, objectives, win/lose, end screens and resets,
+    # decided once from the prompt. High effort: it separates what the
+    # prompt states from what the game obviously needs, and a wrong call is
+    # either a missing Game Over screen or a health bar on a book reader.
+    game_design_model: str = "gpt-5.6-sol"
+    game_design_reasoning_effort: str = "high"
+    game_design_verbosity: str = "medium"
+    game_design_agent_max_turns: int = Field(default=20, ge=4, le=200)
+    game_design_max_retries: int = Field(default=1, ge=0, le=4)
+    # Agent rounds spent fixing validator findings before the remaining
+    # problems are repaired deterministically.
+    game_design_max_repair_rounds: int = Field(default=2, ge=0, le=6)
+
     # --- Character routing (Tripo vs Uthana) -----------------------------
     # Decides, after the Tripo models exist, which provider rigs and animates
     # each character. High effort: it weighs gameplay needs against two
@@ -390,6 +404,7 @@ class Settings(BaseSettings):
         "codegen_reasoning_effort",
         "mechanic_plan_reasoning_effort",
         "npc_plan_reasoning_effort",
+        "game_design_reasoning_effort",
         "character_routing_reasoning_effort",
         "uthana_motion_plan_reasoning_effort",
         "world_reasoning_effort",
@@ -409,6 +424,7 @@ class Settings(BaseSettings):
         "codegen_verbosity",
         "mechanic_plan_verbosity",
         "npc_plan_verbosity",
+        "game_design_verbosity",
         "character_routing_verbosity",
         "uthana_motion_plan_verbosity",
         "world_verbosity",

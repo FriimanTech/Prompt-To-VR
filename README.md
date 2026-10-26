@@ -51,6 +51,7 @@ prompt
   →  1. BuildSpec (Claude Opus)
   →  2. AssetManifest (Claude Sonnet)     # objects only; environment is C++
   →  3. NPC plan (OpenAI gpt-5.6-sol)
+  → 3b. Game design (OpenAI gpt-5.6-sol)  # health, lives, objectives, endings
   →  4. MechanicPlan (OpenAI gpt-5.6-sol)
   →  5. SceneSpec (OpenAI gpt-5.6-sol, per scene)
   →  6. Reference images (Gemini)
@@ -58,14 +59,14 @@ prompt
   →  8. Auto-rigging (Tripo)
   →  9. Animation retarget (Tripo)
   → 10. Asset normalization
-  → 11. Asset contract (deterministic sockets)
+  → 11. Asset contract (deterministic sockets + character model frames)
   → 12. C++ code generation (OpenAI Agents + compile-verify)
   → 13. World generation (C++ environment → world.scene.json)
   → 14. Asset optimization (LOD decimation)
   → 15. Scene compile (merge world + gameplay → scene.json)
   → 16. pcvr: cmake_build (.exe)  |  quest: quest_build (APK)
-        quest only: quest_runtime_verify (run on the headset, check the NPCs;
-        report-only, skipped with no headset)
+        quest only: quest_runtime_verify (run on the headset, check the NPCs
+        and walk the game loop; report-only, skipped with no headset)
   → 17. Engine promotion (reuse catalog)
 ```
 

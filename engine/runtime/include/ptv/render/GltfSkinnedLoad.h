@@ -96,9 +96,42 @@ struct SkeletonData {
      *  vertex positions. */
     float unit_scale{1.0f};
     std::vector<AnimationClip> clips;
+    /** Lowest bind-pose vertex, in metres in the entity's own space (after
+     *  any model frame). Filled by ``load_glb_skinned`` only; lets the
+     *  runtime stand a character that arrived with no measured foot offset
+     *  on its real soles instead of on a half-height guess. */
+    float bind_min_y{0.0f};
 
     bool empty() const { return parents.empty(); }
     size_t joint_count() const { return parents.size(); }
+};
+
+/** A character's measured model frame (``asset_contract`` -> ``scene.json``),
+ *  in the GLB's own units.
+ *
+ * Character sources disagree about where the origin is and which way the
+ * model faces: Tripo puts the origin at the feet and faces +X, Uthana centres
+ * the hips and faces +Z. With a frame, the loader pivots the model so its
+ * soles sit ``height / 2`` below the entity origin (the centre of its
+ * capsule), its face points down -Z, and ``height`` -- not the longest axis --
+ * maps to ``target_scale_meters``. The pivot is folded into the root joints
+ * exactly like a non-joint ancestor node, so the palette, ``joint_world``,
+ * sockets and attachments all see it without knowing it exists. */
+struct ModelFrame {
+    bool valid{false};
+    /** Rotation about +Y that turns the model's forward onto -Z. */
+    float yaw_offset_rad{0.0f};
+    /** Bind-pose sole height and standing height, GLB units. */
+    float sole_y{0.0f};
+    float height{0.0f};
+    /** Metres per GLB unit. 0 = ``target_scale_meters / height``. */
+    float unit_scale{0.0f};
+
+    /** The pivot in GLB units: rotate about Y, then drop the soles to
+     *  ``-height / 2``. */
+    Mat4 pivot() const;
+    /** Metres per GLB unit for ``target_scale_meters``. */
+    float scale_for(float target_scale_meters) const;
 };
 
 /** Turn a set of local joint transforms into the matrices the vertex shader
@@ -138,7 +171,8 @@ bool glb_probe_skin(const std::string& path,
 bool load_glb_skeleton(const std::string& path,
                        float target_scale_meters,
                        SkeletonData& out_skeleton,
-                       std::string& err);
+                       std::string& err,
+                       const ModelFrame* frame = nullptr);
 
 /** Merge all skinned triangle primitives into one indexed buffer and load the
  *  matching skeleton.
@@ -155,6 +189,7 @@ bool load_glb_skinned(const std::string& path,
                       std::vector<SkinnedVertex>& out_verts,
                       std::vector<std::uint32_t>& out_indices,
                       SkeletonData& out_skeleton,
-                      std::string& err);
+                      std::string& err,
+                      const ModelFrame* frame = nullptr);
 
 }  // namespace ptv::gltf_mesh_load

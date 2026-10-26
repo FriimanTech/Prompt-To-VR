@@ -19,10 +19,10 @@
 // IEquip reports and calls unequip on a click, which is a few lines rather
 // than a from-scratch UI.
 //
-// Rows are drawn as state-coloured plates plus an optional thumbnail entity,
-// NOT as text: the engine has no in-world text rendering. For a wardrobe that
-// is the better answer anyway -- the player recognises their gauntlet by
-// looking at it, not by reading "gauntlet".
+// Rows are drawn as state-coloured plates with their label in SDF text
+// (ctx.text), plus an optional thumbnail entity -- for a wardrobe the player
+// recognises their gauntlet by looking at it. A panel title and subtitle
+// (IUi::set_title) sit above the rows: "Game Over" / "Survived 2:41".
 // ---------------------------------------------------------------------------
 
 #include <algorithm>
@@ -164,10 +164,11 @@ private:
               MechanicContext& ctx) const {
         if (ctx.draw == nullptr) return;
         const int count = static_cast<int>(panel.rows.size());
-        if (count == 0) return;
         const Mat4 m = panel_matrix(panel);
         const float hw = panel.width_m * 0.5f;
         const float hh = panel.row_height_m * 0.45f;
+        draw_text(panel, m, ctx);
+        if (count == 0) return;
 
         for (int i = 0; i < count; ++i) {
             const UiRow& row = panel.rows[static_cast<std::size_t>(i)];
@@ -208,6 +209,45 @@ private:
                                row_world(panel, m, panel.highlighted, count),
                                Vec4{1.0f, 0.95f, 0.55f, 1.0f}, 0.006f);
             }
+        }
+    }
+
+    /** Title above the rows, subtitle under it, and each row's label on the
+     *  row. Text sits a few millimetres in front of the plates so the two
+     *  never z-fight, and is sized from the row height so a panel scaled for
+     *  a far wall stays as readable as one at arm's length. */
+    void draw_text(const CUiPanel& panel, const Mat4& m,
+                   MechanicContext& ctx) const {
+        if (ctx.text == nullptr) return;
+        const int count = static_cast<int>(panel.rows.size());
+        const Quat facing = glm::angleAxis(panel.yaw_rad, Vec3(0.0f, 1.0f, 0.0f));
+        const float label_h = panel.row_height_m * 0.30f;
+        constexpr float kLift = 0.004f;
+        const float top =
+            count > 0 ? row_local(panel, 0, count).y + panel.row_height_m * 0.5f
+                      : 0.0f;
+        float y = top + panel.row_height_m * 0.35f;
+        if (!panel.subtitle.empty()) {
+            ctx.text->text(panel.subtitle.c_str(),
+                           Vec3(m * Vec4(0.0f, y, kLift, 1.0f)), facing,
+                           label_h * 0.8f, Vec4(0.85f, 0.88f, 0.92f, 1.0f));
+            y += label_h * 1.9f;
+        }
+        if (!panel.title.empty()) {
+            ctx.text->text(panel.title.c_str(),
+                           Vec3(m * Vec4(0.0f, y, kLift, 1.0f)), facing,
+                           label_h * 1.7f, Vec4(1.0f, 1.0f, 1.0f, 1.0f));
+        }
+        for (int i = 0; i < count; ++i) {
+            const UiRow& row = panel.rows[static_cast<std::size_t>(i)];
+            if (row.label.empty()) continue;
+            const Vec3 c = row_local(panel, i, count);
+            Vec4 color{0.92f, 0.94f, 0.97f, 1.0f};
+            if (!row.enabled) color = Vec4{0.55f, 0.56f, 0.60f, 1.0f};
+            if (i == panel.highlighted) color = Vec4{1.0f, 0.95f, 0.55f, 1.0f};
+            ctx.text->text(row.label.c_str(),
+                           Vec3(m * Vec4(c.x, c.y - 0.5f * label_h, c.z + kLift, 1.0f)),
+                           facing, label_h, color);
         }
     }
 };

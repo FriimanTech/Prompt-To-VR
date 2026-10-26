@@ -59,8 +59,13 @@ from ..quest_ids import quest_package_name
 from .context import PipelineContext, StageResult
 
 ARTIFACT = "runtime_verification.json"
-#: A capsule standing on the floor has feet within this of it.
-FEET_TOLERANCE_M = 0.3
+#: Median distance between the DRAWN feet (lowest animated foot joint, less
+#: its bind height above the soles) and the floor for a grounded NPC.
+FEET_TOLERANCE_M = 0.05
+#: A hovering NPC's median sole height may differ from its hover height by this.
+HOVER_TOLERANCE_M = 0.15
+#: Median heading error, while moving, against the travel direction or target.
+FACING_TOLERANCE_DEG = 20.0
 #: A stationary NPC may sway (idle clip, turning to face) but not walk.
 STATIONARY_DRIFT_M = 0.25
 #: The scripted walk starts this long after launch (engine kSettleS).
@@ -227,10 +232,11 @@ def parse_telemetry(text: str) -> Telemetry:
                     kv[key] = float(kv.get(key, "nan"))
                 except ValueError:
                     kv[key] = math.nan
-            try:
-                kv["feet_gap"] = float(kv.get("feet_gap", "nan"))
-            except ValueError:
-                kv["feet_gap"] = math.nan
+            for key in ("feet_gap", "origin_gap", "facing_err_deg"):
+                try:
+                    kv[key] = float(kv.get(key, "nan"))
+                except ValueError:
+                    kv[key] = math.nan
             t.status.append(kv)
         elif body.startswith("spawn:"):
             m = _SPAWN.search(body)
@@ -326,19 +332,45 @@ def evaluate(tel: Telemetry, npc_plan: Optional[NpcPlan], scene: dict,
     autopilot_from = AUTOPILOT_SETTLE_S + 5.0
 
     def floor_and_area(subject: str, samples: list[dict], category: str) -> None:
-        gaps = [s["feet_gap"] for s in samples if not math.isnan(s["feet_gap"])]
         if not samples:
             return
-        if not gaps:
+        motor = str(samples[-1].get("motor") or "grounded")
+        # ``feet_gap`` is measured from the DRAWN feet (lowest animated
+        # foot/toe joint), not from the declared foot offset, so a model that
+        # floats or sinks relative to its capsule fails here even when the
+        # contract looks right.
+        gaps = [s["feet_gap"] for s in samples if not math.isnan(s["feet_gap"])]
+        if motor == "flying":
+            checks.append(_check("stands on the floor", category, None,
+                                 "flies freely; no floor height applies", subject))
+        elif not gaps:
             checks.append(_check("stands on the floor", category, False,
                                  "no floor found under it in any sample", subject))
+        elif motor.startswith("hover:"):
+            hover = float(motor.split(":", 1)[1])
+            median = sorted(gaps)[len(gaps) // 2]
+            ok = abs(median - hover) <= HOVER_TOLERANCE_M
+            checks.append(_check(
+                "holds its hover height", category, ok,
+                f"feet {median:+.2f} m above the floor (median), asked {hover:.2f} m",
+                subject))
         else:
             worst = max(gaps, key=abs)
-            ok = abs(sorted(gaps)[len(gaps) // 2]) <= FEET_TOLERANCE_M and abs(worst) <= 1.0
+            median = sorted(gaps)[len(gaps) // 2]
+            ok = abs(median) <= FEET_TOLERANCE_M and abs(worst) <= 1.0
             checks.append(_check(
                 "stands on the floor", category, ok,
-                f"feet {sorted(gaps)[len(gaps) // 2]:+.2f} m from the floor (median), "
+                f"drawn feet {median:+.2f} m from the floor (median), "
                 f"worst {worst:+.2f} m over {len(gaps)} samples", subject))
+        faced = [s["facing_err_deg"] for s in samples
+                 if s["speed"] > 0.3 and not math.isnan(s["facing_err_deg"])]
+        if faced:
+            median = sorted(faced)[len(faced) // 2]
+            checks.append(_check(
+                "faces where it is going", category, median <= FACING_TOLERANCE_DEG,
+                f"median {median:.0f} deg off its travel direction / target over "
+                f"{len(faced)} moving samples (allowed {FACING_TOLERANCE_DEG:.0f})",
+                subject))
         if regions:
             outside = [s for s in samples if s["_pos"] and not _inside(regions, s["_pos"])]
             checks.append(_check(
@@ -515,6 +547,105 @@ def capture_seconds(npc_plan: Optional[NpcPlan], base: float) -> float:
 
 
 # ---------------------------------------------------------------------------
+# The game-loop pass
+# ---------------------------------------------------------------------------
+
+#: builtin.game_flow's scripted verification: each life is ended after ~12 s,
+#: an end screen is clicked after ~3 s, the winning attempt runs timers 10x
+#: and forces non-timer objectives after ~15 s, the last attempt pauses and
+#: leaves after ~10 s. Plus launch and fades.
+FLOW_PER_LIFE_S = 17.0
+FLOW_FIXED_S = 75.0
+MAX_FLOW_CAPTURE_S = 300.0
+
+
+def flow_capture_seconds(design: Any) -> float:
+    lives = design.lives.count if design.lives.count is not None else 1
+    deaths = lives if design.can_die() else 0
+    timed = max((o.duration_s or 0.0 for o in design.objectives
+                 if o.kind.value == "survive_time"), default=0.0)
+    return min(MAX_FLOW_CAPTURE_S, FLOW_FIXED_S + deaths * FLOW_PER_LIFE_S + timed / 10.0)
+
+
+def parse_flow(text: str) -> list[dict[str, str]]:
+    """Every ``flow:`` line, as key/value pairs, in order. A line without
+    ``key=value`` pairs keeps its text under ``_text``."""
+    out: list[dict[str, str]] = []
+    for raw in text.splitlines():
+        if "flow:" not in raw:
+            continue
+        body = raw.split("flow:", 1)[1].strip()
+        kv = _kv(body)
+        kv["_text"] = body
+        out.append(kv)
+    return out
+
+
+def evaluate_flow(events: list[dict[str, str]], design: Any, *, exited: bool,
+                  relaunched: bool) -> list[VerificationCheck]:
+    """What this game's loop promises, checked against what it did.
+
+    Only checks the design calls for: a game that cannot kill the player is
+    checked for never dying; one with nothing to win is not asked to win."""
+    cat = "game_flow"
+    states = [e for e in events if "state" in e]
+    buttons = [e.get("button") for e in events if "button" in e]
+    starts = [e for e in states if e.get("state") == "playing" and e.get("why") == "start"]
+    checks = [_check("game loop starts", cat, bool(starts),
+                     "" if starts else "no 'flow: state=playing why=start' line",
+                     evidence=[e["_text"] for e in states[:3]])]
+    if not starts:
+        return checks
+    can_die = design.can_die()
+    lost = [e for e in states if e.get("state") == "life_lost"]
+    if not can_die:
+        checks.append(_check("the player cannot die", cat, not lost,
+                             f"{len(lost)} life lost event(s) in a game with no failure"))
+    else:
+        checks.append(_check("health reaching zero costs a life", cat, bool(lost),
+                             f"{len(lost)} life lost event(s)",
+                             evidence=[e["_text"] for e in lost[:3]]))
+        lives = design.lives.count
+        if lives is None or lives > 1:
+            respawned = [e for e in states if e.get("state") == "respawning"]
+            checks.append(_check("the player respawns", cat, bool(respawned),
+                                 f"{len(respawned)} respawn(s)",
+                                 evidence=[e["_text"] for e in events
+                                           if e["_text"].startswith("respawned")][:3]))
+        if lives is not None:
+            over = [e for e in states if e.get("state") == "game_over"]
+            ok = bool(over) and over[0].get("lives") == "0"
+            checks.append(_check("Game Over follows the last life", cat, ok,
+                                 f"game over events: {[e['_text'] for e in over[:2]]}"))
+            checks.append(_check("Try Again restarts the game", cat,
+                                 "try_again" in buttons and len(starts) >= 2,
+                                 f"buttons {buttons}; {len(starts)} start(s)"))
+            if len(starts) >= 2:
+                fresh = starts[1].get("lives") == str(lives)
+                checks.append(_check("a restart resets lives", cat, fresh,
+                                     f"attempt 2 started with lives={starts[1].get('lives')} "
+                                     f"(want {lives})"))
+    can_win = design.victory.kind.value != "none" and bool(design.objectives)
+    if can_win:
+        won = [e for e in states if e.get("state") in ("victory", "completed")]
+        checks.append(_check("winning ends on the victory screen", cat, bool(won),
+                             f"{len(won)} win(s)", evidence=[e["_text"] for e in won[:2]]))
+        if won:
+            checks.append(_check("Play Again restarts the game", cat,
+                                 "play_again" in buttons and len(starts) >= (3 if can_die and design.lives.count is not None else 2),
+                                 f"buttons {buttons}; {len(starts)} start(s)"))
+    left = "leave_game" in buttons
+    checks.append(_check("Leave Game ends the app", cat, left and exited,
+                         ("" if left else "Leave Game was never chosen; ")
+                         + ("the process exited" if exited else "the process was still running")))
+    if exited:
+        checks.append(_check("the app launches again after leaving", cat, relaunched,
+                             "" if relaunched else "the second launch did not start: the "
+                             "activity was not finished cleanly"))
+    return checks
+
+
+# ---------------------------------------------------------------------------
 # Stage
 # ---------------------------------------------------------------------------
 
@@ -605,6 +736,11 @@ def run_with_adb(ctx: PipelineContext, runner: Optional[AdbRunner] = None,
     crash_text = ""
     alive = False
     stop_stream: Optional[Callable[[], str]] = None
+    design = ctx.game_design or ctx.store.load_game_design(ctx.project_id)
+    flow_log_file = log_file.with_name(log_file.stem + "_flow.log")
+    flow_text = ""
+    flow_exited = False
+    flow_relaunched = False
     pin = getattr(ctx.settings, "quest_verify_store_pin", None)
 
     def scriptable(enable: bool) -> None:
@@ -650,29 +786,32 @@ def run_with_adb(ctx: PipelineContext, runner: Optional[AdbRunner] = None,
         # Guardian "headset taken off" interstitial times out in window
         # placement and is silently dropped, so let the interstitial clear
         # first and retry with a wake-up between attempts.
-        sleep(LAUNCH_SETTLE_S)
-        launched = False
-        for attempt in range(LAUNCH_ATTEMPTS):
-            if attempt:
-                ctx.emit(stage, "info", f"launch attempt {attempt + 1}: the game "
-                         "did not start (Guardian interstitial?); retrying")
-                adb_s(["shell", "am", "broadcast", "-a",
-                       "com.oculus.vrpowermanager.prox_close"])
-                adb_s(["shell", "input", "keyevent", "KEYCODE_WAKEUP"])
-                adb_s(["shell", "input", "keyevent", "KEYCODE_BACK"])
-                sleep(LAUNCH_SETTLE_S)
-            rc, out = adb_s(["shell", "am", "start", "-n",
-                             f"{package}/android.app.NativeActivity"])
-            if rc != 0 or "Error" in out:
-                raise RuntimeError(f"could not launch {package}: {out.strip()[:300]}")
-            for _ in range(LAUNCH_POLL_S):
-                sleep(1.0)
-                rc_p, pid_p = adb_s(["shell", "pidof", package])
-                if rc_p == 0 and pid_p.strip():
-                    launched = True
-                    break
-            if launched:
-                break
+        def running() -> bool:
+            rc_p, pid_p = adb_s(["shell", "pidof", package])
+            return rc_p == 0 and bool(pid_p.strip())
+
+        def start_game() -> bool:
+            sleep(LAUNCH_SETTLE_S)
+            for attempt in range(LAUNCH_ATTEMPTS):
+                if attempt:
+                    ctx.emit(stage, "info", f"launch attempt {attempt + 1}: the game "
+                             "did not start (Guardian interstitial?); retrying")
+                    adb_s(["shell", "am", "broadcast", "-a",
+                           "com.oculus.vrpowermanager.prox_close"])
+                    adb_s(["shell", "input", "keyevent", "KEYCODE_WAKEUP"])
+                    adb_s(["shell", "input", "keyevent", "KEYCODE_BACK"])
+                    sleep(LAUNCH_SETTLE_S)
+                rc_s, out_s = adb_s(["shell", "am", "start", "-n",
+                                     f"{package}/android.app.NativeActivity"])
+                if rc_s != 0 or "Error" in out_s:
+                    raise RuntimeError(f"could not launch {package}: {out_s.strip()[:300]}")
+                for _ in range(LAUNCH_POLL_S):
+                    sleep(1.0)
+                    if running():
+                        return True
+            return False
+
+        launched = start_game()
         if not launched:
             if not still_there():
                 raise DeviceGone("the headset disconnected while launching the game")
@@ -690,14 +829,49 @@ def run_with_adb(ctx: PipelineContext, runner: Optional[AdbRunner] = None,
             waited += step
             if not still_there():
                 raise DeviceGone("the headset disconnected while the game was running")
-        rc, pid = adb_s(["shell", "pidof", package])
-        alive = rc == 0 and pid.strip() != ""
+        alive = running()
         if stop_stream is not None:
             log_text = stop_stream()
             stop_stream = None
         else:
             _, log_text = adb_s(["logcat", "-d", "-v", "time", "-s", "ptv:*"], 60)
         _, crash_text = adb_s(["logcat", "-b", "crash", "-d"], 30)
+
+        # --- Second pass: the game loop -------------------------------
+        # The player can die, the engine clicks the end-screen buttons, and
+        # the game is expected to END ITSELF through Leave Game -- then it
+        # must launch again (a Quest app that returned from android_main
+        # without finishing its activity does not).
+        if design is not None:
+            adb_s(["shell", "am", "force-stop", package])
+            adb_s(["shell", "setprop", "debug.ptv.verify_flow", "1"])
+            adb_s(["logcat", "-c"])
+            if streamer is not None:
+                stop_stream = streamer(["-s", serial, "logcat", "-v", "time", "-s", "ptv:*"],
+                                       flow_log_file)
+            flow_budget = flow_capture_seconds(design)
+            ctx.emit(stage, "info", f"game-loop pass: up to {flow_budget:.0f} s")
+            if start_game():
+                waited = 0.0
+                while waited < flow_budget:
+                    ctx.raise_if_cancelled()
+                    sleep(5.0)
+                    waited += 5.0
+                    if not still_there():
+                        raise DeviceGone("the headset disconnected during the game-loop pass")
+                    if not running():
+                        flow_exited = True
+                        break
+            if stop_stream is not None:
+                flow_text = stop_stream()
+                stop_stream = None
+            else:
+                _, flow_text = adb_s(["logcat", "-d", "-v", "time", "-s", "ptv:*"], 60)
+            adb_s(["shell", "setprop", "debug.ptv.verify_flow", "0"])
+            if flow_exited:
+                adb_s(["shell", "setprop", "debug.ptv.verify", "0"])
+                flow_relaunched = start_game()
+                adb_s(["shell", "am", "force-stop", package])
     except DeviceGone as exc:
         return finish_skipped(str(exc), device_serial=serial, package=package)
     finally:
@@ -709,6 +883,7 @@ def run_with_adb(ctx: PipelineContext, runner: Optional[AdbRunner] = None,
         # Always leave the headset as it was found.
         for args in (["shell", "am", "force-stop", package],
                      ["shell", "setprop", "debug.ptv.verify", "0"],
+                     ["shell", "setprop", "debug.ptv.verify_flow", "0"],
                      ["shell", "setprop", "debug.oculus.guardian_pause", prev_guardian],
                      ["shell", "am", "broadcast", "-a",
                       "com.oculus.vrpowermanager.automation_disable"]):
@@ -727,6 +902,11 @@ def run_with_adb(ctx: PipelineContext, runner: Optional[AdbRunner] = None,
     tel = parse_telemetry(log_text)
     checks, npc_summary = evaluate(tel, npc_plan, scene, process_alive=alive,
                                    crash_text=crash_text)
+    if design is not None:
+        if flow_text and not (flow_log_file.exists() and flow_log_file.stat().st_size):
+            flow_log_file.write_text(flow_text, encoding="utf-8")
+        checks.extend(evaluate_flow(parse_flow(flow_text), design,
+                                    exited=flow_exited, relaunched=flow_relaunched))
     failed = [c for c in checks if c.outcome == CheckOutcome.failed]
     status = VerificationStatus.failed if failed else VerificationStatus.passed
     reason = (f"{len(failed)} of {len(checks)} check(s) failed: "

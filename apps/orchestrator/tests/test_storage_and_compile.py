@@ -1033,14 +1033,60 @@ def test_animation_map_reaches_scene_json_through_normalization():
         "joint_count": 65,
         "animations": {"idle": "Idle", "walk": "Walk_01"},
     }
-    out = _mesh_render_fields(norm, 1.6, None)
+    out = _mesh_render_fields(norm, 1.6, _FRAMED)
 
     assert out["skinned"] is True
     assert out["animations"] == {"idle": "Idle", "walk": "Walk_01"}
 
     # An un-animated asset must not gain an empty map -- the runtime treats
     # absence as "no contract" and falls back to exact-name matching.
-    assert "animations" not in _mesh_render_fields({"skinned": True}, 1.0, None)
+    assert "animations" not in _mesh_render_fields({"skinned": True}, 1.0, _FRAMED)
+
+
+# A Tripo-style biped frame: origin at the feet, 1.8 units tall, facing +X,
+# T-posed so its arm span (2.4) beats its height.
+_FRAMED = {
+    "frame": {
+        "status": "measured",
+        "method": "shoulders+toes",
+        "sole_y": 0.0,
+        "height": 1.8,
+        "yaw_offset_rad": 1.570796,
+        "raw_longest_axis": 2.4,
+    }
+}
+
+
+def test_framed_character_stands_on_its_soles_and_scales_by_height():
+    """Tripo models (origin at the feet) used to get no foot offset at all,
+    because it was only emitted when the bind sole was BELOW the origin, and
+    the runtime then floated them by half their height. A framed character
+    always gets the contract: half its height, its yaw correction, and a
+    height-based scale."""
+
+    from ptv_orchestrator.pipeline.stage_scene_compile import _mesh_render_fields
+
+    norm = {"skinned": True, "lod0_longest_axis": 2.4, "bounds_radius_m": 0.5}
+    out = _mesh_render_fields(norm, 1.9, _FRAMED, asset_id="goblin")
+    assert out["foot_offset_m"] == pytest.approx(0.95)
+    assert out["scale_basis"] == "height"
+    assert out["unit_scale"] == pytest.approx(1.9 / 1.8)
+    assert out["model_yaw_offset_rad"] == pytest.approx(1.570796)
+    assert out["model_frame"]["height"] == pytest.approx(1.8)
+    # The culling radius follows the height-based scale, not the arm span.
+    assert out["bounds_radius_m"] == pytest.approx(0.5 * 2.4 * 1.9 / 1.8)
+
+
+def test_skinned_character_without_a_frame_fails_scene_compile():
+    from ptv_orchestrator.pipeline.stage_scene_compile import (
+        ModelFrameContractError,
+        _mesh_render_fields,
+    )
+
+    with pytest.raises(ModelFrameContractError, match="goblin"):
+        _mesh_render_fields({"skinned": True}, 1.8, {"sockets": {}}, asset_id="goblin")
+    # A static prop needs no frame.
+    assert "foot_offset_m" not in _mesh_render_fields({"lod0_longest_axis": 1.0}, 0.3)
 
 
 def test_animated_agents_get_their_own_budget_per_tier():
@@ -1134,7 +1180,7 @@ def test_locomotion_clips_get_a_reference_speed_scaled_by_height():
             "attack": "Slash",
         },
     }
-    out = _mesh_render_fields(norm, 1.8, None)
+    out = _mesh_render_fields(norm, 1.8, _FRAMED)
     speeds = out["animation_speeds"]
 
     # 1.8 m biped: ~1.4 m/s walking, ~4.0 m/s running.
@@ -1147,12 +1193,12 @@ def test_locomotion_clips_get_a_reference_speed_scaled_by_height():
     assert "attack" not in speeds
 
     # Half-height creature, half the stride.
-    small = _mesh_render_fields(norm, 0.9, None)["animation_speeds"]
+    small = _mesh_render_fields(norm, 0.9, _FRAMED)["animation_speeds"]
     assert small["walk"] == pytest.approx(speeds["walk"] / 2.0, abs=1e-3)
 
     # No height means no honest estimate, so emit nothing rather than a wrong
     # divisor.
-    assert "animation_speeds" not in _mesh_render_fields(norm, 0.0, None)
+    assert "animation_speeds" not in _mesh_render_fields(norm, 0.0, _FRAMED)
 
 
 def test_normalization_picks_up_the_animation_report(tmp_path: Path):

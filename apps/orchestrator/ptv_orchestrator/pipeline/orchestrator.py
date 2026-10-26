@@ -36,6 +36,7 @@ from . import (
     stage_cmake,
     stage_code_generation,
     stage_engine_promotion,
+    stage_game_design,
     stage_mechanic_plan,
     stage_quest_build,
     stage_quest_verify,
@@ -66,6 +67,10 @@ _SHARED_STAGES: list[tuple[ProjectStage, StageFn]] = [
     # before mechanic/scene planning (both need to know who the combatants
     # are).
     (ProjectStage.npc_plan, stage_npc_plan.run),
+    # The loop's rules: after npc_plan (who can hurt the player, which waves
+    # exist), before mechanic_plan (which maps the loop onto
+    # builtin.game_flow instead of planning a generated one).
+    (ProjectStage.game_design, stage_game_design.run),
     (ProjectStage.mechanic_plan, stage_mechanic_plan.run),
     (ProjectStage.scene_spec, stage_scene_spec.run),
     (ProjectStage.reference_images, stage_reference_images.run),

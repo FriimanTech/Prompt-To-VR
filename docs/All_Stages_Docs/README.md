@@ -10,7 +10,7 @@ Authoritative pipeline order: [`apps/orchestrator/ptv_orchestrator/pipeline/orch
 flowchart TD
   subgraph shared [Stages 1-15 shared]
     S1[1 build_spec] --> S2[2 asset_manifest] --> S3[3 npc_plan]
-    S3 --> S4[4 mechanic_plan] --> S5[5 scene_spec]
+    S3 --> S3b[3b game_design] --> S4[4 mechanic_plan] --> S5[5 scene_spec]
     S5 --> S6[6 reference_images] --> S7[7 tripo_models]
     S7 --> S8[8 asset_rigging] --> S9[9 asset_animation]
     S9 --> S10[10 asset_normalization] --> S11[11 asset_contract]
@@ -32,6 +32,7 @@ Stages **1–15** and **17** are identical for PC VR and Quest. Only **stage 16*
 | 1 | `build_spec` | Prompt → structured BuildSpec | [PC](PC_VR_Stages/01_build_spec/README.md) · [Quest](Quest_Stages/01_build_spec/README.md) |
 | 2 | `asset_manifest` | Plan 3D objects (not environment) | [PC](PC_VR_Stages/02_asset_manifest/README.md) · [Quest](Quest_Stages/02_asset_manifest/README.md) |
 | 3 | `npc_plan` | NPC roles, factions, animate vs slide | [PC](PC_VR_Stages/03_npc_plan/README.md) · [Quest](Quest_Stages/03_npc_plan/README.md) |
+| 3b | `game_design` | Health, lives, respawn, objectives, end screens | [PC](PC_VR_Stages/03b_game_design/README.md) · [Quest](Quest_Stages/03b_game_design/README.md) |
 | 4 | `mechanic_plan` | Reuse-first mechanics + CodeTask DAG | [PC](PC_VR_Stages/04_mechanic_plan/README.md) · [Quest](Quest_Stages/04_mechanic_plan/README.md) |
 | 5 | `scene_spec` | Wire entities, mechanics, spawns per scene | [PC](PC_VR_Stages/05_scene_spec/README.md) · [Quest](Quest_Stages/05_scene_spec/README.md) |
 | 6 | `reference_images` | Gemini reference images for Tripo | [PC](PC_VR_Stages/06_reference_images/README.md) · [Quest](Quest_Stages/06_reference_images/README.md) |
@@ -93,6 +94,7 @@ All_Stages_Docs/
 | Codegen board + DAG | [`docs/codegen-agents.md`](../codegen-agents.md) |
 | World builder | [`docs/world-generation.md`](../world-generation.md) |
 | NPC runtime | [`docs/npc-and-ai.md`](../npc-and-ai.md) |
+| Game loop (lives, endings, menus) | [`docs/game-flow.md`](../game-flow.md) |
 | Navigation | [`docs/navigation.md`](../navigation.md) |
 | Rendering / LOD budgets | [`docs/rendering.md`](../rendering.md) |
 | Engine catalog growth | [`docs/engine-growth.md`](../engine-growth.md) |

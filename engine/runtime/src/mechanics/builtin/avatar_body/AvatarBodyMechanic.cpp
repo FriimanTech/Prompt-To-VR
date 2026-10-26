@@ -47,6 +47,7 @@
 #include "HeightCalibration.h"
 #include "NeckDrift.h"
 #include "ptv/api/BodySlots.h"
+#include "ptv/api/Facing.h"
 #include "ptv/core/Logger.h"
 
 #include <glm/gtc/matrix_transform.hpp>
@@ -117,7 +118,7 @@ float wrap_pi(float a) {
 }
 
 /** Yaw of a forward vector: R_y(yaw) * (0,0,-1) == forward. */
-float yaw_of(const Vec3& fwd) { return std::atan2(-fwd.x, -fwd.z); }
+float yaw_of(const Vec3& fwd) { return yaw_from_forward(fwd); }
 
 Quat rot_of(const Mat4& m) {
     Mat3 r(m);
@@ -315,9 +316,22 @@ private:
                     glm::cross(Vec3(0.0f, 1.0f, 0.0f), glm::normalize(right)));
             }
         }
-        // Rotation that turns the model's forward onto -Z.
+        // Rotation that turns the model's forward onto -Z. With a measured
+        // model frame the loader has already done that (it is folded into
+        // the root joints), so this comes out as identity and serves as a
+        // cross-check of the pipeline's measurement.
         facing_ = glm::angleAxis(-yaw_of(fwd_model), Vec3(0.0f, 1.0f, 0.0f));
         forward_model_ = fwd_model;
+        if (world.has<CMesh>(avatar) && world.get<CMesh>(avatar).has_model_frame) {
+            const float residual_deg = std::abs(glm::degrees(yaw_of(fwd_model)));
+            if (residual_deg > 10.0f) {
+                PTV_WARN(
+                    "avatar_body: shoulders say the framed avatar still faces "
+                    "{:.0f} deg off -Z; asset_contract's forward measurement "
+                    "and the rig disagree. Using the shoulders.",
+                    residual_deg);
+            }
+        }
 
         // --- Gait speeds: the clips' own, unless the binding set them ------
         if (world.has<CMesh>(avatar)) {

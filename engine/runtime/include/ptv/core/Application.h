@@ -81,6 +81,10 @@ private:
     class TransitionService;
     class UiService;
     class ComfortService;
+    class AppService;
+    class TextDrawService;
+    friend class AppService;
+    friend class TextDrawService;
     friend class ComfortService;
     friend class LocomotionService;
     friend class PhysicsAccessService;
@@ -235,6 +239,14 @@ private:
     bool request_scene_transition(const std::string& scene_id,
                                   const std::string& spawn_point_id);
 
+    /** Ask to reload the current scene at the next frame boundary (Try Again
+     *  / Play Again). ``fresh`` drops every scene's saved deltas. */
+    bool request_scene_restart(bool fresh);
+
+    /** Leave Game: ask the XR runtime to end the session; the frame loop
+     *  stops when it has. */
+    void request_exit();
+
     /** Perform a requested transition, if there is one. Called once per frame
      *  from outside every entity loop. */
     void apply_pending_transition();
@@ -256,7 +268,8 @@ private:
      *  player body, mechanic instances, the render environment -- is rebuilt,
      *  because all of it describes the scene being replaced. */
     bool load_scene_at(const std::string& path,
-                       const std::string& spawn_point_id);
+                       const std::string& spawn_point_id,
+                       bool fresh = false);
 
     /** Put the rig on a named spawn point, or on the scene's default. */
     void place_player_at_spawn(const std::string& spawn_point_id);
@@ -468,8 +481,30 @@ private:
         bool active{false};
         std::string scene_id;
         std::string spawn_point_id;
+        /** Reload the CURRENT scene (Try Again / Play Again). */
+        bool restart{false};
+        /** ...without restoring what the player changed, discarding every
+         *  scene's saved deltas. */
+        bool fresh{false};
     };
     PendingTransition pending_transition_{};
+    /** The game loop's shared state (ctx.game), written by builtin.game_flow.
+     *  ``attempts`` survives a restart; everything else starts over. */
+    GameFlowBoard game_flow_board_{};
+    // Leave Game: the OpenXR session is asked to exit and the frame loop
+    // stops when it does (or after a timeout, if the runtime never answers).
+    bool exit_requested_{false};
+    bool exit_sent_{false};
+    float exit_wait_s_{0.0f};
+    double uptime_s_{0.0};
+    // IApp::request_fade: strongest request this frame, and what is drawn.
+    float fade_request_{0.0f};
+    float fade_level_{0.0f};
+    // Verification of the game flow (``debug.ptv.verify_flow`` = 1): the
+    // player is NOT protected, and builtin.game_flow scripts its own
+    // end-screen clicks so one unattended run walks death, Game Over, Try
+    // Again, victory, Play Again and Leave Game.
+    bool verify_flow_{false};
     /** Scenes folded into this one, by scene id.
      *
      *  Tracked so a mechanic can ask whether an interior is already there
@@ -616,6 +651,8 @@ private:
     std::unique_ptr<TransitionService> transition_svc_;
     std::unique_ptr<UiService> ui_svc_;
     std::unique_ptr<ComfortService> comfort_svc_;
+    std::unique_ptr<AppService> app_svc_;
+    std::unique_ptr<TextDrawService> text_svc_;
     MechanicContext mech_ctx_{};
 
     // Comfort vignette state, per ComfortChannel.

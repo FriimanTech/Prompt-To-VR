@@ -27,7 +27,19 @@ from typing import Mapping
 
 #: Bumped whenever a rule below changes what counts as valid. The codegen
 #: board stores it and re-checks every finished task when it moves.
-API_CONTRACT_VERSION = 3
+API_CONTRACT_VERSION = 4
+
+# --- Game loop (projects with a game_design.json) ---------------------------
+# builtin.game_flow owns lives, respawn, restart and the end screens. A task
+# that keeps its own copy builds a second loop that fights the engine's -- the
+# shape of the humans-vs-aliens failure, where the generated run flow froze
+# the arena at zero health.
+_PRIVATE_LIVES = re.compile(
+    r"\b(?:int|unsigned|std::uint32_t|std::int32_t|uint32_t|int32_t)\s+"
+    r"(?:\w+_)?(?:lives|lives_left|lives_remaining|remaining_lives)(?:_)?\s*[{=;]")
+_PRIVATE_RESPAWN = re.compile(r"\b(?:void|bool)\s+\w*respawn\w*\s*\(")
+_TELEPORTS = re.compile(r"\bteleport_to\s*\(|\bplace_player\s*\(")
+_RESTARTS = re.compile(r"\brestart_current\s*\(|\brevive\s*\(")
 
 _REGISTER_BEHAVIOUR = re.compile(r"\bPTV_REGISTER_BEHAVIOUR\s*\(")
 # The context-taking on_tick: ``on_tick(World&, uint32_t, float, const
@@ -54,14 +66,33 @@ _OFFERED_ENTRY = re.compile(
 )
 
 
-def lint_task_sources(kind: str, files: Mapping[str, str]) -> list[str]:
+def lint_task_sources(kind: str, files: Mapping[str, str], *,
+                      game_flow: bool = False) -> list[str]:
     """Problems with ONE task's files, phrased for the agent that wrote them.
 
     ``kind`` is the CodeTask kind (``ai``, ``mechanic``, ``dialogue``);
-    ``files`` maps file name -> contents."""
+    ``files`` maps file name -> contents. ``game_flow`` is true when the
+    project has a game design, i.e. ``builtin.game_flow`` runs the loop."""
 
     problems: list[str] = []
     joined = "\n".join(files.values())
+
+    if game_flow:
+        if _PRIVATE_LIVES.search(joined):
+            problems.append(
+                "keeps its own lives counter. builtin.game_flow owns lives, "
+                "respawn and Game Over in this game; read ctx.game->lives() "
+                "and ctx.game->state() instead.")
+        if _PRIVATE_RESPAWN.search(joined) and _TELEPORTS.search(joined):
+            problems.append(
+                "implements a respawn of its own (a *respawn* function that "
+                "teleports the player). builtin.game_flow respawns the player "
+                "under a fade with invulnerability; remove it.")
+        if _RESTARTS.search(joined):
+            problems.append(
+                "restarts the scene or revives the player itself. Try Again / "
+                "Play Again / respawn are builtin.game_flow's; a game-specific "
+                "loss is ctx.game->fail(\"reason\"), a win ctx.game->complete(id).")
 
     if _REGISTER_BEHAVIOUR.search(joined) and not _CTX_ON_TICK.search(joined):
         problems.append(
@@ -102,11 +133,12 @@ def lint_task_sources(kind: str, files: Mapping[str, str]) -> list[str]:
     return problems
 
 
-def stale_contract_reasons(files: Mapping[str, str]) -> list[str]:
+def stale_contract_reasons(files: Mapping[str, str], *,
+                           game_flow: bool = False) -> list[str]:
     """Why already-generated code no longer satisfies the contract (empty =
     still fine). Same rules as :func:`lint_task_sources`."""
 
-    return lint_task_sources("", files)
+    return lint_task_sources("", files, game_flow=game_flow)
 
 
 def find_dead_contracts(task_sources: Mapping[str, Mapping[str, str]]) -> list[str]:

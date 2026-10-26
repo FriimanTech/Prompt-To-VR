@@ -1,8 +1,10 @@
 #pragma once
 
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 
+#include "ptv/api/GameFlow.h"
 #include "ptv/api/InteractiveState.h"
 #include "ptv/math/Math.h"
 
@@ -368,6 +370,38 @@ public:
                         const Vec4& color) = 0;
 };
 
+/** How a line of world-space text is placed relative to its anchor. */
+enum class TextAlign : int { Left = 0, Center = 1, Right = 2 };
+
+/**
+ * World-space text for the current frame.
+ *
+ * Signed-distance-field glyphs from the engine's bundled font, drawn
+ * unlit and alpha-tested so they stay crisp at any distance on both
+ * Quest and PC VR. Like IDebugDraw, a call lasts one frame: call it every
+ * frame while the text should show.
+ *
+ * Size text by the ANGLE it subtends, not by metres: readable VR body text
+ * is roughly 1.3-1.5 degrees tall. ``height_for_angle`` turns a distance and
+ * an angle into the ``height_m`` to pass.
+ */
+class ITextDraw {
+public:
+    virtual ~ITextDraw() = default;
+    /** Draw ``utf8`` (printable ASCII; anything else shows as '?') with its
+     *  first baseline at ``position``, lines split on '\n',
+     *  facing along ``rotation``'s +Z (so a panel facing the player passes
+     *  the panel's own rotation). ``height_m`` is the cap height. */
+    virtual void text(const char* utf8, const Vec3& position,
+                      const Quat& rotation, float height_m, const Vec4& color,
+                      TextAlign align = TextAlign::Center) = 0;
+    /** Width in metres ``utf8`` would occupy at ``height_m``. */
+    virtual float measure(const char* utf8, float height_m) const = 0;
+    static float height_for_angle(float distance_m, float degrees) {
+        return 2.0f * distance_m * std::tan(degrees * 0.00872664626f);
+    }
+};
+
 /**
  * Which entity each hand is holding.
  *
@@ -718,6 +752,18 @@ public:
 
     /** Kill outright, skipping damage and invulnerability. */
     virtual void kill(std::uint32_t entity) = 0;
+
+    /** Bring a dead (or dying) entity back with ``health`` (<= 0 = full) and
+     *  ``invulnerable_s`` of protection. This is how the player respawns;
+     *  NPCs that already finished dying have been removed and cannot be.
+     *  Returns false when the entity has no health. Normally only
+     *  ``builtin.game_flow`` calls this. */
+    virtual bool revive(std::uint32_t entity, float health, float invulnerable_s) {
+        (void)entity;
+        (void)health;
+        (void)invulnerable_s;
+        return false;
+    }
 
     /** Faction id, or "" when the entity has no faction. */
     virtual const char* faction(std::uint32_t entity) const = 0;
@@ -1307,6 +1353,15 @@ public:
     /** Which row the pointer is on, or -1. Lets a caller preview a selection
      *  without waiting for the click. */
     virtual int highlighted_row(const char* panel_id) const = 0;
+
+    /** Heading text drawn above the rows ("Game Over") and a smaller line
+     *  under it ("Survived 2:41"). Row labels are drawn on the rows. */
+    virtual void set_title(const char* panel_id, const char* title,
+                           const char* subtitle) {
+        (void)panel_id;
+        (void)title;
+        (void)subtitle;
+    }
 };
 
 /**
@@ -1350,6 +1405,18 @@ public:
 
     /** Is a transition already pending this frame? */
     virtual bool transition_pending() const = 0;
+
+    /** Reload the scene the player is in, at a frame boundary, arriving at
+     *  its default spawn.
+     *
+     *  ``fresh`` = a new attempt: what the player changed (doors, pickups,
+     *  loadout) is NOT restored, every scene's saved deltas are discarded,
+     *  and the encounter starts over -- this is Try Again / Play Again.
+     *  ``fresh = false`` reloads with the scene's remembered state. */
+    virtual bool restart_current(bool fresh) {
+        (void)fresh;
+        return false;
+    }
 
     /** Fold another scene INSIDE this one, mounted on ``host``'s ``anchor``
      *  and shrunk so its longest horizontal extent fits ``fit_extent_m``.
@@ -1527,6 +1594,14 @@ struct MechanicContext {
     /** The scene's NPC waves (see IEncounters). Always set by the engine;
      *  ``configured()`` is false when the scene has no encounter plan. */
     IEncounters* encounters{nullptr};
+    /** The game loop (see ptv/api/GameFlow.h). ``configured()`` is false in a
+     *  scene with no ``builtin.game_flow``; ``gameplay_active()`` is then
+     *  always true. */
+    IGameFlow* game{nullptr};
+    /** Quit the app (Leave Game), platform, uptime. */
+    IApp* app{nullptr};
+    /** World-space text (see ITextDraw). */
+    ITextDraw* text{nullptr};
 };
 
 }  // namespace ptv

@@ -80,6 +80,18 @@ orchestrator and a reusable Vulkan + OpenXR engine core.
    inventions: an enemy from one CodeTask has to be able to hurt a player
    set up by another. NPC waves are run by `builtin.encounter_director`
    and read through `ctx.encounters`. See `docs/npc-and-ai.md`.
+   The GAME LOOP is the engine's too: `builtin.game_flow` runs
+   `game_design.json` (player health reaching zero, lives, respawn under a
+   fade, objectives, Game Over / victory / completion screens, pause menu,
+   Try Again / Play Again via a fresh scene reload, Leave Game via
+   `xrRequestExitSession` + `ANativeActivity_finish`), and `builtin.game_hud`
+   shows health / lives / timer / objective on the left wrist. Generated code
+   never keeps lives, respawns, restarts, opens a results screen or quits;
+   it reads `ctx.game` (`gameplay_active()` gates weapons and timers) and
+   reports custom objectives with `add_progress` / `complete` / `fail`.
+   World-space text is `ctx.text` (SDF, bundled OFL font). Facing has one
+   formula, `ptv/api/Facing.h` (`yaw_from_forward(f) = atan2(-f.x, -f.z)`).
+   See `docs/game-flow.md`.
 6. Generated C++ (`.cpp`, `.h`, `.hpp`) is confined to
    `engine/generated/{mechanics,ai,dialogue,world}/`. It MUST NOT modify the
    renderer, XR session loop, platform layer, memory core, or base ECS.
@@ -175,6 +187,21 @@ orchestrator and a reusable Vulkan + OpenXR engine core.
    type into world-declared `npc_spawn_zones`; `builtin.npc.follow` and
    `builtin.npc.melee_chase` carry per-type stats from the plan. Generated
    code never spawns or pools NPCs; HUDs read `ctx.encounters`.
+2c. Prompt + BuildSpec + NpcPlan + AssetManifest → **GameDesign**
+   (`game_design`, OpenAI Agents SDK agent, `gpt-5.6-sol` @ reasoning
+   `high`, no tools): the rules of the loop -- experience kind, player
+   health, lives, what happens on a lost life, objectives, victory / failure,
+   end screens and their buttons, pause menu, reset policy, HUD -- each
+   decision `explicit` (with the prompt's verbatim quote, checked) or
+   `inferred` (with a rationale); explicit always wins and nothing the game
+   does not need is invented (a book reader has no health). A deterministic
+   validate-and-repair loop (`game_design_rules.py`) guarantees no dead
+   ends: every ending has a screen, every screen a button, something offers
+   Leave Game, attackers imply health, lives imply Game Over with Try Again.
+   Feeds mechanic_plan, world_generation (objective spawn points), codegen
+   and scene_compile, which binds one `ptv_game_director` entity
+   (`builtin.ui_panel` + `builtin.game_flow` + `builtin.game_hud`) and fails
+   if the loop cannot complete in that scene. See `docs/game-flow.md`.
 3. AssetManifest + BuildSpec + NpcPlan → **MechanicPlan** (OpenAI Agents SDK agent,
    `gpt-5.6-sol` @ reasoning `high`, no tools). Each mechanic is classified `builtin`,
    `builtin+config`, `builtin+config_code_edit` (copy a built-in's source and
@@ -263,7 +290,15 @@ orchestrator and a reusable Vulkan + OpenXR engine core.
    `asset_animation.json` entry with `provider: "uthana"` and clip speeds.
 7. Assets **validated** (`asset_normalization`): GLB header/JSON check plus
    scale / collision metadata. This stage does NOT modify geometry.
-7b. **Asset contract** (`asset_contract`): derives each asset's named
+7b. **Asset contract** (`asset_contract`): measures every character's
+   **model frame** (`model_frame.py`: sole = skinned bind-pose bottom,
+   height, forward = up x the shoulder line confirmed by the toes; Tripo
+   rigs stand on their origin and face +X, Uthana's are hips-centred and
+   face +Z) -- scene_compile emits it as `mesh.model_frame`,
+   `foot_offset_m` = half the height and a HEIGHT-based `unit_scale`, the
+   skinned loader folds the pivot into the root joints, and a skinned
+   character without a frame fails scene_compile. It also derives each
+   asset's named
    **sockets** (`muzzle`, `grip`) from its geometry with the deterministic
    `ptv_glb_sockets` tool (principal-axis PCA + mass asymmetry — no model
    calls) and writes `asset_contract.json`. Positions are stored in UNIT
@@ -362,7 +397,13 @@ orchestrator and a reusable Vulkan + OpenXR engine core.
  player cannot die), reads the engine's NPC telemetry and checks only what
  this game's NPC plan asks for -- base checks for every game (including one
  with no NPCs), floor / no-drift checks for stationary NPCs, band checks for
- followers, spawn and close-and-hit checks for enemies. Writes
+ followers, spawn and close-and-hit checks for enemies; drawn feet within
+ 5 cm of the floor and facing within 20 degrees of travel for moving NPCs.
+ With a `game_design.json` it runs a second launch (`debug.ptv.verify_flow`:
+ the player can die and the game loop clicks its own end-screen buttons)
+ and checks the loop the design promises: health 0 costs a life, respawn,
+ Game Over after the last life, Try Again / Play Again restart and reset,
+ victory when winnable, Leave Game exits and the app relaunches. Writes
  `runtime_verification.json`. SKIPPED, never failed, when no headset is
  connected. See `docs/quest-build.md`.
 11. Launch (branches on target_device): `pcvr` runs the `.exe` through OpenXR

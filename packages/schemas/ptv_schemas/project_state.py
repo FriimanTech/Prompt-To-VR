@@ -19,6 +19,11 @@ class ProjectStage(str, Enum):
     # Reads the prompt for what every NPC is supposed to DO, before rigging
     # spends credits on animating something the game wants to slide.
     npc_plan = "npc_plan"
+    # The game loop's rules (health, lives, respawn, objectives, win/lose,
+    # end screens). After npc_plan because who can hurt the player and which
+    # waves exist come from there; before mechanic_plan, which maps the loop
+    # onto builtin.game_flow instead of generating one.
+    game_design = "game_design"
     mechanic_plan = "mechanic_plan"
     scene_spec = "scene_spec"
     reference_images = "reference_images"

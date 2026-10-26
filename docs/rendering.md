@@ -17,8 +17,30 @@ generated C++ — the world already carries everything the renderer needs in
 begin render pass (MSAA color + depth, cleared to the horizon color)
   → sky pass      : fullscreen triangle, gradient + sun, depth test/write off
   → geometry pass : UBO-lit, per-primitive mesh, fog + contact-AO + tonemap
+  → text pass     : SDF glyph quads (alpha-blended, depth-tested, no depth write)
+  → vignette      : comfort tunnel or gameplay fade to black
 end render pass  → MSAA resolve into the swapchain image
 ```
+
+## World-space text
+
+The engine draws text with a signed-distance-field atlas
+(`TextAtlas`, `TextRenderer`): at start-up stb_truetype bakes printable
+ASCII from the bundled font (`engine/runtime/assets/fonts/`,
+Atkinson Hyperlegible Bold, SIL OFL 1.1 -- chosen for legibility) into one
+R8 texture. Each frame `ctx.text->text(...)` submissions are laid out on the
+CPU into world-space quads, uploaded once and drawn after the geometry pass
+for each eye. `text.frag` derives its edge width from `fwidth`, so glyphs
+stay one pixel soft at any distance and do not shimmer as the head moves,
+and draws a dark outline so text reads over a bright sky or a dark wall.
+Size VR text by angle (`ITextDraw::height_for_angle(distance, 1.4)`), not by
+metres. `builtin.ui_panel` draws its title, subtitle and row labels this
+way, and `builtin.game_hud` its numbers. A missing font or shader disables
+text (with a warning), never the game.
+
+`IApp::request_fade(amount)` reuses the vignette pass with a zero clear
+angle to fade the whole view to black; the game loop's respawns and
+restarts use it, independent of the player's comfort-vignette setting.
 
 Both eyes are recorded sequentially into one command buffer and submitted with a
 single fence wait per frame (the existing single-frame-in-flight model).

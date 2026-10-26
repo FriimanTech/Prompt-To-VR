@@ -57,6 +57,7 @@ from .encounters import (
     finalize_encounter_zones,
     place_persistent_npcs,
 )
+from .game_flow_scene import apply_game_flow, game_flow_violations
 from .npc_population import repair_npc_plan
 from .gameplay_relocation import (
     relocate_gameplay_layer,
@@ -150,6 +151,14 @@ class EquipSlotContractError(RuntimeError):
     runtime symptom is an item that simply refuses to holster, with no error
     anywhere.
     """
+
+
+class GameFlowContractError(RuntimeError):
+    """The game design's loop cannot complete in a compiled scene."""
+
+
+class ModelFrameContractError(RuntimeError):
+    """A skinned character reached scene_compile without a measured frame."""
 
 
 class MissingNpcError(RuntimeError):
@@ -403,7 +412,9 @@ def _default_entity_for_asset(
         "glb_path": glb_path,
         "target_scale_meters": asset.target_scale_meters,
         "collision_shape": asset.collision_shape,
-        **_mesh_render_fields(norm or {}, asset.target_scale_meters, contract),
+        **_mesh_render_fields(
+            norm or {}, asset.target_scale_meters, contract, asset_id=asset.id
+        ),
     }
     transform_identity = {
         "position": [0.0, 0.0, 0.0],
@@ -586,6 +597,8 @@ def _mesh_render_fields(
     norm: dict[str, Any],
     target_scale_meters: float,
     contract: dict[str, Any] | None = None,
+    *,
+    asset_id: str = "",
 ) -> dict[str, Any]:
     """Per-mesh metadata from ``asset_optimization`` and ``asset_contract``.
 
@@ -646,18 +659,51 @@ def _mesh_render_fields(
                     speeds[str(key)] = round(float(mps), 4)
         if speeds:
             out["animation_speeds"] = speeds
-    # How far below the origin the soles are, at the asset's in-scene size,
-    # so a grounded character stands ON the floor even when its mesh is not
-    # vertically symmetric about the origin.
-    sole = norm.get("bind_sole_y")
-    if norm.get("skinned") and sole is not None and float(sole) < 0.0:
-        scale = out.get("unit_scale")
-        if scale is None:
-            longest = float(norm.get("lod0_longest_axis") or 0.0)
-            scale = float(target_scale_meters) / longest if longest > 1e-6 else None
-        if scale:
-            out["foot_offset_m"] = round(-float(sole) * float(scale), 4)
-    sockets = _sockets_in_meters(contract, target_scale_meters)
+    # The character's measured model frame (asset_contract). The runtime
+    # pivots the model so its soles sit ``height / 2`` below the entity
+    # origin -- the centre of its capsule -- and its face points down -Z,
+    # whatever the source put where. So ``foot_offset_m`` is ALWAYS half the
+    # in-scene height for a framed character: it is never derived from the
+    # sign of the bind-pose sole, which is what used to leave Tripo models
+    # (origin at the feet, sole 0) with no offset and a half-height guess.
+    frame = (contract or {}).get("frame") if contract else None
+    framed = (
+        isinstance(frame, dict)
+        and frame.get("status") not in (None, "failed")
+        and float(frame.get("height") or 0.0) > 1e-6
+    )
+    socket_scale = float(target_scale_meters)
+    if framed:
+        height_raw = float(frame["height"])
+        target = float(target_scale_meters)
+        # A character's target scale is its HEIGHT. Scaling by the longest
+        # axis shrinks anything whose arm span or tail beats its height.
+        out["scale_basis"] = "height"
+        out["unit_scale"] = target / height_raw
+        out["foot_offset_m"] = round(0.5 * target, 4)
+        out["model_yaw_offset_rad"] = round(float(frame.get("yaw_offset_rad") or 0.0), 6)
+        out["model_frame"] = {
+            "sole_y": float(frame.get("sole_y") or 0.0),
+            "height": height_raw,
+            "yaw_offset_rad": out["model_yaw_offset_rad"],
+            "method": str(frame.get("method") or ""),
+        }
+        if out.get("bounds_radius_m"):
+            longest_raw = float(frame.get("raw_longest_axis") or height_raw)
+            out["bounds_radius_m"] = (
+                float(norm["bounds_radius_m"]) * longest_raw * target / height_raw
+            )
+        longest_raw = float(frame.get("raw_longest_axis") or 0.0)
+        if longest_raw > 1e-6:
+            socket_scale = longest_raw * target / height_raw
+    elif norm.get("skinned"):
+        raise ModelFrameContractError(
+            f"skinned asset '{asset_id}' has no measured model frame in"
+            " asset_contract.json;"
+            " re-run asset_contract (it measures the sole, height and forward"
+            " axis the runtime needs to stand and face the character)"
+        )
+    sockets = _sockets_in_meters(contract, socket_scale)
     if sockets:
         out["sockets"] = sockets
     return out
@@ -834,7 +880,8 @@ def compile_scene_json(
                     asset.collision_shape if asset is not None else "aabb"
                 ),
                 **_mesh_render_fields(
-                    norm, scale_m, contracts.get(e.mesh.asset_id)
+                    norm, scale_m, contracts.get(e.mesh.asset_id),
+                    asset_id=e.mesh.asset_id,
                 ),
             }
             referenced_asset_ids.add(e.mesh.asset_id)
@@ -1203,7 +1250,9 @@ def _repoint_world_meshes_to_lods(
         if norm.get("lod_paths"):
             new_mesh["glb_path"] = norm["glb_path"]
             new_mesh.update(
-                _mesh_render_fields(norm, scale_m, (contracts or {}).get(asset_id))
+                _mesh_render_fields(
+                    norm, scale_m, (contracts or {}).get(asset_id), asset_id=asset_id
+                )
             )
         merged["mesh"] = new_mesh
         out.append(merged)
@@ -1584,6 +1633,9 @@ def run(ctx: PipelineContext) -> StageResult:
         npc_plan = ctx.npc_plan or ctx.store.load_npc_plan(ctx.project_id)
     except Exception:  # noqa: BLE001 - projects from before the NPC plan
         npc_plan = None
+    # None for projects from before the game_design stage: they keep the run
+    # flow their own generated code provides.
+    game_design = ctx.game_design or ctx.store.load_game_design(ctx.project_id)
     if npc_plan is not None and npc_plan.npcs:
         # Same deterministic repairs the npc_plan stage applies, so a plan
         # written before encounters existed still gets its companion placed
@@ -1701,6 +1753,25 @@ def run(ctx: PipelineContext) -> StageResult:
         if zones:
             ctx.emit(ProjectStage.scene_compile, "info",
                      f"{scene_entry.id}: encounter director has {zones} spawn zone(s)")
+
+        # The game loop: one director with the flow, its panel and the HUD,
+        # then a static check that every path through it can complete here.
+        flow = apply_game_flow(
+            doc, game_design,
+            on_warning=lambda m, sid=scene_entry.id: ctx.emit(
+                ProjectStage.scene_compile, "warning", f"{sid}: {m}"),
+        )
+        flow_problems = game_flow_violations(doc, flow)
+        if flow_problems:
+            msg = f"{scene_entry.id}: game flow cannot complete: " + "; ".join(flow_problems)
+            ctx.store.record_stage(state, ProjectStage.scene_compile,
+                                   ProjectStatus.failed, message=msg[:400])
+            ctx.emit(ProjectStage.scene_compile, "failed", msg[:400])
+            raise GameFlowContractError(msg)
+        if flow is not None:
+            ctx.emit(ProjectStage.scene_compile, "info",
+                     f"{scene_entry.id}: game flow bound ({flow['experience']}, "
+                     f"lives {flow['lives']}, {len(flow['objectives'])} objective(s))")
 
         # Every entity is now present -- authored, world-merged and
         # auto-instantiated alike -- so this is the one place a physics value

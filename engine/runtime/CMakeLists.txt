@@ -25,6 +25,7 @@ target_include_directories(ptv_runtime PUBLIC
 
 target_include_directories(ptv_runtime PRIVATE
   "${CMAKE_CURRENT_SOURCE_DIR}/src"
+  "${Stb_INCLUDE_DIR}"
 )
 
 target_link_libraries(ptv_runtime
@@ -129,3 +130,25 @@ else()
 endif()
 target_compile_definitions(ptv_runtime PUBLIC
   "PTV_ENGINE_ASSET_DIR=\"${PTV_ENGINE_ASSET_DIR}\"")
+
+# The bundled UI font (Atkinson Hyperlegible Bold, SIL OFL 1.1 -- license
+# beside it). Copied into the asset dir so desktop and Quest resolve it the
+# same way: ``<PTV_ENGINE_ASSET_DIR>/fonts/...``.
+set(PTV_FONT_SRC_DIR "${CMAKE_CURRENT_SOURCE_DIR}/assets/fonts")
+set(PTV_FONT_FILES
+    "${PTV_ENGINE_ASSET_DIR}/fonts/AtkinsonHyperlegible-Bold.ttf"
+    "${PTV_ENGINE_ASSET_DIR}/fonts/OFL.txt")
+add_custom_command(
+  OUTPUT ${PTV_FONT_FILES}
+  COMMAND ${CMAKE_COMMAND} -E make_directory "${PTV_ENGINE_ASSET_DIR}/fonts"
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different
+          "${PTV_FONT_SRC_DIR}/AtkinsonHyperlegible-Bold.ttf"
+          "${PTV_FONT_SRC_DIR}/OFL.txt"
+          "${PTV_ENGINE_ASSET_DIR}/fonts/"
+  DEPENDS "${PTV_FONT_SRC_DIR}/AtkinsonHyperlegible-Bold.ttf"
+          "${PTV_FONT_SRC_DIR}/OFL.txt"
+  COMMENT "Copying the UI font"
+  VERBATIM
+)
+add_custom_target(ptv_engine_fonts ALL DEPENDS ${PTV_FONT_FILES})
+add_dependencies(ptv_runtime ptv_engine_fonts)

@@ -48,6 +48,7 @@ from typing import Any
 from ptv_schemas import ProjectStage, ProjectStatus
 from ptv_schemas.asset_manifest import AssetCategory
 
+from . import model_frame
 from .context import PipelineContext, StageResult
 from .proc import proc_hooks
 
@@ -87,6 +88,7 @@ def run(ctx: PipelineContext) -> StageResult:
 
     hints_by_id = {item.id: list(item.socket_hints) for item in manifest.items}
     category_by_id = {item.id: item.category for item in manifest.items}
+    item_by_id = {item.id: item for item in manifest.items}
     targets = _resolvable_assets(
         normalization, hints_by_id, ctx.settings.repo_root
     )
@@ -101,6 +103,10 @@ def run(ctx: PipelineContext) -> StageResult:
         hints = hints_by_id.get(asset_id, [])
         category = category_by_id.get(asset_id)
 
+        frame = _frame_for(
+            item_by_id.get(asset_id), normalization.get(asset_id) or {}, glb_path
+        )
+
         excuse = _not_socketable(category, hints)
         if excuse is not None:
             report[asset_id] = {
@@ -109,12 +115,16 @@ def run(ctx: PipelineContext) -> StageResult:
                 "sockets": {},
                 "socket_hints": hints,
             }
+            if frame is not None:
+                report[asset_id]["frame"] = frame
             skipped += 1
             continue
 
         if tool is None:
             tool = _ensure_tool(ctx)
         entry = _derive(tool, glb_path, hints)
+        if frame is not None:
+            entry["frame"] = frame
         report[asset_id] = entry
         if entry.get("sockets"):
             derived += 1
@@ -238,6 +248,16 @@ def _blocking_failures(
     out: list[str] = []
     for asset_id in sorted(report):
         entry = report[asset_id]
+        frame = entry.get("frame")
+        # A rigged character with no frame cannot be stood or faced at all
+        # (scene_compile refuses it). An unrigged one degrades to drawing
+        # the mesh as authored, so it is reported, not blocking.
+        if (isinstance(frame, dict) and frame.get("status") == "failed"
+                and frame.get("rigged")):
+            out.append(
+                f"asset '{asset_id}': model frame could not be measured:"
+                f" {frame.get('reason') or 'no reason recorded'}"
+            )
         status = entry.get("status")
         reason = entry.get("reason") or "no reason recorded"
         if status == "missing":
@@ -249,6 +269,27 @@ def _blocking_failures(
                 f" derivation failed: {reason}"
             )
     return out
+
+
+def _frame_for(
+    item: Any, norm: dict[str, Any], glb_path: Path
+) -> dict[str, Any] | None:
+    """The character's measured model frame, or ``None`` for non-characters.
+
+    Characters and anything skinned get one: those are what the engine stands
+    on a floor and turns to face a direction, and the two providers disagree
+    about both (see :mod:`model_frame`).
+    """
+    is_character = getattr(item, "category", None) == AssetCategory.character
+    skinned = bool(norm.get("skinned"))
+    if not (is_character or skinned) or not glb_path.exists():
+        return None
+    rigged = skinned or bool(getattr(item, "rigged", False))
+    frame = model_frame.try_measure(
+        glb_path, rigged=rigged, forward_hint=getattr(item, "forward_hint", None)
+    )
+    frame["rigged"] = rigged
+    return frame
 
 
 def _resolvable_assets(

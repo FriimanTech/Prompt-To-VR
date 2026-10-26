@@ -113,6 +113,8 @@ public:
         bool button_b{false};
         bool button_x{false};
         bool button_y{false};
+        /** Left controller menu button (the right one is the system's). */
+        bool button_menu{false};
         // Capacitive touch ("capsense"): the finger is RESTING on the control
         // without pressing it. Distinguishing rest from press is what lets a
         // virtual hand pose its index finger on the trigger and its thumb on
@@ -166,6 +168,11 @@ public:
     void shutdown();
 
     bool poll_events();                     // returns false when the session is exiting
+    /** Ask the runtime to end the session (``xrRequestExitSession``). The
+     *  session then passes through STOPPING (ended in poll_events) to
+     *  EXITING, where poll_events returns false. False when there is no
+     *  running session to end. */
+    bool request_exit();
     bool begin_frame(Views& views);         // returns false when the frame should be skipped
     void end_frame_no_render();             // submit an empty frame (e.g. when not focused)
 
@@ -278,6 +285,7 @@ private:
     XrAction button_b_action_{XR_NULL_HANDLE};   // right controller B
     XrAction button_x_action_{XR_NULL_HANDLE};   // left controller X
     XrAction button_y_action_{XR_NULL_HANDLE};   // left controller Y
+    XrAction button_menu_action_{XR_NULL_HANDLE};  // left controller menu
     XrAction trigger_touch_action_{XR_NULL_HANDLE};    // capsense, per hand
     XrAction thumbrest_touch_action_{XR_NULL_HANDLE};  // capsense, per hand
     XrAction thumbstick_touch_action_{XR_NULL_HANDLE}; // capsense, per hand

@@ -909,6 +909,57 @@ _BUILTINS: tuple[CatalogEntry, ...] = (
             "entity, named by the world builder's yields_asset_id."
         ),
     ),
+    # ----- Game loop -----
+    CatalogEntry(
+        id="builtin.game_flow",
+        summary=(
+            "The game LOOP, run from game_design.json: notices the player's "
+            "health reaching zero, spends lives, fades out, respawns them "
+            "(spawn / checkpoint / last safe spot, health restored, loadout "
+            "kept, a few seconds of invulnerability, nearby enemies cleared), "
+            "tracks objectives (survive a time, defeat N, clear the waves, "
+            "reach a place, collect items, custom ones reported by game code "
+            "through ctx.game), and shows the end screens -- Game Over with "
+            "Try Again, You Win / The End with Play Again, Leave Game -- plus "
+            "a pause menu on the left menu button. Try Again reloads the "
+            "scene fresh; Leave Game quits the app properly on Quest and PC. "
+            "The scene compiler binds it from game_design.json -- NEVER plan "
+            "or generate lives, respawn, a run flow, a results/game-over "
+            "screen, a restart or a quit button. Game-specific objectives "
+            "call ctx.game->add_progress / complete / fail instead."
+        ),
+        category="game",
+        params={
+            "(compiled)": "everything comes from game_design.json; do not author params",
+        },
+        inputs=("player health (ctx.combat)", "objectives", "left menu button",
+                "end-screen clicks"),
+        comfort_notes=(
+            "Every relocation happens under a fade to black; end screens are "
+            "world-locked panels 1.5 m away, slightly below eye level; the "
+            "sticks are locked and the player invulnerable while one is up."
+        ),
+    ),
+    CatalogEntry(
+        id="builtin.game_hud",
+        summary=(
+            "The loop's numbers on the left wrist, showing only what the "
+            "game has: a health bar, lives, the clock of a timed objective, "
+            "score, and the current objective. Bound by the scene compiler "
+            "from game_design.json's hud block. A game-specific HUD element "
+            "(an ammo counter on the weapon) is still generated; the health "
+            "/ lives / timer / objective HUD is not."
+        ),
+        category="game",
+        params={
+            "(compiled)": "health / lives / timer / score / objective flags from game_design.json",
+        },
+        inputs=("ctx.game", "ctx.combat"),
+        comfort_notes=(
+            "Wrist-mounted, never head-locked: a HUD glued to the face cannot "
+            "be looked away from."
+        ),
+    ),
 )
 
 

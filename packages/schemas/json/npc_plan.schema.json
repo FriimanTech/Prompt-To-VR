@@ -257,6 +257,13 @@
     "NpcLocomotion": {
       "additionalProperties": false,
       "properties": {
+        "hover_height_m": {
+          "default": 0.0,
+          "maximum": 50.0,
+          "minimum": 0.0,
+          "title": "Hover Height M",
+          "type": "number"
+        },
         "leash_radius_m": {
           "default": 0.0,
           "maximum": 1000.0,

@@ -153,7 +153,21 @@ def _package_engine_assets(engine_dir: Path, assets_dir: Path) -> list[str]:
     import subprocess
     import sys
 
+    import shutil
+
     notes: list[str] = []
+    # The UI font (end screens, menus, HUD numerals), beside its OFL license.
+    # Without it the runtime still runs, but every label is invisible.
+    font_dir = engine_dir / "runtime" / "assets" / "fonts"
+    out_fonts = assets_dir / "engine" / "fonts"
+    if font_dir.is_dir():
+        out_fonts.mkdir(parents=True, exist_ok=True)
+        for f in font_dir.iterdir():
+            if f.suffix.lower() in (".ttf", ".txt"):
+                shutil.copy2(f, out_fonts / f.name)
+    else:
+        notes.append(f"{font_dir} missing; UI text will not render")
+
     script = engine_dir / "tools" / "prepare_default_hands.py"
     source = engine_dir.parent / "Default_Models" / "default_rigged_hand_model.glb"
     if not script.is_file():

@@ -87,6 +87,7 @@ from .codegen_contracts import (
     lint_task_sources,
 )
 from .context import PipelineContext, StageResult
+from .game_flow_plan import reconcile_game_flow_items
 from .npc_population import reconcile_npc_ai_items
 from .proc import proc_hooks
 from .prompts import code_task_system
@@ -200,6 +201,17 @@ def run_with_runner(
             ctx.emit(ProjectStage.code_generation, "info", f"NPCs: {note}"[:300])
             ctx.store.append_log(ctx.project_id, "code_generation", f"NPCs: {note}")
 
+    # Likewise for the game loop: with a game_design.json, lives / respawn /
+    # end screens are builtin.game_flow, never generated.
+    design = ctx.game_design or ctx.store.load_game_design(ctx.project_id)
+    plan, flow_notes = reconcile_game_flow_items(plan, design)
+    if flow_notes:
+        ctx.mechanic_plan = plan
+        ctx.store.save_mechanic_plan(ctx.project_id, plan)
+        for note in flow_notes:
+            ctx.emit(ProjectStage.code_generation, "info", f"game loop: {note}"[:300])
+            ctx.store.append_log(ctx.project_id, "code_generation", f"game loop: {note}")
+
     codegen_items = [it for it in plan.items if it.code_task is not None]
 
     if not codegen_items:
@@ -268,9 +280,10 @@ def run_with_runner(
     # Same idea for the engine contract (codegen_contracts): code written
     # before a rule existed -- an AI with no MechanicContext, a private
     # damage inbox -- compiled, shipped and silently did nothing.
+    has_flow = design is not None
     api_resets = board.invalidate_on_api_contract_change(
         API_CONTRACT_VERSION, repo_root,
-        lambda files: lint_task_sources("", files),
+        lambda files: lint_task_sources("", files, game_flow=has_flow),
     )
     for tid, why in api_resets:
         ctx.emit(
@@ -1154,7 +1167,8 @@ class _StageRuntime:
         # Engine-contract rules: things that compile but cannot work.
         kind_value = getattr(task.kind, "value", str(task.kind))
         contract = lint_task_sources(
-            kind_value, {Path(rel).name: code for rel, code in normalised}
+            kind_value, {Path(rel).name: code for rel, code in normalised},
+            game_flow=self.ctx.store.load_game_design(self.ctx.project_id) is not None,
         )
         if contract:
             raise CodegenContractError(

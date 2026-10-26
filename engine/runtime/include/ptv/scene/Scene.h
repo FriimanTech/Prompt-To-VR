@@ -23,6 +23,11 @@ struct MeshRef {
     float unit_scale{0.0f};
     /** Origin-to-sole distance in metres (see CMesh). 0 = unknown. */
     float foot_offset_m{0.0f};
+    /** ``mesh.model_frame`` from scene.json (see CMesh::has_model_frame). */
+    bool has_model_frame{false};
+    float model_yaw_offset_rad{0.0f};
+    float model_sole_y{0.0f};
+    float model_height{0.0f};
     std::string collision_shape{"aabb"};
     /** Decimated level-of-detail chain produced by the ``asset_optimization``
      * pipeline stage, coarsest last. ``lod_paths[0]`` is the same mesh as

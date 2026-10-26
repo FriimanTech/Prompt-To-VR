@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from enum import Enum
-from typing import List, Optional
+from typing import List, Literal, Optional
 
 from pydantic import Field
 
@@ -257,6 +257,14 @@ class AssetItem(StrictModel):
             " in the hand when grabbed by its grip socket. Leave unset: the"
             " grip socket already points the business end where the"
             " controller aims. Only for an asset that is known to hold wrong."
+        ),
+    )
+    forward_hint: Optional[Literal["+x", "-x", "+z", "-z"]] = Field(
+        default=None,
+        description=(
+            "Model-space axis an UNRIGGED character faces. Leave unset for"
+            " rigged characters: asset_contract measures their forward from"
+            " the skeleton. Only consulted when there is no skeleton."
         ),
     )
 

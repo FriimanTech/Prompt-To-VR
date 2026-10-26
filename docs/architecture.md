@@ -50,6 +50,11 @@ flowchart TD
   Prompt --> NpcPlan[npc_plan.json]
   AssetManifest --> NpcPlan
   NpcPlan --> AssetManifest
+  Prompt --> GameDesign[game_design.json]
+  BuildSpec --> GameDesign
+  NpcPlan --> GameDesign
+  GameDesign --> MechanicPlan
+  GameDesign --> SceneCompile
   BuildSpec --> MechanicPlan[mechanic_plan.json]
   AssetManifest --> MechanicPlan
   NpcPlan --> MechanicPlan
@@ -63,7 +68,7 @@ flowchart TD
   Rigging --> Animation[asset_animation]
   Animation --> Normalize[asset_normalization.json]
   NpcPlan --> Rigging
-  Normalize --> Contract["asset_contract: derive sockets"]
+  Normalize --> Contract["asset_contract: sockets + character model frame"]
   Contract --> CppGen
   MechanicPlan --> CppGen["engine/generated/<kind>/<project_id>/*.cpp"]
   BuildSpec --> WorldGen
@@ -107,6 +112,7 @@ flowchart TD
 | Mechanics | `src/mechanics/MechanicRegistry.cpp` + `src/mechanics/builtin/<mechanic>/` | Data-driven mechanics; each built-in is its own `IMechanic` module |
 | Debug | `src/debug/DebugUI.cpp` | Dear ImGui overlay (mirror-window only) |
 | Save | `src/save/SaveSystem.cpp` | JSON world snapshot / load |
+| Text | `src/render/TextAtlas.cpp` + `src/render/TextRenderer.cpp` | SDF glyph atlas (stb_truetype, bundled Atkinson Hyperlegible, OFL) and world-space text pass |
 | Application | `src/core/Application.cpp` | Main loop |
 
 Every subsystem exposes its public API through `engine/runtime/include/ptv/`.
@@ -123,7 +129,26 @@ socket or joint), `combat` (health, damage, factions), `perception`
 (who can I see) and `nav` (how do I get there). Those six exist so that
 characters authored by different CodeTasks share one model of damage,
 targeting and movement — see [npc-and-ai.md](npc-and-ai.md) and
-[navigation.md](navigation.md).
+[navigation.md](navigation.md). `game` (the loop run by `builtin.game_flow`:
+state, lives, objectives, `gameplay_active`), `text` (world-space SDF text)
+and `app` (Leave Game, fades, respawn placement) complete it — see
+[game-flow.md](game-flow.md).
+
+## The character model frame
+
+Character sources disagree about where the origin is and which way a model
+faces: Tripo rigs stand on their origin (soles at y = 0) and face +X; Uthana
+characters are centred at the hips and face +Z. The engine faces -Z and
+stands a character's capsule on its centre. `asset_contract` measures every
+character's frame from its skeleton and skinned bind pose
+(`pipeline/model_frame.py`: sole = mesh bottom, height, forward = up x the
+shoulder line, confirmed by the toes), `scene_compile` emits it as
+`mesh.model_frame` with `foot_offset_m` = half the height and a height-based
+`unit_scale`, and the skinned loader folds a pivot (yaw onto -Z, soles to
+-height/2) into the root joints exactly like a non-joint ancestor node -- so
+the palette, `joint_world`, sockets and attachments all agree. A skinned
+character without a frame fails `scene_compile`. Facing uses one formula,
+`ptv/api/Facing.h` (`yaw_from_forward(f) = atan2(-f.x, -f.z)`).
 
 ## The socket contract
 

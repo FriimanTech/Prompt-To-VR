@@ -67,6 +67,25 @@
           "title": "Collision Shape",
           "type": "string"
         },
+        "forward_hint": {
+          "anyOf": [
+            {
+              "enum": [
+                "+x",
+                "-x",
+                "+z",
+                "-z"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Model-space axis an UNRIGGED character faces. Leave unset for rigged characters: asset_contract measures their forward from the skeleton. Only consulted when there is no skeleton.",
+          "title": "Forward Hint"
+        },
         "hold_rotation_offset_deg": {
           "anyOf": [
             {

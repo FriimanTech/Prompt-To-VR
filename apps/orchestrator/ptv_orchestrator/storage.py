@@ -39,6 +39,7 @@ from ptv_schemas import (
     BuildSpec,
     MechanicPlan,
     NpcPlan,
+    GameDesign,
     PlayerExperience,
     ProjectStage,
     ProjectState,
@@ -261,6 +262,19 @@ class ProjectStore:
 
     def save_npc_plan(self, project_id: str, plan: NpcPlan) -> ArtifactMetadata:
         return self.write_model(project_id, "npc_plan.json", plan)
+
+    def save_game_design(
+        self, project_id: str, design: GameDesign
+    ) -> ArtifactMetadata:
+        return self.write_model(project_id, "game_design.json", design)
+
+    def load_game_design(self, project_id: str) -> GameDesign | None:
+        """The game design, or ``None`` for a project generated before the
+        stage existed -- those keep whatever run flow their own code has."""
+        path = self.dir_for(project_id) / "game_design.json"
+        if not path.exists():
+            return None
+        return _load_json_model(path, GameDesign)
 
     def save_mechanic_plan(
         self, project_id: str, plan: MechanicPlan

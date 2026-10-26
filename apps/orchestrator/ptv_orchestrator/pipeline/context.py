@@ -38,6 +38,7 @@ class PipelineContext:
     build_spec: Any = None
     asset_manifest: Any = None
     npc_plan: Any = None
+    game_design: Any = None
     mechanic_plan: Any = None
     scene_specs: list[Any] = field(default_factory=list)
 

@@ -315,6 +315,27 @@ void bake_prefix(const RootPrefix& rp, AnimChannel& ch) {
     }
 }
 
+/** Fold a model-frame pivot into every root joint: its bind pose and the keys
+ *  of any clip that animates it. Applied on top of the ancestor prefix that
+ *  ``build_skeleton`` / ``parse_animations`` already folded, so the result is
+ *  ``pivot * ancestors * root``. */
+void apply_frame_pivot(const ModelFrame& frame, SkeletonData& out) {
+    const Mat4 pivot = frame.pivot();
+    RootPrefix rp;
+    rp.translation = Vec3(pivot[3]);
+    rp.rotation = glm::angleAxis(frame.yaw_offset_rad, Vec3(0.0f, 1.0f, 0.0f));
+    rp.scale = 1.0f;
+    for (size_t j = 0; j < out.joint_count(); ++j) {
+        if (out.parents[j] >= 0) continue;
+        out.bind_pose[j] = decompose_trs(pivot * out.bind_pose[j].matrix());
+        for (auto& clip : out.clips) {
+            for (auto& ch : clip.channels) {
+                if (ch.joint == static_cast<int>(j)) bake_prefix(rp, ch);
+            }
+        }
+    }
+}
+
 void parse_animations(const tinygltf::Model& model,
                       const std::unordered_map<int, int>& node_to_joint,
                       SkeletonData& out) {
@@ -500,6 +521,22 @@ std::array<float, 4> material_base_color(const tinygltf::Model& model,
 
 }  // namespace
 
+Mat4 ModelFrame::pivot() const {
+    const Mat4 rot =
+        glm::rotate(Mat4(1.0f), yaw_offset_rad, Vec3(0.0f, 1.0f, 0.0f));
+    const Mat4 drop = glm::translate(
+        Mat4(1.0f), Vec3(0.0f, -(sole_y + 0.5f * height), 0.0f));
+    return drop * rot;
+}
+
+float ModelFrame::scale_for(float target_scale_meters) const {
+    if (unit_scale > 1e-8f) return unit_scale;
+    if (height > 1e-6f && target_scale_meters > 1e-4f) {
+        return target_scale_meters / height;
+    }
+    return 1.0f;
+}
+
 void build_joint_palette(const SkeletonData& skeleton,
                          const std::vector<JointPose>& local_pose,
                          std::vector<Mat4>& out_palette) {
@@ -575,7 +612,8 @@ bool glb_probe_skin(const std::string& path, bool* out_has_skin,
 }
 
 bool load_glb_skeleton(const std::string& path, float target_scale_meters,
-                       SkeletonData& out_skeleton, std::string& err) {
+                       SkeletonData& out_skeleton, std::string& err,
+                       const ModelFrame* frame) {
     out_skeleton = SkeletonData{};
     tinygltf::Model model;
     if (!parse_glb(path, model, err)) return false;
@@ -594,6 +632,11 @@ bool load_glb_skeleton(const std::string& path, float target_scale_meters,
     }
     parse_animations(model, node_to_joint, out_skeleton);
 
+    if (frame != nullptr && frame->valid) {
+        apply_frame_pivot(*frame, out_skeleton);
+        out_skeleton.unit_scale = frame->scale_for(target_scale_meters);
+        return true;
+    }
     const float extent = longest_axis_from_accessors(model, sel.mesh_nodes);
     out_skeleton.unit_scale =
         (target_scale_meters > 1e-4f && extent > 1e-6f)
@@ -605,7 +648,8 @@ bool load_glb_skeleton(const std::string& path, float target_scale_meters,
 bool load_glb_skinned(const std::string& path, float target_scale_meters,
                       std::vector<SkinnedVertex>& out_verts,
                       std::vector<std::uint32_t>& out_indices,
-                      SkeletonData& out_skeleton, std::string& err) {
+                      SkeletonData& out_skeleton, std::string& err,
+                      const ModelFrame* frame) {
     out_verts.clear();
     out_indices.clear();
     out_skeleton = SkeletonData{};
@@ -817,8 +861,12 @@ bool load_glb_skinned(const std::string& path, float target_scale_meters,
         err = "degenerate bounds";
         return false;
     }
+    const bool framed = frame != nullptr && frame->valid;
+    if (framed) apply_frame_pivot(*frame, out_skeleton);
     const float scale =
-        (target_scale_meters > 1e-4f) ? (target_scale_meters / extent) : 1.0f;
+        framed ? frame->scale_for(target_scale_meters)
+               : ((target_scale_meters > 1e-4f) ? (target_scale_meters / extent)
+                                                : 1.0f);
     if (scale != 1.0f) {
         for (auto& v : out_verts) {
             v.pos[0] *= scale;
@@ -827,12 +875,20 @@ bool load_glb_skinned(const std::string& path, float target_scale_meters,
         }
     }
     out_skeleton.unit_scale = scale;
+    // In the bind pose the palette is the identity (or, with a frame, the
+    // pivot, whose rotation is about Y and so leaves heights alone).
+    out_skeleton.bind_min_y =
+        lo[1] * scale -
+        (framed ? (frame->sole_y + 0.5f * frame->height) * scale : 0.0f);
 
     PTV_INFO(
         "skinned GLB loaded: {} verts, {} tris, {} joints, {} clip(s), "
-        "scale {:.3f} (target {:.2f} m)",
+        "scale {:.3f} (target {:.2f} m){}",
         out_verts.size(), out_indices.size() / 3, joint_count,
-        out_skeleton.clips.size(), scale, target_scale_meters);
+        out_skeleton.clips.size(), scale, target_scale_meters,
+        framed ? fmt::format(", model frame yaw {:.1f} deg, sole {:.3f}",
+                             glm::degrees(frame->yaw_offset_rad), frame->sole_y)
+               : std::string(", NO model frame (longest-axis scale)"));
     return true;
 }
 

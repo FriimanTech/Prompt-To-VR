@@ -13,7 +13,10 @@ and the orchestrator's
 - `ptv/api/` — `IMechanic`, `IBehaviour`, `IDialogueHook` and the register
   macros, plus `InputSnapshot` (live controller/headset input) and
   `MechanicContext` (locomotion / physics / debug-draw / hand / transform-fx /
-  haptics / socket / skeleton services).
+  haptics / socket / skeleton services, plus `game` / `app` / `text` from
+  `GameFlow.h`: the game loop, Leave Game / fades / respawn placement, and
+  world-space SDF text), and `Facing.h` -- the single yaw convention
+  (`yaw_from_forward`, `rotation_facing`, `facing_of`, `heading_error`).
 - `ptv/ecs/` — `World`, core ECS components (`CTransform`, `CMesh`, `CPhysics`, …),
   plus `TransformOffset.h` (the draw-time visual-offset layer) and
   `Skeleton.h` (the per-frame pose tick).
@@ -43,8 +46,14 @@ Wraps `xrCreateInstance`, `xrGetSystem`, `xrCreateSession` (via
 application can drive the XR session without leaking OpenXR types upward.
 
 The `gameplay` action set carries left/right hand + aim poses, trigger, grip,
-thumbstick, A/B/X/Y buttons, capacitive `trigger/touch` and
-`thumbrest/touch`, and one `XR_ACTION_TYPE_VIBRATION_OUTPUT` haptic action.
+thumbstick, A/B/X/Y buttons, the LEFT menu button (`menu/click`, the game
+loop's pause control; the right one belongs to the system), capacitive
+`trigger/touch` and `thumbrest/touch`, and one
+`XR_ACTION_TYPE_VIBRATION_OUTPUT` haptic action. `request_exit()` calls
+`xrRequestExitSession` for Leave Game; `poll_events` ends the session at
+STOPPING and reports EXITING, and on Quest `android_main` then calls
+`ANativeActivity_finish` and waits for `destroyRequested` before returning,
+so the app launches again (KhronosGroup/OpenXR-SDK-Source#329).
 The same binding set is suggested against both
 `/interaction_profiles/oculus/touch_controller` and
 `/interaction_profiles/meta/touch_controller_plus`; a runtime that does not

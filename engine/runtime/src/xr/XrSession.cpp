@@ -345,6 +345,10 @@ bool XrRuntime::create_action_set() {
     make_action(XR_ACTION_TYPE_BOOLEAN_INPUT, "button_b", "Button B", button_b_action_, false);
     make_action(XR_ACTION_TYPE_BOOLEAN_INPUT, "button_x", "Button X", button_x_action_, false);
     make_action(XR_ACTION_TYPE_BOOLEAN_INPUT, "button_y", "Button Y", button_y_action_, false);
+    // The left menu button is the one an app may use (the right one belongs
+    // to the system): the conventional pause control.
+    make_action(XR_ACTION_TYPE_BOOLEAN_INPUT, "button_menu", "Menu Button",
+                button_menu_action_, false);
     // Capacitive touch ("capsense"): the controller reports a finger RESTING
     // on a control before it is pressed. This is what lets a virtual hand put
     // its index finger on the trigger and its thumb down on the rest, instead
@@ -392,6 +396,7 @@ bool XrRuntime::create_action_set() {
         // X / Y live on the LEFT Touch controller only.
         {button_x_action_, path("/user/hand/left/input/x/click")},
         {button_y_action_, path("/user/hand/left/input/y/click")},
+        {button_menu_action_, path("/user/hand/left/input/menu/click")},
         {trigger_touch_action_, path("/user/hand/left/input/trigger/touch")},
         {trigger_touch_action_, path("/user/hand/right/input/trigger/touch")},
         {thumbrest_touch_action_,
@@ -595,6 +600,13 @@ void XrRuntime::set_foveation_level(int level) {
 
     foveation_level_applied_ = level;
     PTV_INFO("XR: foveation level -> {}", level);
+}
+
+bool XrRuntime::request_exit() {
+    if (xr_session_ == XR_NULL_HANDLE || !is_running_) return false;
+    const XrResult r = xrRequestExitSession(xr_session_);
+    PTV_INFO("XR: exit requested (xrRequestExitSession -> {})", static_cast<int>(r));
+    return XR_SUCCEEDED(r);
 }
 
 bool XrRuntime::poll_events() {
@@ -971,6 +983,7 @@ void XrRuntime::sync_input(InputState& out) {
     read_bool(button_b_action_, out.button_b);
     read_bool(button_x_action_, out.button_x);
     read_bool(button_y_action_, out.button_y);
+    read_bool(button_menu_action_, out.button_menu);
     read_bool(button_a_touch_action_, out.button_a_touch);
     read_bool(button_b_touch_action_, out.button_b_touch);
     read_bool(button_x_touch_action_, out.button_x_touch);

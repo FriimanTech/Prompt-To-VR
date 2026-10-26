@@ -132,6 +132,10 @@ class NpcLocomotion(StrictModel):
     #: guards that hold a post rather than following the player across the
     #: level.
     leash_radius_m: float = Field(default=0.0, ge=0.0, le=1000.0)
+    #: Metres between the floor and the soles while it moves, for a
+    #: ``flying`` character the prompt says HOVERS (a drone, a ghost).
+    #: 0 = moves freely in three dimensions. Ignored for grounded movement.
+    hover_height_m: float = Field(default=0.0, ge=0.0, le=50.0)
 
 
 class NpcPerception(StrictModel):

@@ -255,6 +255,17 @@ let it include -- code that compiles, links, ships and silently does nothing:
   health is the health; mirror `ctx.combat->health` / `max_health`, defeat is
   `!is_alive`. (Caught after a regenerated player-health mechanic swapped its
   rejected `MeleeHitInbox` for an `apply_melee_hit()` nobody called.)
+- in a project with a `game_design.json` (contract v4): a private lives
+  counter, a private `*respawn*` function that teleports the player, or a
+  generated `restart_current` / `revive`. The loop is `builtin.game_flow`;
+  generated code reads `ctx.game` and reports objectives with
+  `add_progress` / `complete` / `fail`.
+
+The game-loop reconcile (`reconcile_game_flow_items`, see
+[game-flow.md](game-flow.md#2-planning-and-codegen)) also runs at the start of
+code generation: a run flow, lives, respawn, player-health or end-screen
+task in the plan becomes `builtin.game_flow`, and a plain health / lives /
+timer HUD becomes `builtin.game_hud`, before any agent is started.
 
 A violation raises `CodegenContractError` from `_write_files`; the task gets
 ONE repair round with the violations and its own files as `repair_context`

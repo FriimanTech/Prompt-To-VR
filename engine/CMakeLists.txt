@@ -32,6 +32,9 @@ find_package(spdlog CONFIG REQUIRED)
 find_package(nlohmann_json CONFIG REQUIRED)
 find_package(imgui CONFIG REQUIRED)
 find_package(TinyGLTF CONFIG QUIET)
+# stb_truetype: bakes the SDF glyph atlas for world-space text (menus, HUD).
+# Header-only; vcpkg's port exposes the include dir as Stb_INCLUDE_DIR.
+find_package(Stb REQUIRED)
 # Offline mesh simplification for the asset_optimization pipeline stage
 # (engine/tools/glb_optimize.cpp). Host-only: not linked into the runtime.
 find_package(meshoptimizer CONFIG REQUIRED)

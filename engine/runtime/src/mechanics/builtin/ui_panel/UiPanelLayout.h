@@ -17,6 +17,7 @@
 #include <cstddef>
 #include <string>
 
+#include "ptv/api/Facing.h"
 #include "ptv/ecs/World.h"
 #include "ptv/math/Math.h"
 
@@ -113,7 +114,7 @@ inline void anchor_to_head(CUiPanel& panel, const Vec3& head,
                         head.z + fwd.z * panel.distance_m);
     // The panel's local +Z is its face, so rotate that to point back at the
     // user: R(yaw) * (0,0,1) == -fwd.
-    panel.yaw_rad = std::atan2(-fwd.x, -fwd.z);
+    panel.yaw_rad = yaw_from_forward(fwd);
     panel.anchor_set = true;
 }
 

@@ -74,9 +74,25 @@ The built-in then, every frame:
    treats convex shapes as solid, and a plain ray hit the NPC's own capsule
    at distance zero and lifted it by its height every frame -- every NPC in
    every game left the level on its first frame. The rise per frame is also
-   capped, so no probe result can launch a character;
+   capped, so no probe result can launch a character. Steps up to 0.35 m
+   are climbed, a floor steeper than `max_slope_deg` (50) is a wall, and when
+   the floor drops away by more than `step_down_m` the body FALLS under
+   gravity and lands instead of teleporting down. A one-shot
+   `CLocomotionIntent::jump_velocity` launches it (playing `jump` if the asset
+   has one). `motor: "flying"` (set from `MovementStyle.flying`) drops the
+   floor snap and uses `desired_velocity` in 3D, or holds
+   `NpcLocomotion.hover_height_m` above the floor for a prompt that says it
+   hovers;
 2. turns it toward travel at a configured rate (or toward `face_target`, for
-   an enemy that strafes while keeping its weapon on you);
+   an enemy that strafes while keeping its weapon on you), and while it is
+   more than `turn_in_place_deg` (60) off it slows down and turns in place
+   rather than walking sideways. Yaw comes from the one engine formula,
+   `ptv/api/Facing.h` (`yaw_from_forward(f) = atan2(-f.x, -f.z)`): the old
+   hand-written `atan2(f.x, -f.z)` mirrored every heading about Z, so a
+   chaser looked right only when running straight down -Z.
+   `CLocomotionIntent::look_target` turns only the head (clamped to 60
+   degrees), and `builtin.npc.melee_chase` squares up to its target when
+   close and never swings at something more than 35 degrees off its facing;
 3. picks idle, walk or run from the speed it **achieved** — a character
    pressed against a wall falls back to idle rather than running on the spot;
 4. sets clip playback rate to `achieved_speed / reference_speed`, clamped to
@@ -97,6 +113,29 @@ proportionally less.
 Setting `animated: false` turns steps 3 and 4 off and keeps 1 and 2. That is
 the ducks: the same mechanic, no separate code path, and nothing for a codegen
 agent to choose wrongly.
+
+### Standing on the floor and facing forward, whatever the source
+
+Tripo characters stand on their origin (soles at y = 0) and face +X; Uthana
+characters are centred at the hips and face +Z. Both used to be drawn as
+authored, so Tripo NPCs floated by half their height (the runtime assumed a
+symmetric body) and walked sideways. Now `asset_contract` measures every
+character's **model frame** (sole, height, forward from the shoulder line,
+confirmed by the toes), `scene_compile` emits it as `mesh.model_frame`,
+and the skinned loader pivots the rig so its face is the entity's -Z and its
+soles sit `foot_offset_m` (half its height) below the capsule centre. The
+scale comes from the HEIGHT, not the longest axis, so a T-posed character's
+arm span no longer shrinks it. A skinned character without a frame fails
+`scene_compile`; one that somehow reaches the runtime without a foot offset
+is stood on the soles its loaded bind pose actually has.
+
+The bind pose is only half the story: a clip can carry the whole body lower
+or higher (the bruiser's crouched walk sank its feet 6 cm). So
+`builtin.character_locomotion` also **plants the feet**: every frame it
+measures the lowest drawn foot / toe joint, less that joint's bind height
+above the soles, against the floor the snap found, and eases the body by the
+difference (time constant 0.25 s, so a stride's natural foot lift is not
+chased; clamped to 12% of the height and below the step-down distance).
 
 ### When Tripo has no clip for something
 
@@ -424,10 +463,13 @@ reports what its NPCs do:
 - once per scene, an `npc_manifest` line per NPC (skeleton loaded, each
   animation intent resolved to a clip, bound and attached mechanics, any that
   did not resolve) and an `npc_manifest_summary`;
-- every second, an `npc` line per live NPC (position, `feet_gap` above the
-  floor, measured speed, intent speed, current clip, alive, distance to the
-  player) and an `npc_summary` (encounter phase, alive, wave, hits on the
-  player);
+- every second, an `npc` line per live NPC (position; `feet_gap`, the
+  lowest DRAWN foot/toe joint less its bind height above the mesh's soles,
+  above the floor -- independent of the declared foot offset, so a model that
+  floats relative to its capsule shows up; `origin_gap`, what the contract
+  says; `facing_err_deg` against its travel direction or target; `motor`;
+  measured speed, intent speed, current clip, alive, distance to the player)
+  and an `npc_summary` (encounter phase, alive, wave, hits on the player);
 - a `spawn:` line per clone and a `combat:` line per hit that lands.
 
 Verification mode (Android property `debug.ptv.verify` = 1, or `PTV_VERIFY=1`

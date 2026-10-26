@@ -324,6 +324,9 @@ bool Renderer::initialize(VulkanContext& vk,
     if (!create_depth_image()) return false;
     if (!create_msaa_color_image()) return false;
     if (!create_command_resources()) return false;
+    // Optional like the vignette: a missing font or shader costs the labels,
+    // not the game.
+    text_.initialize(vk, render_pass_, samples_, cmd_pool_);
     start_stream_worker();
     PTV_INFO("Renderer ready: {}x{} per eye, color fmt {}, MSAA {}x",
              eye_width_, eye_height_, static_cast<int>(color_format_),
@@ -1597,6 +1600,11 @@ void Renderer::draw_frame(const std::array<EyeTarget, 2>& eyes,
         }
     }
 
+    // Shared by both eyes; the previous frame's fence has already passed, so
+    // nothing in flight still reads the text vertex buffer.
+    text_.prepare(text_items_);
+    text_items_.clear();
+
     vkResetCommandBuffer(cmd_, 0);
     VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
     bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
@@ -1706,6 +1714,9 @@ void Renderer::draw_frame(const std::array<EyeTarget, 2>& eyes,
             }
         }
 
+        // ---- World-space text: after opaque geometry (it blends) --------
+        text_.record(cmd_, vp_mat);
+
         // ---- Comfort vignette: last, over everything --------------------
         if (vignette_pipeline_ != VK_NULL_HANDLE && vignette_opacity_ > 0.002f) {
             vkCmdBindPipeline(cmd_, VK_PIPELINE_BIND_POINT_GRAPHICS,
@@ -1783,7 +1794,8 @@ bool Renderer::mesh_slot_is_skinned(int slot) const {
 
 int Renderer::load_glb_skinned(const std::string& resolved_path,
                                float target_scale_meters,
-                               gltf_mesh_load::SkeletonData& out_skeleton) {
+                               gltf_mesh_load::SkeletonData& out_skeleton,
+                               const gltf_mesh_load::ModelFrame* frame) {
     if (!vk_ || resolved_path.empty()) return -1;
     if (!asset_source().exists(resolved_path)) {
         PTV_WARN("skinned GLB not found via asset source: {}", resolved_path);
@@ -1797,12 +1809,16 @@ int Renderer::load_glb_skinned(const std::string& resolved_path,
     std::vector<std::uint32_t> indices;
     std::string err;
     if (!gltf_mesh_load::load_glb_skinned(resolved_path, target_scale_meters,
-                                          verts, indices, out_skeleton, err)) {
+                                          verts, indices, out_skeleton, err,
+                                          frame)) {
         PTV_WARN("skinned GLB load failed ({}): {}", resolved_path, err);
         return -1;
     }
 
-    const std::string key = mesh_key(resolved_path, target_scale_meters, 0.0f);
+    const float key_unit =
+        (frame != nullptr && frame->valid) ? frame->unit_scale : 0.0f;
+    const std::string key =
+        mesh_key(resolved_path, target_scale_meters, key_unit);
     auto it = gltf_path_to_slot_.find(key);
     if (it != gltf_path_to_slot_.end()) {
         gltf_meshes_[static_cast<size_t>(it->second)].last_used_frame =
@@ -2061,7 +2077,21 @@ void Renderer::build_items_from_world(World& world, std::vector<DrawItem>& out,
         if (world.registry().all_of<CMesh>(entity)) {
             const auto& cm = world.registry().get<CMesh>(entity);
             if (!cm.glb_path.empty()) {
-                const Mat4 model = entity_model;
+                // A rigged mesh carries its model frame in its root joints;
+                // a static one (an unrigged character) gets it here.
+                Mat4 model = entity_model;
+                if (cm.has_model_frame && cm.unit_scale > 1e-8f &&
+                    !world.registry().all_of<CSkeleton>(entity)) {
+                    const float u = cm.unit_scale;
+                    model = model *
+                            glm::translate(Mat4(1.0f),
+                                           Vec3(0.0f,
+                                                -(cm.model_sole_y +
+                                                  0.5f * cm.model_height) * u,
+                                                0.0f)) *
+                            glm::rotate(Mat4(1.0f), cm.model_yaw_offset_rad,
+                                        Vec3(0.0f, 1.0f, 0.0f));
+                }
                 const Vec3 center{model[3][0], model[3][1], model[3][2]};
                 const float distance = view_info.valid
                                            ? glm::length(center - cam)
@@ -2157,7 +2187,8 @@ void Renderer::build_items_from_world(World& world, std::vector<DrawItem>& out,
                 // Skinned meshes are uploaded by target scale at scene load;
                 // static ones stream with the asset's single unit scale when
                 // the pipeline provided one.
-                const float unit = skel ? 0.0f : cm.unit_scale;
+                const float unit =
+                    (skel && !cm.has_model_frame) ? 0.0f : cm.unit_scale;
                 auto key_of = [&](const std::string& p) {
                     return mesh_key(p, cm.target_scale_meters, unit);
                 };
@@ -2435,6 +2466,7 @@ void Renderer::shutdown() {
     if (vk_->device() != VK_NULL_HANDLE) {
         vkDeviceWaitIdle(vk_->device());
     }
+    text_.shutdown();
     destroy_gltf_meshes();
     for (auto& kv : framebuffers_) {
         if (kv.second) vkDestroyFramebuffer(vk_->device(), kv.second, nullptr);

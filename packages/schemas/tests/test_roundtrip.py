@@ -143,8 +143,9 @@ def test_export_all_writes_files(tmp_path: Path):
     assert set(written) == {
         "build_spec",
         "asset_manifest",
-        "npc_plan",
-        "character_routing",
+            "npc_plan",
+            "game_design",
+            "character_routing",
         "uthana_motion_plan",
         "mechanic_plan",
         "scene_spec",

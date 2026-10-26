@@ -100,6 +100,8 @@ BUILTIN_MECHANIC_IDS = {
     "builtin.mover",
     "builtin.breakable",
     "builtin.harvestable",
+    "builtin.game_flow",
+    "builtin.game_hud",
 }
 
 

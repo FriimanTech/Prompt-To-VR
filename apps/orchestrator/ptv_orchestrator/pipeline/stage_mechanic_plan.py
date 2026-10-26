@@ -35,6 +35,7 @@ from ..engine_catalog import as_planner_text
 from .binding_validator import validate_bindings
 from .builtin_source import editable_builtins_note
 from .context import PipelineContext, StageResult
+from .game_flow_plan import reconcile_game_flow_items
 from .mechanic_plan_agent import (
     MechanicPlanAgentInput,
     MechanicPlanner,
@@ -85,6 +86,21 @@ def run_with_planner(
         )
 
     npc_plan = ctx.npc_plan or ctx.store.load_npc_plan(ctx.project_id)
+    design = ctx.game_design or ctx.store.load_game_design(ctx.project_id)
+    loop_rule = (
+        "GAME LOOP: this game's rules are decided (game_design.json below). "
+        "Lives, respawn, health reaching zero, objectives, win/lose, the "
+        "Game Over / victory / end screens, Try Again / Play Again, the pause "
+        "menu and Leave Game are builtin.game_flow, and the health / lives / "
+        "timer / objective HUD is builtin.game_hud -- the scene compiler binds "
+        "both. Plan any BuildSpec mechanic that IS one of those as builtin+config "
+        "of that built-in; NEVER generate a run flow, lives, respawn, results "
+        "screen, restart or quit. A game-specific objective is generated code "
+        "that calls ctx.game->add_progress / complete / fail. game_design.json:\n"
+        + design.model_dump_json(indent=2)
+        if design is not None else
+        "GAME LOOP: no game design for this project."
+    )
     inp = MechanicPlanAgentInput(
         build_spec_json=build_spec.model_dump_json(indent=2),
         asset_manifest_json=manifest.model_dump_json(indent=2),
@@ -113,6 +129,7 @@ def run_with_planner(
             " only for NPC behaviour those cannot express (ranged attacks,"
             " flight, special abilities), and for wave HUDs that READ"
             " ctx.encounters.",
+            loop_rule,
         ],
     )
 
@@ -156,6 +173,12 @@ def run_with_planner(
     for note in npc_notes:
         ctx.emit(ProjectStage.mechanic_plan, "info", f"NPCs: {note}"[:240])
         ctx.store.append_log(ctx.project_id, "mechanic_plan", f"NPCs: {note}")
+
+    # The game loop runs on builtin.game_flow / builtin.game_hud.
+    plan, flow_notes = reconcile_game_flow_items(plan, design)
+    for note in flow_notes:
+        ctx.emit(ProjectStage.mechanic_plan, "info", f"game loop: {note}"[:240])
+        ctx.store.append_log(ctx.project_id, "mechanic_plan", f"game loop: {note}")
 
     ctx.mechanic_plan = plan
     art = ctx.store.save_mechanic_plan(ctx.project_id, plan)

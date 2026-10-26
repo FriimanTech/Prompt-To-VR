@@ -15,6 +15,7 @@
         "build_spec",
         "asset_manifest",
         "npc_plan",
+        "game_design",
         "mechanic_plan",
         "scene_spec",
         "reference_images",

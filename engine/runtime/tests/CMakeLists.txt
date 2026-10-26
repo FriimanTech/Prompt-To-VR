@@ -56,6 +56,8 @@ if(Python3_Interpreter_FOUND)
            COMMAND ptv_smoke gltf_nodes "${PTV_STATIC_FIXTURE}")
   add_test(NAME ptv_smoke_skinning_math
            COMMAND ptv_smoke skinning_math "${PTV_RIGGED_FIXTURE}")
+  add_test(NAME ptv_smoke_model_frame
+           COMMAND ptv_smoke model_frame "${PTV_RIGGED_FIXTURE}")
   add_test(NAME ptv_smoke_pose_system
            COMMAND ptv_smoke pose_system "${PTV_RIGGED_FIXTURE}")
   add_test(NAME ptv_smoke_clip_blend
@@ -160,3 +162,9 @@ add_test(NAME ptv_smoke_npc_ground_snap COMMAND ptv_smoke npc_ground_snap)
 add_test(NAME ptv_smoke_mechanic_host_npc COMMAND ptv_smoke mechanic_host_npc)
 add_test(NAME ptv_smoke_player_rig_adoption COMMAND ptv_smoke player_rig_adoption)
 add_test(NAME ptv_smoke_damage_log COMMAND ptv_smoke damage_log)
+add_test(NAME ptv_smoke_facing_math COMMAND ptv_smoke facing_math)
+add_test(NAME ptv_smoke_facing_directions COMMAND ptv_smoke facing_directions)
+add_test(NAME ptv_smoke_ground_motor COMMAND ptv_smoke ground_motor)
+add_test(NAME ptv_smoke_foot_planting COMMAND ptv_smoke foot_planting)
+add_test(NAME ptv_smoke_text_atlas COMMAND ptv_smoke text_atlas)
+add_test(NAME ptv_smoke_game_flow COMMAND ptv_smoke game_flow)

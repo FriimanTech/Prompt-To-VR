@@ -351,6 +351,13 @@ SceneDoc LoadSceneJson(const std::string& path) {
             m.unit_scale = std::max(0.0f, e["mesh"].value("unit_scale", 0.0f));
             m.foot_offset_m =
                 std::clamp(e["mesh"].value("foot_offset_m", 0.0f), 0.0f, 100.0f);
+            const auto& frame = e["mesh"].value("model_frame", Json::object());
+            if (frame.is_object() && frame.value("height", 0.0f) > 1e-6f) {
+                m.has_model_frame = true;
+                m.model_height = frame.value("height", 0.0f);
+                m.model_sole_y = frame.value("sole_y", 0.0f);
+                m.model_yaw_offset_rad = frame.value("yaw_offset_rad", 0.0f);
+            }
             m.collision_shape = e["mesh"].value("collision_shape", "aabb");
             // Decimated LOD chain + culling radius from asset_optimization.
             // Absent on scenes compiled before that stage: the renderer then
@@ -534,7 +541,9 @@ void ApplySceneToWorld(const SceneDoc& doc, World& world,
                          es.mesh->bounds_radius_m, es.mesh->sockets,
                          es.mesh->skinned, es.mesh->animations,
                          es.mesh->animation_speeds, es.mesh->unit_scale,
-                         es.mesh->foot_offset_m});
+                         es.mesh->foot_offset_m, es.mesh->has_model_frame,
+                         es.mesh->model_yaw_offset_rad, es.mesh->model_sole_y,
+                         es.mesh->model_height});
         }
         if (es.primitive.has_value()) {
             world.registry().emplace<CPrimitive>(

@@ -30,13 +30,14 @@ A concrete example prompt lives in the `NewProjectPage` sample text.
 | `BuildSpec` | `build_spec.json` | Claude Opus (via `LlmClient`; OpenAI fallback) |
 | `AssetManifest` | `asset_manifest.json` | Claude Sonnet (via `LlmClient`; OpenAI fallback) |
 | `NpcPlan` | `npc_plan.json` | OpenAI Agents SDK `gpt-5.6-sol` (no tools); reconciles manifest |
+| `GameDesign` | `game_design.json` | OpenAI Agents SDK `gpt-5.6-sol` (no tools) + deterministic validate/repair; see [game-flow.md](game-flow.md) |
 | `MechanicPlan` | `mechanic_plan.json` | OpenAI Agents SDK `gpt-5.6-sol` (no tools) |
 | `SceneSpec` | `scene_spec.<scene_id>.json`, `scene_spec.json` | OpenAI Agents SDK `gpt-5.6-sol` (per scene) |
 | `CodeTask` (embedded in MechanicPlan) | `*.codetask.json` beside generated `*.cpp` | MechanicPlan stage (executed by codegen agents) |
 | Rigging record | `asset_rig.json`, `model_rigged.glb` | Tripo `asset_rigging` stage |
 | Animation record | `asset_animation.json`, `model_animated.glb` | Tripo `asset_animation` stage |
 | Normalization stamp | `asset_normalization.json` | Orchestrator (`asset_normalization`, deterministic) |
-| Socket contract | `asset_contract.json` | Orchestrator (`asset_contract`, deterministic) |
+| Socket contract + character model frames | `asset_contract.json` (`sockets`, `frame`) | Orchestrator (`asset_contract`, deterministic) |
 | Codegen ledger | `codegen_board.json` | Orchestrator (`code_generation`) |
 | World scene | `world.scene.json` | Offline `ptv_worldgen` (world architect agent) |
 | Compiled scene | `scene.json` | Orchestrator (`scene_compile`, deterministic) |
@@ -128,7 +129,14 @@ builtin.snap_turn
 builtin.locomotion.snap_turn
 builtin.grab
 builtin.throw
+builtin.game_flow        (bound by scene_compile from game_design.json)
+builtin.game_hud         (bound by scene_compile from game_design.json)
 ```
+
+`AssetItem.forward_hint` (`+x` / `-x` / `+z` / `-z`, optional) names the
+axis an UNRIGGED character faces; rigged characters are measured from their
+skeleton. `NpcLocomotion.hover_height_m` (optional) is the floor-to-soles gap
+of a `flying` NPC the prompt says hovers.
 
 Anything outside this list must be modeled as a `CodeTask` and is classified
 `generate` in the `MechanicPlan`.

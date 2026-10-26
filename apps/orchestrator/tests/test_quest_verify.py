@@ -165,6 +165,116 @@ def test_npc_launched_into_the_sky_fails_the_floor_check() -> None:
     assert floor.outcome == CheckOutcome.failed
 
 
+def test_floating_by_half_its_height_fails_even_with_a_perfect_contract() -> None:
+    # origin_gap 0 (the capsule sits right) but the DRAWN feet are 0.9 m up:
+    # the Tripo floating bug. Only the drawn-feet measurement can see it.
+    log = _npc_log([(0.0, 0.0)] * 3).replace(
+        "feet_gap=0.02", "feet_gap=0.90 origin_gap=0.00 motor=grounded")
+    checks = qv.evaluate(qv.parse_telemetry(log), _plan("stationary", ["idle"]), SCENE,
+                         process_alive=True)[0]
+    floor = next(c for c in checks if c.name == "stands on the floor")
+    assert floor.outcome == CheckOutcome.failed
+
+
+def test_hovering_npc_is_judged_against_its_hover_height() -> None:
+    log = _npc_log([(0.0, 0.0)] * 3).replace("feet_gap=0.02", "feet_gap=2.02 motor=hover:2.00")
+    checks = qv.evaluate(qv.parse_telemetry(log), _plan("flying", ["idle"]), SCENE,
+                         process_alive=True)[0]
+    hover = next(c for c in checks if c.name == "holds its hover height")
+    assert hover.outcome == CheckOutcome.passed
+    assert not any(c.name == "stands on the floor" for c in checks)
+
+
+def test_npc_walking_sideways_fails_the_facing_check() -> None:
+    plan = _plan("animated_locomotion", ["patrol"])
+    sideways = _npc_log([(float(i), 1.0) for i in range(5)]).replace(
+        "feet_gap=0.02", "feet_gap=0.02 facing_err_deg=90")
+    checks = qv.evaluate(qv.parse_telemetry(sideways), plan, SCENE, process_alive=True)[0]
+    facing = next(c for c in checks if c.name == "faces where it is going")
+    assert facing.outcome == CheckOutcome.failed
+    forward = _npc_log([(float(i), 1.0) for i in range(5)]).replace(
+        "feet_gap=0.02", "feet_gap=0.02 facing_err_deg=4")
+    checks = qv.evaluate(qv.parse_telemetry(forward), plan, SCENE, process_alive=True)[0]
+    facing = next(c for c in checks if c.name == "faces where it is going")
+    assert facing.outcome == CheckOutcome.passed
+
+
+def _goblin_design():
+    from ptv_schemas import GameDesign
+
+    return GameDesign.model_validate({
+        "prompt_id": "p", "experience": "combat",
+        "player_vitality": {"has_health": True}, "lives": {"count": 3},
+        "objectives": [{"id": "survive", "kind": "survive_time", "description": "Survive",
+                        "duration_s": 180}],
+        "victory": {"kind": "all_objectives", "objective_ids": ["survive"]},
+        "failure": [{"kind": "lives_exhausted"}],
+        "end_screens": [
+            {"kind": "game_over", "title": "Game Over", "buttons": ["try_again", "leave_game"]},
+            {"kind": "victory", "title": "You Win!", "buttons": ["play_again", "leave_game"]}]})
+
+
+FLOW_LOG = "\n".join(_line("00.000", f"flow: {b}") for b in [
+    "state=playing from=inactive why=start attempt=1 lives=3",
+    "state=life_lost from=playing why=health_zero attempt=1 lives=2",
+    "respawned at 0.00,0.00,0.00 (spawn) lives=2",
+    "state=respawning from=life_lost why=respawn attempt=1 lives=2",
+    "state=life_lost from=playing why=health_zero attempt=1 lives=1",
+    "state=respawning from=life_lost why=respawn attempt=1 lives=1",
+    "state=life_lost from=playing why=health_zero attempt=1 lives=0",
+    "state=game_over from=life_lost why=lives_exhausted attempt=1 lives=0",
+    "button=try_again state=game_over",
+    "state=playing from=inactive why=start attempt=2 lives=3",
+    "state=victory from=playing why=objectives_met attempt=2 lives=3",
+    "button=play_again state=victory",
+    "state=playing from=inactive why=start attempt=3 lives=3",
+    "state=paused from=playing why=verify_pause attempt=3 lives=3",
+    "button=leave_game state=paused",
+    "state=exiting from=paused why=leave_game attempt=3 lives=3",
+])
+
+
+def test_goblin_shooter_loop_passes_every_flow_check() -> None:
+    checks = qv.evaluate_flow(qv.parse_flow(FLOW_LOG), _goblin_design(),
+                              exited=True, relaunched=True)
+    names = {c.name for c in checks}
+    assert {"health reaching zero costs a life", "the player respawns",
+            "Game Over follows the last life", "Try Again restarts the game",
+            "a restart resets lives", "winning ends on the victory screen",
+            "Play Again restarts the game", "Leave Game ends the app",
+            "the app launches again after leaving"} <= names
+    assert all(c.outcome == CheckOutcome.passed for c in checks), [
+        (c.name, c.detail) for c in checks if c.outcome != CheckOutcome.passed]
+
+
+def test_frozen_at_zero_health_fails_the_flow() -> None:
+    # The humans-vs-aliens bug: health hit zero and nothing happened.
+    log = "\n".join(_line("00.000", f"flow: {b}") for b in [
+        "state=playing from=inactive why=start attempt=1 lives=3"])
+    checks = qv.evaluate_flow(qv.parse_flow(log), _goblin_design(),
+                              exited=False, relaunched=False)
+    failed = {c.name for c in checks if c.outcome == CheckOutcome.failed}
+    assert "health reaching zero costs a life" in failed
+    assert "Leave Game ends the app" in failed
+
+
+def test_a_reader_is_only_checked_for_not_dying_and_leaving() -> None:
+    from ptv_schemas import GameDesign
+
+    reader = GameDesign.model_validate({"prompt_id": "p", "experience": "media",
+                                        "free_play": True})
+    log = "\n".join(_line("00.000", f"flow: {b}") for b in [
+        "state=playing from=inactive why=start attempt=1 lives=-1",
+        "state=paused from=playing why=verify_pause attempt=1 lives=-1",
+        "button=leave_game state=paused"])
+    checks = qv.evaluate_flow(qv.parse_flow(log), reader, exited=True, relaunched=True)
+    assert {c.name for c in checks} == {
+        "game loop starts", "the player cannot die", "Leave Game ends the app",
+        "the app launches again after leaving"}
+    assert all(c.outcome == CheckOutcome.passed for c in checks)
+    assert qv.flow_capture_seconds(reader) < qv.flow_capture_seconds(_goblin_design())
+
+
 def test_crash_fails_the_base_check() -> None:
     checks, _ = qv.evaluate(qv.parse_telemetry(BASE_LOG), None, {}, process_alive=False,
                             crash_text="F libc: Fatal signal 11 (SIGSEGV)")

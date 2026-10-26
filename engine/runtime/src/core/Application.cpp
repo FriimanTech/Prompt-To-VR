@@ -60,6 +60,7 @@
 #include "core/NpcRuntime.h"
 #include "mechanics/builtin/HandRig.h"
 #include "ptv/api/BodySlots.h"
+#include "ptv/api/Facing.h"
 #include "ptv/core/Logger.h"
 #include "ptv/ecs/Clone.h"
 #include "ptv/ecs/Skeleton.h"
@@ -784,6 +785,78 @@ private:
     Application* app_;
 };
 
+class Application::AppService final : public IApp {
+public:
+    explicit AppService(Application* app) : app_(app) {}
+    void request_exit() override { app_->request_exit(); }
+    bool exit_requested() const override { return app_->exit_requested_; }
+    const char* platform() const override {
+#if defined(__ANDROID__)
+        return "quest";
+#else
+        return "pcvr";
+#endif
+    }
+    bool verify_flow() const override { return app_->verify_flow_; }
+    float uptime_s() const override { return static_cast<float>(app_->uptime_s_); }
+    void request_fade(float amount) override {
+        if (!std::isfinite(amount)) return;
+        app_->fade_request_ = std::max(app_->fade_request_, std::clamp(amount, 0.0f, 1.0f));
+    }
+    bool place_player(const Vec3& feet, float yaw) override {
+        if (!std::isfinite(feet.x) || !std::isfinite(feet.y) ||
+            !std::isfinite(feet.z) || !std::isfinite(yaw)) {
+            return false;
+        }
+        if (app_->player_entity_ == entt::null) return false;
+        app_->set_rig_world_position(feet);
+        app_->set_rig_world_yaw(yaw);
+        // Stand the body under the head again on the next pose, as at load.
+        app_->motor_needs_sync_ = true;
+        app_->pending_move_ = Vec3(0.0f);
+        return true;
+    }
+    Vec3 scene_spawn_position() const override { return app_->scene_.spawn.position; }
+    float scene_spawn_yaw() const override {
+        const Vec3 f = glm::mat3_cast(app_->scene_.spawn.rotation) * Vec3(0.0f, 0.0f, -1.0f);
+        return yaw_from_forward(f);
+    }
+
+private:
+    Application* app_;
+};
+
+class Application::TextDrawService final : public ITextDraw {
+public:
+    explicit TextDrawService(Application* app) : app_(app) {}
+    void text(const char* utf8, const Vec3& position, const Quat& rotation,
+              float height_m, const Vec4& color, TextAlign align) override {
+        if (utf8 == nullptr || *utf8 == '\0' || !std::isfinite(height_m) ||
+            height_m <= 0.0f || !std::isfinite(position.x) ||
+            !std::isfinite(position.y) || !std::isfinite(position.z)) {
+            return;
+        }
+        TextItem it{};
+        it.text = utf8;
+        it.position = position;
+        it.rotation = rotation;
+        it.height_m = std::clamp(height_m, 0.002f, 5.0f);
+        it.color = color;
+        it.align = static_cast<int>(align);
+        app_->renderer_.submit_text(std::move(it));
+    }
+    float measure(const char* utf8, float height_m) const override {
+        if (utf8 == nullptr) return 0.0f;
+        if (const TextAtlas* a = app_->renderer_.text_atlas()) {
+            return a->measure(utf8, height_m);
+        }
+        return 0.6f * height_m * static_cast<float>(std::strlen(utf8));
+    }
+
+private:
+    Application* app_;
+};
+
 class Application::ComfortService final : public IComfort {
 public:
     explicit ComfortService(Application* app) : app_(app) {}
@@ -882,6 +955,18 @@ void Application::tick_comfort_vignette(float dt) {
         kOpenHalfAngle +
         (0.5f * vignette_inner_deg_ - kOpenHalfAngle) * vignette_level_;
     const float opacity = std::min(1.0f, vignette_level_ * 4.0f) * 0.95f;
+
+    // A gameplay fade (respawn, restart) is a whole-view fade to black and
+    // wins over the comfort vignette when stronger. Smoothed so it never
+    // pops, quickly enough that a 0.5 s fade reads as one.
+    fade_level_ += (fade_request_ - fade_level_) * (1.0f - std::exp(-dt / 0.12f));
+    if (fade_level_ < 1e-3f) fade_level_ = 0.0f;
+    fade_request_ = 0.0f;
+    if (fade_level_ > opacity) {
+        // Clear half-angle 0 with a narrow feather covers the whole view.
+        renderer_.set_vignette(fade_level_, 0.0f, 1.0f);
+        return;
+    }
     renderer_.set_vignette(opacity, clear, vignette_feather_deg_);
 }
 
@@ -1481,6 +1566,14 @@ public:
         return p == nullptr ? -1 : p->highlighted;
     }
 
+    void set_title(const char* panel_id, const char* title,
+                   const char* subtitle) override {
+        if (CUiPanel* p = find(panel_id)) {
+            p->title = title == nullptr ? "" : title;
+            p->subtitle = subtitle == nullptr ? "" : subtitle;
+        }
+    }
+
 private:
     CUiPanel* find(const char* panel_id) {
         return const_cast<CUiPanel*>(
@@ -1524,6 +1617,10 @@ public:
 
     bool transition_pending() const override {
         return app_->pending_transition_.active;
+    }
+
+    bool restart_current(bool fresh) override {
+        return app_->request_scene_restart(fresh);
     }
 
     bool load_nested(const char* scene_id, std::uint32_t host,
@@ -1888,7 +1985,7 @@ public:
 
         // Verification keeps the player alive so a test run can watch the
         // whole encounter; the hit is still recorded below.
-        const bool protect = app_->verify_mode_ &&
+        const bool protect = app_->verify_mode_ && !app_->verify_flow_ &&
                              target == static_cast<std::uint32_t>(app_->player_entity_);
         if (!protect) hp.current = std::max(0.0f, hp.current - amount);
         hp.invuln_s = std::max(0.0f, hp.invuln_after_hit_s);
@@ -1948,6 +2045,30 @@ public:
         app_->begin_death(entity);
     }
 
+    bool revive(std::uint32_t entity, float health,
+                float invulnerable_s) override {
+        World& w = app_->world_;
+        if (!w.valid(entity) || !w.has<CHealth>(entity)) return false;
+        auto& hp = w.get<CHealth>(entity);
+        hp.alive = true;
+        hp.death_timer_s = -1.0f;
+        hp.current = (std::isfinite(health) && health > 0.0f)
+                         ? std::min(health, hp.max)
+                         : hp.max;
+        if (std::isfinite(invulnerable_s)) {
+            hp.invuln_s = std::max(hp.invuln_s, std::clamp(invulnerable_s, 0.0f, 30.0f));
+        }
+        // An NPC's body was removed when it died; the player's never is.
+        if (entity != static_cast<std::uint32_t>(app_->player_entity_)) {
+            app_->physics_.add_body_for(app_->world_, entity);
+        }
+        if (app_->mech_ctx_.skeleton != nullptr) {
+            app_->mech_ctx_.skeleton->stop_clip(entity);
+        }
+        PTV_INFO("combat: {} revived with {:.1f} health", entity, hp.current);
+        return true;
+    }
+
     const char* faction(std::uint32_t entity) const override {
         const World& w = app_->world_;
         if (!w.valid(entity) || !w.has<CFaction>(entity)) return "";
@@ -1998,7 +2119,7 @@ private:
         const bool on_player =
             target == static_cast<std::uint32_t>(app_->player_entity_);
         if (on_player) ++player_hits_;
-        if (on_player && app_->verify_mode_ &&
+        if (on_player && app_->verify_mode_ && !app_->verify_flow_ &&
             instigator != InputSnapshot::kInvalidEntity) {
             auto& q = app_->verify_defeats_;
             const bool queued = std::any_of(q.begin(), q.end(), [&](const auto& p) {
@@ -3724,7 +3845,7 @@ float matrix_yaw(const Mat4& m) {
     const Vec3 fwd = Vec3(m * Vec4(0.0f, 0.0f, -1.0f, 0.0f));
     const Vec3 flat(fwd.x, 0.0f, fwd.z);
     if (glm::length(flat) < 1e-5f) return 0.0f;
-    return std::atan2(-flat.x, -flat.z);
+    return yaw_from_forward(flat);
 }
 
 /** Rig yaw that makes the player face ``facing``.
@@ -3736,7 +3857,7 @@ float matrix_yaw(const Mat4& m) {
  *  was a scene's default; named portal spawn points, which routinely face
  *  sideways, make it the common case. */
 float yaw_for_facing(const Vec3& facing) {
-    return std::atan2(-facing.x, -facing.z);
+    return yaw_from_forward(facing);
 }
 
 }  // namespace
@@ -3946,11 +4067,42 @@ bool Application::request_scene_transition(const std::string& scene_id,
     return true;
 }
 
+bool Application::request_scene_restart(bool fresh) {
+    if (pending_transition_.active) return false;
+    pending_transition_.active = true;
+    pending_transition_.restart = true;
+    pending_transition_.fresh = fresh;
+    pending_transition_.scene_id = scene_.scene_id;
+    PTV_INFO("transition: restart of '{}' requested ({})", scene_.scene_id,
+             fresh ? "fresh" : "keep state");
+    return true;
+}
+
+void Application::request_exit() {
+    if (exit_requested_) return;
+    exit_requested_ = true;
+    exit_wait_s_ = 0.0f;
+    PTV_INFO("app: exit requested");
+}
+
 void Application::apply_pending_transition() {
     if (!pending_transition_.active) return;
     const std::string scene_id = pending_transition_.scene_id;
     const std::string spawn_id = pending_transition_.spawn_point_id;
+    const bool restart = pending_transition_.restart;
+    const bool fresh = pending_transition_.fresh;
     pending_transition_ = PendingTransition{};
+
+    if (restart) {
+        // The attempt counter is the one piece of flow state a restart keeps.
+        const int attempts = game_flow_board_.flow_state()->attempts;
+        if (!load_scene_at(scene_path_, "", fresh)) {
+            PTV_ERROR("restart of '{}' failed; staying put", scene_id);
+            return;
+        }
+        game_flow_board_.flow_state()->attempts = attempts + 1;
+        return;
+    }
 
     const auto it = scene_.scene_index.find(scene_id);
     if (it == scene_.scene_index.end()) return;
@@ -3999,8 +4151,11 @@ void Application::place_player_at_spawn(const std::string& spawn_point_id) {
 }
 
 bool Application::load_scene_at(const std::string& path,
-                                const std::string& spawn_point_id) {
-    if (!std::filesystem::exists(path)) {
+                                const std::string& spawn_point_id,
+                                bool fresh) {
+    // Through the asset source, not std::filesystem: on Quest the scene
+    // documents live inside the APK, where the filesystem sees nothing.
+    if (!asset_source().exists(path)) {
         PTV_ERROR("transition: no scene document at {}", path);
         return false;
     }
@@ -4008,7 +4163,18 @@ bool Application::load_scene_at(const std::string& path,
     // 1) Remember what the player did to the place they are leaving. Deltas
     //    only -- the outgoing scene is rebuilt from its own document plus
     //    this, so a room the player never touched costs nothing to store.
-    if (!scene_.scene_id.empty()) {
+    //    A fresh restart is a new attempt: nothing is remembered, and what
+    //    earlier visits saved is thrown away so no scene restores it later.
+    if (fresh) {
+        std::error_code ec;
+        for (const auto& [id, rel] : scene_.scene_index) {
+            (void)rel;
+            std::filesystem::remove(save_path_for_scene(id), ec);
+        }
+        if (!scene_.scene_id.empty()) {
+            std::filesystem::remove(save_path_for_scene(scene_.scene_id), ec);
+        }
+    } else if (!scene_.scene_id.empty()) {
         SaveSystem::save_to_file(save_path_for_scene(scene_.scene_id), world_);
     }
 
@@ -4043,6 +4209,7 @@ bool Application::load_scene_at(const std::string& path,
     nested_scenes_.clear();
     clone_children_.clear();
     encounter_board_.clear();
+    game_flow_board_.clear();
     // Physics bodies are dropped by rebuild_from_world below, which tracks
     // them by body id rather than through the world, so it does not matter
     // that the entities are gone by then.
@@ -4063,7 +4230,7 @@ bool Application::load_scene_at(const std::string& path,
     //    transforms -- a door left open has to be open when its collider is
     //    built, or the player walks into a body that is not where the door is.
     const std::string save = save_path_for_scene(scene_.scene_id);
-    if (std::filesystem::exists(save)) {
+    if (!fresh && std::filesystem::exists(save)) {
         SaveSystem::load_from_file(save, world_);
     }
 
@@ -4393,8 +4560,12 @@ void Application::begin_death(std::uint32_t entity) {
 
     // Corpses must stop blocking the living. Removing the body rather than
     // leaving it kinematic also means the player can walk over the spot,
-    // which is what they will try to do.
-    physics_.remove_body(entity);
+    // which is what they will try to do. The player keeps theirs: they are
+    // revived in place or respawned, and a capsule-less player walks
+    // through walls on the way to the Game Over screen.
+    if (entity != static_cast<std::uint32_t>(player_entity_)) {
+        physics_.remove_body(entity);
+    }
 
     // Stop it steering: an entity with a locomotion intent would keep
     // walking through its own death animation.
@@ -4463,6 +4634,29 @@ bool is_npc_entity(const World& w, std::uint32_t e) {
     return false;
 }
 
+/** "grounded", "flying", "hover:<m>" or "none": which character_locomotion
+ *  motor drives this NPC, so verification knows which height check applies. */
+std::string npc_motor_of(const World& w, std::uint32_t e) {
+    if (!w.has<CMechanicBinding>(e)) return "none";
+    for (const auto& entry : w.get<CMechanicBinding>(e).entries) {
+        if (entry.id != "builtin.character_locomotion" &&
+            entry.builtin_id != "builtin.character_locomotion") {
+            continue;
+        }
+        const auto p = nlohmann::json::parse(entry.params_json, nullptr, false);
+        if (!p.is_object()) return "grounded";
+        if (p.value("motor", std::string("grounded")) != "flying") return "grounded";
+        const float hover = p.value("hover_height_m", 0.0f);
+        if (hover > 0.0f) {
+            char buf[32];
+            std::snprintf(buf, sizeof(buf), "hover:%.2f", hover);
+            return buf;
+        }
+        return "flying";
+    }
+    return "none";
+}
+
 std::string fmt_vec(const Vec3& v) {
     char buf[64];
     std::snprintf(buf, sizeof(buf), "%.2f,%.2f,%.2f", v.x, v.y, v.z);
@@ -4492,10 +4686,26 @@ void Application::read_verify_mode() {
         on = v[0] == '1' || v[0] == 't' || v[0] == 'y';
     }
 #endif
-    verify_mode_ = on;
+    bool flow = false;
+#if defined(__ANDROID__)
+    char flow_value[PROP_VALUE_MAX] = {0};
+    if (__system_property_get("debug.ptv.verify_flow", flow_value) > 0) {
+        flow = flow_value[0] == '1' || flow_value[0] == 't' || flow_value[0] == 'y';
+    }
+#else
+    if (const char* v = std::getenv("PTV_VERIFY_FLOW")) {
+        flow = v[0] == '1' || v[0] == 't' || v[0] == 'y';
+    }
+#endif
+    // The flow pass is a verification run too (scripted walk, telemetry).
+    verify_flow_ = flow;
+    verify_mode_ = on || flow;
     verify_time_s_ = 0.0f;
     verify_origin_set_ = false;
-    if (on) {
+    if (flow) {
+        PTV_INFO("verify: FLOW mode on (scripted walk, player CAN die, end "
+                 "screens are clicked by script)");
+    } else if (on) {
         PTV_INFO("verify: mode on (scripted player walk, player cannot die)");
     }
 }
@@ -4641,11 +4851,57 @@ void Application::tick_npc_telemetry(float dt) {
         Vec3 hit(0.0f), n(0.0f, 1.0f, 0.0f);
         std::uint32_t what = InputSnapshot::kInvalidEntity;
         std::string feet_gap = "none";
+        std::string origin_gap = "none";
         if (physics_.raycast(pos + Vec3(0.0f, 0.5f * h, 0.0f), Vec3(0, -1, 0),
                              200.0f, filter, hit, n, what)) {
             char buf[32];
+            // What the CONTRACT says: origin minus the declared foot offset.
             std::snprintf(buf, sizeof(buf), "%.2f", pos.y - foot - hit.y);
+            origin_gap = buf;
+            // What is actually DRAWN: the lowest animated foot/toe joint,
+            // less its bind-pose height above the mesh's real soles. This is
+            // independent of foot_offset_m, so a model whose drawn feet do
+            // not match its capsule shows up here even when the contract
+            // looks perfect.
+            float sole = pos.y - foot;
+            if (skeleton_svc_ != nullptr &&
+                world_.registry().all_of<CSkeleton>(ent)) {
+                const auto& sk = world_.registry().get<CSkeleton>(ent);
+                const float s = view.get<CTransform>(ent).t.scale;
+                float best = 1.0e30f;
+                for (const char* slot : {"foot_l", "foot_r", "toes_l", "toes_r"}) {
+                    const int j = skeleton_svc_->joint_for_slot(e, slot);
+                    if (j < 0) continue;
+                    const float above_sole =
+                        skeleton_svc_->joint_bind_model(e, j)[3].y -
+                        sk.skeleton.bind_min_y;
+                    best = std::min(best, skeleton_svc_->joint_world(e, j)[3].y -
+                                              above_sole * s);
+                }
+                if (best < 1.0e29f) sole = best;
+            }
+            std::snprintf(buf, sizeof(buf), "%.2f", sole - hit.y);
             feet_gap = buf;
+        }
+        // Angle between where the body faces and where it is meant to face:
+        // its travel direction, or the target it is tracking.
+        std::string facing_err = "-";
+        if (const auto* li = world_.registry().try_get<CLocomotionIntent>(ent)) {
+            Vec3 want(0.0f);
+            if (li->has_face_target && !li->face_travel) {
+                want = li->face_target - pos;
+            } else {
+                want = li->desired_velocity;
+            }
+            want.y = 0.0f;
+            if (glm::length(want) > 0.2f) {
+                char buf[32];
+                std::snprintf(buf, sizeof(buf), "%.0f",
+                              glm::degrees(heading_error(
+                                  facing_of(view.get<CTransform>(ent).t.rotation),
+                                  want)));
+                facing_err = buf;
+            }
         }
         std::string clip = "-";
         if (const auto* anim = world_.registry().try_get<CAnimator>(ent)) {
@@ -4664,11 +4920,13 @@ void Application::tick_npc_telemetry(float dt) {
         const Vec3 to_player(player.x - pos.x, 0.0f, player.z - pos.z);
         const std::string* name = world_.id_of(ent);
         PTV_INFO(
-            "npc t={:.1f} id={} e={} asset={} pos={} feet_gap={} speed={:.2f} "
+            "npc t={:.1f} id={} e={} asset={} pos={} feet_gap={} "
+            "origin_gap={} facing_err_deg={} motor={} speed={:.2f} "
             "intent={:.2f} clip=\"{}\" alive={} dist_player={:.2f}",
             npc_telemetry_clock_s_, name ? *name : std::string("clone"), e,
-            cm.asset_id, fmt_vec(pos), feet_gap, speed, intent, clip,
-            alive ? 1 : 0, glm::length(to_player));
+            cm.asset_id, fmt_vec(pos), feet_gap, origin_gap, facing_err,
+            npc_motor_of(world_, e), speed, intent, clip, alive ? 1 : 0,
+            glm::length(to_player));
     }
     // Forget NPCs that no longer exist so a reused entity id starts clean.
     for (auto it = npc_last_pos_.begin(); it != npc_last_pos_.end();) {
@@ -4773,13 +5031,41 @@ void Application::attach_skeletons() {
             if (!has_skin) continue;
         }
 
+        gltf_mesh_load::ModelFrame frame{};
+        if (cm.has_model_frame) {
+            frame.valid = true;
+            frame.yaw_offset_rad = cm.model_yaw_offset_rad;
+            frame.sole_y = cm.model_sole_y;
+            frame.height = cm.model_height;
+            frame.unit_scale = cm.unit_scale;
+        } else {
+            PTV_WARN(
+                "rigged mesh {} has no model frame in scene.json; it is scaled "
+                "by its longest axis and faces whatever its source faced. "
+                "Re-run asset_contract and scene_compile.",
+                cm.glb_path);
+        }
+        const gltf_mesh_load::ModelFrame* frame_ptr =
+            frame.valid ? &frame : nullptr;
+
         gltf_mesh_load::SkeletonData skel;
         const int slot = renderer_.load_glb_skinned(
-            cm.glb_path, cm.target_scale_meters, skel);
+            cm.glb_path, cm.target_scale_meters, skel, frame_ptr);
         if (slot < 0 || skel.joint_count() == 0) {
             PTV_WARN("rigged mesh {} failed to load; drawing nothing for it",
                      cm.glb_path);
             continue;
+        }
+        if (cm.foot_offset_m <= 1.0e-4f) {
+            // No measured offset: stand it on the soles the loaded bind pose
+            // actually has. Half the height would float a feet-origin model
+            // by half its height, which is exactly what Tripo NPCs did.
+            auto& mutable_cm = view.get<CMesh>(entity);
+            mutable_cm.foot_offset_m = std::max(-skel.bind_min_y, 1.0e-3f);
+            PTV_WARN(
+                "rigged mesh {} has no foot_offset_m; measured {:.3f} m from "
+                "its bind pose",
+                cm.glb_path, mutable_cm.foot_offset_m);
         }
 
         // Every LOD shares the skeleton by construction (ptv_glb_optimize
@@ -4788,7 +5074,7 @@ void Application::attach_skeletons() {
         for (size_t i = 1; i < cm.lod_paths.size(); ++i) {
             gltf_mesh_load::SkeletonData ignored;
             renderer_.load_glb_skinned(cm.lod_paths[i], cm.target_scale_meters,
-                                       ignored);
+                                       ignored, frame_ptr);
         }
 
         CSkeleton cs{};
@@ -4879,6 +5165,23 @@ int Application::run(const Config& cfg) {
 #endif
 
         if (!xr_.poll_events()) running_ = false;
+        uptime_s_ += dt;
+
+        // Leave Game: ask the runtime to end the session once; poll_events
+        // reports EXITING and the loop ends. A runtime that never answers
+        // (no session, a desktop run without a headset) is not waited on
+        // forever.
+        if (exit_requested_) {
+            if (!exit_sent_) {
+                exit_sent_ = true;
+                if (!xr_.request_exit()) running_ = false;
+            }
+            exit_wait_s_ += dt;
+            if (exit_wait_s_ > 3.0f) {
+                PTV_WARN("app: runtime did not end the session; exiting anyway");
+                running_ = false;
+            }
+        }
 
         // ------------------------------------------------------------
         // OpenXR frame timing.
@@ -5114,6 +5417,8 @@ int Application::run(const Config& cfg) {
             s.prev_button_b = prev_input_.button_b;
             s.prev_button_x = prev_input_.button_x;
             s.prev_button_y = prev_input_.button_y;
+            s.button_menu = input.button_menu;
+            s.prev_button_menu = prev_input_.button_menu;
             if (input.head_valid) {
                 s.head_position = head_world_pos;
                 s.head_rotation = head_world_rot;
@@ -5622,8 +5927,13 @@ bool Application::initialize(const Config& cfg) {
     transition_svc_ = std::make_unique<TransitionService>(this);
     ui_svc_ = std::make_unique<UiService>(this);
     comfort_svc_ = std::make_unique<ComfortService>(this);
+    app_svc_ = std::make_unique<AppService>(this);
+    text_svc_ = std::make_unique<TextDrawService>(this);
     mech_ctx_.locomotion = locomotion_svc_.get();
     mech_ctx_.comfort = comfort_svc_.get();
+    mech_ctx_.game = &game_flow_board_;
+    mech_ctx_.app = app_svc_.get();
+    mech_ctx_.text = text_svc_.get();
     mech_ctx_.physics = physics_svc_.get();
     mech_ctx_.contacts = contacts_svc_.get();
     mech_ctx_.spawn = spawn_svc_.get();

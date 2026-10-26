@@ -60,6 +60,17 @@ FetchContent_Declare(JoltPhysics
   GIT_TAG v5.5.0
   SOURCE_SUBDIR Build)
 
+# stb (stb_truetype for the text atlas). Header-only, no CMake project, so it
+# is only populated. Pinned to the commit vcpkg's "stb" port (2024-07-29)
+# uses on desktop so both builds bake identical glyphs.
+FetchContent_Declare(stb
+  GIT_REPOSITORY https://github.com/nothings/stb.git
+  GIT_TAG f75e8d1cad7d90d72ef7a4661f1b994ef78b4e31)
+FetchContent_GetProperties(stb)
+if(NOT stb_POPULATED)
+  FetchContent_Populate(stb)
+endif()
+
 set(TINYGLTF_HEADER_ONLY ON CACHE BOOL "" FORCE)
 set(TINYGLTF_INSTALL OFF CACHE BOOL "" FORCE)
 FetchContent_MakeAvailable(glm entt nlohmann_json vma volk tinygltf spdlog JoltPhysics)
@@ -124,7 +135,8 @@ set(PTV_COMPILE_DEFS
 set(PTV_INCLUDE_DIRS
   "${PTV_RUNTIME_DIR}/include"
   "${PTV_RUNTIME_DIR}/src"
-  "${tinygltf_SOURCE_DIR}")
+  "${tinygltf_SOURCE_DIR}"
+  "${stb_SOURCE_DIR}")
 
 # Warnings we refuse to hear from vendored headers.
 #

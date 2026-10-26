@@ -16,6 +16,7 @@
 #if defined(__ANDROID__)
 
 #include <android_native_app_glue.h>
+#include <unistd.h>
 
 #include <memory>
 
@@ -81,6 +82,32 @@ extern "C" void android_main(android_app* app) {
     ptv::Application appn;
     const int rc = appn.run(cfg);
     PTV_INFO("android_main: runtime exited rc={}", rc);
+
+    // The frame loop ended on its own (Leave Game, or the XR session
+    // exiting) rather than because Android destroyed the activity. Returning
+    // now would leave the process in a state the Quest cannot relaunch, so
+    // ask the framework to finish the activity and wait for it to say so
+    // (KhronosGroup/OpenXR-SDK-Source#329; ANativeActivity_finish).
+    if (!app->destroyRequested) {
+        ANativeActivity_finish(app->activity);
+        while (!app->destroyRequested) {
+            int events = 0;
+            android_poll_source* source = nullptr;
+            if (ALooper_pollOnce(100, nullptr, &events,
+                                 reinterpret_cast<void**>(&source)) >= 0 &&
+                source != nullptr) {
+                source->process(app, source);
+            }
+        }
+        PTV_INFO("android_main: activity finished");
+        // Android keeps a finished activity's process cached, and the next
+        // launch would reuse it -- with every engine singleton (asset source,
+        // registries, logger) still holding the previous run. Leave Game
+        // means the game is over: end the process so the next launch is a
+        // clean one. _exit, not exit: static destructors racing the Java
+        // side's teardown is exactly what must not happen here.
+        _exit(0);
+    }
 }
 
 #endif  // __ANDROID__

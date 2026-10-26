@@ -139,7 +139,11 @@ only when the game calls for it:
   NPCs runs only these; its NPC section reads "not applicable: this game has
   no NPCs".
 - **Placed at load (`persistent_count > 0`):** present, skeleton and clips
-  resolved, feet within 0.3 m of the floor, inside the walkable area.
+  resolved, DRAWN feet within 5 cm of the floor (median; the lowest animated
+  foot joint, not the declared offset -- a hovering NPC is checked against
+  its hover height instead and a free flyer not at all), faces where it is
+  going (median heading error under 20 degrees while moving), inside the
+  walkable area.
 - **Stationary (`movement_style: stationary`):** stays within 0.25 m of where
   it was placed, plays `idle` if it has one; with combat behaviours it must
   land hits on the player from its spot. Follow / chase movement checks never
@@ -149,8 +153,26 @@ only when the game calls for it:
   moving.
 - **Encounters:** waves start; enough enemies spawn within the start delay
   plus 15 s.
-- **Enemies hostile to the player with chase/melee:** on the floor, close
-  the distance, play a gait clip while moving, land hits on the player.
+- **Enemies hostile to the player with chase/melee:** on the floor, facing
+  their travel / target, close the distance, play a gait clip while moving,
+  land hits on the player.
+- **The game loop (projects with `game_design.json`):** a SECOND launch with
+  `debug.ptv.verify_flow 1`, where the player can die and
+  `builtin.game_flow` clicks its own end-screen buttons (see
+  [game-flow.md](game-flow.md#5-on-headset-verification-quest-only-report-only)).
+  The stage waits up to `flow_capture_seconds` (75 s plus 17 s per life plus
+  a tenth of any survival timer, capped at 300 s) for the game to leave on its
+  own, logs to `logs/runtime/verify_<ts>_flow.log`, then launches it once
+  more. Checks: the loop starts; health 0 costs a life; the player respawns;
+  Game Over follows the last life; Try Again restarts and resets lives;
+  winning shows the victory screen; Play Again restarts; Leave Game ends the
+  process; the app launches again. A game that cannot kill the player is
+  checked for never dying instead.
+
+The APK also carries the engine's UI font: `quest_build` copies
+`engine/runtime/assets/fonts/` (Atkinson Hyperlegible Bold + its OFL
+license) into `assets/engine/fonts/`, beside the default hands. Without it
+the game runs, but no label, title or HUD number is drawn.
 
 Output: `runtime_verification.json` (`RuntimeVerification` in
 `packages/schemas`) with `passed` / `failed` / `skipped`, every check with

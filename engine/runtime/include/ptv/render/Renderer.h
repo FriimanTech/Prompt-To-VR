@@ -17,6 +17,7 @@
 #include "ptv/math/Math.h"
 #include "ptv/render/GltfMeshLoad.h"
 #include "ptv/render/GltfSkinnedLoad.h"
+#include "ptv/render/TextRenderer.h"
 #include "ptv/scene/Scene.h"
 
 namespace ptv {
@@ -183,6 +184,13 @@ public:
      *  the unobstructed view around each eye's forward axis and
      *  ``feather_deg`` the width of the soft edge beyond it -- angles, not
      *  screen fractions, so every headset occludes the same visual field. */
+    /** World-space strings for the next frame (consumed by draw_frame). */
+    void submit_text(TextItem item) { text_items_.push_back(std::move(item)); }
+    /** The glyph atlas, for measuring text; null when text is unavailable. */
+    const TextAtlas* text_atlas() const {
+        return text_.ready() ? &text_.atlas() : nullptr;
+    }
+
     void set_vignette(float opacity, float clear_half_angle_deg,
                       float feather_deg) {
         vignette_opacity_ = opacity;
@@ -220,10 +228,16 @@ public:
      *  ``out_skeleton`` with the hierarchy the pose system needs. Unlike the
      *  static streaming path this blocks, because a skinned entity cannot be
      *  drawn at all until its skeleton exists -- there is no coarser LOD to
-     *  fall back to. */
+     *  fall back to.
+     *
+     *  ``frame`` (optional) is the asset's measured model frame: the mesh is
+     *  then scaled by height and pivoted onto the engine's frame, and cached
+     *  under ``frame->unit_scale`` -- the same key the draw loop builds from
+     *  ``CMesh::unit_scale``. */
     int load_glb_skinned(const std::string& resolved_path,
                          float target_scale_meters,
-                         gltf_mesh_load::SkeletonData& out_skeleton);
+                         gltf_mesh_load::SkeletonData& out_skeleton,
+                         const gltf_mesh_load::ModelFrame* frame = nullptr);
 
     /** True when ``slot`` holds skinned geometry (48-byte vertices). */
     bool mesh_slot_is_skinned(int slot) const;
@@ -391,6 +405,10 @@ private:
     float vignette_opacity_{0.0f};
     float vignette_clear_deg_{60.0f};
     float vignette_feather_deg_{20.0f};
+
+    // World-space SDF text (menus, HUD numerals), drawn after geometry.
+    TextRenderer text_{};
+    std::vector<TextItem> text_items_;
 
     VkShaderModule vs_{VK_NULL_HANDLE};
     VkShaderModule fs_{VK_NULL_HANDLE};

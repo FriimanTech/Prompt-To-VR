@@ -31,6 +31,7 @@
 #include <string>
 
 #include "../BuiltinMechanicBase.h"
+#include "ptv/api/Facing.h"
 #include "ptv/core/Logger.h"
 
 namespace ptv {
@@ -92,6 +93,7 @@ public:
             want.desired_velocity = Vec3(0.0f);
             want.face_travel = true;
             want.has_face_target = false;
+            want.has_look_target = false;
             return;
         }
 
@@ -127,12 +129,25 @@ public:
             return;
         }
 
+        // The head tracks the target whatever the body is doing.
+        want.has_look_target = true;
+        want.look_target = them;
+
         if (d <= range_) {
             want.desired_velocity = Vec3(0.0f);
             want.face_travel = false;
             want.has_face_target = true;
             want.face_target = them;
-            if (cooldown_t_ <= 0.0f) {
+            // Never swing at something behind it: wait until the body has
+            // turned to face the target, so the attack visibly lands. A body
+            // that cannot turn (nothing drives its locomotion) still attacks
+            // after a moment rather than standing there forever.
+            const float err = glm::degrees(heading_error(
+                facing_of(world.get<CTransform>(self).t.rotation), flat));
+            unfaced_t_ = err <= kMaxAttackFacingErrDeg ? 0.0f : unfaced_t_ + dt;
+            const bool faced =
+                err <= kMaxAttackFacingErrDeg || unfaced_t_ >= kMaxTurnWaitS;
+            if (cooldown_t_ <= 0.0f && faced) {
                 windup_t_ = windup_;
                 if (ctx.skeleton != nullptr && !attack_clip_.empty()) {
                     ctx.skeleton->play_clip(self, attack_clip_.c_str(), false, 0.08f);
@@ -149,8 +164,12 @@ public:
         dir.y = 0.0f;
         if (glm::length(dir) < 1e-4f) dir = flat;
         const bool close = d < range_ * 3.0f;
-        want.face_travel = true;
-        want.has_face_target = false;
+        // Far away it faces where it is going (around corners, through
+        // doors). Closing in it squares up to the target, so it arrives
+        // already facing what it is about to hit.
+        want.face_travel = !close;
+        want.has_face_target = close;
+        want.face_target = them;
         want.desired_velocity =
             glm::length(dir) > 1e-4f ? glm::normalize(dir) * (close ? walk_ : chase_)
                                      : Vec3(0.0f);
@@ -233,6 +252,9 @@ private:
     }
 
     static constexpr float kMaxReachHeightM = 2.0f;
+    static constexpr float kMaxAttackFacingErrDeg = 35.0f;
+    static constexpr float kMaxTurnWaitS = 1.0f;
+    float unfaced_t_{0.0f};
 
     std::string target_tag_;
     float sight_{30.0f}, chase_{3.5f}, walk_{1.4f};

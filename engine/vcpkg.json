@@ -16,6 +16,7 @@
     "joltphysics",
     "spdlog",
     "nlohmann-json",
+    "stb",
     {
       "name": "imgui",
       "features": ["vulkan-binding", "glfw-binding"]

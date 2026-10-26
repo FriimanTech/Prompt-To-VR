@@ -104,6 +104,11 @@ struct InputSnapshot {
     bool prev_button_b{false};
     bool prev_button_x{false};
     bool prev_button_y{false};
+    /** Left controller menu button: the game's pause control, owned by
+     *  ``builtin.game_flow`` when the scene has one. */
+    bool button_menu{false};
+    bool prev_button_menu{false};
+    bool menu_pressed() const { return button_menu && !prev_button_menu; }
 
     // Head (HMD) pose in world/stage space.
     glm::vec3 head_position{0.0f};

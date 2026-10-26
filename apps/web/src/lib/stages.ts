@@ -118,8 +118,17 @@ const STAGES: StageMeta[] = [
       "Who fights whom, and which characters need rigs at all. Runs early because that answer is what costs credits later.",
   },
   {
-    id: "mechanic_plan",
+    id: "game_design",
     step: 4,
+    label: "Game design",
+    group: "plan",
+    cost: "llm",
+    blurb:
+      "The rules of the loop: health, lives, respawn, objectives, how it ends, and the end screens. Explicit prompt rules win; nothing a game does not need is added.",
+  },
+  {
+    id: "mechanic_plan",
+    step: 5,
     label: "MechanicPlan",
     group: "plan",
     cost: "llm",
@@ -128,7 +137,7 @@ const STAGES: StageMeta[] = [
   },
   {
     id: "scene_spec",
-    step: 5,
+    step: 6,
     label: "SceneSpec",
     group: "plan",
     cost: "llm",
@@ -136,7 +145,7 @@ const STAGES: StageMeta[] = [
   },
   {
     id: "reference_images",
-    step: 6,
+    step: 7,
     label: "Reference images",
     group: "assets",
     cost: "credits",
@@ -144,7 +153,7 @@ const STAGES: StageMeta[] = [
   },
   {
     id: "tripo_models",
-    step: 7,
+    step: 8,
     label: "Tripo 3D models",
     group: "assets",
     cost: "credits",
@@ -152,7 +161,7 @@ const STAGES: StageMeta[] = [
   },
   {
     id: "character_routing",
-    step: 8,
+    step: 9,
     label: "Character routing",
     group: "assets",
     cost: "llm",
@@ -161,7 +170,7 @@ const STAGES: StageMeta[] = [
   },
   {
     id: "uthana_rigging",
-    step: 9,
+    step: 10,
     label: "Uthana auto-rig",
     group: "assets",
     cost: "credits",
@@ -170,7 +179,7 @@ const STAGES: StageMeta[] = [
   },
   {
     id: "asset_rigging",
-    step: 10,
+    step: 11,
     label: "Auto-rigging",
     group: "assets",
     cost: "credits",
@@ -179,7 +188,7 @@ const STAGES: StageMeta[] = [
   },
   {
     id: "asset_animation",
-    step: 11,
+    step: 12,
     label: "Animation retarget",
     group: "assets",
     cost: "credits",
@@ -187,7 +196,7 @@ const STAGES: StageMeta[] = [
   },
   {
     id: "uthana_motion_plan",
-    step: 12,
+    step: 13,
     label: "Uthana motion plan",
     group: "assets",
     cost: "llm",
@@ -196,7 +205,7 @@ const STAGES: StageMeta[] = [
   },
   {
     id: "uthana_animation",
-    step: 13,
+    step: 14,
     label: "Uthana animation",
     group: "assets",
     cost: "credits",
@@ -205,7 +214,7 @@ const STAGES: StageMeta[] = [
   },
   {
     id: "asset_normalization",
-    step: 14,
+    step: 15,
     label: "Asset normalization",
     group: "assets",
     cost: "free",
@@ -214,7 +223,7 @@ const STAGES: StageMeta[] = [
   },
   {
     id: "asset_contract",
-    step: 15,
+    step: 16,
     label: "Asset sockets",
     group: "assets",
     cost: "free",
@@ -223,7 +232,7 @@ const STAGES: StageMeta[] = [
   },
   {
     id: "world_generation",
-    step: 16,
+    step: 17,
     label: "VR environments",
     group: "build",
     cost: "llm",
@@ -232,7 +241,7 @@ const STAGES: StageMeta[] = [
   },
   {
     id: "code_generation",
-    step: 17,
+    step: 18,
     label: "Gameplay C++",
     group: "build",
     cost: "llm",
@@ -241,7 +250,7 @@ const STAGES: StageMeta[] = [
   },
   {
     id: "asset_optimization",
-    step: 18,
+    step: 19,
     label: "Decimation and LODs",
     group: "compile",
     cost: "free",
@@ -250,7 +259,7 @@ const STAGES: StageMeta[] = [
   },
   {
     id: "scene_compile",
-    step: 19,
+    step: 20,
     label: "Scene compile",
     group: "compile",
     cost: "free",
@@ -259,7 +268,7 @@ const STAGES: StageMeta[] = [
   },
   {
     id: "cmake_build",
-    step: 20,
+    step: 21,
     label: "CMake build (.exe)",
     group: "ship",
     cost: "free",
@@ -268,7 +277,7 @@ const STAGES: StageMeta[] = [
   },
   {
     id: "quest_build",
-    step: 20,
+    step: 21,
     label: "Quest APK build",
     group: "ship",
     cost: "free",
@@ -277,7 +286,7 @@ const STAGES: StageMeta[] = [
   },
   {
     id: "quest_runtime_verify",
-    step: 21,
+    step: 22,
     label: "Verify on headset",
     group: "ship",
     cost: "free",
@@ -289,7 +298,7 @@ const STAGES: StageMeta[] = [
   // the step number is what the timeline shows.
   {
     id: "engine_promotion",
-    step: 21,
+    step: 22,
     label: "Engine promotion",
     group: "ship",
     cost: "free",
@@ -298,7 +307,7 @@ const STAGES: StageMeta[] = [
   },
   {
     id: "engine_promotion",
-    step: 22,
+    step: 23,
     label: "Engine promotion",
     group: "ship",
     cost: "free",

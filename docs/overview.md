@@ -41,6 +41,7 @@ prompt
   →  1. BuildSpec (Claude Opus)
   →  2. AssetManifest (Claude Sonnet)     # objects only; environment is C++
   →  3. NPC plan (OpenAI gpt-5.6-sol)     # animate vs slide; factions; reconciles manifest
+  → 3b. Game design (OpenAI gpt-5.6-sol)  # health, lives, respawn, objectives, end screens
   →  4. MechanicPlan (OpenAI gpt-5.6-sol)  # reuse-first; CodeTask DAG
   →  5. SceneSpec (OpenAI gpt-5.6-sol, per scene)
   →  6. Reference images (Gemini)
@@ -48,20 +49,24 @@ prompt
   →  8. Auto-rigging (Tripo rig-check + rig)
   →  9. Animation retarget (Tripo; semantic intents → clips)
   → 10. Asset normalization (deterministic GLB validation)
-  → 11. Asset contract (deterministic sockets via ptv_glb_sockets)
+  → 11. Asset contract (deterministic sockets via ptv_glb_sockets, and each
+        character's model frame: soles, height, forward axis)
   → 12. C++ code generation (OpenAI Agents + compile-verify)
   → 13. World generation (OpenAI world architect → world.scene.json)
   → 14. Asset optimization (LOD decimation + performance profile)
   → 15. Scene compile (merge world + gameplay → scene.json)
   → 16. pcvr: cmake_build (.exe)  |  quest: quest_build (APK)
-        quest only: quest_runtime_verify (run on the headset, check the NPCs;
-        report-only, skipped with no headset)
+        quest only: quest_runtime_verify (run on the headset, check the NPCs
+        and walk the game loop; report-only, skipped with no headset)
   → 17. Engine promotion (registry of reusable generated modules)
 ```
 
 The VR **environment** is C++ (`IWorldBuilder`), not a Tripo GLB — see
 [`world-generation.md`](world-generation.md). NPC behaviour and combat use
-engine services — see [`npc-and-ai.md`](npc-and-ai.md).
+engine services — see [`npc-and-ai.md`](npc-and-ai.md). The game loop
+(health, lives, respawn, objectives, Game Over / victory screens, Try Again,
+Leave Game) is the engine's `builtin.game_flow`, run from `game_design.json`
+— see [`game-flow.md`](game-flow.md).
 
 Every stage writes artifacts to `projects/<project_id>/` and can be resumed.
 

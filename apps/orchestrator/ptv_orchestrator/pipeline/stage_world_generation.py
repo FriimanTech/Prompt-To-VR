@@ -261,6 +261,30 @@ def _npc_brief(ctx: PipelineContext) -> list[str]:
     return lines
 
 
+def _objective_brief(ctx: PipelineContext) -> list[str]:
+    """Places the game design's objectives need the world to declare.
+
+    A ``reach_location`` objective is checked by builtin.game_flow against a
+    NAMED spawn point, and scene_compile fails the build if the world never
+    declared it -- so the architect is told the exact ids up front."""
+    try:
+        design = ctx.game_design or ctx.store.load_game_design(ctx.project_id)
+    except Exception:  # noqa: BLE001 - an unreadable design is not the world's problem
+        return []
+    if design is None:
+        return []
+    wanted = [(o.id, t, o.description) for o in design.objectives
+              if o.kind.value == "reach_location" for t in o.target_ids]
+    if not wanted:
+        return []
+    return [
+        "OBJECTIVE DESTINATIONS (required): declare w.spawn_point with EXACTLY "
+        "these ids, on walkable floor inside a nav_region, at the place each "
+        "objective sends the player -- the game is won by reaching them: "
+        + "; ".join(f"'{t}' for objective '{oid}' ({desc})" for oid, t, desc in wanted)
+    ]
+
+
 def run_with_architect(
     ctx: PipelineContext, architect: Optional[WorldArchitect] = None
 ) -> StageResult:
@@ -400,6 +424,7 @@ def run_with_architect(
         if job is not None:
             extra.extend(_env_brief(job, len(jobs)))
         extra.extend(_npc_brief(ctx))
+        extra.extend(_objective_brief(ctx))
 
         inp = WorldAgentInput(
             project_id=project_id,

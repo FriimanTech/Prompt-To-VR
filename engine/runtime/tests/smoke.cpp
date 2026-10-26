@@ -40,6 +40,7 @@
 #include "../src/mechanics/builtin/avatar_body/HeightCalibration.h"
 #include "../src/core/NpcRuntime.h"
 #include "ptv/api/BodySlots.h"
+#include "ptv/api/Facing.h"
 #include "ptv/api/IBehaviour.h"
 #include "ptv/api/IMechanic.h"
 #include "ptv/core/Logger.h"
@@ -3371,6 +3372,10 @@ static int case_npc_behaviors() {
     const auto v = reg.get<ptv::CLocomotionIntent>(grunt).desired_velocity;
     if (v.x < 3.9f) return fail("melee_chase did not run at the target");
     pos(player) = ptv::Vec3(1.2f, 0.0f, 0.0f);
+    // character_locomotion would have turned it to face the player (+X); an
+    // NPC never swings at something it is not facing.
+    reg.get<ptv::CTransform>(grunt).t.rotation =
+        ptv::rotation_facing(ptv::Vec3(1.0f, 0.0f, 0.0f));
     chase->on_update(world, gid, 0.05f, input, ctx);
     if (glm::length(reg.get<ptv::CLocomotionIntent>(grunt).desired_velocity) > 1e-4f)
         return fail("melee_chase kept moving in attack range");
@@ -4727,6 +4732,604 @@ static int case_damage_log() {
     return ok("damage log: hits are observable by sequence, whoever dealt them");
 }
 
+// --- Grounding + facing ----------------------------------------------------
+
+namespace {
+
+/** Terrain for the motor tests: a floor at y = 0 for x < 1 and a pit floor
+ *  at y = -3 beyond, optionally with a steep ramp at x >= 3. Rays hit the
+ *  highest surface below their origin. */
+class FakeTerrain final : public ptv::IPhysicsAccess {
+public:
+    bool steep_wall{false};
+    bool raycast(const ptv::Vec3& origin, const ptv::Vec3&, float max_dist,
+                 ptv::PhysicsRayHit& out) const override {
+        float y = origin.x < 1.0f ? 0.0f : -3.0f;
+        ptv::Vec3 n(0.0f, 1.0f, 0.0f);
+        if (steep_wall && origin.x >= 3.0f) {
+            y = -2.0f;  // 1 m above the pit: too tall to step, too steep to walk
+            n = glm::normalize(ptv::Vec3(-1.0f, 0.3f, 0.0f));
+        }
+        if (origin.y - y > max_dist || origin.y < y) return false;
+        out.point = ptv::Vec3(origin.x, y, origin.z);
+        out.normal = n;
+        out.hit = true;
+        return true;
+    }
+    bool has_body(std::uint32_t) const override { return false; }
+    void set_kinematic(std::uint32_t, bool) override {}
+    void move_kinematic(std::uint32_t, const ptv::Vec3&, const ptv::Quat&,
+                        float) override {}
+    void apply_impulse(std::uint32_t, const ptv::Vec3&) override {}
+    ptv::Vec3 slide_move(std::uint32_t, const ptv::Vec3& d) const override {
+        return d;
+    }
+};
+
+std::uint32_t make_walker(ptv::World& world, const char* name, ptv::Vec3 pos,
+                          float foot) {
+    const auto e = world.create_entity(name);
+    ptv::Transform t{};
+    t.position = pos;
+    world.registry().emplace<ptv::CTransform>(e, ptv::CTransform{t});
+    ptv::CMesh m{};
+    m.asset_id = name;
+    m.target_scale_meters = 1.8f;
+    m.skinned = true;
+    m.foot_offset_m = foot;
+    world.registry().emplace<ptv::CMesh>(e, std::move(m));
+    return static_cast<std::uint32_t>(e);
+}
+
+}  // namespace
+
+// The shared yaw convention: a forward vector and its yaw round-trip, and the
+// rotation built from a yaw really points -Z at that heading.
+static int case_facing_math() {
+    const ptv::Vec3 dirs[] = {
+        {1, 0, 0}, {-1, 0, 0}, {0, 0, 1}, {0, 0, -1},
+        {0.7071f, 0, 0.7071f}, {-0.7071f, 0, 0.7071f},
+        {0.7071f, 0, -0.7071f}, {-0.7071f, 0, -0.7071f}};
+    for (const auto& d : dirs) {
+        const ptv::Vec3 f = ptv::facing_of(ptv::rotation_facing(d));
+        if (glm::length(f - d) > 1e-4f) {
+            std::fprintf(stderr, "  dir (%.2f,%.2f) -> faced (%.2f,%.2f)\n",
+                         d.x, d.z, f.x, f.z);
+            return fail("rotation_facing does not face its direction");
+        }
+        const ptv::Vec3 back = ptv::forward_from_yaw(ptv::yaw_from_forward(d));
+        if (glm::length(back - d) > 1e-4f)
+            return fail("yaw_from_forward / forward_from_yaw do not round-trip");
+    }
+    return ok("facing math: one yaw convention, round-trips in every direction");
+}
+
+// Every travel direction, not just -Z: a mirrored yaw formula looks right
+// only along Z, and that is the one direction the old test checked.
+static int case_facing_directions() {
+    FakePhysics physics;
+    FakeSkeleton skeleton;
+    ptv::MechanicContext ctx{};
+    ctx.physics = &physics;
+    ctx.skeleton = &skeleton;
+    const ptv::InputSnapshot input{};
+    const ptv::Vec3 dirs[] = {
+        {1, 0, 0}, {-1, 0, 0}, {0, 0, 1}, {0, 0, -1},
+        {0.7071f, 0, 0.7071f}, {-0.7071f, 0, -0.7071f}};
+    for (const auto& d : dirs) {
+        ptv::World world;
+        auto mech = ptv::MechanicRegistry::get().make_mechanic(
+            "builtin.character_locomotion");
+        if (!mech) return fail("builtin.character_locomotion is not registered");
+        const auto id = make_walker(world, "walker", ptv::Vec3(0, 0.9f, 0), 0.9f);
+        mech->on_attach(world, id, nlohmann::json::object(), ctx);
+        auto& want = world.registry().emplace_or_replace<ptv::CLocomotionIntent>(
+            static_cast<entt::entity>(id));
+        want.desired_velocity = d * 1.4f;
+        for (int i = 0; i < 90; ++i) mech->on_update(world, id, 1.0f / 60.0f, input, ctx);
+        const auto& t = world.get<ptv::CTransform>(id).t;
+        const float err = glm::degrees(ptv::heading_error(ptv::facing_of(t.rotation), d));
+        const ptv::Vec3 moved = t.position - ptv::Vec3(0, 0.9f, 0);
+        if (err > 3.0f) {
+            std::fprintf(stderr, "  travel (%.2f, %.2f): facing error %.1f deg\n",
+                         d.x, d.z, err);
+            return fail("the character does not face its direction of travel");
+        }
+        if (glm::dot(ptv::Vec3(moved.x, 0, moved.z), d) < 0.5f)
+            return fail("the character did not travel the way it was asked");
+    }
+
+    // Turn-in-place: asked to reverse, it must cover less ground in the first
+    // few frames than it would at full speed, because it is turning.
+    {
+        ptv::World world;
+        auto mech = ptv::MechanicRegistry::get().make_mechanic(
+            "builtin.character_locomotion");
+        const auto id = make_walker(world, "turner", ptv::Vec3(0, 0.9f, 0), 0.9f);
+        nlohmann::json p = nlohmann::json::object();
+        p["turn_rate_deg_s"] = 180.0f;
+        mech->on_attach(world, id, p, ctx);
+        auto& want = world.registry().emplace_or_replace<ptv::CLocomotionIntent>(
+            static_cast<entt::entity>(id));
+        want.desired_velocity = ptv::Vec3(0, 0, 1.4f);  // behind it (+Z)
+        for (int i = 0; i < 6; ++i) mech->on_update(world, id, 1.0f / 60.0f, input, ctx);
+        const float covered = world.get<ptv::CTransform>(id).t.position.z;
+        if (covered > 0.6f * 1.4f * 6.0f / 60.0f)
+            return fail("a character facing away walked off backwards at full "
+                        "speed instead of turning first");
+    }
+    return ok("facing: every travel direction is faced, and a reversal turns "
+              "in place before walking");
+}
+
+// Grounded motor: off a ledge it FALLS (not teleports) and lands; a jump
+// rises and comes back; a steep slope above it is a wall; a hovering flyer
+// holds its height.
+static int case_ground_motor() {
+    FakeTerrain terrain;
+    FakeSkeleton skeleton;
+    ptv::MechanicContext ctx{};
+    ctx.physics = &terrain;
+    ctx.skeleton = &skeleton;
+    const ptv::InputSnapshot input{};
+    const float dt = 1.0f / 60.0f;
+    const float foot = 0.9f;
+
+    {  // Ledge
+        ptv::World world;
+        auto mech = ptv::MechanicRegistry::get().make_mechanic(
+            "builtin.character_locomotion");
+        const auto id = make_walker(world, "faller", ptv::Vec3(0.5f, foot, 0), foot);
+        mech->on_attach(world, id, nlohmann::json::object(), ctx);
+        auto& want = world.registry().emplace_or_replace<ptv::CLocomotionIntent>(
+            static_cast<entt::entity>(id));
+        want.desired_velocity = ptv::Vec3(4.0f, 0, 0);
+        float prev_y = foot;
+        float worst_drop = 0.0f;
+        for (int i = 0; i < 120; ++i) {
+            mech->on_update(world, id, dt, input, ctx);
+            const float y = world.get<ptv::CTransform>(id).t.position.y;
+            worst_drop = std::max(worst_drop, prev_y - y);
+            prev_y = y;
+            if (i == 20) want.desired_velocity = ptv::Vec3(0.0f);
+        }
+        if (worst_drop > 0.5f)
+            return fail("walking off a ledge teleported the character down "
+                        "instead of letting it fall");
+        if (std::fabs(prev_y - (-3.0f + foot)) > 0.02f) {
+            std::fprintf(stderr, "  landed at y=%.3f, floor+foot=%.3f\n",
+                         prev_y, -3.0f + foot);
+            return fail("the character did not land on the lower floor");
+        }
+    }
+    {  // Jump
+        ptv::World world;
+        auto mech = ptv::MechanicRegistry::get().make_mechanic(
+            "builtin.character_locomotion");
+        const auto id = make_walker(world, "jumper", ptv::Vec3(0, foot, 0), foot);
+        mech->on_attach(world, id, nlohmann::json::object(), ctx);
+        auto& want = world.registry().emplace_or_replace<ptv::CLocomotionIntent>(
+            static_cast<entt::entity>(id));
+        want.jump_velocity = 4.0f;
+        float apex = foot;
+        for (int i = 0; i < 90; ++i) {
+            mech->on_update(world, id, dt, input, ctx);
+            apex = std::max(apex, world.get<ptv::CTransform>(id).t.position.y);
+        }
+        if (apex < foot + 0.5f) return fail("a jump did not leave the ground");
+        if (std::fabs(world.get<ptv::CTransform>(id).t.position.y - foot) > 0.02f)
+            return fail("a jump did not come back down to the floor");
+        if (world.get<ptv::CLocomotionIntent>(id).jump_velocity != 0.0f)
+            return fail("jump_velocity was not consumed");
+    }
+    {  // Steep slope above = wall
+        terrain.steep_wall = true;
+        ptv::World world;
+        auto mech = ptv::MechanicRegistry::get().make_mechanic(
+            "builtin.character_locomotion");
+        const auto id = make_walker(world, "climber", ptv::Vec3(2.9f, -3.0f + foot, 0), foot);
+        mech->on_attach(world, id, nlohmann::json::object(), ctx);
+        auto& want = world.registry().emplace_or_replace<ptv::CLocomotionIntent>(
+            static_cast<entt::entity>(id));
+        want.desired_velocity = ptv::Vec3(1.4f, 0, 0);
+        for (int i = 0; i < 60; ++i) mech->on_update(world, id, dt, input, ctx);
+        if (world.get<ptv::CTransform>(id).t.position.x >= 3.0f)
+            return fail("a character walked up a slope steeper than max_slope_deg");
+        terrain.steep_wall = false;
+    }
+    {  // Hover
+        ptv::World world;
+        auto mech = ptv::MechanicRegistry::get().make_mechanic(
+            "builtin.character_locomotion");
+        const auto id = make_walker(world, "drone", ptv::Vec3(0, foot, 0), foot);
+        nlohmann::json p = nlohmann::json::object();
+        p["motor"] = "flying";
+        p["hover_height_m"] = 2.0f;
+        mech->on_attach(world, id, p, ctx);
+        for (int i = 0; i < 180; ++i) mech->on_update(world, id, dt, input, ctx);
+        if (std::fabs(world.get<ptv::CTransform>(id).t.position.y - (2.0f + foot)) > 0.05f)
+            return fail("a hovering flyer did not hold its hover height");
+    }
+    return ok("ground motor: falls off ledges and lands, jumps, refuses steep "
+              "slopes, and a hovering flyer holds its height");
+}
+
+namespace {
+
+/** A rig whose clip carries the body 6 cm low: the foot joint is drawn at
+ *  body_y - 0.9 (soles) + 0.05 (joint above soles) - 0.06 (clip crouch). */
+class CrouchSkeleton final : public ptv::ISkeleton {
+public:
+    ptv::World* world{nullptr};
+    std::uint32_t entity{0};
+    bool has_skeleton(std::uint32_t) const override { return true; }
+    int joint_index(std::uint32_t, const char*) const override { return -1; }
+    int joint_count(std::uint32_t) const override { return 1; }
+    int joint_for_slot(std::uint32_t, const char* slot) const override {
+        return std::string(slot) == "foot_l" ? 0 : -1;
+    }
+    int joint_parent(std::uint32_t, int) const override { return -1; }
+    ptv::Mat4 joint_world(std::uint32_t, int) const override {
+        const float y = world->get<ptv::CTransform>(entity).t.position.y;
+        return glm::translate(ptv::Mat4(1.0f), ptv::Vec3(0, y - 0.9f + 0.05f - 0.06f, 0));
+    }
+    ptv::Mat4 joint_model(std::uint32_t, int) const override { return ptv::Mat4(1.0f); }
+    ptv::Mat4 joint_bind_model(std::uint32_t, int) const override {
+        return glm::translate(ptv::Mat4(1.0f), ptv::Vec3(0, -0.9f + 0.05f, 0));
+    }
+    ptv::Quat joint_bind_rotation(std::uint32_t, int) const override { return ptv::Quat(1, 0, 0, 0); }
+    ptv::Quat joint_local_rotation(std::uint32_t, int) const override { return ptv::Quat(1, 0, 0, 0); }
+    void set_joint_rotation_from_bind(std::uint32_t, int, const ptv::Quat&) override {}
+    int joint_subtree(std::uint32_t, int, int*, int) const override { return 0; }
+    void set_joint_rotation(std::uint32_t, int, const ptv::Quat&) override {}
+    void set_joint_translation(std::uint32_t, int, const ptv::Vec3&) override {}
+    void set_joint_scale(std::uint32_t, int, const ptv::Vec3&) override {}
+    bool play_clip(std::uint32_t, const char*, bool, float) override { return true; }
+    void stop_clip(std::uint32_t) override {}
+    void set_clip_speed(std::uint32_t, float) override {}
+    bool has_clip(std::uint32_t, const char*) const override { return true; }
+    const char* current_clip(std::uint32_t) const override { return "walk"; }
+    float clip_time(std::uint32_t) const override { return 0.0f; }
+    float clip_duration(std::uint32_t) const override { return 1.0f; }
+    bool clip_finished(std::uint32_t) const override { return false; }
+    void fade_to_rest(std::uint32_t, float) override {}
+    bool one_shot_playing(std::uint32_t) const override { return false; }
+};
+
+}  // namespace
+
+// A clip that carries the body low (a brute's crouched gait) sinks the drawn
+// feet even though the capsule stands exactly right; planting lifts the body
+// until the drawn soles meet the floor.
+static int case_foot_planting() {
+    ptv::World world;
+    const auto id = make_walker(world, "bruiser", ptv::Vec3(0, 0.9f, 0), 0.9f);
+    ptv::CSkeleton sk{};
+    sk.skeleton.bind_min_y = -0.9f;
+    world.registry().emplace<ptv::CSkeleton>(static_cast<entt::entity>(id), std::move(sk));
+    FakePhysics physics;  // flat floor at y = 0
+    CrouchSkeleton skeleton;
+    skeleton.world = &world;
+    skeleton.entity = id;
+    ptv::MechanicContext ctx{};
+    ctx.physics = &physics;
+    ctx.skeleton = &skeleton;
+    const ptv::InputSnapshot input{};
+    auto mech = ptv::MechanicRegistry::get().make_mechanic("builtin.character_locomotion");
+    mech->on_attach(world, id, nlohmann::json::object(), ctx);
+    for (int i = 0; i < 120; ++i) mech->on_update(world, id, 1.0f / 60.0f, input, ctx);
+    const float drawn_sole = skeleton.joint_world(id, 0)[3].y - 0.05f;
+    if (std::fabs(drawn_sole) > 0.01f) {
+        std::fprintf(stderr, "  drawn soles at %.3f after planting\n", drawn_sole);
+        return fail("the drawn feet were not planted on the floor");
+    }
+    return ok("foot planting: a crouched gait is lifted until its drawn soles "
+              "meet the floor");
+}
+
+// The model frame: with one, the rigged mesh's bind pose IS the pivot -- the
+// face turned onto -Z and the soles at -height/2 -- for any source frame.
+static int case_model_frame(const char* glb) {
+    namespace gl = ptv::gltf_mesh_load;
+    std::vector<gl::SkinnedVertex> verts;
+    std::vector<std::uint32_t> idx;
+    gl::SkeletonData plain;
+    std::string err;
+    const float target = 1.8f;
+    if (!gl::load_glb_skinned(glb, target, verts, idx, plain, err))
+        return fail(("fixture did not load: " + err).c_str());
+    float lo = 1e30f, hi = -1e30f;
+    for (const auto& v : verts) {
+        lo = std::min(lo, v.pos[1]);
+        hi = std::max(hi, v.pos[1]);
+    }
+    // Back to GLB units for the frame.
+    const float raw_lo = lo / plain.unit_scale;
+    const float raw_h = (hi - lo) / plain.unit_scale;
+
+    gl::ModelFrame frame{};
+    frame.valid = true;
+    frame.yaw_offset_rad = glm::radians(90.0f);  // a +X-facing source
+    frame.sole_y = raw_lo;
+    frame.height = raw_h;
+    gl::SkeletonData framed;
+    if (!gl::load_glb_skinned(glb, target, verts, idx, framed, err, &frame))
+        return fail(("framed fixture did not load: " + err).c_str());
+
+    if (std::fabs(framed.unit_scale - target / raw_h) > 1e-4f)
+        return fail("a framed character is not scaled by its height");
+    if (std::fabs(framed.bind_min_y + 0.5f * target) > 0.01f) {
+        std::fprintf(stderr, "  bind_min_y %.4f, expected %.4f\n",
+                     framed.bind_min_y, -0.5f * target);
+        return fail("the model frame did not put the soles at -height/2");
+    }
+    std::vector<ptv::Mat4> palette;
+    gl::build_joint_palette(framed, framed.bind_pose, palette);
+    if (palette.empty()) return fail("no palette");
+    // A +X-facing model turned onto -Z: its +X must now point at -Z.
+    const ptv::Vec3 face = ptv::Vec3(palette[0] * ptv::Vec4(1, 0, 0, 0));
+    if (glm::length(face - ptv::Vec3(0, 0, -1)) > 1e-3f) {
+        std::fprintf(stderr, "  model +X now points (%.3f, %.3f, %.3f)\n",
+                     face.x, face.y, face.z);
+        return fail("the model frame did not turn the model's forward onto -Z");
+    }
+    // Every joint gets the same pivot in bind pose.
+    for (size_t j = 1; j < palette.size(); ++j) {
+        if (glm::length(ptv::Vec3(palette[j][3]) - ptv::Vec3(palette[0][3])) > 1e-3f)
+            return fail("joints disagree on the bind-pose pivot");
+    }
+    // A clip that animates a root joint must play relative to the pivot:
+    // each framed key is exactly yaw * the unframed key.
+    const ptv::Quat yaw = glm::angleAxis(frame.yaw_offset_rad, ptv::Vec3(0, 1, 0));
+    for (size_t c = 0; c < framed.clips.size() && c < plain.clips.size(); ++c) {
+        const auto& fch = framed.clips[c].channels;
+        const auto& pch = plain.clips[c].channels;
+        for (size_t k = 0; k < fch.size() && k < pch.size(); ++k) {
+            if (framed.parents[static_cast<size_t>(fch[k].joint)] >= 0) continue;
+            if (fch[k].path != gl::AnimPath::Rotation || fch[k].values.size() < 4)
+                continue;
+            const auto& a = pch[k].values;
+            const auto& b = fch[k].values;
+            const ptv::Quat want = yaw * ptv::Quat(a[3], a[0], a[1], a[2]);
+            const ptv::Quat got(b[3], b[0], b[1], b[2]);
+            if (std::fabs(std::fabs(glm::dot(want, got)) - 1.0f) > 1e-4f)
+                return fail("a root animation key was not given the model frame");
+        }
+    }
+    return ok("model frame: framed rigs face -Z, stand on their soles and "
+              "scale by height");
+}
+
+// --- Text + game flow -----------------------------------------------------
+
+#include "ptv/render/TextAtlas.h"
+
+// The bundled font bakes, and layout behaves: centred lines straddle the
+// anchor, a longer string is wider, and newlines stack downward.
+static int case_text_atlas() {
+    ptv::TextAtlas atlas;
+    std::string err;
+    if (!atlas.build_default(err)) return fail(("font did not bake: " + err).c_str());
+    if (atlas.width() <= 0 || atlas.height() <= 0 ||
+        atlas.pixels().size() != static_cast<size_t>(atlas.width() * atlas.height()))
+        return fail("atlas has no pixels");
+    std::vector<ptv::TextQuad> q;
+    atlas.layout("Game Over", 0.05f, 1, q);
+    if (q.size() != 8) return fail("'Game Over' did not lay out 8 glyph quads");
+    float lo = 1e9f, hi = -1e9f, top = -1e9f;
+    for (const auto& g : q) {
+        lo = std::min(lo, g.p0.x);
+        hi = std::max(hi, g.p1.x);
+        top = std::max(top, g.p1.y);
+    }
+    if (std::fabs(lo + hi) > 0.02f) return fail("centred text is not centred");
+    if (top < 0.045f || top > 0.07f) return fail("cap height does not match the request");
+    if (atlas.measure("Try Again", 0.05f) <= atlas.measure("Try", 0.05f))
+        return fail("a longer string is not wider");
+    std::vector<ptv::TextQuad> two;
+    atlas.layout("A\nB", 0.05f, 0, two);
+    if (two.size() != 2 || !(two[1].p1.y < two[0].p0.y))
+        return fail("a second line does not sit below the first");
+    return ok("text atlas: bundled font bakes to an SDF atlas and lays out");
+}
+
+namespace {
+
+class FlowCombat final : public ptv::ICombat {
+public:
+    bool alive{true};
+    int revives{0};
+    bool apply_damage(std::uint32_t, float, std::uint32_t) override { return false; }
+    void heal(std::uint32_t, float) override {}
+    float health(std::uint32_t) const override { return alive ? 100.0f : 0.0f; }
+    float max_health(std::uint32_t) const override { return 100.0f; }
+    bool is_alive(std::uint32_t) const override { return alive; }
+    void kill(std::uint32_t) override { alive = false; }
+    const char* faction(std::uint32_t) const override { return ""; }
+    bool is_hostile(std::uint32_t, std::uint32_t) const override { return false; }
+    bool revive(std::uint32_t, float, float) override {
+        alive = true;
+        ++revives;
+        return true;
+    }
+};
+
+class FlowUi final : public ptv::IUi {
+public:
+    bool opened{false};
+    std::string title;
+    std::vector<std::string> rows;
+    std::vector<std::string> clicks;
+    bool panel_exists(const char*) const override { return true; }
+    void open(const char*) override { opened = true; }
+    void close(const char*) override { opened = false; }
+    bool is_open(const char*) const override { return opened; }
+    void set_rows(const char*, const ptv::UiRowDesc* r, int n) override {
+        rows.clear();
+        for (int i = 0; i < n; ++i) rows.emplace_back(r[i].id);
+    }
+    bool poll_click(const char*, ptv::UiClick* out) override {
+        if (clicks.empty()) return false;
+        scratch_ = clicks.front();
+        clicks.erase(clicks.begin());
+        out->row_id = scratch_.c_str();
+        return true;
+    }
+    int highlighted_row(const char*) const override { return -1; }
+    void set_title(const char*, const char* t, const char*) override { title = t; }
+
+private:
+    std::string scratch_;
+};
+
+class FlowApp final : public ptv::IApp {
+public:
+    bool exit{false};
+    int placed{0};
+    void request_exit() override { exit = true; }
+    bool exit_requested() const override { return exit; }
+    const char* platform() const override { return "pcvr"; }
+    float uptime_s() const override { return 0.0f; }
+    bool place_player(const ptv::Vec3&, float) override {
+        ++placed;
+        return true;
+    }
+};
+
+class FlowTransition final : public ptv::ISceneTransition {
+public:
+    int restarts{0};
+    bool go_to(const char*, const char*) override { return false; }
+    const char* current_scene() const override { return "arena"; }
+    bool scene_exists(const char*) const override { return true; }
+    bool transition_pending() const override { return false; }
+    bool load_nested(const char*, std::uint32_t, const char*, float) override { return false; }
+    bool unload_nested(const char*) override { return false; }
+    bool nested_loaded(const char*) const override { return false; }
+    bool restart_current(bool) override {
+        ++restarts;
+        return true;
+    }
+};
+
+class FlowHands final : public ptv::IHands {
+public:
+    std::uint32_t player{0};
+    std::uint32_t held_entity(int) const override { return 0xFFFFFFFFu; }
+    void set_held_entity(int, std::uint32_t) override {}
+    std::uint32_t hand_entity(int) const override { return 0xFFFFFFFFu; }
+    std::uint32_t finger_target(int) const override { return 0xFFFFFFFFu; }
+    void set_finger_target(int, std::uint32_t) override {}
+    std::uint32_t player_entity() const override { return player; }
+};
+
+}  // namespace
+
+// The Goblin Shooter loop end to end: three lives, respawn, Game Over with
+// Try Again, a survive-the-clock win with Play Again, and Leave Game.
+static int case_game_flow() {
+    const auto design = nlohmann::json::parse(R"({
+        "experience": "combat", "has_health": true, "max_health": 100, "lives": 3,
+        "respawn": {"at": "spawn", "delay_s": 1.0, "invulnerable_s": 3},
+        "spawn": {"position": [0, 0, 0], "yaw_deg": 0},
+        "objectives": [{"id": "survive", "kind": "survive_time",
+                        "description": "Survive", "duration_s": 5}],
+        "victory": {"kind": "all_objectives", "objective_ids": ["survive"]},
+        "failure": [{"kind": "lives_exhausted"}],
+        "screens": {"game_over": {"title": "Game Over", "buttons": ["try_again", "leave_game"]},
+                    "victory": {"title": "You Win!", "buttons": ["play_again", "leave_game"]}},
+        "panel_id": "ptv_game_flow"})");
+    ptv::World world;
+    const auto player = static_cast<std::uint32_t>(world.create_entity("player_rig"));
+    world.registry().emplace<ptv::CTransform>(static_cast<entt::entity>(player));
+    FlowCombat combat;
+    FlowUi ui;
+    FlowApp app;
+    FlowTransition transition;
+    FlowHands hands;
+    hands.player = player;
+    ptv::GameFlowBoard board;
+    ptv::MechanicContext ctx{};
+    ctx.combat = &combat;
+    ctx.ui = &ui;
+    ctx.app = &app;
+    ctx.transition = &transition;
+    ctx.hands = &hands;
+    ctx.game = &board;
+    ptv::InputSnapshot input{};
+    const float dt = 1.0f / 30.0f;
+
+    auto mech = ptv::MechanicRegistry::get().make_mechanic("builtin.game_flow");
+    if (!mech) return fail("builtin.game_flow is not registered");
+    mech->on_attach(world, player, design, ctx);
+    auto run = [&](float seconds) {
+        for (float t = 0.0f; t < seconds; t += dt) mech->on_update(world, player, dt, input, ctx);
+    };
+    run(0.2f);
+    if (board.state() != ptv::GameFlowState::Playing || board.lives() != 3)
+        return fail("the flow did not start Playing with 3 lives");
+    if (!board.gameplay_active()) return fail("gameplay is not active while playing");
+
+    for (int life = 0; life < 2; ++life) {
+        combat.alive = false;
+        run(0.1f);
+        if (board.state() != ptv::GameFlowState::LifeLost)
+            return fail("health reaching zero did not cost a life");
+        run(2.0f);
+        if (board.state() == ptv::GameFlowState::LifeLost)
+            return fail("the player was never respawned");
+        if (!combat.alive) return fail("respawn did not revive the player");
+    }
+    if (board.lives() != 1 || app.placed != 2) return fail("lives / respawn placement miscounted");
+
+    combat.alive = false;
+    run(2.0f);
+    if (board.state() != ptv::GameFlowState::GameOver) return fail("the last life did not end the game");
+    if (!ui.opened || ui.title != "Game Over") return fail("the Game Over screen did not open");
+    if (ui.rows != std::vector<std::string>{"try_again", "leave_game"})
+        return fail("the Game Over screen does not offer Try Again / Leave Game");
+    if (board.gameplay_active()) return fail("gameplay stayed active under the Game Over screen");
+    ui.clicks.push_back("try_again");
+    run(0.1f);
+    if (transition.restarts != 1) return fail("Try Again did not restart the scene");
+
+    // The reload: a fresh mechanic instance, attempt 2.
+    board.clear();
+    board.flow_state()->attempts = 2;
+    combat.alive = true;
+    auto again = ptv::MechanicRegistry::get().make_mechanic("builtin.game_flow");
+    again->on_attach(world, player, design, ctx);
+    for (float t = 0.0f; t < 5.5f; t += dt) again->on_update(world, player, dt, input, ctx);
+    if (board.state() != ptv::GameFlowState::Victory) return fail("surviving the clock did not win");
+    if (ui.title != "You Win!" || ui.rows.front() != "play_again")
+        return fail("the victory screen is wrong");
+    ui.clicks.push_back("leave_game");
+    again->on_update(world, player, dt, input, ctx);
+    if (!app.exit || board.state() != ptv::GameFlowState::Exiting)
+        return fail("Leave Game did not exit the app");
+
+    // A book reader: no health, never dies; the menu button pauses.
+    ptv::GameFlowBoard calm;
+    ctx.game = &calm;
+    app.exit = false;
+    auto reader = ptv::MechanicRegistry::get().make_mechanic("builtin.game_flow");
+    reader->on_attach(world, player, nlohmann::json::parse(R"({
+        "experience": "media", "has_health": false, "free_play": true,
+        "pause": {"enabled": true, "buttons": ["resume", "leave_game"]}})"), ctx);
+    combat.alive = false;  // nothing can hurt a reader; ignored
+    for (int i = 0; i < 10; ++i) reader->on_update(world, player, dt, input, ctx);
+    if (calm.state() != ptv::GameFlowState::Playing) return fail("a book reader 'died'");
+    input.button_menu = true;
+    reader->on_update(world, player, dt, input, ctx);
+    if (calm.state() != ptv::GameFlowState::Paused) return fail("the menu button did not pause");
+    input.prev_button_menu = true;
+    ui.clicks.push_back("resume");
+    reader->on_update(world, player, dt, input, ctx);
+    if (calm.state() != ptv::GameFlowState::Playing) return fail("Resume did not resume");
+    return ok("game flow: lives, respawn, Game Over / Try Again, victory / Play "
+              "Again, Leave Game, and a reader that cannot die but can pause");
+}
+
 int main(int argc, char** argv) {
     if (argc < 2) {
         std::fprintf(
@@ -4762,6 +5365,19 @@ int main(int argc, char** argv) {
     if (what == "mechanic_host_npc") return case_mechanic_host_npc();
     if (what == "player_rig_adoption") return case_player_rig_adoption();
     if (what == "damage_log") return case_damage_log();
+    if (what == "facing_math") return case_facing_math();
+    if (what == "text_atlas") return case_text_atlas();
+    if (what == "game_flow") return case_game_flow();
+    if (what == "facing_directions") return case_facing_directions();
+    if (what == "ground_motor") return case_ground_motor();
+    if (what == "foot_planting") return case_foot_planting();
+    if (what == "model_frame") {
+        if (argc < 3) {
+            std::fprintf(stderr, "usage: ptv_smoke model_frame <rigged.glb>\n");
+            return 2;
+        }
+        return case_model_frame(argv[2]);
+    }
     if (what == "animation_lod") {
         if (argc < 3) {
             std::fprintf(stderr,

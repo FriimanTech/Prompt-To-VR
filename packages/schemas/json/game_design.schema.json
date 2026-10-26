@@ -1,0 +1,552 @@
+{
+  "$defs": {
+    "ConditionKind": {
+      "enum": [
+        "all_objectives",
+        "any_objective",
+        "lives_exhausted",
+        "timer_expired",
+        "custom",
+        "none"
+      ],
+      "title": "ConditionKind",
+      "type": "string"
+    },
+    "DecisionSource": {
+      "enum": [
+        "explicit",
+        "inferred"
+      ],
+      "title": "DecisionSource",
+      "type": "string"
+    },
+    "EndButton": {
+      "enum": [
+        "try_again",
+        "play_again",
+        "keep_playing",
+        "leave_game"
+      ],
+      "title": "EndButton",
+      "type": "string"
+    },
+    "EndCondition": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "$ref": "#/$defs/ConditionKind",
+          "default": "none"
+        },
+        "objective_ids": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 32,
+          "title": "Objective Ids",
+          "type": "array"
+        },
+        "provenance": {
+          "$ref": "#/$defs/Provenance"
+        }
+      },
+      "title": "EndCondition",
+      "type": "object"
+    },
+    "EndScreen": {
+      "additionalProperties": false,
+      "properties": {
+        "buttons": {
+          "items": {
+            "$ref": "#/$defs/EndButton"
+          },
+          "maxItems": 4,
+          "title": "Buttons",
+          "type": "array"
+        },
+        "kind": {
+          "$ref": "#/$defs/EndScreenKind"
+        },
+        "show_stats": {
+          "default": true,
+          "title": "Show Stats",
+          "type": "boolean"
+        },
+        "subtitle": {
+          "default": "",
+          "maxLength": 160,
+          "title": "Subtitle",
+          "type": "string"
+        },
+        "title": {
+          "maxLength": 60,
+          "title": "Title",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "title"
+      ],
+      "title": "EndScreen",
+      "type": "object"
+    },
+    "EndScreenKind": {
+      "enum": [
+        "victory",
+        "game_over",
+        "completed"
+      ],
+      "title": "EndScreenKind",
+      "type": "string"
+    },
+    "EnemyPolicy": {
+      "description": "What happens to enemies when the player loses a life.",
+      "enum": [
+        "none",
+        "clear_nearby",
+        "reset_wave",
+        "reset_all"
+      ],
+      "title": "EnemyPolicy",
+      "type": "string"
+    },
+    "ExperienceKind": {
+      "description": "What kind of experience this is -- decides which systems it needs.",
+      "enum": [
+        "combat",
+        "puzzle",
+        "exploration",
+        "narrative",
+        "sandbox",
+        "score_attack",
+        "simulation",
+        "media"
+      ],
+      "title": "ExperienceKind",
+      "type": "string"
+    },
+    "HudSpec": {
+      "additionalProperties": false,
+      "properties": {
+        "health": {
+          "default": false,
+          "title": "Health",
+          "type": "boolean"
+        },
+        "lives": {
+          "default": false,
+          "title": "Lives",
+          "type": "boolean"
+        },
+        "objective": {
+          "default": false,
+          "title": "Objective",
+          "type": "boolean"
+        },
+        "score": {
+          "default": false,
+          "title": "Score",
+          "type": "boolean"
+        },
+        "timer": {
+          "default": false,
+          "title": "Timer",
+          "type": "boolean"
+        }
+      },
+      "title": "HudSpec",
+      "type": "object"
+    },
+    "Lives": {
+      "additionalProperties": false,
+      "properties": {
+        "count": {
+          "anyOf": [
+            {
+              "maximum": 99,
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Count"
+        },
+        "provenance": {
+          "$ref": "#/$defs/Provenance"
+        }
+      },
+      "title": "Lives",
+      "type": "object"
+    },
+    "Objective": {
+      "additionalProperties": false,
+      "properties": {
+        "count": {
+          "anyOf": [
+            {
+              "maximum": 100000,
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Count"
+        },
+        "description": {
+          "maxLength": 300,
+          "title": "Description",
+          "type": "string"
+        },
+        "duration_s": {
+          "anyOf": [
+            {
+              "maximum": 36000.0,
+              "minimum": 0.0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Duration S"
+        },
+        "id": {
+          "description": "Snake-case identifier, max 64 chars.",
+          "pattern": "^[a-z0-9][a-z0-9_.\\-]{0,63}$",
+          "title": "Id",
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/$defs/ObjectiveKind"
+        },
+        "provenance": {
+          "$ref": "#/$defs/Provenance"
+        },
+        "radius_m": {
+          "default": 2.0,
+          "maximum": 100.0,
+          "minimum": 0.0,
+          "title": "Radius M",
+          "type": "number"
+        },
+        "target_ids": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 32,
+          "title": "Target Ids",
+          "type": "array"
+        }
+      },
+      "required": [
+        "id",
+        "kind",
+        "description"
+      ],
+      "title": "Objective",
+      "type": "object"
+    },
+    "ObjectiveKind": {
+      "enum": [
+        "survive_time",
+        "defeat_count",
+        "clear_waves",
+        "reach_location",
+        "collect",
+        "interact",
+        "custom"
+      ],
+      "title": "ObjectiveKind",
+      "type": "string"
+    },
+    "OnLifeLost": {
+      "additionalProperties": false,
+      "properties": {
+        "clear_radius_m": {
+          "default": 6.0,
+          "maximum": 200.0,
+          "minimum": 0.0,
+          "title": "Clear Radius M",
+          "type": "number"
+        },
+        "delay_s": {
+          "default": 2.0,
+          "maximum": 30.0,
+          "minimum": 0.0,
+          "title": "Delay S",
+          "type": "number"
+        },
+        "enemy_policy": {
+          "$ref": "#/$defs/EnemyPolicy",
+          "default": "clear_nearby"
+        },
+        "invulnerable_s": {
+          "default": 3.0,
+          "maximum": 30.0,
+          "minimum": 0.0,
+          "title": "Invulnerable S",
+          "type": "number"
+        },
+        "keep_loadout": {
+          "default": true,
+          "title": "Keep Loadout",
+          "type": "boolean"
+        },
+        "provenance": {
+          "$ref": "#/$defs/Provenance"
+        },
+        "respawn_at": {
+          "$ref": "#/$defs/RespawnPoint",
+          "default": "spawn"
+        },
+        "restore_health": {
+          "default": true,
+          "title": "Restore Health",
+          "type": "boolean"
+        }
+      },
+      "title": "OnLifeLost",
+      "type": "object"
+    },
+    "PauseButton": {
+      "enum": [
+        "resume",
+        "restart",
+        "leave_game"
+      ],
+      "title": "PauseButton",
+      "type": "string"
+    },
+    "PauseMenu": {
+      "additionalProperties": false,
+      "properties": {
+        "buttons": {
+          "items": {
+            "$ref": "#/$defs/PauseButton"
+          },
+          "maxItems": 4,
+          "title": "Buttons",
+          "type": "array"
+        },
+        "enabled": {
+          "default": true,
+          "title": "Enabled",
+          "type": "boolean"
+        }
+      },
+      "title": "PauseMenu",
+      "type": "object"
+    },
+    "PlayerVitality": {
+      "additionalProperties": false,
+      "properties": {
+        "damage_sources": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 32,
+          "title": "Damage Sources",
+          "type": "array"
+        },
+        "has_health": {
+          "default": false,
+          "title": "Has Health",
+          "type": "boolean"
+        },
+        "invulnerable": {
+          "default": false,
+          "title": "Invulnerable",
+          "type": "boolean"
+        },
+        "max_health": {
+          "default": 100.0,
+          "exclusiveMinimum": 0.0,
+          "maximum": 100000.0,
+          "title": "Max Health",
+          "type": "number"
+        },
+        "provenance": {
+          "$ref": "#/$defs/Provenance"
+        },
+        "regen_per_s": {
+          "default": 0.0,
+          "maximum": 1000.0,
+          "minimum": 0.0,
+          "title": "Regen Per S",
+          "type": "number"
+        }
+      },
+      "title": "PlayerVitality",
+      "type": "object"
+    },
+    "Provenance": {
+      "additionalProperties": false,
+      "properties": {
+        "prompt_quote": {
+          "default": "",
+          "maxLength": 400,
+          "title": "Prompt Quote",
+          "type": "string"
+        },
+        "rationale": {
+          "default": "",
+          "maxLength": 400,
+          "title": "Rationale",
+          "type": "string"
+        },
+        "source": {
+          "$ref": "#/$defs/DecisionSource",
+          "default": "inferred"
+        }
+      },
+      "title": "Provenance",
+      "type": "object"
+    },
+    "ResetPolicy": {
+      "additionalProperties": false,
+      "description": "What a fresh restart (Try Again / Play Again) puts back.",
+      "properties": {
+        "encounters": {
+          "default": true,
+          "title": "Encounters",
+          "type": "boolean"
+        },
+        "health": {
+          "default": true,
+          "title": "Health",
+          "type": "boolean"
+        },
+        "lives": {
+          "default": true,
+          "title": "Lives",
+          "type": "boolean"
+        },
+        "loadout": {
+          "default": true,
+          "title": "Loadout",
+          "type": "boolean"
+        },
+        "player_position": {
+          "default": true,
+          "title": "Player Position",
+          "type": "boolean"
+        },
+        "score": {
+          "default": true,
+          "title": "Score",
+          "type": "boolean"
+        },
+        "timer": {
+          "default": true,
+          "title": "Timer",
+          "type": "boolean"
+        },
+        "world_state": {
+          "default": true,
+          "title": "World State",
+          "type": "boolean"
+        }
+      },
+      "title": "ResetPolicy",
+      "type": "object"
+    },
+    "RespawnPoint": {
+      "enum": [
+        "spawn",
+        "checkpoint",
+        "last_safe"
+      ],
+      "title": "RespawnPoint",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "end_screens": {
+      "items": {
+        "$ref": "#/$defs/EndScreen"
+      },
+      "maxItems": 3,
+      "title": "End Screens",
+      "type": "array"
+    },
+    "experience": {
+      "$ref": "#/$defs/ExperienceKind"
+    },
+    "failure": {
+      "items": {
+        "$ref": "#/$defs/EndCondition"
+      },
+      "maxItems": 8,
+      "title": "Failure",
+      "type": "array"
+    },
+    "free_play": {
+      "default": false,
+      "title": "Free Play",
+      "type": "boolean"
+    },
+    "hud": {
+      "$ref": "#/$defs/HudSpec"
+    },
+    "lives": {
+      "$ref": "#/$defs/Lives"
+    },
+    "objectives": {
+      "items": {
+        "$ref": "#/$defs/Objective"
+      },
+      "maxItems": 16,
+      "title": "Objectives",
+      "type": "array"
+    },
+    "omitted": {
+      "items": {
+        "type": "string"
+      },
+      "maxItems": 16,
+      "title": "Omitted",
+      "type": "array"
+    },
+    "on_life_lost": {
+      "$ref": "#/$defs/OnLifeLost"
+    },
+    "pause_menu": {
+      "$ref": "#/$defs/PauseMenu"
+    },
+    "player_vitality": {
+      "$ref": "#/$defs/PlayerVitality"
+    },
+    "prompt_id": {
+      "description": "Snake-case identifier, max 64 chars.",
+      "pattern": "^[a-z0-9][a-z0-9_.\\-]{0,63}$",
+      "title": "Prompt Id",
+      "type": "string"
+    },
+    "reset_policy": {
+      "$ref": "#/$defs/ResetPolicy"
+    },
+    "summary": {
+      "default": "",
+      "maxLength": 600,
+      "title": "Summary",
+      "type": "string"
+    },
+    "victory": {
+      "$ref": "#/$defs/EndCondition"
+    }
+  },
+  "required": [
+    "prompt_id",
+    "experience"
+  ],
+  "title": "GameDesign",
+  "type": "object"
+}
