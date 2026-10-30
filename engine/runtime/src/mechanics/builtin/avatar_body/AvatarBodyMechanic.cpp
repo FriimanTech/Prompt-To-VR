@@ -673,6 +673,16 @@ private:
                 finite_quat(hand.hand_rotation)) {
                 hand_pos = hand.hand_position;
                 hand_rot = glm::normalize(hand.hand_rotation);
+                // A hand anchored to what it holds (the support hand on a
+                // handguard, the primary on a grip) is solved onto it.
+                Vec3 anchor_pos;
+                Quat anchor_rot;
+                float anchor_w = 0.0f;
+                if (ctx.hands != nullptr &&
+                    ctx.hands->hand_anchor(h, &anchor_pos, &anchor_rot, &anchor_w)) {
+                    hand_pos = glm::mix(hand_pos, anchor_pos, anchor_w);
+                    hand_rot = glm::normalize(glm::slerp(hand_rot, anchor_rot, anchor_w));
+                }
                 arm.held_pos_local = Vec3(root_inv * Vec4(hand_pos, 1.0f));
                 arm.held_rot_local =
                     glm::normalize(glm::inverse(rt.rotation) * hand_rot);
@@ -774,6 +784,12 @@ private:
             }
             // Wrist: exactly the controller's orientation.
             set_world_rotation(avatar, arm.hand, wrist_rot, ctx);
+            // Palm -> elbow, for holds that lie along the forearm (a
+            // strapped shield): the real arm, not a guess from the hand.
+            if (ctx.hands != nullptr) {
+                const Vec3 elbow(ctx.skeleton->joint_world(avatar, arm.fore)[3]);
+                ctx.hands->publish_forearm_direction(h, elbow - hand_pos);
+            }
 
             // --- Diagnostics: an arm joint that leaps in one frame --------
             // Measured in the body's own frame, so walking, turning the

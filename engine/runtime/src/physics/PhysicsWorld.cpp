@@ -541,6 +541,17 @@ bool PhysicsWorld::has_body(std::uint32_t entity) const {
     return impl_->entity_to_body.find(entity) != impl_->entity_to_body.end();
 }
 
+bool PhysicsWorld::body_center(std::uint32_t entity, Vec3* out) const {
+    if (!impl_ || out == nullptr) return false;
+    const auto it = impl_->entity_to_body.find(entity);
+    if (it == impl_->entity_to_body.end()) return false;
+    const JPH::AABox box =
+        impl_->system.GetBodyInterface().GetTransformedShape(it->second).GetWorldSpaceBounds();
+    const JPH::Vec3 c = box.GetCenter();
+    *out = Vec3(c.GetX(), c.GetY(), c.GetZ());
+    return true;
+}
+
 bool PhysicsWorld::recreate_body_movable(std::uint32_t entity,
                                          int motion_type_raw) {
     // Replace a static body with an otherwise identical movable one. Jolt
@@ -1090,6 +1101,60 @@ bool PhysicsWorld::raycast(const Vec3& origin, const Vec3& dir, float max_dist,
     }
     if (auto found =
             impl_->body_to_entity.find(hit.mBodyID.GetIndexAndSequenceNumber());
+        found != impl_->body_to_entity.end()) {
+        out_entity = found->second;
+    }
+    return true;
+}
+
+bool PhysicsWorld::sphere_cast(const Vec3& origin, const Vec3& dir, float radius,
+                               float max_dist, const RayFilter& filter,
+                               Vec3& out_hit, Vec3& out_normal,
+                               std::uint32_t& out_entity) const {
+    out_entity = kInvalidEntity;
+    if (!impl_) return false;
+    if (radius <= 1e-4f) {
+        return raycast(origin, dir, max_dist, filter, out_hit, out_normal, out_entity);
+    }
+    const float len = std::sqrt(dir.x * dir.x + dir.y * dir.y + dir.z * dir.z);
+    if (len < 1e-6f || max_dist <= 0.0f || !is_finite_vec(origin)) return false;
+    const Vec3 delta = dir / len * max_dist;
+    JPH::ShapeRefC sphere = new JPH::SphereShape(std::clamp(radius, 0.001f, 2.0f));
+    const JPH::RShapeCast cast = JPH::RShapeCast::sFromWorldTransform(
+        sphere, JPH::Vec3::sReplicate(1.0f),
+        JPH::RMat44::sTranslation(JPH::RVec3(origin.x, origin.y, origin.z)),
+        JPH::Vec3(delta.x, delta.y, delta.z));
+    JPH::ShapeCastSettings settings;
+    settings.mBackFaceModeTriangles = JPH::EBackFaceMode::IgnoreBackFaces;
+    settings.mBackFaceModeConvex = JPH::EBackFaceMode::IgnoreBackFaces;
+    RayBodyFilter body_filter;
+    body_filter.skip_characters = filter.skip_characters;
+    for (const std::uint32_t e : filter.ignore) {
+        if (auto it = impl_->entity_to_body.find(e); it != impl_->entity_to_body.end()) {
+            body_filter.ids.push_back(it->second);
+        }
+    }
+    JPH::ClosestHitCollisionCollector<JPH::CastShapeCollector> collector;
+    if (filter.static_only) {
+        const JPH::SpecifiedBroadPhaseLayerFilter bp_filter(BPLayers::STATIC);
+        const JPH::SpecifiedObjectLayerFilter obj_filter(Layers::STATIC);
+        impl_->system.GetNarrowPhaseQuery().CastShape(
+            cast, settings, JPH::RVec3(origin.x, origin.y, origin.z), collector, bp_filter,
+            obj_filter, body_filter);
+    } else {
+        impl_->system.GetNarrowPhaseQuery().CastShape(
+            cast, settings, JPH::RVec3(origin.x, origin.y, origin.z), collector, {}, {},
+            body_filter);
+    }
+    if (!collector.HadHit()) return false;
+    const auto& h = collector.mHit;
+    // Contact point on the struck body; the normal points back at the caster.
+    out_hit = Vec3(static_cast<float>(h.mContactPointOn2.GetX()),
+                   static_cast<float>(h.mContactPointOn2.GetY()),
+                   static_cast<float>(h.mContactPointOn2.GetZ()));
+    const JPH::Vec3 axis = h.mPenetrationAxis.Normalized();
+    out_normal = Vec3(-axis.GetX(), -axis.GetY(), -axis.GetZ());
+    if (auto found = impl_->body_to_entity.find(h.mBodyID2.GetIndexAndSequenceNumber());
         found != impl_->body_to_entity.end()) {
         out_entity = found->second;
     }

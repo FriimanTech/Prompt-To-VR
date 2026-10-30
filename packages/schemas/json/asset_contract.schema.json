@@ -1,0 +1,286 @@
+{
+  "$defs": {
+    "AssetContractEntry": {
+      "additionalProperties": true,
+      "properties": {
+        "bounds": {
+          "additionalProperties": true,
+          "title": "Bounds",
+          "type": "object"
+        },
+        "cross_section_unit": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Cross Section Unit"
+        },
+        "frame": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Frame"
+        },
+        "hold": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ContractHold"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "overlay_paths": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Overlay Paths",
+          "type": "array"
+        },
+        "part_regions": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "title": "Part Regions",
+          "type": "object"
+        },
+        "principal_axis": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "number"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Principal Axis"
+        },
+        "reason": {
+          "default": "",
+          "title": "Reason",
+          "type": "string"
+        },
+        "socket_confidence": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "title": "Socket Confidence",
+          "type": "object"
+        },
+        "socket_hints": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Socket Hints",
+          "type": "array"
+        },
+        "sockets": {
+          "additionalProperties": {
+            "$ref": "#/$defs/ContractSocket"
+          },
+          "title": "Sockets",
+          "type": "object"
+        },
+        "source_glb": {
+          "default": "",
+          "title": "Source Glb",
+          "type": "string"
+        },
+        "space": {
+          "default": "unit",
+          "title": "Space",
+          "type": "string"
+        },
+        "status": {
+          "default": "skipped",
+          "title": "Status",
+          "type": "string"
+        },
+        "unsatisfied_hints": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Unsatisfied Hints",
+          "type": "array"
+        },
+        "warnings": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Warnings",
+          "type": "array"
+        }
+      },
+      "title": "AssetContractEntry",
+      "type": "object"
+    },
+    "ContractHold": {
+      "additionalProperties": false,
+      "properties": {
+        "aim_aligned": {
+          "default": false,
+          "title": "Aim Aligned",
+          "type": "boolean"
+        },
+        "finger_pose": {
+          "default": "wrap",
+          "title": "Finger Pose",
+          "type": "string"
+        },
+        "forearm_socket": {
+          "default": "",
+          "title": "Forearm Socket",
+          "type": "string"
+        },
+        "forward": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "number"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Forward"
+        },
+        "kind": {
+          "default": "none",
+          "title": "Kind",
+          "type": "string"
+        },
+        "primary_socket": {
+          "default": "",
+          "title": "Primary Socket",
+          "type": "string"
+        },
+        "support_socket": {
+          "default": "",
+          "title": "Support Socket",
+          "type": "string"
+        },
+        "two_hand": {
+          "default": "none",
+          "title": "Two Hand",
+          "type": "string"
+        },
+        "up": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "number"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Up"
+        }
+      },
+      "title": "ContractHold",
+      "type": "object"
+    },
+    "ContractSocket": {
+      "additionalProperties": true,
+      "properties": {
+        "bore_diameter_unit": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Bore Diameter Unit"
+        },
+        "confidence": {
+          "$ref": "#/$defs/SocketConfidence",
+          "default": "heuristic"
+        },
+        "handle_thickness_unit": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Handle Thickness Unit"
+        },
+        "kind": {
+          "default": "",
+          "title": "Kind",
+          "type": "string"
+        },
+        "position": {
+          "items": {
+            "type": "number"
+          },
+          "maxItems": 3,
+          "minItems": 3,
+          "title": "Position",
+          "type": "array"
+        },
+        "rotation": {
+          "items": {
+            "type": "number"
+          },
+          "maxItems": 4,
+          "minItems": 4,
+          "title": "Rotation",
+          "type": "array"
+        }
+      },
+      "required": [
+        "position",
+        "rotation"
+      ],
+      "title": "ContractSocket",
+      "type": "object"
+    },
+    "SocketConfidence": {
+      "enum": [
+        "vision_verified",
+        "vision",
+        "synthesized",
+        "heuristic",
+        "low"
+      ],
+      "title": "SocketConfidence",
+      "type": "string"
+    }
+  },
+  "additionalProperties": {
+    "$ref": "#/$defs/AssetContractEntry"
+  },
+  "title": "AssetContract",
+  "type": "object"
+}

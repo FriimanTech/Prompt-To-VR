@@ -2,6 +2,12 @@
 
 from .anthropic_client import AnthropicClient, AnthropicConfig, StructuredCall
 from .google_image_client import GoogleImageClient, GoogleImageConfig, ImageResult
+from .gemini_vision_client import (
+    DEFAULT_GEMINI_VISION_MODEL,
+    GeminiVisionClient,
+    GeminiVisionConfig,
+    VisionImage,
+)
 from .tripo_client import (
     TripoClient,
     TripoConfig,
@@ -32,6 +38,10 @@ __all__ = [
     "GoogleImageClient",
     "GoogleImageConfig",
     "ImageResult",
+    "DEFAULT_GEMINI_VISION_MODEL",
+    "GeminiVisionClient",
+    "GeminiVisionConfig",
+    "VisionImage",
     "TripoClient",
     "TripoConfig",
     "TripoRigCheck",

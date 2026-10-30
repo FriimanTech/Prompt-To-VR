@@ -26,6 +26,11 @@ extern "C" int ptv_force_link_builtin_slide;
 extern "C" int ptv_force_link_builtin_grab;
 extern "C" int ptv_force_link_builtin_throw;
 extern "C" int ptv_force_link_builtin_recoil;
+extern "C" int ptv_force_link_builtin_weapon;
+extern "C" int ptv_force_link_builtin_melee;
+extern "C" int ptv_force_link_builtin_bow;
+extern "C" int ptv_force_link_builtin_item_source;
+extern "C" int ptv_force_link_builtin_npc_ranged;
 extern "C" int ptv_force_link_builtin_hand_pose;
 extern "C" int ptv_force_link_builtin_character_locomotion;
 extern "C" int ptv_force_link_builtin_avatar_body;
@@ -48,6 +53,9 @@ int sum_builtin_module_anchors() {
     return ptv_force_link_builtin_snap_turn + ptv_force_link_builtin_teleport +
            ptv_force_link_builtin_slide + ptv_force_link_builtin_grab +
            ptv_force_link_builtin_throw + ptv_force_link_builtin_recoil +
+           ptv_force_link_builtin_weapon + ptv_force_link_builtin_melee +
+           ptv_force_link_builtin_bow + ptv_force_link_builtin_item_source +
+           ptv_force_link_builtin_npc_ranged +
            ptv_force_link_builtin_hand_pose +
            ptv_force_link_builtin_character_locomotion +
            ptv_force_link_builtin_avatar_body +

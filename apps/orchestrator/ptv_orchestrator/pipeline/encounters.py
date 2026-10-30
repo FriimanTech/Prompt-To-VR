@@ -157,9 +157,14 @@ def apply_npc_population(
     generated_ai_ids: Iterable[str] = (),
     spec_yaw: Optional[float] = None,
     on_warning: Optional[WarnFn] = None,
+    start_signal_sent: Optional[bool] = None,
 ) -> dict[str, Any]:
     """Make the compiled scene hold exactly the population the NPC plan asks
-    for. Mutates ``doc``; returns a summary for logging and tests."""
+    for. Mutates ``doc``; returns a summary for logging and tests.
+
+    ``start_signal_sent`` is whether any generated code calls
+    ``ctx.encounters->start()``; ``False`` turns a ``signal`` start into a
+    start on load (``None``: unknown, kept as planned)."""
 
     warn = on_warning or (lambda _m: None)
     summary: dict[str, Any] = {"templates": {}, "persistent": {}, "behaviours": {}}
@@ -251,9 +256,15 @@ def apply_npc_population(
                       for g in w.groups if g.asset_id in summary["templates"]]
             if groups:
                 waves.append({"groups": groups})
+        start_kind, start_delay = enc.start.value, float(enc.start_delay_s)
+        if start_kind == "signal" and start_signal_sent is False:
+            # Waiting for a start nothing sends: the waves would never come.
+            start_kind, start_delay = "delay", max(start_delay, 3.0)
+            warn("the encounter waits for a start signal but no generated code calls "
+                 f"ctx.encounters->start(); starting it {start_delay:.0f} s after load")
         params = {
             "mode": enc.mode.value,
-            "start": {"kind": enc.start.value, "delay_s": float(enc.start_delay_s),
+            "start": {"kind": start_kind, "delay_s": start_delay,
                       "tag": enc.start_tag},
             "max_concurrent": int(enc.max_concurrent),
             "spawn_interval_s": float(enc.spawn_interval_s),

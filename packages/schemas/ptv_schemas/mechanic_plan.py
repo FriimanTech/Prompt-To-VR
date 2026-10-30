@@ -102,6 +102,12 @@ BUILTIN_MECHANIC_IDS = {
     "builtin.harvestable",
     "builtin.game_flow",
     "builtin.game_hud",
+    "builtin.weapon",
+    "builtin.bow",
+    "builtin.melee_weapon",
+    "builtin.shield",
+    "builtin.item_source",
+    "builtin.npc.ranged_attack",
 }
 
 

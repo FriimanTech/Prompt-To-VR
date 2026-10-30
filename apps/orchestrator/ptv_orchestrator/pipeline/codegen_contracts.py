@@ -27,7 +27,26 @@ from typing import Mapping
 
 #: Bumped whenever a rule below changes what counts as valid. The codegen
 #: board stores it and re-checks every finished task when it moves.
-API_CONTRACT_VERSION = 4
+API_CONTRACT_VERSION = 5
+
+# --- Weapons (projects with an interaction_design.json) ---------------------
+# builtin.weapon / bow / melee_weapon / shield run every designed weapon. A
+# task that fires one too builds a second gun -- and the humans-vs-aliens
+# pistol showed what a private one does: its ray started at the muzzle, hit
+# the pistol's own collider, and no shot ever reached an alien.
+_READS_MUZZLE = re.compile(r"""socket_world\s*\([^;]*"muzzle"\s*\)""")
+_UNFILTERED_RAY = re.compile(r"\bphysics\s*->\s*raycast\s*\(")
+_PRIVATE_AMMO = re.compile(
+    r"\b(?:int|unsigned|std::uint32_t|std::int32_t|uint32_t|int32_t)\s+"
+    r"\w*(?:ammo|rounds|magazine|mag_count|bullets)\w*\s*[{=;]")
+# ...that the task itself spends (a HUD's display copy is fine).
+_SPENDS_AMMO = re.compile(
+    r"\b\w*(?:ammo|rounds|magazine|mag_count|bullets)\w*\s*(?:--|-=)"
+    r"|--\s*\w*(?:ammo|rounds|magazine|mag_count|bullets)\w*")
+_READS_WEAPONS = re.compile(r"\bweapons\s*->\s*(?:state|held_weapon|hits_since|hit_seq)\s*\(")
+_PRIVATE_PROJECTILE = re.compile(
+    r"\b(?:struct|class)\s+\w*(?:Projectile|Bullet|Tracer)\w*\b(?!\s*;)")
+_FIRES_ON_TRIGGER = re.compile(r"\btrigger_pressed\s*\(|\.trigger\s*>=?")
 
 # --- Game loop (projects with a game_design.json) ---------------------------
 # builtin.game_flow owns lives, respawn, restart and the end screens. A task
@@ -67,15 +86,45 @@ _OFFERED_ENTRY = re.compile(
 
 
 def lint_task_sources(kind: str, files: Mapping[str, str], *,
-                      game_flow: bool = False) -> list[str]:
+                      game_flow: bool = False, weapons: bool = False) -> list[str]:
     """Problems with ONE task's files, phrased for the agent that wrote them.
 
     ``kind`` is the CodeTask kind (``ai``, ``mechanic``, ``dialogue``);
     ``files`` maps file name -> contents. ``game_flow`` is true when the
-    project has a game design, i.e. ``builtin.game_flow`` runs the loop."""
+    project has a game design, i.e. ``builtin.game_flow`` runs the loop;
+    ``weapons`` when its interaction design hands weapons to the engine's
+    weapon built-ins."""
 
     problems: list[str] = []
     joined = "\n".join(files.values())
+
+    if _READS_MUZZLE.search(joined) and _UNFILTERED_RAY.search(joined):
+        problems.append(
+            "casts ctx.physics->raycast from a muzzle socket. The first thing "
+            "that ray hits is the weapon's own collider (or the hand holding "
+            "it), so no shot ever lands. Read hits from ctx.weapons->"
+            "hits_since(...) instead; if you truly need a ray, use "
+            "ctx.physics->raycast_ignoring with the weapon and its wielder.")
+    if weapons:
+        if _READS_MUZZLE.search(joined) and _FIRES_ON_TRIGGER.search(joined):
+            problems.append(
+                "fires a weapon from its muzzle on the trigger. builtin.weapon "
+                "fires every designed weapon (rate, spread, ammo, recoil, "
+                "tracer, damage) -- remove the firing and REACT to shots with "
+                "ctx.weapons->hits_since(seq, ...) / state(weapon, &s).")
+        if (_PRIVATE_AMMO.search(joined) and _SPENDS_AMMO.search(joined)
+                and not _READS_WEAPONS.search(joined)):
+            problems.append(
+                "keeps and spends its own ammo / magazine count. Ammo and "
+                "reloading are builtin.weapon's; read ctx.weapons->state(weapon, &s) "
+                "(s.ammo_in_magazine, s.magazine_size, s.reserve, s.infinite, "
+                "s.reloading) with the weapon from ctx.weapons->held_weapon(hand).")
+        if _PRIVATE_PROJECTILE.search(joined):
+            problems.append(
+                "defines its own projectile / bullet / tracer type. Projectiles "
+                "are ctx.projectiles (pooled, swept, faction-checked) and "
+                "tracers ctx.vfx; launch through them or, for a designed "
+                "weapon, let builtin.weapon do it.")
 
     if game_flow:
         if _PRIVATE_LIVES.search(joined):
@@ -134,11 +183,11 @@ def lint_task_sources(kind: str, files: Mapping[str, str], *,
 
 
 def stale_contract_reasons(files: Mapping[str, str], *,
-                           game_flow: bool = False) -> list[str]:
+                           game_flow: bool = False, weapons: bool = False) -> list[str]:
     """Why already-generated code no longer satisfies the contract (empty =
     still fine). Same rules as :func:`lint_task_sources`."""
 
-    return lint_task_sources("", files, game_flow=game_flow)
+    return lint_task_sources("", files, game_flow=game_flow, weapons=weapons)
 
 
 def find_dead_contracts(task_sources: Mapping[str, Mapping[str, str]]) -> list[str]:

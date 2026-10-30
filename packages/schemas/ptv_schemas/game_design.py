@@ -39,7 +39,7 @@ class Provenance(StrictModel):
     #: prompt verbatim (whitespace and case aside).
     prompt_quote: str = Field(default="", max_length=400)
     #: Why, in one sentence, when inferred.
-    rationale: str = Field(default="", max_length=400)
+    rationale: str = Field(default="", max_length=1000)
 
 
 class ExperienceKind(str, Enum):

@@ -4,8 +4,11 @@
 #include <cstddef>
 #include <cstdint>
 
+#include "ptv/api/Effects.h"
 #include "ptv/api/GameFlow.h"
 #include "ptv/api/InteractiveState.h"
+#include "ptv/api/Projectiles.h"
+#include "ptv/api/Weapons.h"
 #include "ptv/math/Math.h"
 
 namespace ptv {
@@ -314,7 +317,38 @@ public:
     }
 
     /** True when this entity has a physics body at all. */
+    /** Raycast that passes through every entity in ``ignore`` (``count`` of
+     *  them): the weapon, the hands holding it and the player, so a shot
+     *  fired from a muzzle that sits on or inside the weapon's own collider
+     *  does not hit the weapon at distance zero. */
+    virtual bool raycast_ignoring(const std::uint32_t* ignore, int count,
+                                  const Vec3& origin, const Vec3& dir,
+                                  float max_dist, PhysicsRayHit& out) const {
+        return raycast_excluding(count > 0 ? ignore[0] : 0xFFFFFFFFu, origin, dir,
+                                 max_dist, out);
+    }
+
+    /** Sweep a sphere of ``radius`` (a fat ray: arrows, rockets, grenades),
+     *  ignoring the listed entities. Radius 0 behaves as
+     *  ``raycast_ignoring``. */
+    virtual bool sphere_cast_ignoring(const std::uint32_t* ignore, int count,
+                                      const Vec3& origin, const Vec3& dir,
+                                      float radius, float max_dist,
+                                      PhysicsRayHit& out) const {
+        (void)radius;
+        return raycast_ignoring(ignore, count, origin, dir, max_dist, out);
+    }
+
     virtual bool has_body(std::uint32_t entity) const = 0;
+
+    /** Centre of the entity's collider in world space -- where to aim at it,
+     *  whatever its mesh origin is (feet, middle or wherever the GLB put
+     *  it). False when it has no body. */
+    virtual bool body_center(std::uint32_t entity, Vec3* out) const {
+        (void)entity;
+        (void)out;
+        return false;
+    }
 
     /** Switch a body between dynamic and kinematic. Grab uses this so a held
      *  object stops being affected by gravity while carried. */
@@ -450,6 +484,59 @@ public:
      *  visible fingers stay frozen. */
     virtual std::uint32_t finger_target(int hand) const = 0;
     virtual void set_finger_target(int hand, std::uint32_t entity) = 0;
+
+    /** Draw ``hand`` at this GRIP pose instead of the controller's, blended
+     *  by ``weight`` (0..1). ``builtin.grab`` sets it every frame a hand
+     *  holds something by a socket, so the visible hand closes exactly on
+     *  the handle, the second hand wraps the first, or the support hand sits
+     *  under a handguard. Valid for the frame it is set in; not setting it
+     *  hands the visual back to the controller. Affects drawing only
+     *  (default hands and a full-body avatar's IK target), never input. */
+    virtual void set_hand_anchor(int hand, const Vec3& grip_position,
+                                 const Quat& grip_rotation, float weight) {
+        (void)hand; (void)grip_position; (void)grip_rotation; (void)weight;
+    }
+    /** This frame's anchor, if any. */
+    virtual bool hand_anchor(int hand, Vec3* grip_position, Quat* grip_rotation,
+                             float* weight) const {
+        (void)hand; (void)grip_position; (void)grip_rotation; (void)weight;
+        return false;
+    }
+
+    /** World direction from the palm toward the elbow: from the avatar's
+     *  forearm when a full body drives the arm, otherwise from the hand
+     *  rig's own wrist. Used to lay a strapped shield along the forearm. */
+    virtual Vec3 forearm_direction(int hand) const {
+        (void)hand;
+        return Vec3(0.0f, 0.0f, 1.0f);
+    }
+    /** ``builtin.avatar_body`` publishes the measured forearm direction. */
+    virtual void publish_forearm_direction(int hand, const Vec3& dir) {
+        (void)hand; (void)dir;
+    }
+
+    /** The two-handed item ``hand`` is steadying as the SUPPORT hand (the
+     *  other hand holds it), or the invalid sentinel. Weapons that require
+     *  two hands read this. Published by ``builtin.grab``. */
+    virtual std::uint32_t support_entity(int hand) const {
+        (void)hand;
+        return 0xFFFFFFFFu;
+    }
+    virtual void set_support_entity(int hand, std::uint32_t entity) {
+        (void)hand; (void)entity;
+    }
+
+    /** Ask ``builtin.grab`` to put ``entity`` straight into ``hand`` next
+     *  frame (an arrow drawn from a quiver, a magazine from a pouch), as if
+     *  the player had squeezed on it. ``take_hold_request`` is grab's side:
+     *  it returns and clears the pending request. */
+    virtual void request_hold(int hand, std::uint32_t entity) {
+        (void)hand; (void)entity;
+    }
+    virtual std::uint32_t take_hold_request(int hand) {
+        (void)hand;
+        return 0xFFFFFFFFu;
+    }
 
     /** The player's own body: a kinematic capsule that follows the headset.
      *
@@ -667,6 +754,18 @@ public:
                         const char* anchor, const Vec3& local_position,
                         const Quat& local_rotation) = 0;
 
+    /** Put a held item in an NPC's hand BY ITS OWN HAND SOCKET: the child's
+     *  ``child_socket`` (a hand_grip, in the OpenXR grip frame) is made to
+     *  coincide with the grip frame of the parent's hand joint ``anchor``
+     *  (``hand_r`` / ``hand_l``, measured from the rig's palm). For an
+     *  anchor that is not a recognisable hand, the joint's own frame is
+     *  used. Returns false when the socket or anchor cannot be resolved. */
+    virtual bool attach_by_socket(std::uint32_t child, const char* child_socket,
+                                  std::uint32_t parent, const char* anchor) {
+        (void)child; (void)child_socket; (void)parent; (void)anchor;
+        return false;
+    }
+
     /** Release a child. It keeps its current world pose and, if it had a
      *  dynamic body before being attached, starts simulating again. */
     virtual void detach(std::uint32_t child) = 0;
@@ -739,6 +838,28 @@ public:
      *  health bar in a few frames. */
     virtual bool apply_damage(std::uint32_t target, float amount,
                               std::uint32_t instigator) = 0;
+
+    /** Damage from a weapon hit (a bullet, a beam tick, a sword swing).
+     *  Unlike ``apply_damage`` it is NOT swallowed by an NPC's post-hit
+     *  invulnerability window -- that window exists for contact damage
+     *  tested every frame, and it would turn a 700 rpm rifle into one hit
+     *  every 0.4 s. Hits on the player still respect it. */
+    virtual bool apply_weapon_damage(std::uint32_t target, float amount,
+                                     std::uint32_t instigator) {
+        return apply_damage(target, amount, instigator);
+    }
+
+    /** Register a held shield (engine built-ins): melee hits whose path
+     *  from the attacker to the holder passes through it are reduced to
+     *  ``leak`` of their damage. ``enabled`` false unregisters. */
+    virtual void set_blocker(std::uint32_t shield, bool enabled, float leak) {
+        (void)shield; (void)enabled; (void)leak;
+    }
+    /** Hits a shield has blocked so far (telemetry / feedback). */
+    virtual std::uint64_t blocked_seq(std::uint32_t shield) const {
+        (void)shield;
+        return 0;
+    }
 
     /** Restore health, never above the maximum. */
     virtual void heal(std::uint32_t entity, float amount) = 0;
@@ -1602,6 +1723,13 @@ struct MechanicContext {
     IApp* app{nullptr};
     /** World-space text (see ITextDraw). */
     ITextDraw* text{nullptr};
+    /** Gameplay effects: flashes, tracers, beams, impacts, decals
+     *  (ptv/api/Effects.h). */
+    IEffects* vfx{nullptr};
+    /** Engine-owned projectiles with travel time (ptv/api/Projectiles.h). */
+    IProjectiles* projectiles{nullptr};
+    /** Weapon state, hits and NPC triggers (ptv/api/Weapons.h). */
+    IWeapons* weapons{nullptr};
 };
 
 }  // namespace ptv

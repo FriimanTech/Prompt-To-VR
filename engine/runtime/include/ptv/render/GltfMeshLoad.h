@@ -32,4 +32,32 @@ bool load_glb_merged(const std::string& path,
                      std::string& err,
                      float unit_scale = 0.0f);
 
+struct TexturedVertex {
+    float pos[3];
+    float normal[3];
+    float uv[2];
+    float color[4];
+};
+
+/** A base-colour image exactly as stored in the GLB (PNG / JPEG bytes). */
+struct EncodedImage {
+    std::string mime;
+    std::vector<unsigned char> bytes;
+};
+
+struct TexturedMesh {
+    std::vector<TexturedVertex> verts;
+    std::vector<uint32_t> indices;
+    /** Per triangle: index into ``images`` of its base-colour texture, or -1. */
+    std::vector<int> tri_image;
+    std::vector<EncodedImage> images;
+};
+
+/** The same merge as ``load_glb_merged`` at source scale (identical node
+ *  traversal and therefore identical positions, triangle for triangle), plus
+ *  TEXCOORD_0 and each primitive's encoded base-colour image. Offline tools
+ *  only (the socket-view renderer); the runtime never decodes textures. */
+bool load_glb_textured(const std::string& path, TexturedMesh& out,
+                       std::string& err);
+
 }  // namespace ptv::gltf_mesh_load

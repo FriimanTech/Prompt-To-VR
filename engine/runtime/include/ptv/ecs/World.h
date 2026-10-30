@@ -144,6 +144,41 @@ struct CTransformOffset {
     bool active{false};
 };
 
+/** Per-socket facts from ``socket_generation`` (kind, mirror rule, sizes),
+ *  beside ``CMesh::sockets``. Absent on meshes from older pipelines. */
+struct SocketInfo {
+    std::string kind;
+    std::string mirror;
+    std::string wrap_of;
+    float lateral_offset_m{0.0f};
+    float bore_diameter_m{0.0f};
+    float handle_thickness_m{0.0f};
+};
+
+struct CSocketInfo {
+    std::unordered_map<std::string, SocketInfo> sockets;
+};
+
+enum class HoldKind : int { None, OneHand, TwoHandLine, TwoHandWrap, ForearmStrap };
+enum class TwoHandMode : int { None, Optional, Required };
+enum class HoldFingerPose : int { Wrap, Trigger, Strap, Pinch, OpenSupport };
+
+/** How a held item is solved into the hand(s), from ``mesh.hold``.
+ *  ``builtin.grab`` reads it; ``builtin.hand_pose`` reads ``finger_pose``. */
+struct CHoldProfile {
+    HoldKind kind{HoldKind::None};
+    bool aim_aligned{false};
+    TwoHandMode two_hand{TwoHandMode::None};
+    std::string primary_socket;
+    std::string support_socket;
+    std::string forearm_socket;
+    HoldFingerPose finger_pose{HoldFingerPose::Wrap};
+    /** Mesh-space facing of aim-aligned items (where shots go, and up). */
+    bool has_forward{false};
+    Vec3 forward{0.0f, 0.0f, 1.0f};
+    Vec3 up{0.0f, 1.0f, 0.0f};
+};
+
 struct CMesh {
     std::string asset_id;
     std::string glb_path;
@@ -687,6 +722,10 @@ struct CAttachment {
     /** Extra offset applied after the anchor, in the anchor's space. */
     Vec3 local_position{0.0f};
     Quat local_rotation{1.0f, 0.0f, 0.0f, 0.0f};
+    /** Socket on THIS entity (a hand_grip) to seat on the anchor instead of
+     *  the authored offset. Resolved once after skeletons load (the hand's
+     *  grip frame comes from the rig), then cleared. */
+    std::string child_socket;
 };
 
 struct CMechanicBinding {

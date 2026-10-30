@@ -71,6 +71,9 @@ public:
     /** Returns true if there is a physics body for this entity. */
     bool has_body(std::uint32_t entity) const;
 
+    /** Centre of the body's world-space bounds (what a shot should aim at). */
+    bool body_center(std::uint32_t entity, Vec3* out) const;
+
     /** Toggle a body between Dynamic and Kinematic (useful for grab). */
     void set_kinematic(std::uint32_t entity, bool kinematic);
 
@@ -213,6 +216,13 @@ public:
     bool raycast(const Vec3& origin, const Vec3& dir, float max_dist,
                  const RayFilter& filter, Vec3& out_hit, Vec3& out_normal,
                  std::uint32_t& out_entity) const;
+
+    /** Sweep a sphere of ``radius`` from ``origin`` along ``dir`` for
+     *  ``max_dist`` and report the first body it touches (a fat ray for
+     *  arrows, rockets and grenades). Radius 0 is a raycast. */
+    bool sphere_cast(const Vec3& origin, const Vec3& dir, float radius,
+                     float max_dist, const RayFilter& filter, Vec3& out_hit,
+                     Vec3& out_normal, std::uint32_t& out_entity) const;
 
 private:
     /** Replace a static body with an identical movable one.

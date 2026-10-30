@@ -115,7 +115,7 @@ Reads build_spec, manifest, npc_plan; writes `mechanic_plan.json`.
 
 ### Hub mechanics and DAG
 
-Hub CodeTasks (e.g. shooting_hub) emit first with empty `depends_on`; weapon/enemy tasks list hub id in deps. Board enforces order at codegen.
+Hub CodeTasks (e.g. a spell-casting hub) emit first with empty `depends_on`; branch tasks list the hub id in deps. Board enforces order at codegen. Weapons are not hubs any more: `weapon_plan.reconcile_weapon_items` maps every designed weapon onto `builtin.weapon` / `builtin.bow` / `builtin.melee_weapon` / `builtin.shield` (+ `builtin.item_source`, `builtin.npc.ranged_attack`), removes generated shooting hubs, fire profiles, ammo / reload / recoil tasks and `builtin.recoil`, and tells their dependents to read `ctx.weapons` (see [docs/weapons.md](../../../weapons.md)).
 
 ### editable_builtins_note
 

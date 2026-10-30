@@ -17,7 +17,9 @@ from pydantic import BaseModel
 from . import (
     AcceptanceTestPlan,
     ArtifactMetadata,
+    AssetContract,
     AssetManifest,
+    InteractionDesign,
     BuildSpec,
     CharacterRoutingPlan,
     CodeTask,
@@ -38,6 +40,8 @@ _EXPORTS: dict[str, Type[BaseModel]] = {
     "mechanic_plan": MechanicPlan,
     "npc_plan": NpcPlan,
     "game_design": GameDesign,
+    "interaction_design": InteractionDesign,
+    "asset_contract": AssetContract,
     "character_routing": CharacterRoutingPlan,
     "uthana_motion_plan": UthanaMotionPlan,
     "scene_spec": SceneSpec,

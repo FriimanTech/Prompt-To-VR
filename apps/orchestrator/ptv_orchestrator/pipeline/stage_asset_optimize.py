@@ -166,11 +166,19 @@ def run(ctx: PipelineContext) -> StageResult:
     )
 
     # --- Allocate a triangle budget per asset ------------------------------
+    # A projectile mesh is drawn many times at once and for a fraction of a
+    # second each: it gets the profile's projectile cap, never hero detail.
+    design = ctx.interaction_design or ctx.store.load_interaction_design(ctx.project_id)
+    projectile_assets = {p.asset_id for p in (design.projectiles if design else [])
+                         if p.asset_id}
     requests: dict[str, AssetBudgetRequest] = {}
     for asset_id in usable:
         item = items.get(asset_id)
         info = report[asset_id]
         source_tris = info.get("source_triangles")
+        cap = item.max_triangles if item is not None else None
+        if asset_id in projectile_assets:
+            cap = min(cap or profile.projectile_max_triangles, profile.projectile_max_triangles)
         requests[asset_id] = AssetBudgetRequest(
             importance=_importance_for(ctx, asset_id, item),
             target_scale_meters=(
@@ -178,9 +186,7 @@ def run(ctx: PipelineContext) -> StageResult:
             ),
             instance_count=max(1, _instance_count(ctx, asset_id)),
             source_triangles=(int(source_tris) if source_tris else None),
-            max_triangles=(
-                item.max_triangles if item is not None else None
-            ),
+            max_triangles=cap,
         )
     budgets = allocate_asset_budgets(profile, requests)
 
@@ -232,6 +238,7 @@ def run(ctx: PipelineContext) -> StageResult:
                 profile=profile,
                 repo_root=ctx.settings.repo_root,
                 on_line=lambda m: ctx.emit(stage, "log", m[:400]),
+                drop_triangles=_engine_drawn_parts(ctx, asset_id),
             )
         except Exception as exc:  # noqa: BLE001 - report and keep going
             info["optimization"] = {"status": "failed", "reason": str(exc)}
@@ -300,6 +307,25 @@ def run(ctx: PipelineContext) -> StageResult:
 # ---------------------------------------------------------------------------
 
 
+def _engine_drawn_parts(ctx: PipelineContext, asset_id: str) -> Path | None:
+    """Triangles of a part the engine draws itself and the mesh must lose: a
+    modelled bowstring (builtin.bow draws a string that bends). From the
+    socket_generation region recorded in asset_contract.json."""
+    path = ctx.project_dir / "asset_contract.json"
+    if not path.exists():
+        return None
+    try:
+        entry = json.loads(path.read_text(encoding="utf-8")).get(asset_id) or {}
+    except json.JSONDecodeError:
+        return None
+    region = (entry.get("part_regions") or {}).get("bowstring")
+    if not region:
+        return None
+    p = Path(region)
+    p = p if p.is_absolute() else ctx.settings.repo_root / p
+    return p if p.exists() else None
+
+
 def _build_lod_chain(
     *,
     tool: Path,
@@ -309,6 +335,7 @@ def _build_lod_chain(
     profile: PerformanceProfile,
     repo_root: Path,
     on_line,
+    drop_triangles: Path | None = None,
 ) -> dict[str, Any]:
     """Emit LOD0..LODn for one asset and return the recorded metadata.
 
@@ -323,6 +350,8 @@ def _build_lod_chain(
         max(1, int(round(budget * ratio))) for ratio in profile.lod_ratios
     ]
     fingerprint = _source_fingerprint(source, repo_root)
+    if drop_triangles is not None:
+        fingerprint = f"{fingerprint}|drop:{drop_triangles.stat().st_size}"
 
     if stamp_path.exists():
         try:
@@ -371,6 +400,8 @@ def _build_lod_chain(
         ]
         if sloppy:
             args.append("--sloppy")
+        if drop_triangles is not None:
+            args += ["--drop-triangles", str(drop_triangles)]
         proc = subprocess.run(args, capture_output=True, text=True)
         if proc.returncode != 0:
             raise RuntimeError(

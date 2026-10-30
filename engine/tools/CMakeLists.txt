@@ -20,3 +20,11 @@ set_target_properties(ptv_glb_optimize PROPERTIES FOLDER "ptv/tools")
 add_executable(ptv_glb_sockets glb_sockets.cpp)
 target_link_libraries(ptv_glb_sockets PRIVATE ptv_runtime)
 set_target_properties(ptv_glb_sockets PROPERTIES FOLDER "ptv/tools")
+
+# glb_views: multi-view colour + triangle-id + depth renders of a GLB for the
+# socket_generation stage (vision finds parts; ids map them onto the mesh).
+# CPU rasteriser, so it runs on any build machine without a GPU.
+add_executable(ptv_glb_views glb_views.cpp)
+target_link_libraries(ptv_glb_views PRIVATE ptv_runtime)
+target_include_directories(ptv_glb_views PRIVATE "${Stb_INCLUDE_DIR}")
+set_target_properties(ptv_glb_views PROPERTIES FOLDER "ptv/tools")

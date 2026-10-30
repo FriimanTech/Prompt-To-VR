@@ -209,6 +209,9 @@ public:
      *  flow scripts its own end-screen clicks so a headset test can walk
      *  every path. Generated code must not read this. */
     virtual bool verify_flow() const { return false; }
+    /** Any engine verification run (``debug.ptv.verify*``): the player is a
+     *  script that cannot pick things up. Generated code must not read this. */
+    virtual bool verify_run() const { return false; }
     /** Seconds since the app started. */
     virtual float uptime_s() const = 0;
     /** Fade the whole view toward black THIS frame (0 clear .. 1 black),

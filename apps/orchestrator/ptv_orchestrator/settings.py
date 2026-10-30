@@ -239,6 +239,32 @@ class Settings(BaseSettings):
     # problems are repaired deterministically.
     game_design_max_repair_rounds: int = Field(default=2, ge=0, le=6)
 
+    # --- Interaction design stage (how each item is held / fired) --------
+    # Hold profile, sockets to find, weapon + projectile decisions. High
+    # effort with web search: real-world dimensions and calibres are looked
+    # up, and a wrong call is a gun held by its barrel or a beam rifle
+    # spraying meshes.
+    interaction_design_model: str = "gpt-5.6-sol"
+    interaction_design_reasoning_effort: str = "high"
+    interaction_design_verbosity: str = "medium"
+    interaction_design_agent_max_turns: int = Field(default=40, ge=4, le=200)
+    interaction_design_max_retries: int = Field(default=1, ge=0, le=4)
+    interaction_design_max_repair_rounds: int = Field(default=2, ge=0, le=6)
+    interaction_design_web_search: bool = True
+
+    # --- Socket generation stage (vision + geometry) ---------------------
+    # Gemini image understanding on multi-view renders of each GLB; the
+    # geometry solvers turn its masks / keypoints into exact sockets.
+    # gemini-3.8-flash: stable, trained for detection + segmentation
+    # (docs: thinking_level "minimal" for segmentation).
+    socket_vision_model: str = "gemini-3.8-flash"
+    socket_vision_enabled: bool = True
+    socket_vision_max_parallel: int = Field(default=6, ge=1, le=32)
+    socket_view_size: int = Field(default=768, ge=256, le=1536)
+    # Render-and-verify rounds after the first solve (0 = do not verify).
+    socket_verify_rounds: int = Field(default=1, ge=0, le=3)
+    socket_vision_timeout_s: float = Field(default=120.0, ge=10.0, le=900.0)
+
     # --- Character routing (Tripo vs Uthana) -----------------------------
     # Decides, after the Tripo models exist, which provider rigs and animates
     # each character. High effort: it weighs gameplay needs against two
@@ -405,6 +431,7 @@ class Settings(BaseSettings):
         "mechanic_plan_reasoning_effort",
         "npc_plan_reasoning_effort",
         "game_design_reasoning_effort",
+        "interaction_design_reasoning_effort",
         "character_routing_reasoning_effort",
         "uthana_motion_plan_reasoning_effort",
         "world_reasoning_effort",
@@ -425,6 +452,7 @@ class Settings(BaseSettings):
         "mechanic_plan_verbosity",
         "npc_plan_verbosity",
         "game_design_verbosity",
+        "interaction_design_verbosity",
         "character_routing_verbosity",
         "uthana_motion_plan_verbosity",
         "world_verbosity",

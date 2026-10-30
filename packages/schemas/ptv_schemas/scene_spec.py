@@ -25,6 +25,31 @@ class SocketRef(StrictModel):
 
     position: Vec3 = Field(default_factory=Vec3)
     rotation: QuatXYZW = Field(default_factory=QuatXYZW)
+    kind: str = Field(
+        default="",
+        max_length=32,
+        description=(
+            "Socket kind (hand_grip, muzzle, ...). Hand kinds are in the"
+            " OpenXR grip frame; every other kind faces along +Z."
+        ),
+    )
+    confidence: str = Field(default="", max_length=24)
+    bore_diameter_m: Optional[float] = Field(default=None, ge=0.0, le=5.0)
+
+
+class HoldRef(StrictModel):
+    """How a held item is solved into the hand(s); compiled from the
+    InteractionDesign + asset contract. The SceneSpec agent leaves it empty."""
+
+    kind: str = Field(default="none", max_length=32)
+    aim_aligned: bool = False
+    two_hand: str = Field(default="none", max_length=16)
+    primary_socket: str = Field(default="", max_length=64)
+    support_socket: str = Field(default="", max_length=64)
+    forearm_socket: str = Field(default="", max_length=64)
+    finger_pose: str = Field(default="wrap", max_length=16)
+    forward: Optional[Vec3] = None
+    up: Optional[Vec3] = None
 
 
 class MeshRef(StrictModel):
@@ -40,6 +65,13 @@ class MeshRef(StrictModel):
             "Named attachment points (e.g. 'muzzle', 'grip') in metres,"
             " relative to the mesh origin. Populated by the scene compiler"
             " from asset_contract.json; the SceneSpec agent leaves this empty."
+        ),
+    )
+    hold: Optional[HoldRef] = Field(
+        default=None,
+        description=(
+            "Hold profile for held items, compiled by the scene compiler from"
+            " interaction_design.json. The SceneSpec agent leaves this empty."
         ),
     )
 
@@ -104,6 +136,15 @@ class AttachmentRef(StrictModel):
             " ('muzzle', 'grip') win; otherwise the runtime matches a joint,"
             " including loose aliases like 'hand_r' / 'hand_l' / 'head' that"
             " work regardless of what Tripo named the bones."
+        ),
+    )
+    socket: str = Field(
+        default="",
+        max_length=64,
+        description=(
+            "Optional socket on THIS entity (e.g. 'grip') to seat on the"
+            " anchor, so a rifle sits in an NPC's hand by its own handle."
+            " Overrides position/rotation."
         ),
     )
     position: Vec3 = Field(

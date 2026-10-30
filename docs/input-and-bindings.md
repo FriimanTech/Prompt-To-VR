@@ -337,7 +337,7 @@ Details that matter:
 
 A fixed menu needs no code at all — declare `rows` in the mechanic's params.
 
-## Held weapons (GLB-asset mechanics)
+## Held items and weapons
 
 A mechanic bound to a grabbable GLB acts only while held:
 
@@ -345,13 +345,27 @@ A mechanic bound to a grabbable GLB acts only while held:
 int h = input.hand_holding(entity);           // -1 if not held
 if (h < 0) return;
 auto hand = static_cast<InputSnapshot::Hand>(h);
-if (input.trigger_pressed(hand)) { /* fire */ }
+if (input.trigger_pressed(hand)) { /* use it */ }
 ```
 
-Projectiles/VFX should leave the barrel: read a local-space
-`muzzle_offset` from params and transform it by the holding hand's aim
-pose. Give the projectile a `CPhysics` + `CTransform` so Jolt integrates
-it and cover/collision blocks it.
+Designed weapons are NOT generated: `builtin.weapon` reads the holding
+hand's trigger itself (fire modes, reload on the face button, recoil and
+haptics), as do `builtin.bow` (the other hand's grip draws),
+`builtin.melee_weapon` and `builtin.shield`. Generated code reacts through
+the services the engine adds to `MechanicContext` for them:
+
+* `ctx.weapons` -- `state`, `held_weapon`, `hit_seq` / `hits_since`, and for
+  AI `trigger` / `fire_once` / `aim_at`;
+* `ctx.projectiles` -- `launch`, `preset("<id>")`, `hits_since`;
+* `ctx.vfx` -- flashes, tracers, beams, impacts, decals, explosions;
+* `ctx.physics->raycast_ignoring` / `sphere_cast_ignoring` -- rays that
+  skip the item and whoever holds it;
+* `ctx.combat->apply_weapon_damage` -- damage that rapid fire is not lost to.
+
+`builtin.grab` also accepts scripted holds (`ctx.hands->request_hold`, used
+by `builtin.item_source` and the weapons verification pass) and draws the
+hand on the item's socket (`ctx.hands->set_hand_anchor`). See
+[weapons.md](weapons.md) and [sockets.md](sockets.md).
 
 ## Scope
 

@@ -37,12 +37,14 @@ from . import (
     stage_code_generation,
     stage_engine_promotion,
     stage_game_design,
+    stage_interaction_design,
     stage_mechanic_plan,
     stage_quest_build,
     stage_quest_verify,
     stage_reference_images,
     stage_scene_compile,
     stage_scene_spec,
+    stage_socket_generation,
     stage_tripo_models,
     stage_uthana_animation,
     stage_uthana_motion_plan,
@@ -63,6 +65,10 @@ StageFn = Callable[[PipelineContext], StageResult]
 _SHARED_STAGES: list[tuple[ProjectStage, StageFn]] = [
     (ProjectStage.build_spec, stage_build_spec.run),
     (ProjectStage.asset_manifest, stage_asset_manifest.run),
+    # How each item is held / fired. Directly after the manifest because it
+    # appends projectile meshes before any image or Tripo money is spent,
+    # and every later planning stage reads it.
+    (ProjectStage.interaction_design, stage_interaction_design.run),
     # Before rigging (it decides what needs animating and what does not) and
     # before mechanic/scene planning (both need to know who the combatants
     # are).
@@ -99,6 +105,11 @@ _SHARED_STAGES: list[tuple[ProjectStage, StageFn]] = [
     (ProjectStage.uthana_motion_plan, stage_uthana_motion_plan.run),
     (ProjectStage.uthana_animation, stage_uthana_animation.run),
     (ProjectStage.asset_normalization, stage_asset_normalize.run),
+    # Vision + geometry finds the sockets interaction_design asked for on
+    # the (rigged, validated) source GLB. Before asset_contract, which merges
+    # them, and long before asset_optimization -- sockets are unit space and
+    # survive the LOD chain.
+    (ProjectStage.socket_generation, stage_socket_generation.run),
     # Must precede code_generation: the codegen agent needs asset_contract.json
     # in context so it writes ctx.sockets->socket_world(self, "muzzle") against
     # socket names that actually exist, instead of guessing a hard-coded

@@ -53,6 +53,18 @@ alwaysApply: true
  teleports the player, or a generated `restart_current` / `revive` fails
  the CodeTask (`codegen_contracts.py`, API contract v4). Headings use
  `ptv/api/Facing.h`, never a hand-written `atan2`.
+- Generated code never runs a weapon. In a project with an
+  `interaction_design.json`, firing, ammo / reload / overheat, recoil,
+  tracers, projectiles, beams, muzzle flash, hit detection and weapon damage
+  are `builtin.weapon`'s; bows `builtin.bow` (+ `builtin.item_source`),
+  melee `builtin.melee_weapon`, shields `builtin.shield`, shooting NPCs
+  `builtin.npc.ranged_attack` — all bound by `scene_compile` from the design.
+  Generated code REACTS through `ctx.weapons` (`hits_since`, `state`,
+  `held_weapon`); abilities that launch something use `ctx.projectiles` /
+  `ctx.vfx`. A plain `ctx.physics->raycast` from a muzzle socket, private
+  fire-on-trigger from a muzzle, a private ammo count or a private
+  projectile type fails the CodeTask (`codegen_contracts.py`, API contract
+  v5); rays that must skip the shooter use `raycast_ignoring`.
 - The orchestrator validates includes before writing files (fail-loudly)
   and `engine/tools/check_generated_bounds.py` runs before the build as a
   secondary check, failing the stage on any violation.

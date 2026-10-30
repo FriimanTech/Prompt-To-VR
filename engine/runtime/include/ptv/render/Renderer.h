@@ -17,6 +17,7 @@
 #include "ptv/math/Math.h"
 #include "ptv/render/GltfMeshLoad.h"
 #include "ptv/render/GltfSkinnedLoad.h"
+#include "ptv/render/FxRenderer.h"
 #include "ptv/render/TextRenderer.h"
 #include "ptv/scene/Scene.h"
 
@@ -186,6 +187,11 @@ public:
      *  screen fractions, so every headset occludes the same visual field. */
     /** World-space strings for the next frame (consumed by draw_frame). */
     void submit_text(TextItem item) { text_items_.push_back(std::move(item)); }
+    /** Effect quads for the next frame (consumed by draw_frame), at most
+     *  ``set_fx_budget`` of them. */
+    void submit_fx(const FxQuad& q) { fx_items_.push_back(q); }
+    void set_fx_budget(std::size_t max_quads) { fx_budget_ = max_quads; }
+    std::uint32_t fx_quads_drawn() const { return fx_.quad_count(); }
     /** The glyph atlas, for measuring text; null when text is unavailable. */
     const TextAtlas* text_atlas() const {
         return text_.ready() ? &text_.atlas() : nullptr;
@@ -409,6 +415,9 @@ private:
     // World-space SDF text (menus, HUD numerals), drawn after geometry.
     TextRenderer text_{};
     std::vector<TextItem> text_items_;
+    FxRenderer fx_{};
+    std::vector<FxQuad> fx_items_;
+    std::size_t fx_budget_{1024};
 
     VkShaderModule vs_{VK_NULL_HANDLE};
     VkShaderModule fs_{VK_NULL_HANDLE};

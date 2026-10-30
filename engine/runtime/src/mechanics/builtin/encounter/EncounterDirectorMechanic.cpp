@@ -117,7 +117,7 @@ private:
                     MechanicContext& ctx, EncounterState& s, std::uint32_t player) {
         switch (s.phase) {
             case EncounterPhase::Idle:
-                tick_idle(world, dt, input, s);
+                tick_idle(world, dt, input, ctx, s);
                 // A wave that starts spawns on the same frame.
                 if (s.phase == EncounterPhase::Active) {
                     tick_active(world, 0.0f, ctx, s, player);
@@ -198,9 +198,20 @@ private:
         return kInvalid;
     }
 
-    void tick_idle(World& world, float dt, const InputSnapshot& input,
+    void tick_idle(World& world, float dt, const InputSnapshot& input, MechanicContext& ctx,
                    EncounterState& s) {
         bool go = s.start_requested;
+        // A verification run's scripted player never picks the weapon up;
+        // start a grab-triggered encounter on a timer so the waves are seen.
+        if (plan_.start == encounter::Start::PlayerGrabsTag && ctx.app != nullptr &&
+            ctx.app->verify_run()) {
+            start_timer_s_ += dt;
+            if (start_timer_s_ >= 5.0f) {
+                PTV_INFO("encounter: verification run -- starting the '{}' grab-triggered "
+                         "encounter on a timer", plan_.start_tag);
+                go = true;
+            }
+        }
         switch (plan_.start) {
             case encounter::Start::OnLoad:
                 go = true;

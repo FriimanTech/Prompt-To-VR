@@ -53,6 +53,20 @@ _STAGE = ProjectStage.npc_plan
 _ACTOR_CATEGORIES = {AssetCategory.character}
 
 
+def _interaction_lines(ctx: PipelineContext) -> list[str]:
+    """How the game's items are held and fired (interaction_design.json), so
+    an NPC with a ranged attack names a weapon asset that actually fires."""
+    from .interaction_rules import design_excerpt  # noqa: PLC0415
+
+    design = ctx.interaction_design or ctx.store.load_interaction_design(ctx.project_id)
+    text = design_excerpt(design)
+    if not text:
+        return []
+    return ["ITEMS (interaction_design.json; an NPC with ranged_attack wields one "
+            "of the weapons below with wielders npc, fired by "
+            "builtin.npc.ranged_attack):\n" + text]
+
+
 def _is_actor_candidate(item: AssetItem) -> bool:
     """Could this asset be a NON-player character?
 
@@ -153,7 +167,7 @@ def run_with_director(
             + ", ".join(i.id for i in candidates),
             "Emit at most one NpcSpec per asset id, and only for assets that "
             "are autonomous actors.",
-        ],
+        ] + _interaction_lines(ctx),
     )
 
     try:

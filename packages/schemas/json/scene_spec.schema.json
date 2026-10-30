@@ -24,6 +24,13 @@
         "rotation": {
           "$ref": "#/$defs/QuatXYZW",
           "description": "Rotation relative to the anchor."
+        },
+        "socket": {
+          "default": "",
+          "description": "Optional socket on THIS entity (e.g. 'grip') to seat on the anchor, so a rifle sits in an NPC's hand by its own handle. Overrides position/rotation.",
+          "maxLength": 64,
+          "title": "Socket",
+          "type": "string"
         }
       },
       "required": [
@@ -252,6 +259,77 @@
       "title": "HealthProps",
       "type": "object"
     },
+    "HoldRef": {
+      "additionalProperties": false,
+      "description": "How a held item is solved into the hand(s); compiled from the\nInteractionDesign + asset contract. The SceneSpec agent leaves it empty.",
+      "properties": {
+        "aim_aligned": {
+          "default": false,
+          "title": "Aim Aligned",
+          "type": "boolean"
+        },
+        "finger_pose": {
+          "default": "wrap",
+          "maxLength": 16,
+          "title": "Finger Pose",
+          "type": "string"
+        },
+        "forearm_socket": {
+          "default": "",
+          "maxLength": 64,
+          "title": "Forearm Socket",
+          "type": "string"
+        },
+        "forward": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Vec3"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "kind": {
+          "default": "none",
+          "maxLength": 32,
+          "title": "Kind",
+          "type": "string"
+        },
+        "primary_socket": {
+          "default": "",
+          "maxLength": 64,
+          "title": "Primary Socket",
+          "type": "string"
+        },
+        "support_socket": {
+          "default": "",
+          "maxLength": 64,
+          "title": "Support Socket",
+          "type": "string"
+        },
+        "two_hand": {
+          "default": "none",
+          "maxLength": 16,
+          "title": "Two Hand",
+          "type": "string"
+        },
+        "up": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Vec3"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "title": "HoldRef",
+      "type": "object"
+    },
     "LightSpec": {
       "additionalProperties": false,
       "properties": {
@@ -326,6 +404,18 @@
           "maxLength": 512,
           "title": "Glb Path",
           "type": "string"
+        },
+        "hold": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/HoldRef"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Hold profile for held items, compiled by the scene compiler from interaction_design.json. The SceneSpec agent leaves this empty."
         },
         "sockets": {
           "additionalProperties": {
@@ -428,6 +518,33 @@
       "additionalProperties": false,
       "description": "A named attachment point in the mesh's own local space.\n\nDerived deterministically from geometry by the ``asset_contract`` stage\nand converted from unit space to metres by the scene compiler, so the\nruntime can just compose ``entity_transform * socket``.",
       "properties": {
+        "bore_diameter_m": {
+          "anyOf": [
+            {
+              "maximum": 5.0,
+              "minimum": 0.0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Bore Diameter M"
+        },
+        "confidence": {
+          "default": "",
+          "maxLength": 24,
+          "title": "Confidence",
+          "type": "string"
+        },
+        "kind": {
+          "default": "",
+          "description": "Socket kind (hand_grip, muzzle, ...). Hand kinds are in the OpenXR grip frame; every other kind faces along +Z.",
+          "maxLength": 32,
+          "title": "Kind",
+          "type": "string"
+        },
         "position": {
           "$ref": "#/$defs/Vec3"
         },

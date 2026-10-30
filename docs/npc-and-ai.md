@@ -346,7 +346,11 @@ Generated code does not spawn NPCs, though. That belongs to the director.
 runs the NPC plan's encounters:
 
 - **Start.** On load, after a delay, when the player grabs something with a
-  given tag (picking up the blaster), or on `ctx.encounters->start()`.
+  given tag (picking up the blaster), or on `ctx.encounters->start()`. A
+  `signal` start that no generated code sends (`scene_compile` scans the
+  project's generated C++ for `encounters->start(`) becomes a start 3 s
+  after load, with a warning -- otherwise the waves would never come, which
+  is what the laser-deck run found.
 - **Spawning.** It clones the wave's templates interleaved by type, one per
   `spawn_interval_s`, while fewer than `max_concurrent` are alive and the
   animated-agent budget allows. A refused spawn retries half a second later.
@@ -383,10 +387,23 @@ them per NPC type from the NPC plan:
   Speed, damage, range, cooldown and sight come from that type's `NpcSpec`,
   so the bulky variant really is slower and harder-hitting.
 
-Both only write `CLocomotionIntent`; `builtin.character_locomotion` moves and
-animates the body. The mechanic planner maps "follows the player" and
-"chases and hits" onto these, and generates code only for what they cannot
-express: ranged attacks, flight, special abilities.
+- **`builtin.npc.ranged_attack`** — an enemy (or ally) that shoots: it
+  finds the nearest hostile it can see, keeps between `min_range_m` and
+  `preferred_range_m` of it, faces it, and fires the weapon it carries in
+  bursts through `ctx.weapons` (`aim_at`, `trigger`) with a small aim
+  wobble. The weapon itself is `builtin.weapon`, so an NPC's rifle and the
+  player's rifle fire, trace and damage identically. The scene compiler
+  binds it for every NPC whose plan has `ranged_attack`, attaches the
+  design's NPC weapon to its right hand by the weapon's own grip socket
+  (`attached_to.socket`, seated once the rig is loaded through
+  `IAttach::attach_by_socket`), or puts `builtin.weapon` on a character
+  modelled holding its gun. Clones carry their gun (`clone_entity_tree`).
+
+All three only write `CLocomotionIntent`; `builtin.character_locomotion`
+moves and animates the body. The mechanic planner maps "follows the
+player", "chases and hits" and "shoots at the player" onto these, and
+generates code only for what they cannot express: flight, special
+abilities. See [weapons.md](weapons.md).
 
 That is enforced, not just requested. `reconcile_npc_ai_items`
 ([npc_population.py](../apps/orchestrator/ptv_orchestrator/pipeline/npc_population.py))

@@ -260,6 +260,20 @@ let it include -- code that compiles, links, ships and silently does nothing:
   generated `restart_current` / `revive`. The loop is `builtin.game_flow`;
   generated code reads `ctx.game` and reports objectives with
   `add_progress` / `complete` / `fail`.
+- (contract v5) a `ctx.physics->raycast` from a `"muzzle"` socket: the ray
+  hits the weapon's own collider first (the humans-vs-aliens pistol never
+  hit anything). Use `raycast_ignoring`, or read `ctx.weapons->hits_since`.
+- in a project whose `interaction_design.json` hands weapons to the engine
+  (contract v5): firing from a muzzle on the trigger, a private ammo /
+  magazine count, or a private projectile / bullet / tracer type. Weapons
+  are `builtin.weapon` / `bow` / `melee_weapon` / `shield`; generated code
+  reacts through `ctx.weapons`, and abilities that launch something use
+  `ctx.projectiles` / `ctx.vfx`. See [weapons.md](weapons.md).
+
+The weapon reconcile (`weapon_plan.reconcile_weapon_items`) also runs at the
+start of code generation: shooting hubs, fire profiles, ammo / reload,
+recoil and projectile tasks are removed (named) in favour of the weapon
+built-ins, and tasks that depended on them are told to read `ctx.weapons`.
 
 The game-loop reconcile (`reconcile_game_flow_items`, see
 [game-flow.md](game-flow.md#2-planning-and-codegen)) also runs at the start of
@@ -554,8 +568,9 @@ default cmake verifier is used when `codegen_verify_compile` is set.
 `CodeTask.depends_on: List[IdStr]` lists other CodeTasks in the same
 plan that this task depends on. Examples:
 
-* A weapon profile (`repulsor_blast`) depends on the shooting-hub
-  task: `depends_on: ["shooting_hub"]`.
+* A spell profile (`fireball`) depends on a casting-hub task:
+  `depends_on: ["spell_hub"]`. (Weapons no longer work this way: they are
+  engine built-ins, see [weapons.md](weapons.md).)
 * A helper module shared by two behaviours becomes a dep of both.
 
 Rules:
@@ -592,30 +607,23 @@ The architecture described above is general. Two workflows the
 platform must support — neither implemented in this PR — illustrate
 the shape of typical games:
 
-### Iron-Man-style Quest 3 game (one scene, two assets)
+### Wizard duel (one hub, N spell profiles)
 
 * MechanicPlan items: locomotion (`builtin`), snap turn (`builtin`),
-  grab (`builtin`), equip (`builtin+config`), shooting hub
-  (`generate`), repulsor blast
-  (`generate`, `depends_on: ["shooting_hub"]`).
-* Board flow: `shooting_hub` starts `pending`; `repulsor_blast`
-  starts `blocked`. Whichever worker wins the atomic claim runs the
-  hub; when it marks done, the next loop promotes
-  `repulsor_blast → pending` and the next claim picks it up. Other
-  workers see no eligible task and exit cleanly.
-* No worker dead-spins on a specific dependency; no agent-to-agent
-  chat exists; the board is the single source of truth.
+  grab (`builtin`), a casting hub (`generate`), one `spell_<name>` task
+  per spell (`generate`, `depends_on: ["spell_hub"]`).
+* Board flow: `spell_hub` starts `pending`; the spells start `blocked`.
+  Whichever worker wins the atomic claim runs the hub; when it marks done,
+  the next loop promotes the spells to `pending` and up to three run in
+  parallel. No worker dead-spins on a dependency; no agent-to-agent chat
+  exists; the board is the single source of truth.
 
-### Multi-weapon shooter (one hub, N weapon profiles)
+### Shooter (no generated weapons)
 
-* One `shooting_hub` task, one `weapon_profile_<name>` task per
-  weapon, all with `depends_on: ["shooting_hub"]`.
-* Once the hub completes, every weapon profile becomes claimable
-  and three of them run in parallel.
-
-The Equip / Shooting-Hub / Repulsor mechanics themselves are **not**
-implemented in this PR — only the architecture that lets a future
-real prompt add them.
+* Every gun, bow, sword and shield is a `builtin+config` item of its
+  weapon built-in, tuned from the interaction design. Only game-specific
+  reactions are generated -- a scoring target or a custom HUD reading
+  `ctx.weapons->hits_since` / `state`.
 
 ## Live input bridge (generated mechanics react to real controllers)
 
@@ -647,10 +655,13 @@ a|b|x|y`) and `params.value("hand", ...)` (`left|right|either`) at
 `on_attach`, then checks the live `InputSnapshot` in `on_update`. Do NOT
 fake input through boolean params any more.
 
-Held-weapon / GLB-asset mechanics use `input.hand_holding(entity)` to
-detect which hand holds them and read that hand's trigger; spawn
-projectiles/VFX from a `muzzle_offset` (local Vec3 in params) transformed
-by the holding hand's aim pose.
+Mechanics bound to a held item use `input.hand_holding(entity)` to detect
+which hand holds them. Points on the item come from its sockets
+(`ctx.sockets->socket_world(self, "<name>")`, names from the interaction
+design), never a hard-coded offset. Designed weapons are not generated at
+all ([weapons.md](weapons.md)); a custom ability that launches something
+uses `ctx.projectiles->launch` (or `preset("<projectile id>")`) and
+`ctx.vfx`.
 
 | Component | Status today |
 |-----------|--------------|
@@ -659,7 +670,7 @@ by the holding hand's aim pose.
 | `builtin.throw` | A real per-entity mechanic in `builtin/throw/`; grab without throw simply drops |
 | Live input into `on_update` | **Works** — `InputSnapshot` passed every frame |
 | Locomotion / physics from generated code | **Works** — via `MechanicContext` (clamped) |
-| Shooting hub + live trigger | Works — read the held hand's trigger from `InputSnapshot` |
+| Weapons (guns, beams, rockets, bows, melee, shields) | Engine built-ins bound by `scene_compile` from the interaction design; generated code reads `ctx.weapons` |
 | **Equip on body slots** | Stub — generated code should not assume it works |
 
 ## Classifications (MechanicPlan)

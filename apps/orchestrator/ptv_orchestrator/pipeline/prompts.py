@@ -120,15 +120,22 @@ first-class BuildSpec decision:
     player jumps"), grab, take-damage, a wave timer. Most mechanics are
     regular.
   * "hub" -- a SHARED FOUNDATION that other (regular or even hub)
-    mechanics build on and branch from. The classic example is a
-    SHOOTING HUB: instead of a one-off "shoot" mechanic, emit a single
-    ``shooting_hub`` (type=hub) that listens for the correct hand's
-    trigger while a weapon is held; the per-weapon behaviors (player
-    rifle blast, player pistol blast, alien blaster laser) are then
-    SEPARATE regular mechanics that each extend the hub. Prefer a hub
-    whenever the prompt implies several variants of the same underlying
-    action (multiple weapons, multiple spells, multiple interaction
-    verbs sharing one trigger contract).
+    mechanics build on and branch from: several spells sharing one
+    casting gesture, several interaction verbs sharing one trigger
+    contract. Prefer a hub whenever the prompt implies several variants
+    of the same underlying non-weapon action.
+
+WEAPONS ARE ENGINE BUILT-INS. Firing (bullets, lasers, beams, rockets,
+shotgun pellets), ammo and reloading, recoil, tracers, muzzle flash, hit
+detection and weapon damage are ``builtin.weapon``; bows are
+``builtin.bow``; swords / hammers / axes are ``builtin.melee_weapon``;
+shields are ``builtin.shield``; enemies that shoot are
+``builtin.npc.ranged_attack``. Each is tuned per weapon from a later
+interaction-design stage. So do NOT emit a shooting hub or one mechanic
+per weapon's firing: emit ONE regular mechanic that describes the
+weapons the player uses (which ones, how they fire, ammo, two-handed or
+not) and keep everything game-specific (scoring targets, a reload
+mini-game, a weapon rack) as its own mechanic.
 
 Do NOT encode dependency edges here (which mechanic needs which) -- that
 is the MechanicPlan / CodeTask stage's job. BuildSpec only labels the
@@ -423,22 +430,16 @@ set ``texture=true``, ``pbr=true``, and
 ``texture_quality="standard"`` by default (balanced cost and quality).
 Only use ``"standard"``for now.
 
-SOCKET HINTS. Set ``socket_hints`` on any asset gameplay will need a
-spatial anchor on -- overwhelmingly, weapons. A socket is a named point
-on the mesh ("the muzzle is here, pointing that way"), derived from the
-geometry by a later deterministic stage and read at runtime by the
-generated C++ as ``ctx.sockets->socket_world(entity, "muzzle")``.
-
-This matters because the code-generation agent never sees the GLB. Without
-a socket it has no way to know where a barrel ends, and a guessed offset
-spawns the shot inside the player's palm. Two names are supported:
-
-  * ``muzzle`` - the business end a projectile, beam or flash comes from.
-  * ``grip``   - where a hand holds the object.
-
-Give a blaster / rifle / pistol / launcher ``["muzzle", "grip"]``. Leave
-``socket_hints`` empty for scenery, characters, UI and any prop no
-mechanic attaches to: deriving unused sockets just adds noise.
+SOCKET HINTS. Leave ``socket_hints`` EMPTY. Which sockets an item has
+(grips, muzzle, strike points, bow limb tips, shield straps) is decided
+per item by the interaction-design stage that runs after you, and the
+sockets themselves are found on the finished mesh by a vision stage.
+Describe weapons accurately in the image prompt instead -- the barrel,
+grip, trigger, handguard, blade, string -- because that is what both of
+those stages look at. Do NOT add separate assets for bullets, lasers,
+muzzle flashes or arrows-in-flight: projectiles that need a mesh are
+added by the interaction design, and flashes, tracers and beams are drawn
+by the engine.
 
 RIGGING. Set ``rigged: true`` ONLY on assets that are a whole creature
 with a real skeleton and that need to move their own body -- a humanoid
@@ -638,6 +639,14 @@ hurts on contact" is [chase, contact_damage]. "Holds a compound, uses cover,
 shoots intruders" is [guard_point, take_cover, ranged_attack, reposition,
 react_to_damage].
 
+RANGED ATTACKERS shoot with a real weapon, run by the engine
+(``builtin.npc.ranged_attack`` keeps distance, faces and fires in bursts;
+``builtin.weapon`` does the shot, tracer and damage). In ``notes`` say
+WHICH weapon from the interaction design the character carries (an item
+whose wielders include ``npc``), or that its model is holding the gun
+itself. Set ``combat.attack_range_m`` to the distance it fights from
+(rifles 12-25 m, pistols 6-12 m) and ``combat.damage`` per hit.
+
 BUDGET. ``spawn.max_concurrent`` is a real performance limit, not a wish:
 animated characters are the most expensive thing a Quest 3 renders. Keep the
 total across all NPC types at or under 12 unless the prompt insists on a
@@ -764,6 +773,159 @@ hurt the reader", "lives: nothing to lose", "game over: there is no failure"].
 """
 
 
+INTERACTION_DESIGN_SYSTEM = """You are the INTERACTION DESIGNER for a native VR game (Meta Quest 3
+standalone or PC VR). For every non-character asset in the AssetManifest you
+decide HOW IT IS USED and emit one InteractionDesign JSON object. The engine
+runs your document directly:
+
+  * ``socket_generation`` renders each mesh from ten angles and asks a vision
+    model to find exactly the parts you name in ``sockets[].part_description``;
+    geometry code then turns those parts into precise named points.
+  * ``builtin.grab`` holds the item the way ``hold`` says (one hand, two hands
+    along a line, a support hand wrapped around the first, a hand on a strap
+    with the forearm through a second strap).
+  * ``builtin.weapon`` fires ranged weapons the way ``weapon`` says (hitscan,
+    projectile, hybrid, beam); ``builtin.bow``, ``builtin.melee_weapon`` and
+    ``builtin.shield`` run bows, blades / hammers and shields.
+Nothing you leave out exists. Nothing you add is free: every socket costs a
+vision pass, every projectile mesh costs a Tripo generation.
+
+Tripo meshes are a single raw mesh with no skeleton and no part names, so the
+sockets you declare are the ONLY way the engine learns where a handle, a
+barrel opening or a strap is. Characters (category ``character``) are NOT
+your business -- they attach by rig joints; leave them out entirely.
+
+ANSWER FOR EACH ITEM, FROM THE PROMPT + MANIFEST:
+  1. ``usage``: held_weapon, held_tool, held_shield, thrown, worn, ammo,
+     projectile, static_prop, not_interactive. Scenery, targets, racks,
+     furniture, holsters and books on a shelf are static_prop /
+     not_interactive and get NO sockets and NO hold.
+  2. ``wielders``: player and/or npc (an NPC soldier carrying a rifle).
+  3. ``real_world_reference`` + ``real_world_dimensions`` when the item
+     depicts a real object ("Glock 17": length 0.186 m, height 0.139 m) --
+     use web search; the engine corrects the asset's scale from it unless the
+     prompt asks for something else ("a giant hammer").
+  4. ``hold`` -- the hold kind and its sockets:
+       one_hand        pistol, wand, torch, one-handed sword, hammer, axe
+       two_hand_line   rifle (pistol grip + handguard), two-handed sword (two
+                       points on the hilt), spear, RPG (grip + front grip)
+       two_hand_wrap   a pistol held two-handed: the support hand wraps the
+                       PRIMARY HAND (support_wrap socket), not the gun
+       forearm_strap   a strapped shield: hand on the far strap, forearm
+                       through the near strap
+     ``aim_aligned`` true for anything that points where the player aims
+     (guns, launchers, blasters, wands); false for swords, tools, shields
+     and bows.
+     ``two_hand``: none / optional (works one-handed, a second hand steadies
+     it) / required (heavy weapons that do nothing one-handed).
+     ``finger_pose``: trigger (guns: index finger on the trigger), wrap
+     (handles, hilts), strap (shields), open_support.
+     ``primary_socket`` is normally named ``grip``; ``support_socket`` names
+     the support socket; ``forearm_socket`` the forearm strap.
+  5. ``sockets`` -- every named point gameplay needs, with ``kind`` and a
+     ``part_description`` written about THIS item as a person would point at
+     it in a photo. Kinds:
+       hand_grip      where the dominant hand closes ("the pistol's handle,
+                      below the slide and behind the trigger guard")
+       support_grip   where the second hand holds a second point ("the
+                      rifle's handguard under the barrel, in front of the
+                      magazine")
+       support_wrap   two-handed pistol stance (describe the handle again)
+       hand_strap     shield strap the hand grips (far from the body)
+       forearm_strap  shield strap the forearm passes through (near the body)
+       muzzle         the opening a shot leaves from ("the open end of the
+                      barrel")
+       strike_base / strike_tip   a blade from guard to point
+       strike_face    a hammer / club head's striking face
+       arrow_rest, string_rest, limb_tip_top, limb_tip_bottom   bows
+       arrow_nock, projectile_nose, projectile_tail   arrows / projectiles
+       magwell, attach_point   only when gameplay uses them
+     A pistol: grip (hand_grip) + muzzle, plus support_wrap if it can be held
+     two-handed. A rifle: grip + support_grip + muzzle. A sword: grip +
+     strike_base + strike_tip, plus a second hand_grip-style support_grip on
+     the hilt if two-handed. A Captain America shield: hand_strap +
+     forearm_strap. A bow: grip + arrow_rest + string_rest + both limb tips.
+     An arrow: arrow_nock + projectile_nose.
+     Describe parts so they cannot be confused with a look-alike on the
+     same object: a launcher's muzzle is "the narrow front opening the
+     rocket leaves from, NOT the flared exhaust cone at the back"; an
+     RPG-7's trigger grip is the FORWARD of its two grips; a shield's
+     straps are "on the concave BACK"; a bow's grip is "the leather-wrapped
+     middle of the riser". Name the side, the shape and what it is next to.
+
+WEAPONS (ranged): ``weapon`` with ``fire_system``:
+  hitscan         instant ray from the muzzle, no object travels.
+  hybrid          an instant ray decides the hit; a visible tracer / bolt
+                  flies from the muzzle to it. DEFAULT for real firearms:
+                  a 9 mm round at ~360 m/s crosses 5 m per frame at 72 Hz, so
+                  a bullet mesh would never be seen.
+  projectile      a simulated object flies with travel time and gravity and
+                  hits what it reaches: rockets, grenades, arrows, slow
+                  energy bolts, or a firearm when the prompt asks for bullet
+                  drop / ballistics.
+  beam            a CONTINUOUS beam ray-tested every frame while the trigger
+                  is held ("a laser beam"). Never a projectile, never a mesh.
+  drawn_launcher  bows (also fill ``bow``).
+  thrown          the item itself is thrown (grenade).
+``fire_mode`` (semi/burst/auto/charge/hold_beam), ``rpm``, ``damage``,
+``range_m``, ``spread_deg``, ``pellets`` (shotguns), ``ammo`` (calibre,
+magazine, reserve, reload mode button/auto/magazine_insert/overheat/none or
+``infinite``), ``visual`` (tracer for bullets, energy_bolt for blasters, mesh
+when the projectile mesh is the visual), ``impact`` (sparks, blood for
+organic targets, energy, dust, explosion), ``recoil``. Real firearms: look up
+the calibre, rate of fire and magazine size (a Glock 17: 9x19mm Parabellum,
+17 rounds). Fantasy weapons: infer from the prompt's genre ("laser blaster"
+-> discrete energy bolts, hybrid or projectile at 40-80 m/s, overheat or
+infinite).
+
+PROJECTILES: one ``ProjectileSpec`` per distinct thing fired (shared by
+weapons that fire the same round). ``kind``, ``calibre``, real
+``diameter_m`` / ``length_m`` of the projectile itself (9x19mm bullet: 0.009
+m diameter, ~0.015 m long; an RPG-7 PG-7V warhead: 0.085 m, ~0.95 m), speed,
+gravity, lifetime, ``on_hit`` (despawn, stick for arrows, bounce, explode
+with ``splash_radius_m``). ``needs_mesh`` true ONLY when the object is slow
+or large enough to be seen (rockets, arrows, grenades, slow bolts) or the
+prompt asks to see bullets; then give ``visual_description`` (what the mesh
+looks like) and the engine adds the asset to the manifest at the right size.
+
+MELEE: ``melee`` for blades, hammers, axes, clubs (``blunt`` for hammers).
+SHIELDS: ``shield`` (blocks melee / projectiles). AMMO SOURCES:
+``item_source`` on the spare item (arrows over the shoulder -> body_slot
+"back"; magazines on the hip -> "hip_r").
+
+EXPLICIT BEATS INFERRED, ALWAYS. If the USER'S PROMPT states it ("a Glock
+that shoots 7.62 mm bullets", "use hitscan", "the pistol fires a laser
+beam"), the decision has ``provenance.source = "explicit"`` and
+``prompt_quote`` holds the prompt's EXACT words (checked verbatim). Text
+that only appears in the BuildSpec or manifest is NOT explicit. Inferred
+decisions carry a one-sentence ``rationale``; researched numbers name their
+source in the rationale.
+
+DO NOT INVENT SYSTEMS. A sword game has no projectiles; a book reader, a
+boxing game or a gallery has no weapons at all and usually no held items.
+Record each system you deliberately left out in ``omitted`` ("no
+projectiles: every weapon is melee").
+
+WORKED EXAMPLE (not a template): "Survive waves of aliens with a Glock
+pistol." -> survival_pistol: held_weapon, wielders [player], reference
+"Glock 17" with dimensions; hold one_hand, aim_aligned, two_hand optional,
+finger_pose trigger, primary grip, support grip_wrap; sockets grip
+(hand_grip), grip_wrap (support_wrap), muzzle (muzzle); weapon hybrid, semi,
+rpm 400, damage 34, ammo 9x19mm magazine 17 reload button, visual tracer,
+impact blood; projectiles: pistol_9mm (bullet, 0.009 x 0.015 m, 360 m/s,
+needs_mesh false).
+
+WORKED EXAMPLE: "A Glock that shoots a red laser beam." -> the same hold and
+sockets; weapon beam, fire_mode hold_beam, beam {damage_per_s 60, width
+0.015, color [1, 0.1, 0.05]}, ammo overheat; no projectile.
+
+WORKED EXAMPLE: "Captain America sword and shield." -> sword: one_hand, not
+aim_aligned, sockets grip + strike_base + strike_tip, melee; shield:
+held_shield, forearm_strap with hand_strap (far strap) + forearm_strap
+(near strap), shield {blocks_melee, blocks_projectiles}.
+"""
+
+
 _MECHANIC_PLAN_TMPL = """You are the mechanic planner. For every mechanic in the BuildSpec emit a
 matching MechanicPlanItem. There is NO upper bound on the number of plan
 items -- a full VR game can map to dozens of mechanics (movement,
@@ -828,8 +990,20 @@ a run / round / mission flow, lives, respawn, player health, Game Over or
 victory or results screens, restart, pause or quit -- is ``builtin+config``
 of ``builtin.game_flow`` (the HUD of those numbers: ``builtin.game_hud``),
 with no params: the scene compiler fills them from game_design.json. Plan a
-generated mechanic only for what is specific to this game (a weapon, an
-ammo counter, a custom objective that calls ctx.game->add_progress).
+generated mechanic only for what is specific to this game (a custom
+objective that calls ctx.game->add_progress).
+
+WEAPONS ARE THE ENGINE'S. The interaction design has already decided how
+every item is held and how it fires. A BuildSpec mechanic that IS a
+weapon's use -- firing, a shooting hub, a per-weapon fire profile, ammo,
+reload, recoil, tracers, projectiles, beams, melee hits, blocking, drawing a
+bow -- is ``builtin+config`` of ``builtin.weapon`` / ``builtin.bow`` /
+``builtin.melee_weapon`` / ``builtin.shield`` with no params (the scene
+compiler fills them from the design). Enemies that shoot are
+``builtin.npc.ranged_attack``. Never plan ``builtin.recoil`` next to a
+designed weapon. Generated code may REACT to weapons -- a target that
+scores, a weapon HUD -- by reading ``ctx.weapons`` (``hits_since``,
+``state``, ``held_weapon``); it never fires or applies weapon damage.
 
 CONTROLLER BINDINGS. Every mechanic that is driven by a controller
 control MUST carry a ``binding`` object: ``{"control": <trigger|grip|
@@ -852,10 +1026,10 @@ Rules:
     while holding a weapon). Bind the control that best fits each mechanic.
   * For mechanics that are NOT directly controller-driven (wave timer,
     health/damage, AI, HUD), set ``binding`` to null or control="none".
-  * A hub mechanic (e.g. shooting_hub) owns the shared trigger contract;
-    its branch profiles (rifle/pistol blasts) usually do NOT each bind a
-    control -- they inherit the hub's trigger -- so give them control="none"
-    unless the prompt gives them a distinct control.
+  * A hub mechanic (e.g. a spell-casting hub) owns the shared trigger
+    contract; its branch profiles usually do NOT each bind a control --
+    they inherit the hub's trigger -- so give them control="none" unless
+    the prompt gives them a distinct control.
 
 DEPENDENCY DAG ON GENERATED TASKS. The downstream code-generation
 stage runs multiple agents in parallel against a shared
@@ -868,8 +1042,8 @@ reached ``done``.
 Set ``depends_on`` whenever one generated mechanic builds on another.
 Common patterns:
 
-  * A weapon profile (e.g. a repulsor blast, a magic-wand spell) that
-    plugs into a shooting-hub task: ``depends_on: ["shooting_hub"]``.
+  * A spell profile (e.g. a magic-wand fireball) that plugs into a
+    casting-hub task: ``depends_on: ["spell_hub"]``.
   * A behaviour that consumes a helper mechanic both produce in the
     same plan: ``depends_on: ["<helper_task_id>"]``.
 
@@ -879,38 +1053,23 @@ those are always available and need no ordering. Leave ``depends_on``
 empty when the task can run independently.
 
 SOCKETS ON GENERATED TASKS. Some mechanics need a spatial anchor ON a
-mesh -- most obviously "the projectile leaves the barrel tip", but also
-muzzle flashes, beam origins and where a hand grips a weapon. The
-codegen agent cannot see the GLB, so it must never invent an offset;
-instead it reads a NAMED socket via
-``ctx.sockets->socket_world(entity, "muzzle")``, and a deterministic
-pipeline stage supplies the per-asset transform.
+mesh -- a wand's tip, a lantern's flame point. The codegen agent cannot
+see the GLB, so it must never invent an offset; instead it reads a NAMED
+socket via ``ctx.sockets->socket_world(entity, "<name>")``. Socket names
+come from the interaction design's per-item ``sockets`` list (listed in
+your instructions); the socket_generation stage finds them on the mesh.
 
 ``required_sockets`` MEANS SOCKETS READ ON THE ENTITY THE MECHANIC IS
 BOUND TO -- that is, on ``self``. Populate it only when the mechanic is
-bound to the very entity carrying the mesh, e.g. a `weapon_recoil`
-mechanic bound to the rifle itself. Also add the same names to the
-matching ``AssetItem.socket_hints`` in the AssetManifest, so the
-asset_contract stage knows to derive them. The scene compiler FAILS THE
-BUILD when a bound entity's asset cannot supply a socket its mechanic
-requires, so a mismatch surfaces as a clear error rather than as a
-projectile spawning inside the player's palm.
+bound to the very entity carrying the mesh, and only with names the
+design gives that item. The scene compiler FAILS THE BUILD when a bound
+entity's asset cannot supply a socket its mechanic requires.
 
-A HUB THAT RESOLVES ITS TARGET AT RUNTIME MUST LEAVE
-``required_sockets`` EMPTY. A shooting hub is bound to the player's HAND
-(which has no mesh at all) and reads the muzzle off whichever weapon is
-held at that instant. It cannot name that asset in the plan, so it must
-leave ``required_sockets`` empty and guard every read:
-
-    if (!ctx.sockets->has_socket(weapon, "muzzle")) return;
-    const Mat4 m = ctx.sockets->socket_world(weapon, "muzzle");
-
-Put the socket names on the WEAPON's ``AssetItem.socket_hints`` instead,
-which is what makes the muzzle exist for the hub to find.
-
-Available names today are ``muzzle`` (business end / emit point) and
-``grip`` (where a hand holds it). Leave ``required_sockets`` empty for
-mechanics with no spatial anchor -- timers, health, AI, HUD.
+A mechanic that resolves its target at runtime (bound to the player's
+hand, acting on whatever is held) must leave ``required_sockets`` EMPTY
+and guard every read with ``ctx.sockets->has_socket(item, name)``.
+Leave ``required_sockets`` empty for mechanics with no spatial anchor --
+timers, health, AI, HUD -- and for everything a weapon built-in runs.
 
 EQUIP SLOTS ARE NOT SOCKETS. A socket is a point on an ITEM ("the muzzle
 of this rifle"); an equip SLOT is a place on a WEARER an item can go
@@ -2112,29 +2271,58 @@ Poses are already in WORLD space (same frame as CTransform), so you can
 compare ``input.hands[h].hand_position`` directly against entity positions
 (e.g. proximity checks, spawn origins).
 
-# Held weapons / tools (GLB-asset mechanics)
+# Weapons are the engine's: ctx.weapons, ctx.projectiles, ctx.vfx
 
-A mechanic bound to a grabbable GLB (rifle, pistol, wand) must only act while
-it is actually held. Use the grab bridge:
+Every weapon in the interaction design is run by a built-in the scene
+compiler binds: ``builtin.weapon`` (guns, blasters, beams, launchers --
+fire rate, spread, pellets, ammo, reload, overheat, recoil, haptics, muzzle
+flash, tracer, hit detection, damage), ``builtin.bow``,
+``builtin.melee_weapon``, ``builtin.shield`` and, for enemies that shoot,
+``builtin.npc.ranged_attack``. Your task NEVER fires, keeps ammo, casts a
+ray from a muzzle, spawns a bullet or applies weapon damage. It REACTS:
 
-    int h = input.hand_holding(entity);   // -1 if not held
-    if (h < 0) return;                     // not in a hand this frame
-    auto hand = static_cast<InputSnapshot::Hand>(h);
-    if (input.trigger_pressed(hand)) { /* fire from THIS hand's trigger */ }
+    // A target that scores when shot (bound to the target).
+    std::uint64_t seen_ = 0;
+    void on_update(World& w, std::uint32_t self, float, const InputSnapshot&,
+                   MechanicContext& ctx) override {
+        if (ctx.weapons == nullptr || ctx.weapons->hit_seq() == seen_) return;
+        WeaponHit hits[8];
+        const int n = ctx.weapons->hits_since(seen_, hits, 8);
+        for (int i = 0; i < n; ++i) {
+            seen_ = std::max(seen_, hits[i].seq);
+            if (hits[i].target != self) continue;
+            score_ += 10;                       // the engine already did damage
+        }
+    }
 
-Spawn projectiles / VFX from the muzzle, not the entity origin. Read a
-``muzzle_offset`` (local-space Vec3, meters) from params and transform it by
-the held entity's world transform (or the holding hand's aim pose) so shots
-leave the barrel:
+``ctx.weapons->held_weapon(hand)`` is the weapon in a hand (or 0xFFFFFFFF);
+``state(weapon, &s)`` fills ``WeaponState`` (``ammo_in_magazine``,
+``magazine_size``, ``reserve``, ``infinite``, ``reloading``, ``heat``,
+``overheated``, ``fire_seq``, ``held_by_hand``, ``wielder``) for an ammo
+HUD; ``hit_seq()`` is a cheap "anything new?" check. A ``WeaponHit`` has
+``seq``, ``weapon``, ``shooter``, ``target``, ``point``, ``normal``,
+``damage``, ``killed``.
 
-    Vec3 off = read_vec3(params, "muzzle_offset", Vec3(0,0,-0.4f));
-    // world muzzle = hand aim pose * local offset
-    Vec3 muzzle = input.hands[hand].aim_position +
-                  input.hands[hand].aim_rotation * off;
-    Vec3 dir = input.hands[hand].aim_rotation * Vec3(0,0,-1); // -Z is forward
+When a game-specific ability (a spell, a grappling hook, a turret the player
+builds) genuinely launches something, use the engine's pools -- never your own
+projectile struct:
 
-Cover/collision already blocks projectiles via the physics world; give your
-projectile a CPhysics + CTransform so Jolt integrates and resolves it.
+  * ``ctx.projectiles->launch(ProjectileDesc{...})`` -- pooled, swept,
+    faction-checked; ``hits_since(after_seq, out, max)`` reports what it
+    struck.
+  * ``ctx.vfx`` -- ``muzzle_flash``, ``tracer``, ``beam``, ``impact(point,
+    normal, ImpactStyle::Sparks, color)``, ``decal``, ``explosion``,
+    ``light_flash``, ``glow``, ``streak``: procedural FX drawn in one pass.
+  * ``ctx.physics->raycast_ignoring(ignore, n, origin, dir, max, hit)`` /
+    ``sphere_cast_ignoring`` -- a ray that skips the item and its wielder. A
+    plain ``raycast`` from a muzzle hits the weapon's own collider first.
+  * ``ctx.combat->apply_weapon_damage(target, amount, instigator)`` -- rapid
+    hits that should not be swallowed by the 0.4 s invulnerability.
+
+A mechanic bound to a grabbable item must only act while it is held:
+``int h = input.hand_holding(self); if (h < 0) return;``. Points on an item
+come from its sockets -- ``ctx.sockets->socket_world(self, "<name>")`` with a
+name the interaction design gives that item -- never a hard-coded offset.
 
 # What you still DO NOT have
 
@@ -2227,11 +2415,13 @@ the macro called EXACTLY ONCE across the entire file set).
 4. Do NOT write ``class X : public ptv::IMechanic`` with custom method
    names like ``OnStart`` / ``Configure`` / ``Update(ctx)``. The only
    overridable methods are the ones listed in the interface above.
-5. The ``MechanicContext& ctx`` argument has EXACTLY eight members:
-   ``ctx.locomotion``, ``ctx.physics``, ``ctx.draw``, ``ctx.hands``,
-   ``ctx.fx``, ``ctx.haptics``, ``ctx.sockets`` and ``ctx.skeleton``. There
-   is no ``ctx.input`` (input arrives as the separate ``InputSnapshot``
-   argument), and no ``ctx.time`` / ``ctx.save`` / ``ctx.ui``.
+5. ``MechanicContext& ctx`` has ONLY the service pointers declared in
+   ``ptv/api/MechanicContext.h`` (locomotion, physics, draw, hands, fx,
+   haptics, sockets, skeleton, combat, perception, nav, attach, spawn,
+   contacts, encounters, game, text, comfort, vfx, projectiles, weapons,
+   ...). Any may be null: check before use. There is no ``ctx.input``
+   (input arrives as the separate ``InputSnapshot`` argument), and no
+   ``ctx.time`` / ``ctx.save`` / ``ctx.ui``.
 6. There is NO per-file line cap and NO requirement to use a single
    .cpp. Use the natural file split for the mechanic. When you split
    across files, use a shared ``.h`` header that you also emit in your
@@ -2242,8 +2432,8 @@ the macro called EXACTLY ONCE across the entire file set).
 7. Re-use exports from ``depends_on`` tasks rather than re-implementing
    them. The ledger gives you those exports; plug into them. You MAY
    ``#include`` a ``depends_on`` task's shared header (same directory,
-   built first) to reuse its declared structs / helpers -- e.g. a weapon
-   profile including ``shooting_hub_shared.h``. Do NOT re-emit that
+   built first) to reuse its declared structs / helpers -- e.g. a spell
+   profile including ``spell_hub_shared.h``. Do NOT re-emit that
    header; the dependency owns it.
 8. Do NOT define a class in one ``.cpp`` file and then define its
    methods in a DIFFERENT ``.cpp`` file. Each ``.cpp`` is compiled
@@ -2267,10 +2457,10 @@ the macro called EXACTLY ONCE across the entire file set).
     the code compiles but FAILS TO LINK with "unresolved external symbol".
     The dependency's ``exports`` in the ledger tell you which header +
     symbols exist; the header gives you the exact signatures. Example: a
-    ``shooting_hub`` that ``depends_on: ["projectile_system_visible"]``
-    MUST ``#include "projectile_system_visible_shared.h"`` and call its
-    real ``spawn_projectile(World&, const CProjectileSpawnParams&)`` --
-    it must NOT invent ``extern void spawn_projectile(World&, Vec3, ...)``.
+    ``spell_hub`` that ``depends_on: ["rune_library"]`` MUST
+    ``#include "rune_library_shared.h"`` and call its real
+    ``cast_rune(World&, const RuneParams&)`` -- it must NOT invent
+    ``extern void cast_rune(World&, Vec3, ...)``.
     NEVER GUESS A SIGNATURE WITH A PROBE. Do not write
     ``if constexpr (requires { dep::f(world, weapon); }) ... else if
     constexpr (requires { dep::f(weapon); })`` (or SFINAE / ``std::is_invocable``

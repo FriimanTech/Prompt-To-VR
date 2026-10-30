@@ -113,6 +113,7 @@ flowchart TD
 | Debug | `src/debug/DebugUI.cpp` | Dear ImGui overlay (mirror-window only) |
 | Save | `src/save/SaveSystem.cpp` | JSON world snapshot / load |
 | Text | `src/render/TextAtlas.cpp` + `src/render/TextRenderer.cpp` | SDF glyph atlas (stb_truetype, bundled Atkinson Hyperlegible, OFL) and world-space text pass |
+| Weapons | `src/gameplay/EffectsSystem.cpp`, `ProjectileSystem.cpp`, `WeaponBoard.h`, `CombatRules.h` + `src/render/FxRenderer.cpp` | Procedural FX (flashes, tracers, beams, impacts, decals, flash lights), the projectile pool (swept casts, stick / bounce / explode), the shared weapon state / hit board -- see [weapons.md](weapons.md) |
 | Application | `src/core/Application.cpp` | Main loop |
 
 Every subsystem exposes its public API through `engine/runtime/include/ptv/`.
@@ -132,7 +133,10 @@ targeting and movement — see [npc-and-ai.md](npc-and-ai.md) and
 [navigation.md](navigation.md). `game` (the loop run by `builtin.game_flow`:
 state, lives, objectives, `gameplay_active`), `text` (world-space SDF text)
 and `app` (Leave Game, fades, respawn placement) complete it — see
-[game-flow.md](game-flow.md).
+[game-flow.md](game-flow.md). `weapons` (weapon state, hits, NPC triggers),
+`projectiles` (the projectile pool and the scene's designed projectiles) and
+`vfx` (procedural effects) are what the weapon built-ins run on and what
+generated code reacts through — see [weapons.md](weapons.md).
 
 ## The character model frame
 
@@ -161,9 +165,14 @@ can hold the whole thing:
 
 | Clause | Owner | Artifact |
 |---|---|---|
+| "this item is held by its handle, fires from its barrel" | `interaction_design` -> per-item `sockets` + `hold` | `interaction_design.json` |
 | "this mechanic needs a muzzle" | `mechanic_plan` -> `CodeTask.required_sockets` | `mechanic_plan.json` |
-| "this asset's muzzle is at (x, y, z)" | `asset_contract` (deterministic, `ptv_glb_sockets`) | `asset_contract.json` |
-| "this mechanic is bound to this entity" | `scene_spec` | `scene_spec.*.json` |
+| "this asset's muzzle is at (x, y, z), bore 9 mm" | `socket_generation` (vision segmentation + geometry solvers + render-and-verify) -> `asset_contract` | `asset_contract.json` |
+| "this mechanic is bound to this entity" | `scene_spec` (weapons: `scene_compile` from the design) | `scene_spec.*.json` |
+
+With an interaction design the sockets are found per item on the real mesh
+(see [sockets.md](sockets.md)); projects from before it keep the legacy
+deterministic `ptv_glb_sockets` derivation described below.
 
 `scene_compile` is the only stage that runs after all three, so it is both the
 join point (writing `mesh.sockets` in metres) and the validator: a mechanic
@@ -306,8 +315,17 @@ local_offset   = -(inverse(socket.rotation) * (scale * socket.position))
 The hand cancels out of that solve entirely, which is the point: the object
 lands the same way no matter how it was reached for. An asset with no `grip`
 socket keeps the old relative hold, and `snap_to_grip: false` opts out for
-things with no correct orientation (a ball, a rock). This is the socket
-system paying off a second time, with no new stage and no new schema field.
+things with no correct orientation (a ball, a rock).
+
+Socket frames are now the OpenXR grip frame of the hand holding them, and
+the item's `mesh.hold` profile picks the solve (`builtin/grab/HoldSolver.h`):
+hand-frame (swords, tools), aim-aligned (guns: the barrel follows the aim
+pose, because the Touch handle is angled), `two_hand_line` (rifle grip plus
+handguard -- the line between the hands steers the item), `two_hand_wrap`
+(a pistol's support hand wrapped around the shooting hand) and
+`forearm_strap` (a shield along the forearm). The hand is drawn on the
+socket it holds (`IHands::set_hand_anchor`). Full maths and frame
+conventions: [sockets.md](sockets.md).
 
 ## Equip slots: the other half of attachment
 

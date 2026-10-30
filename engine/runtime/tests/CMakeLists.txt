@@ -137,6 +137,7 @@ add_test(NAME ptv_smoke_ui_panel COMMAND ptv_smoke ui_panel)
 add_test(NAME ptv_smoke_reference_frame COMMAND ptv_smoke reference_frame)
 add_test(NAME ptv_smoke_nested_scene COMMAND ptv_smoke nested_scene)
 add_test(NAME ptv_smoke_grab_socket COMMAND ptv_smoke grab_socket)
+add_test(NAME ptv_smoke_hold_solver COMMAND ptv_smoke hold_solver)
 add_test(NAME ptv_smoke_clip_contract COMMAND ptv_smoke clip_contract)
 add_test(NAME ptv_smoke_physics_capsule COMMAND ptv_smoke physics_capsule)
 add_test(NAME ptv_smoke_physics_player_slide

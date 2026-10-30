@@ -16,6 +16,10 @@ class ProjectStage(str, Enum):
     created = "created"
     build_spec = "build_spec"
     asset_manifest = "asset_manifest"
+    # How every object is used: hold profile, the sockets to find on it, and
+    # for weapons how they fire and what they fire (appending projectile
+    # assets to the manifest before any image or Tripo money is spent).
+    interaction_design = "interaction_design"
     # Reads the prompt for what every NPC is supposed to DO, before rigging
     # spends credits on animating something the game wants to slide.
     npc_plan = "npc_plan"
@@ -43,8 +47,13 @@ class ProjectStage(str, Enum):
     # animated GLB per character.
     uthana_animation = "uthana_animation"
     asset_normalization = "asset_normalization"
-    # Derives each asset's named sockets (muzzle, grip) from its geometry and
-    # writes asset_contract.json. Deterministic, no model calls. Runs BEFORE
+    # Finds the sockets interaction_design asked for on each mesh: multi-view
+    # renders, Gemini part segmentation + keypoints, exact triangle-ID
+    # back-projection, per-kind geometric solvers and a render-and-verify
+    # pass. Cached by GLB hash, so a resume never re-bills.
+    socket_generation = "socket_generation"
+    # Merges socket_generation's sockets with each character's measured model
+    # frame and writes asset_contract.json. Runs BEFORE
     # code_generation because the codegen agent needs the contract in context:
     # it writes ctx.sockets->socket_world(self, "muzzle") against socket names
     # it can actually see, rather than guessing an offset.

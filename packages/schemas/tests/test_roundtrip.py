@@ -145,6 +145,8 @@ def test_export_all_writes_files(tmp_path: Path):
         "asset_manifest",
             "npc_plan",
             "game_design",
+            "interaction_design",
+            "asset_contract",
             "character_routing",
         "uthana_motion_plan",
         "mechanic_plan",

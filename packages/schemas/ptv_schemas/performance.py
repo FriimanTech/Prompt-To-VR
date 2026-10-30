@@ -162,6 +162,30 @@ class PerformanceProfile(StrictModel):
         ),
     )
 
+    # --- Weapons: projectiles and procedural FX ---------------------------
+    #
+    # A shot is cheap only if nothing about it allocates or multiplies: the
+    # projectile pool, the FX quad ring and the flash lights are fixed-size,
+    # and when one is full the OLDEST entry is recycled (a minigun never
+    # grows memory or draw calls; its first tracers just disappear early).
+    max_live_projectiles: int = Field(
+        default=64, ge=1, le=4096,
+        description="Projectile pool size; oldest recycled when full.")
+    max_projectile_meshes: int = Field(
+        default=24, ge=0, le=1024,
+        description="Projectiles drawn with their own mesh at once (the rest as tracers).")
+    max_fx_quads: int = Field(
+        default=1024, ge=64, le=65536,
+        description="Camera-facing FX quads per frame (flashes, tracers, sparks, beams).")
+    max_beams: int = Field(default=4, ge=0, le=256)
+    max_decals: int = Field(default=48, ge=0, le=4096)
+    max_flash_lights: int = Field(
+        default=2, ge=0, le=16,
+        description="Short-lived point lights from muzzle flashes / explosions.")
+    projectile_max_triangles: int = Field(
+        default=300, ge=32, le=20000,
+        description="LOD0 triangle cap for a projectile mesh (rocket, arrow).")
+
     min_triangles_per_asset: int = Field(default=1500, gt=0)
     max_triangles_per_asset: int = Field(default=60000, gt=0)
     lod_ratios: List[float] = Field(
@@ -309,6 +333,9 @@ def derive_profile(
         base["animation_lod_distances_m"] = [
             d * 2.0 for d in base["animation_lod_distances_m"]
         ]
+        base.update(max_live_projectiles=256, max_projectile_meshes=96,
+                    max_fx_quads=4096, max_beams=16, max_decals=192,
+                    max_flash_lights=4, projectile_max_triangles=1500)
 
     governor = GovernorBounds(
         # Never let the governor cull closer than the first LOD switch.

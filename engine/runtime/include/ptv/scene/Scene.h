@@ -14,6 +14,37 @@ namespace ptv {
 
 using Json = nlohmann::json;
 
+/** What ``socket_generation`` knows about a socket beyond its transform. */
+struct SocketInfoSpec {
+    /** hand_grip / support_grip / support_wrap / hand_strap are in the OpenXR
+     *  grip frame; every other kind faces along +Z. */
+    std::string kind;
+    /** Hand sockets: ``same`` (either hand uses this frame) or ``flip_z180``
+     *  (the left hand is this frame turned half a turn about Z). */
+    std::string mirror;
+    /** support_wrap: the grip it wraps, and how far to the side of it the
+     *  support palm sits (applied toward the free side at runtime). */
+    std::string wrap_of;
+    float lateral_offset_m{0.0f};
+    float bore_diameter_m{0.0f};
+    float handle_thickness_m{0.0f};
+    std::string confidence;
+};
+
+/** ``mesh.hold``: how a held item is solved into one or two hands. */
+struct HoldSpec {
+    std::string kind{"none"};  // one_hand | two_hand_line | two_hand_wrap | forearm_strap
+    bool aim_aligned{false};
+    std::string two_hand{"none"};  // none | optional | required
+    std::string primary_socket;
+    std::string support_socket;
+    std::string forearm_socket;
+    std::string finger_pose{"wrap"};
+    bool has_forward{false};
+    Vec3 forward{0.0f, 0.0f, 1.0f};
+    Vec3 up{0.0f, 1.0f, 0.0f};
+};
+
 struct MeshRef {
     std::string asset_id;
     std::string glb_path;
@@ -49,6 +80,9 @@ struct MeshRef {
      * barrel tip of a pistol, a rifle or a rocket launcher: the C++ asks for
      * ``"muzzle"``, and the per-asset numbers arrive as data. */
     std::unordered_map<std::string, Transform> sockets;
+    /** Kind, mirror rule and measured sizes per socket (socket_generation). */
+    std::unordered_map<std::string, SocketInfoSpec> socket_info;
+    std::optional<HoldSpec> hold;
     /** True when the asset carries a skin, set by the scene compiler from the
      * optimizer's report. Lets the runtime decide to attach a ``CSkeleton``
      * and draw through the skinned pipeline without opening every GLB in the
@@ -182,6 +216,8 @@ struct AttachmentRef {
     std::string anchor{"grip"};
     Vec3 position{0.0f};
     Quat rotation{1.0f, 0.0f, 0.0f, 0.0f};
+    /** Optional socket on the attached item to seat on ``anchor``. */
+    std::string socket;
 };
 
 struct MechanicBinding {
@@ -308,6 +344,20 @@ struct ScenePerformance {
     /** Behaviour update rate at those same three bands, in Hz. */
     std::vector<float> ai_tick_rates_hz{30.0f, 10.0f, 3.0f};
 
+    // --- Weapons and effects ---
+    //
+    // Pools, not limits on gameplay: a full pool recycles its oldest member,
+    // so an automatic weapon cannot spend a Quest's frame on projectiles.
+    int max_live_projectiles{64};
+    /** Projectiles drawn as meshes at once (arrows, rockets); the rest of a
+     *  full pool draws as tracers. */
+    int max_projectile_meshes{24};
+    int max_fx_quads{1024};
+    int max_beams{4};
+    int max_decals{48};
+    /** Short point lights from muzzle flashes and explosions. */
+    int max_flash_lights{2};
+
     // --- Adaptive governor bounds ---
     bool governor_enabled{true};
     float governor_max_lod_bias{2.0f};
@@ -315,6 +365,24 @@ struct ScenePerformance {
     int governor_max_foveation_level{3};
     int governor_escalate_after_bad_frames{30};
     int governor_relax_after_good_frames{180};
+};
+
+/** One designed projectile (``scene.json`` ``projectiles``), so code can
+ *  launch "the rocket" by id with the design's flight and look. */
+struct ProjectileTableEntry {
+    std::string id;
+    std::string kind;            // bullet | rocket | arrow | energy_bolt | grenade | other
+    std::string template_entity; // hidden mesh template, empty = tracer
+    float speed_mps{360.0f};
+    float gravity_scale{1.0f};
+    float drag{0.0f};
+    float radius_m{0.0f};
+    float lifetime_s{3.0f};
+    std::string on_hit{"despawn"};
+    float splash_radius_m{0.0f};
+    float splash_damage{0.0f};
+    float diameter_m{0.009f};
+    float length_m{0.015f};
 };
 
 struct SceneDoc {
@@ -375,6 +443,7 @@ struct SceneDoc {
     float ambient_intensity{0.25f};
     SkyGradient sky{};
     ScenePerformance performance{};
+    std::vector<ProjectileTableEntry> projectiles;
     std::vector<LightSpec> lights;
     std::vector<EntitySpec> entities;
     /** Empty when the world builder declared no topology, in which case

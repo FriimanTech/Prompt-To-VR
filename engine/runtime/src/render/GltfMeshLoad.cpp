@@ -384,4 +384,163 @@ bool load_glb_merged(const std::string& path,
     return true;
 }
 
+bool load_glb_textured(const std::string& path, TexturedMesh& out,
+                       std::string& err) {
+    out = TexturedMesh{};
+    tinygltf::Model model;
+    tinygltf::TinyGLTF loader;
+    loader.SetImageLoader(noop_image_loader, nullptr);
+    std::string warn;
+    auto bytes = asset_source().read_bytes(path);
+    if (!bytes) {
+        err = "asset source could not read GLB: " + path;
+        return false;
+    }
+    const std::string base_dir = std::filesystem::path(path).parent_path().string();
+    if (!loader.LoadBinaryFromMemory(&model, &err, &warn, bytes->data(),
+                                     static_cast<unsigned int>(bytes->size()),
+                                     base_dir)) {
+        return false;
+    }
+
+    // Image index (into out.images) per glTF image, materialised on demand.
+    std::vector<int> image_slot(model.images.size(), -2);
+    auto image_for_material = [&](int material_idx, int* texcoord) -> int {
+        *texcoord = 0;
+        if (material_idx < 0 ||
+            static_cast<size_t>(material_idx) >= model.materials.size()) {
+            return -1;
+        }
+        const auto& info =
+            model.materials[material_idx].pbrMetallicRoughness.baseColorTexture;
+        if (info.index < 0 ||
+            static_cast<size_t>(info.index) >= model.textures.size()) {
+            return -1;
+        }
+        *texcoord = info.texCoord;
+        const int src = model.textures[info.index].source;
+        if (src < 0 || static_cast<size_t>(src) >= model.images.size()) return -1;
+        if (image_slot[src] != -2) return image_slot[src];
+        image_slot[src] = -1;
+        const auto& img = model.images[src];
+        if (img.bufferView < 0 ||
+            static_cast<size_t>(img.bufferView) >= model.bufferViews.size()) {
+            return -1;
+        }
+        const auto& bv = model.bufferViews[img.bufferView];
+        if (bv.buffer < 0 || static_cast<size_t>(bv.buffer) >= model.buffers.size())
+            return -1;
+        const auto& buf = model.buffers[bv.buffer].data;
+        if (bv.byteOffset + bv.byteLength > buf.size()) return -1;
+        EncodedImage e;
+        e.mime = img.mimeType;
+        e.bytes.assign(buf.begin() + static_cast<std::ptrdiff_t>(bv.byteOffset),
+                       buf.begin() + static_cast<std::ptrdiff_t>(bv.byteOffset +
+                                                                 bv.byteLength));
+        out.images.push_back(std::move(e));
+        image_slot[src] = static_cast<int>(out.images.size()) - 1;
+        return image_slot[src];
+    };
+
+    for (const auto& inst : collect_mesh_instances(model)) {
+        const auto& mesh = model.meshes[static_cast<size_t>(inst.mesh)];
+        const glm::mat3 normal_mat =
+            inst.identity ? glm::mat3(1.0f)
+                          : glm::transpose(glm::inverse(glm::mat3(inst.world)));
+        for (const auto& prim : mesh.primitives) {
+            if (!(prim.mode == TINYGLTF_MODE_TRIANGLES || prim.mode == -1)) continue;
+            auto pos_it = prim.attributes.find("POSITION");
+            if (pos_it == prim.attributes.end()) continue;
+            std::string acc_err;
+            std::vector<float> positions;
+            size_t pos_comps = 0;
+            if (!read_accessor_floats(model, pos_it->second, positions, &pos_comps,
+                                      &acc_err) ||
+                pos_comps != 3) {
+                continue;
+            }
+            const size_t vcount = positions.size() / 3;
+            std::vector<float> normals;
+            auto n_it = prim.attributes.find("NORMAL");
+            if (n_it != prim.attributes.end()) {
+                size_t nc = 0;
+                if (!read_accessor_floats(model, n_it->second, normals, &nc,
+                                          &acc_err) || nc != 3) {
+                    normals.clear();
+                }
+            }
+            int texcoord = 0;
+            const int image = image_for_material(prim.material, &texcoord);
+            std::vector<float> uvs;
+            auto uv_it = prim.attributes.find("TEXCOORD_" + std::to_string(texcoord));
+            if (uv_it != prim.attributes.end()) {
+                size_t uc = 0;
+                if (!read_accessor_floats(model, uv_it->second, uvs, &uc, &acc_err) ||
+                    uc != 2) {
+                    uvs.clear();
+                }
+            }
+            std::array<float, 4> mat_color{1.0f, 1.0f, 1.0f, 1.0f};
+            if (prim.material >= 0 &&
+                static_cast<size_t>(prim.material) < model.materials.size()) {
+                const auto& bcf =
+                    model.materials[prim.material].pbrMetallicRoughness.baseColorFactor;
+                for (size_t k = 0; k < 4 && k < bcf.size(); ++k)
+                    mat_color[k] = static_cast<float>(bcf[k]);
+            }
+
+            const uint32_t base = static_cast<uint32_t>(out.verts.size());
+            for (size_t i = 0; i < vcount; ++i) {
+                TexturedVertex tv{};
+                glm::vec3 p(positions[i * 3 + 0], positions[i * 3 + 1],
+                            positions[i * 3 + 2]);
+                if (!inst.identity) p = glm::vec3(inst.world * glm::vec4(p, 1.0f));
+                tv.pos[0] = p.x;
+                tv.pos[1] = p.y;
+                tv.pos[2] = p.z;
+                glm::vec3 nrm(0.0f, 0.0f, 0.0f);
+                if (i * 3 + 2 < normals.size()) {
+                    nrm = glm::vec3(normals[i * 3 + 0], normals[i * 3 + 1],
+                                    normals[i * 3 + 2]);
+                    if (!inst.identity) nrm = normal_mat * nrm;
+                }
+                tv.normal[0] = nrm.x;
+                tv.normal[1] = nrm.y;
+                tv.normal[2] = nrm.z;
+                if (i * 2 + 1 < uvs.size()) {
+                    tv.uv[0] = uvs[i * 2 + 0];
+                    tv.uv[1] = uvs[i * 2 + 1];
+                }
+                for (int k = 0; k < 4; ++k) tv.color[k] = mat_color[static_cast<size_t>(k)];
+                out.verts.push_back(tv);
+            }
+            const size_t first_index = out.indices.size();
+            if (prim.indices >= 0) {
+                std::vector<uint32_t> idx;
+                size_t ic = 0;
+                if (!read_accessor_uints(model, prim.indices, idx, &ic, &acc_err) ||
+                    ic != 1) {
+                    out.verts.resize(base);
+                    continue;
+                }
+                for (uint32_t id : idx) out.indices.push_back(base + id);
+            } else {
+                if (vcount % 3 != 0) {
+                    out.verts.resize(base);
+                    continue;
+                }
+                for (size_t i = 0; i < vcount; ++i)
+                    out.indices.push_back(base + static_cast<uint32_t>(i));
+            }
+            const size_t tris = (out.indices.size() - first_index) / 3;
+            out.tri_image.insert(out.tri_image.end(), tris, image);
+        }
+    }
+    if (out.verts.empty() || out.indices.empty()) {
+        err = "no triangle geometry in GLB";
+        return false;
+    }
+    return true;
+}
+
 }  // namespace ptv::gltf_mesh_load

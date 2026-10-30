@@ -20,6 +20,8 @@ entt::entity clone_entity_components(World& world, entt::entity src,
     // What the thing IS. Transient state (CTransformOffset's spring, grab
     // bookkeeping) is deliberately left off so the clone starts clean.
     if (const auto* m = reg.try_get<CMesh>(src)) reg.emplace<CMesh>(dst, *m);
+    if (const auto* si = reg.try_get<CSocketInfo>(src)) reg.emplace<CSocketInfo>(dst, *si);
+    if (const auto* hp = reg.try_get<CHoldProfile>(src)) reg.emplace<CHoldProfile>(dst, *hp);
     if (const auto* p = reg.try_get<CPrimitive>(src)) reg.emplace<CPrimitive>(dst, *p);
     if (const auto* im = reg.try_get<CInlineMesh>(src)) {
         reg.emplace<CInlineMesh>(dst, *im);

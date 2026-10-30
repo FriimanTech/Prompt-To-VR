@@ -183,6 +183,13 @@ SceneDoc LoadSceneJson(const std::string& path) {
         }
         sp.max_animated_agents =
             pf.value("max_animated_agents", sp.max_animated_agents);
+        sp.max_live_projectiles = pf.value("max_live_projectiles", sp.max_live_projectiles);
+        sp.max_projectile_meshes =
+            pf.value("max_projectile_meshes", sp.max_projectile_meshes);
+        sp.max_fx_quads = pf.value("max_fx_quads", sp.max_fx_quads);
+        sp.max_beams = pf.value("max_beams", sp.max_beams);
+        sp.max_decals = pf.value("max_decals", sp.max_decals);
+        sp.max_flash_lights = pf.value("max_flash_lights", sp.max_flash_lights);
         auto read_float_list = [&pf](const char* key,
                                      std::vector<float>& out) {
             if (!pf.contains(key) || !pf[key].is_array()) return;
@@ -215,6 +222,26 @@ SceneDoc LoadSceneJson(const std::string& path) {
             sp.tier, sp.frame_triangle_budget, sp.msaa_samples,
             sp.foveation_level, sp.cull_distance_m,
             sp.governor_enabled ? "on" : "off");
+    }
+
+    for (const auto& pj : j.value("projectiles", Json::array())) {
+        if (!pj.is_object()) continue;
+        ProjectileTableEntry pe{};
+        pe.id = pj.value("id", "");
+        if (pe.id.empty()) continue;
+        pe.kind = pj.value("kind", "bullet");
+        pe.template_entity = pj.value("template", "");
+        pe.speed_mps = pj.value("speed_mps", pe.speed_mps);
+        pe.gravity_scale = pj.value("gravity_scale", pe.gravity_scale);
+        pe.drag = pj.value("drag", pe.drag);
+        pe.radius_m = pj.value("radius_m", pe.radius_m);
+        pe.lifetime_s = pj.value("lifetime_s", pe.lifetime_s);
+        pe.on_hit = pj.value("on_hit", pe.on_hit);
+        pe.splash_radius_m = pj.value("splash_radius_m", pe.splash_radius_m);
+        pe.splash_damage = pj.value("splash_damage", pe.splash_damage);
+        pe.diameter_m = pj.value("diameter_m", pe.diameter_m);
+        pe.length_m = pj.value("length_m", pe.length_m);
+        d.projectiles.push_back(std::move(pe));
     }
 
     for (const auto& l : j.value("lights", Json::array())) {
@@ -401,7 +428,36 @@ SceneDoc LoadSceneJson(const std::string& path) {
                 for (auto it = sockets.begin(); it != sockets.end(); ++it) {
                     if (!it.value().is_object()) continue;
                     m.sockets.emplace(it.key(), read_transform(it.value()));
+                    const auto& sj = it.value();
+                    if (sj.contains("kind")) {
+                        SocketInfoSpec si{};
+                        si.kind = sj.value("kind", "");
+                        si.mirror = sj.value("mirror", "");
+                        si.wrap_of = sj.value("wrap_of", "");
+                        si.lateral_offset_m = sj.value("lateral_offset_m", 0.0f);
+                        si.bore_diameter_m = sj.value("bore_diameter_m", 0.0f);
+                        si.handle_thickness_m = sj.value("handle_thickness_m", 0.0f);
+                        si.confidence = sj.value("confidence", "");
+                        m.socket_info.emplace(it.key(), std::move(si));
+                    }
                 }
+            }
+            if (e["mesh"].contains("hold") && e["mesh"]["hold"].is_object()) {
+                const auto& hj = e["mesh"]["hold"];
+                HoldSpec h{};
+                h.kind = hj.value("kind", "none");
+                h.aim_aligned = hj.value("aim_aligned", false);
+                h.two_hand = hj.value("two_hand", "none");
+                h.primary_socket = hj.value("primary_socket", "");
+                h.support_socket = hj.value("support_socket", "");
+                h.forearm_socket = hj.value("forearm_socket", "");
+                h.finger_pose = hj.value("finger_pose", "wrap");
+                if (hj.contains("forward") && hj["forward"].is_array()) {
+                    h.has_forward = true;
+                    h.forward = read_vec3(hj["forward"], Vec3(0.0f, 0.0f, 1.0f));
+                    h.up = read_vec3(hj.value("up", Json::array()), Vec3(0.0f, 1.0f, 0.0f));
+                }
+                if (!h.primary_socket.empty()) m.hold = std::move(h);
             }
             es.mesh = std::move(m);
         }
@@ -429,6 +485,7 @@ SceneDoc LoadSceneJson(const std::string& path) {
             ar.position = read_vec3(aj.value("position", Json::array()),
                                     Vec3(0.0f));
             ar.rotation = read_quat(aj.value("rotation", Json::array()));
+            ar.socket = aj.value("socket", "");
             if (!ar.entity_id.empty()) es.attached_to = std::move(ar);
         }
         if (e.contains("primitive") && e["primitive"].is_object()) {
@@ -544,6 +601,41 @@ void ApplySceneToWorld(const SceneDoc& doc, World& world,
                          es.mesh->foot_offset_m, es.mesh->has_model_frame,
                          es.mesh->model_yaw_offset_rad, es.mesh->model_sole_y,
                          es.mesh->model_height});
+            if (!es.mesh->socket_info.empty()) {
+                CSocketInfo info{};
+                for (const auto& [name, si] : es.mesh->socket_info) {
+                    info.sockets.emplace(name, SocketInfo{si.kind, si.mirror, si.wrap_of,
+                                                          si.lateral_offset_m,
+                                                          si.bore_diameter_m,
+                                                          si.handle_thickness_m});
+                }
+                world.registry().emplace<CSocketInfo>(e, std::move(info));
+            }
+            if (es.mesh->hold.has_value()) {
+                const HoldSpec& hs = *es.mesh->hold;
+                CHoldProfile hp{};
+                if (hs.kind == "one_hand") hp.kind = HoldKind::OneHand;
+                else if (hs.kind == "two_hand_line") hp.kind = HoldKind::TwoHandLine;
+                else if (hs.kind == "two_hand_wrap") hp.kind = HoldKind::TwoHandWrap;
+                else if (hs.kind == "forearm_strap") hp.kind = HoldKind::ForearmStrap;
+                hp.aim_aligned = hs.aim_aligned;
+                hp.two_hand = hs.two_hand == "required"   ? TwoHandMode::Required
+                              : hs.two_hand == "optional" ? TwoHandMode::Optional
+                                                          : TwoHandMode::None;
+                hp.primary_socket = hs.primary_socket;
+                hp.support_socket = hs.support_socket;
+                hp.forearm_socket = hs.forearm_socket;
+                hp.finger_pose = hs.finger_pose == "trigger"        ? HoldFingerPose::Trigger
+                                 : hs.finger_pose == "strap"        ? HoldFingerPose::Strap
+                                 : hs.finger_pose == "pinch"        ? HoldFingerPose::Pinch
+                                 : hs.finger_pose == "open_support" ? HoldFingerPose::OpenSupport
+                                                                    : HoldFingerPose::Wrap;
+                hp.has_forward = hs.has_forward;
+                hp.forward = hs.forward;
+                hp.up = hs.up;
+                if (hp.kind != HoldKind::None)
+                    world.registry().emplace<CHoldProfile>(e, std::move(hp));
+            }
         }
         if (es.primitive.has_value()) {
             world.registry().emplace<CPrimitive>(
@@ -634,6 +726,7 @@ void ApplySceneToWorld(const SceneDoc& doc, World& world,
         a.anchor = es.attached_to->anchor;
         a.local_position = es.attached_to->position;
         a.local_rotation = es.attached_to->rotation;
+        a.child_socket = es.attached_to->socket;
         world.registry().emplace<CAttachment>(child, std::move(a));
     }
 

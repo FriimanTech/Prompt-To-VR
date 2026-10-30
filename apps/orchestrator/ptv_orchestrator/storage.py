@@ -35,8 +35,10 @@ from ptv_schemas import (
     AcceptanceTestPlan,
     ArtifactKind,
     ArtifactMetadata,
+    AssetContract,
     AssetManifest,
     BuildSpec,
+    InteractionDesign,
     MechanicPlan,
     NpcPlan,
     GameDesign,
@@ -275,6 +277,25 @@ class ProjectStore:
         if not path.exists():
             return None
         return _load_json_model(path, GameDesign)
+
+    def save_interaction_design(
+        self, project_id: str, design: InteractionDesign
+    ) -> ArtifactMetadata:
+        return self.write_model(project_id, "interaction_design.json", design)
+
+    def load_interaction_design(self, project_id: str) -> InteractionDesign | None:
+        """How every item is used, or ``None`` for a project generated before
+        the stage existed -- those keep their asset-manifest socket hints."""
+        path = self.dir_for(project_id) / "interaction_design.json"
+        if not path.exists():
+            return None
+        return _load_json_model(path, InteractionDesign)
+
+    def load_asset_contract(self, project_id: str) -> AssetContract:
+        path = self.dir_for(project_id) / "asset_contract.json"
+        if not path.exists():
+            return AssetContract({})
+        return AssetContract.model_validate_json(path.read_text(encoding="utf-8"))
 
     def save_mechanic_plan(
         self, project_id: str, plan: MechanicPlan

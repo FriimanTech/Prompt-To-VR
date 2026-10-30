@@ -26,7 +26,8 @@ orchestrator and a reusable Vulkan + OpenXR engine core.
 5. Reuse built-in VR mechanics. The engine ships reusable, data-driven
    modules under `engine/runtime/src/mechanics/builtin/<mechanic>/`
    (teleport, head-relative and controller-relative slide, snap turn, grab,
-   throw, recoil, hand_pose). Each is a real `IMechanic` written against the same public
+   throw, recoil, hand_pose, and the weapon set: weapon, bow, melee_weapon,
+   shield, item_source, npc.ranged_attack). Each is a real `IMechanic` written against the same public
    API generated code uses — `InputSnapshot`, `World` and `MechanicContext`
    (locomotion / physics / debug-draw / hand / transform-fx / haptics / socket
    / skeleton services, all engine-clamped) —
@@ -74,6 +75,15 @@ orchestrator and a reusable Vulkan + OpenXR engine core.
  scene's `player_rig`, adopted by the engine); never look it up by name.
  Hits are observed with `ctx.combat->damage_seq` / `damage_events_since`,
  never through a private inbox.
+ WEAPONS are the engine's too: every gun, beam, launcher, bow, sword,
+ hammer and shield the interaction design describes runs on
+ `builtin.weapon` / `bow` / `melee_weapon` / `shield` (NPCs that shoot on
+ `builtin.npc.ranged_attack`), bound by `scene_compile`. Generated code
+ never fires, keeps ammo, casts a ray from a muzzle, spawns a bullet or
+ applies weapon damage; it reacts through `ctx.weapons` (`hits_since`,
+ `state`, `held_weapon`), and abilities that launch something use
+ `ctx.projectiles` / `ctx.vfx`. API contract v5 enforces it. See
+ `docs/weapons.md`.
    Health, factions, damage, death, perception, navigation, attachment and
    runtime spawning are engine services (`ctx.combat`, `ctx.perception`,
    `ctx.nav`, `ctx.attach`, `ctx.spawn`, `ctx.contacts`), not per-game
@@ -166,6 +176,22 @@ orchestrator and a reusable Vulkan + OpenXR engine core.
    that picture, and a silent blob in the scene. Both prompts forbid audio
    entries and a deterministic reconcile drops any that survive, naming them
    — unless dropping would empty the manifest, which is the worse failure.
+2a. Prompt + BuildSpec + AssetManifest → **InteractionDesign**
+   (`interaction_design`, OpenAI Agents SDK agent, `gpt-5.6-sol` @ reasoning
+   `high`, `WebSearchTool`): how every object is used -- `usage`, who wields
+   it, its `hold` profile (one_hand / two_hand_line / two_hand_wrap /
+   forearm_strap, aim-aligned or not), the `sockets` its mesh needs (each a
+   `kind` + plain-words `part_description` for the vision stage), and for
+   weapons the `weapon` (fire system hitscan / hybrid / projectile / beam,
+   fire mode, rpm, spread, ammo, reload, recoil, visual), `melee`, `shield`
+   or `bow` spec plus the `projectiles` fired (a mesh only when seen).
+   Explicit (verbatim quote, checked) or inferred (rationale), explicit wins;
+   a deterministic validate-and-repair (`interaction_rules.py`) and
+   `fallback_design`. `reconcile_manifest` appends seen projectile assets at
+   their real size and applies real-world dimensions. Scenery gets nothing.
+   Feeds npc_plan, game_design, mechanic_plan (weapons map onto the weapon
+   built-ins), socket_generation and scene_compile. See `docs/sockets.md`,
+   `docs/weapons.md`.
 2b. Prompt + BuildSpec + AssetManifest → **NpcPlan** (`npc_plan`, OpenAI
    Agents SDK agent, `gpt-5.6-sol` @ reasoning `high`, no tools). Decides per character: role,
    faction and who it fights, `movement_style`, behaviours, and which
@@ -210,9 +236,15 @@ orchestrator and a reusable Vulkan + OpenXR engine core.
    (control + hand) to every input-driven mechanic; a deterministic
    validator normalizes face-button hands (sharing a control is allowed,
    not a conflict). BuildSpec labels each mechanic `regular` or
-   `hub` (a shared foundation like a shooting hub). A deterministic
+   `hub` (a shared foundation such as a spell-casting hub -- weapons are
+   never hubs). A deterministic
    player-roles reconcile then adds / collapses / removes player
-   mechanics so the plan matches the BuildSpec exactly.
+   mechanics so the plan matches the BuildSpec exactly, and the weapon
+   reconcile (`weapon_plan.py`, also run at codegen start) makes every
+   designed weapon `builtin+config` of `builtin.weapon` / `bow` /
+   `melee_weapon` / `shield` (+ `item_source`, `npc.ranged_attack`),
+   removing generated shooting hubs, fire profiles, ammo / reload / recoil
+   tasks and `builtin.recoil`, named.
 4. All above → **SceneSpec**, one per scene (OpenAI Agents SDK agent,
    `gpt-5.6-sol` @ reasoning `medium`, no tools) with a deterministic validate-and-repair loop
    (asset coverage, environment presence, valid mechanic-binding ids);
@@ -290,6 +322,18 @@ orchestrator and a reusable Vulkan + OpenXR engine core.
    `asset_animation.json` entry with `provider: "uthana"` and clip speeds.
 7. Assets **validated** (`asset_normalization`): GLB header/JSON check plus
    scale / collision metadata. This stage does NOT modify geometry.
+7a. **Socket generation** (`socket_generation`): for every item the
+   interaction design gives sockets, `ptv_glb_views` renders 10 views with a
+   triangle-id buffer; Gemini (`socket_vision_model`, `gemini-3.8-flash`,
+   Interactions API) segments each named part per view; multi-view voting
+   maps masks to triangles; per-kind numpy solvers produce exact frames
+   (hand sockets in the OpenXR grip frame, the rest +Z-facing; bore diameter
+   at muzzles, cross-section for projectiles); the result is drawn on the
+   mesh and verified by Gemini (one retry with the critique, then the
+   geometry fallback is verified too; else `low`). Cached by GLB hash +
+   spec + pipeline version; a required socket that cannot be produced fails
+   the stage. Without a Google key the geometry fallback runs (`heuristic`).
+   See `docs/sockets.md`.
 7b. **Asset contract** (`asset_contract`): measures every character's
    **model frame** (`model_frame.py`: sole = skinned bind-pose bottom,
    height, forward = up x the shoulder line confirmed by the toes; Tripo
@@ -297,11 +341,13 @@ orchestrator and a reusable Vulkan + OpenXR engine core.
    face +Z) -- scene_compile emits it as `mesh.model_frame`,
    `foot_offset_m` = half the height and a HEIGHT-based `unit_scale`, the
    skinned loader folds the pivot into the root joints, and a skinned
-   character without a frame fails scene_compile. It also derives each
-   asset's named
+   character without a frame fails scene_compile. With an interaction
+   design it merges `socket_generation`'s sockets, holds, part regions and
+   projectile cross-sections, and an asset the design gave no sockets gets
+   none. Projects from before that stage instead derive each asset's named
    **sockets** (`muzzle`, `grip`) from its geometry with the deterministic
    `ptv_glb_sockets` tool (principal-axis PCA + mass asymmetry — no model
-   calls) and writes `asset_contract.json`. Positions are stored in UNIT
+   calls). Either way it writes `asset_contract.json`. Positions are stored in UNIT
    space (normalised by the longest-axis extent) so they survive the LOD
    chain; the scene compiler multiplies by `target_scale_meters`, exactly as
    it already does for `bounds_radius_m`. Runs BEFORE codegen because the
@@ -381,8 +427,19 @@ orchestrator and a reusable Vulkan + OpenXR engine core.
    emplaces `CEquipSlots` — the component existed for a long time with
    nothing ever populating it, so every authored holster silently accepted
    nothing. A `builtin.equip` binding naming a slot nothing declares, a
-   duplicate slot name, or a mesh naming an asset absent from the manifest
-   all fail the stage.
+   duplicate slot name on two placed entities (spawn templates are
+   exempt: every variant and clone of an NPC type shares its hand slot), or
+   a mesh naming an asset absent from the manifest all fail the stage. With an interaction design it also binds the
+   **weapons** (`weapon_scene.py`): each designed weapon's built-in with the
+   design's numbers and socket names, hidden projectile / arrow templates, a
+   `builtin.item_source` quiver, `builtin.npc.ranged_attack` for shooting
+   NPCs with their weapon seated in `hand_r` by its grip socket
+   (`attached_to.socket`), the scene-level `projectiles` table, stripping
+   `builtin.recoil` and stale generated weapon bindings; it sizes each
+   projectile to the measured muzzle bore and each arrow to the bow's draw
+   (`projectile_scale.py`, explicit sizes kept), and fails on a gun without
+   a muzzle, a bow without limb tips, a melee weapon without a strike
+   point, or a seen projectile without a mesh. See `docs/weapons.md`.
 10. Build (branches on `ProjectState.target_device`, the create-time UI toggle
    that is the single source of truth and is mirrored into
    `BuildSpec.target_device`; every planning prompt names the target too, so a
@@ -403,7 +460,12 @@ orchestrator and a reusable Vulkan + OpenXR engine core.
  the player can die and the game loop clicks its own end-screen buttons)
  and checks the loop the design promises: health 0 costs a life, respawn,
  Game Over after the last life, Try Again / Play Again restart and reset,
- victory when winnable, Leave Game exits and the app relaunches. Writes
+ victory when winnable, Leave Game exits and the app relaunches. With
+ player weapons it runs a third launch (`debug.ptv.verify_weapons`: a
+ scripted hand holds and fires every weapon at a hostile) and checks each
+ was held, fired, shot from within 2 cm of its muzzle, hit, damaged through
+ `ctx.combat`, kept the projectile pool inside its cap and held the frame
+ budget. Writes
  `runtime_verification.json`. SKIPPED, never failed, when no headset is
  connected. See `docs/quest-build.md`.
 11. Launch (branches on target_device): `pcvr` runs the `.exe` through OpenXR
@@ -441,7 +503,13 @@ orchestrator and a reusable Vulkan + OpenXR engine core.
 - Google GenAI: Python package `google-genai`. Reference images use
   `gemini-3.1-flash-image` with `generate_content` and
   `response_modalities=["IMAGE"]` (Imagen 4 endpoints discontinued
-  2026-08-17).
+  2026-08-17). Socket segmentation and verification use
+  `gemini-3.8-flash` through the Interactions API
+  (`client.interactions.create(model, input, response_format,
+  generation_config)`); it rejects `thinking_level: "minimal"` with a 400,
+  so `GeminiVisionClient` falls back to `"low"` and remembers it.
+- Agents SDK effort for the newer stages: `interaction_design` at `high`
+  (with `WebSearchTool`, Responses API).
 - Tripo: **V3 API** (`https://openapi.tripo3d.ai/v3`) called directly over
   `httpx` — NOT the `tripo3d` SDK, whose base URL is still
   `api.tripo3d.ai/v2/openapi` (V2 retires 2026-11-01). Flow:

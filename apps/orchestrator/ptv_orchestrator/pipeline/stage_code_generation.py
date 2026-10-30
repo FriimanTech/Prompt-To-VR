@@ -90,6 +90,7 @@ from .context import PipelineContext, StageResult
 from .game_flow_plan import reconcile_game_flow_items
 from .npc_population import reconcile_npc_ai_items
 from .proc import proc_hooks
+from .weapon_plan import engine_bindings, reconcile_weapon_items
 from .prompts import code_task_system
 
 
@@ -135,6 +136,13 @@ _TRANSIENT_AGENT_ERRORS = (
     " 503",
     " 504",
 )
+
+
+def _engine_runs_weapons(ctx: PipelineContext) -> bool:
+    """True when the interaction design hands at least one weapon to the
+    engine's weapon built-ins (so generated firing code is a second gun)."""
+    design = ctx.interaction_design or ctx.store.load_interaction_design(ctx.project_id)
+    return design is not None and any(engine_bindings(i, design) for i in design.items)
 
 
 def _is_transient(exc: Exception) -> bool:
@@ -212,6 +220,18 @@ def run_with_runner(
             ctx.emit(ProjectStage.code_generation, "info", f"game loop: {note}"[:300])
             ctx.store.append_log(ctx.project_id, "code_generation", f"game loop: {note}")
 
+    # And for weapons: with an interaction design, firing / ammo / recoil /
+    # melee hits are builtin.weapon & co., never generated.
+    interaction = (ctx.interaction_design
+                   or ctx.store.load_interaction_design(ctx.project_id))
+    plan, weapon_notes = reconcile_weapon_items(plan, interaction, npc_plan)
+    if weapon_notes:
+        ctx.mechanic_plan = plan
+        ctx.store.save_mechanic_plan(ctx.project_id, plan)
+        for note in weapon_notes:
+            ctx.emit(ProjectStage.code_generation, "info", f"weapons: {note}"[:300])
+            ctx.store.append_log(ctx.project_id, "code_generation", f"weapons: {note}")
+
     codegen_items = [it for it in plan.items if it.code_task is not None]
 
     if not codegen_items:
@@ -281,9 +301,11 @@ def run_with_runner(
     # before a rule existed -- an AI with no MechanicContext, a private
     # damage inbox -- compiled, shipped and silently did nothing.
     has_flow = design is not None
+    has_weapons = _engine_runs_weapons(ctx)
     api_resets = board.invalidate_on_api_contract_change(
         API_CONTRACT_VERSION, repo_root,
-        lambda files: lint_task_sources("", files, game_flow=has_flow),
+        lambda files: lint_task_sources("", files, game_flow=has_flow,
+                                        weapons=has_weapons),
     )
     for tid, why in api_resets:
         ctx.emit(
@@ -1169,6 +1191,7 @@ class _StageRuntime:
         contract = lint_task_sources(
             kind_value, {Path(rel).name: code for rel, code in normalised},
             game_flow=self.ctx.store.load_game_design(self.ctx.project_id) is not None,
+            weapons=_engine_runs_weapons(self.ctx),
         )
         if contract:
             raise CodegenContractError(

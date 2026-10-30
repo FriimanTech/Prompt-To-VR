@@ -327,6 +327,7 @@ bool Renderer::initialize(VulkanContext& vk,
     // Optional like the vignette: a missing font or shader costs the labels,
     // not the game.
     text_.initialize(vk, render_pass_, samples_, cmd_pool_);
+    fx_.initialize(vk, render_pass_, samples_);
     start_stream_worker();
     PTV_INFO("Renderer ready: {}x{} per eye, color fmt {}, MSAA {}x",
              eye_width_, eye_height_, static_cast<int>(color_format_),
@@ -1604,6 +1605,12 @@ void Renderer::draw_frame(const std::array<EyeTarget, 2>& eyes,
     // nothing in flight still reads the text vertex buffer.
     text_.prepare(text_items_);
     text_items_.clear();
+    {
+        Vec3 cam{0.0f};
+        for (const auto& e : eyes) cam += Vec3(glm::inverse(e.view)[3]);
+        fx_.prepare(fx_items_, cam * 0.5f, fx_budget_);
+        fx_items_.clear();
+    }
 
     vkResetCommandBuffer(cmd_, 0);
     VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
@@ -1714,7 +1721,8 @@ void Renderer::draw_frame(const std::array<EyeTarget, 2>& eyes,
             }
         }
 
-        // ---- World-space text: after opaque geometry (it blends) --------
+        // ---- Effects, then world-space text: after opaque geometry -----
+        fx_.record(cmd_, vp_mat);
         text_.record(cmd_, vp_mat);
 
         // ---- Comfort vignette: last, over everything --------------------
@@ -2467,6 +2475,7 @@ void Renderer::shutdown() {
         vkDeviceWaitIdle(vk_->device());
     }
     text_.shutdown();
+    fx_.shutdown();
     destroy_gltf_meshes();
     for (auto& kv : framebuffers_) {
         if (kv.second) vkDestroyFramebuffer(vk_->device(), kv.second, nullptr);

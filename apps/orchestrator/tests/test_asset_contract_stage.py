@@ -312,6 +312,45 @@ def test_explicit_hints_win_for_any_category(
     assert set(entry["sockets"]) == {"muzzle"}
 
 
+def test_socket_generation_results_are_merged_with_the_hold(tmp_path: Path, monkeypatch):
+    ctx = _ctx(tmp_path, ["grip", "muzzle"])
+    _stub_tool(monkeypatch)
+    generated = {"blaster": {
+        "asset_id": "blaster", "status": "ok", "longest": 0.3, "method": "vision",
+        "sockets": {
+            "grip": {"position": [0.0, -0.2, -0.1], "rotation": [0, 0, 0, 1],
+                     "kind": "hand_grip", "confidence": "vision_verified",
+                     "handle_thickness_unit": 0.12, "mirror": "same"},
+            "muzzle": {"position": [0.0, 0.0, 0.5], "rotation": [0, 0, 0, 1],
+                       "kind": "muzzle", "confidence": "vision", "bore_diameter_unit": 0.05},
+        },
+        "hold": {"kind": "one_hand", "aim_aligned": True, "two_hand": "none",
+                 "primary_socket": "grip", "support_socket": "", "forearm_socket": "",
+                 "finger_pose": "trigger", "forward": [0, 0, 1], "up": [0, 1, 0]},
+        "part_regions": {"grip": "x.json"}, "warnings": [], "overlays": [],
+    }}
+    (ctx.project_dir / "socket_report.json").write_text(json.dumps(generated),
+                                                        encoding="utf-8")
+    stage_asset_contract.run(ctx)
+    entry = json.loads((ctx.project_dir / "asset_contract.json").read_text("utf-8"))["blaster"]
+    assert entry["sockets"]["grip"]["kind"] == "hand_grip"
+    assert entry["socket_confidence"]["grip"] == "vision_verified"
+    assert entry["hold"]["aim_aligned"] is True
+    assert entry["part_regions"] == {"grip": "x.json"}
+
+
+def test_with_an_interaction_design_unlisted_props_get_no_guessed_sockets(
+        tmp_path: Path, monkeypatch):
+    from ptv_schemas import InteractionDesign
+
+    ctx = _ctx(tmp_path, [])
+    _stub_tool(monkeypatch)
+    ctx.store.save_interaction_design(ctx.project_id, InteractionDesign(prompt_id="demo"))
+    stage_asset_contract.run(ctx)
+    entry = json.loads((ctx.project_dir / "asset_contract.json").read_text("utf-8"))["blaster"]
+    assert entry["sockets"] == {} and "interaction_design" in entry["reason"]
+
+
 def test_no_pipeline_stage_resolves_paths_against_cwd():
     """Artifact paths are repo-root-relative, always.
 

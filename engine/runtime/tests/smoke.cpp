@@ -34,6 +34,7 @@
 #include "../src/mechanics/builtin/HandRig.h"
 #include "../src/mechanics/builtin/TwoBoneIk.h"
 #include "../src/mechanics/builtin/grab/GripHold.h"
+#include "../src/mechanics/builtin/grab/HoldSolver.h"
 #include "../src/mechanics/builtin/teleport/TeleportArc.h"
 #include "../src/mechanics/builtin/slide/SlideComfort.h"
 #include "../src/mechanics/builtin/avatar_body/NeckDrift.h"
@@ -2876,6 +2877,84 @@ static int case_grab_socket() {
               "gun upright");
 }
 
+// HoldSolver: the hand-socket conventions socket_generation writes, solved
+// the way builtin.grab solves them.
+static int case_hold_solver() {
+    namespace g = ptv::grab;
+    using ptv::Quat;
+    using ptv::Vec3;
+    const Vec3 hand_pos(0.1f, 1.2f, -0.3f);
+    const Quat grip = glm::angleAxis(glm::radians(-35.0f), Vec3(1.0f, 0.0f, 0.0f));
+
+    // 1. Hand-frame hold: a sword's grip socket (OpenXR grip frame) lands
+    //    exactly on the grip pose, so -Z (pinky -> thumb) runs along the hilt.
+    {
+        const Vec3 sock_pos(0.0f, -0.1f, 0.0f);
+        // Hilt along mesh +Y: -Z of the socket = +Y, +X = mesh +X.
+        const Quat sock_rot = g::quat_from_zy(Vec3(0, -1, 0), Vec3(0, 0, 1));
+        Vec3 off;
+        Quat rot;
+        g::solve_hand_frame_hold(sock_pos, sock_rot, 1.0f, &off, &rot);
+        const Vec3 obj_pos = hand_pos + grip * off;
+        const Quat obj_rot = grip * rot;
+        const Vec3 s_world = obj_pos + obj_rot * sock_pos;
+        if (glm::length(s_world - hand_pos) > 1e-4f) return fail("hand-frame: socket not on grip");
+        const Quat s_rot = obj_rot * sock_rot;
+        if (glm::dot(s_rot * Vec3(0, 0, -1), grip * Vec3(0, 0, -1)) < 0.999f)
+            return fail("hand-frame: socket frame does not match grip frame");
+        // Left-hand mirror for a palm-up support grip turns about Z.
+        const Quat left = g::hand_socket_rotation(sock_rot, true, true);
+        if (glm::dot(left * Vec3(0, 0, 1), sock_rot * Vec3(0, 0, 1)) < 0.999f ||
+            glm::dot(left * Vec3(1, 0, 0), sock_rot * Vec3(1, 0, 0)) > -0.999f)
+            return fail("flip_z180 mirror is not a half turn about Z");
+    }
+    // 2. Aim hold: palm on the grip origin, barrel (mesh +X) along the aim.
+    {
+        const Quat aim(1.0f, 0.0f, 0.0f, 0.0f);
+        const Quat grip_to_aim = glm::inverse(grip) * aim;
+        const Vec3 palm(-0.05f, -0.05f, 0.0f);
+        Vec3 off;
+        Quat rot;
+        g::solve_aim_hold(palm, Vec3(1, 0, 0), Vec3(0, 1, 0), 1.0f, grip_to_aim,
+                          Quat(1, 0, 0, 0), &off, &rot);
+        const Vec3 obj_pos = hand_pos + grip * off;
+        const Quat obj_rot = grip * rot;
+        if (glm::length(obj_pos + obj_rot * palm - hand_pos) > 1e-4f)
+            return fail("aim hold: palm not at the grip origin");
+        if (glm::dot(obj_rot * Vec3(1, 0, 0), aim * Vec3(0, 0, -1)) < 0.999f)
+            return fail("aim hold: barrel does not follow the aim");
+        if (glm::dot(obj_rot * Vec3(0, 1, 0), aim * Vec3(0, 1, 0)) < 0.99f)
+            return fail("aim hold: gun is not upright");
+    }
+    // 3. Line hold: rifle grip -> handguard span laid between the two hands.
+    {
+        const Vec3 p1(0.0f, -0.05f, 0.0f), p2(0.35f, 0.0f, 0.0f);
+        const Vec3 P1(0.0f, 1.2f, -0.2f), P2(-0.1f, 1.3f, -0.55f);
+        const Quat R = g::line_rotation(p2 - p1, Vec3(0, 1, 0), P2 - P1, Vec3(0, 1, 0));
+        const Vec3 pos = g::place_point(p1, 1.0f, R, P1);
+        if (glm::length(pos + R * p1 - P1) > 1e-4f) return fail("line: grip off the hand");
+        const Vec3 dir = glm::normalize(R * (p2 - p1));
+        if (glm::dot(dir, glm::normalize(P2 - P1)) < 0.999f)
+            return fail("line: rifle not along the hands");
+        if ((R * Vec3(0, 1, 0)).y < 0.8f) return fail("line: rifle rolled over");
+    }
+    // 4. Forearm hold: hand strap at the palm, forearm strap toward the elbow,
+    //    front face along the back of the forearm.
+    {
+        const Vec3 hand_strap(0.0f, 0.12f, -0.03f), fore_strap(0.0f, -0.08f, -0.03f);
+        const Vec3 front(0, 0, 1);
+        const Vec3 elbow_dir = glm::normalize(Vec3(0.1f, -0.2f, 1.0f));
+        const Vec3 dorsal = g::dorsal_direction(grip, false);
+        const Quat R = g::line_rotation(fore_strap - hand_strap, front, elbow_dir, dorsal);
+        if (glm::dot(glm::normalize(R * (fore_strap - hand_strap)), elbow_dir) < 0.999f)
+            return fail("forearm: straps not along the forearm");
+        const Vec3 n = R * front;
+        const Vec3 dorsal_perp = glm::normalize(dorsal - elbow_dir * glm::dot(dorsal, elbow_dir));
+        if (glm::dot(n, dorsal_perp) < 0.999f) return fail("forearm: shield faces the wrong way");
+    }
+    return ok("hold solver: hand-frame, aim, line and forearm holds land as specified");
+}
+
 // The clip contract: a mechanic asks for the semantic intent "walk" and the
 // engine finds whatever the retargeter actually named that clip. Without this
 // indirection every generated play_clip call is a coin flip, because Tripo
@@ -5475,6 +5554,7 @@ int main(int argc, char** argv) {
         return case_self_view_hide(argv[2]);
     }
     if (what == "grab_socket") return case_grab_socket();
+    if (what == "hold_solver") return case_hold_solver();
     if (what == "clip_contract") return case_clip_contract();
     if (what == "lod_skinning") {
         if (argc < 4) {

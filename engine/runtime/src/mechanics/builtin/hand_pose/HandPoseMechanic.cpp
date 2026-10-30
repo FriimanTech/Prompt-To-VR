@@ -63,6 +63,12 @@ constexpr float kCurlDistal = 1.15f;
 constexpr float kRestingCurl = 0.18f;
 // The relaxed open hand is not flat: fingers keep a gentle natural bend.
 constexpr float kDefaultRelaxedCurl = 0.08f;
+// Index finger resting on a trigger it is not pulling.
+constexpr float kTriggerRestCurl = 0.3f;
+// All four fingers around a hilt or strap.
+constexpr float kWrapCurl = 0.92f;
+// A support hand around a handguard or the shooting hand.
+constexpr float kSupportCurl = 0.75f;
 
 // The thumb resting on the stick: swings toward the index finger and bends a
 // little at each joint. Deliberately modest -- it rests on the side of the
@@ -135,7 +141,7 @@ public:
         for (auto& r : rigs_) r = Resolved{};
     }
 
-    void tick(World&, std::uint32_t, float dt, const InputSnapshot& input,
+    void tick(World& world, std::uint32_t, float dt, const InputSnapshot& input,
               MechanicContext& ctx) {
         if (ctx.skeleton == nullptr || ctx.hands == nullptr) return;
 
@@ -172,10 +178,39 @@ public:
             }
             float grip_target = std::max(relaxed_curl_, hand.grip);
             // Holding something pins the fingers closed regardless of how
-            // lightly the player is now squeezing.
+            // lightly the player is now squeezing. The item's hold profile
+            // says HOW: a gun keeps the index finger on the trigger (and
+            // follows it), a hilt or strap is wrapped by all four fingers.
+            const std::uint32_t support = ctx.hands->support_entity(h);
             if (hand.held_entity != InputSnapshot::kInvalidEntity) {
                 grip_target = std::max(grip_target, hold_curl_);
                 index_target = std::max(index_target, kRestingCurl);
+                const auto* hp = world.registry().try_get<CHoldProfile>(
+                    static_cast<entt::entity>(hand.held_entity));
+                if (hp != nullptr) {
+                    switch (hp->finger_pose) {
+                        case HoldFingerPose::Trigger:
+                            index_target = std::max(kTriggerRestCurl, hand.trigger);
+                            break;
+                        case HoldFingerPose::Wrap:
+                        case HoldFingerPose::Strap:
+                            grip_target = std::max(grip_target, kWrapCurl);
+                            index_target = std::max(index_target, kWrapCurl);
+                            break;
+                        case HoldFingerPose::Pinch:
+                            grip_target = std::min(grip_target, 0.45f);
+                            index_target = std::max(index_target, 0.7f);
+                            break;
+                        case HoldFingerPose::OpenSupport:
+                            grip_target = std::min(grip_target, 0.6f);
+                            index_target = std::max(index_target, 0.5f);
+                            break;
+                    }
+                }
+            } else if (support != InputSnapshot::kInvalidEntity) {
+                // The second hand cups the handguard / wraps the first hand.
+                grip_target = std::max(grip_target, kSupportCurl);
+                index_target = std::max(index_target, kSupportCurl);
             }
             bool thumb_down = false;
             if ((thumb_sources_ & kThumbstick) &&

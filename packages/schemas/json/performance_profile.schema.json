@@ -148,6 +148,52 @@
       "title": "Max Animated Agents",
       "type": "integer"
     },
+    "max_beams": {
+      "default": 4,
+      "maximum": 256,
+      "minimum": 0,
+      "title": "Max Beams",
+      "type": "integer"
+    },
+    "max_decals": {
+      "default": 48,
+      "maximum": 4096,
+      "minimum": 0,
+      "title": "Max Decals",
+      "type": "integer"
+    },
+    "max_flash_lights": {
+      "default": 2,
+      "description": "Short-lived point lights from muzzle flashes / explosions.",
+      "maximum": 16,
+      "minimum": 0,
+      "title": "Max Flash Lights",
+      "type": "integer"
+    },
+    "max_fx_quads": {
+      "default": 1024,
+      "description": "Camera-facing FX quads per frame (flashes, tracers, sparks, beams).",
+      "maximum": 65536,
+      "minimum": 64,
+      "title": "Max Fx Quads",
+      "type": "integer"
+    },
+    "max_live_projectiles": {
+      "default": 64,
+      "description": "Projectile pool size; oldest recycled when full.",
+      "maximum": 4096,
+      "minimum": 1,
+      "title": "Max Live Projectiles",
+      "type": "integer"
+    },
+    "max_projectile_meshes": {
+      "default": 24,
+      "description": "Projectiles drawn with their own mesh at once (the rest as tracers).",
+      "maximum": 1024,
+      "minimum": 0,
+      "title": "Max Projectile Meshes",
+      "type": "integer"
+    },
     "max_triangles_per_asset": {
       "default": 60000,
       "exclusiveMinimum": 0,
@@ -165,6 +211,14 @@
       "maximum": 8,
       "minimum": 1,
       "title": "Msaa Samples",
+      "type": "integer"
+    },
+    "projectile_max_triangles": {
+      "default": 300,
+      "description": "LOD0 triangle cap for a projectile mesh (rocket, arrow).",
+      "maximum": 20000,
+      "minimum": 32,
+      "title": "Projectile Max Triangles",
       "type": "integer"
     },
     "resident_triangle_budget": {

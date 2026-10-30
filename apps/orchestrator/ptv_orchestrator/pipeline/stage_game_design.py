@@ -81,7 +81,7 @@ def run_with_designer(ctx: PipelineContext,
             f"Target device: {getattr(build_spec.target_device, 'value', build_spec.target_device)}."
             " Menus are world-space panels the player points at; keep end screens"
             " to at most three buttons.",
-        ],
+        ] + _items_line(ctx),
     )
     message = build_designer_message(inp)
 
@@ -162,6 +162,15 @@ def _downgrade_unquoted(design: GameDesign, prompt: str) -> GameDesign:
             prov.rationale = (prov.rationale or "") + " (quote not found in the prompt)"
             prov.prompt_quote = ""
     return d
+
+
+def _items_line(ctx: PipelineContext) -> list[str]:
+    from .interaction_rules import design_excerpt  # noqa: PLC0415
+
+    text = design_excerpt(
+        ctx.interaction_design or ctx.store.load_interaction_design(ctx.project_id))
+    return (["Held items and weapons (interaction_design.json; the HUD can show the "
+             "held weapon's ammo):\n" + text] if text else [])
 
 
 def _read_prompt(ctx: PipelineContext) -> str:

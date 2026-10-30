@@ -79,6 +79,9 @@ struct Options {
     std::string report;
     std::size_t target_tris = 0;
     bool allow_sloppy = false;
+    // JSON file {"triangles": [...]} of merged-mesh triangles to remove
+    // before simplification (a modelled bowstring the engine draws itself).
+    std::string drop_triangles;
 };
 
 void print_usage() {
@@ -109,6 +112,8 @@ bool parse_args(int argc, char** argv, Options& opt) {
             opt.target_tris = static_cast<std::size_t>(std::stoull(v));
         } else if (a == "--sloppy") {
             opt.allow_sloppy = true;
+        } else if (a == "--drop-triangles") {
+            if (!next(opt.drop_triangles)) return false;
         } else {
             std::fprintf(stderr, "unknown argument: %s\n", a.c_str());
             return false;
@@ -790,6 +795,29 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "load failed (%s): %s\n", opt.input.c_str(),
                      err.c_str());
         return 1;
+    }
+
+    // Step 1b: remove triangles socket_generation identified as a part the
+    // engine replaces (triangle ids are load_glb_merged order).
+    if (!opt.drop_triangles.empty()) {
+        std::ifstream df(opt.drop_triangles);
+        const nlohmann::json dj = nlohmann::json::parse(df, nullptr, false);
+        if (dj.is_object() && dj.contains("triangles") && dj["triangles"].is_array()) {
+            std::vector<char> drop(indices.size() / 3, 0);
+            for (const auto& t : dj["triangles"]) {
+                const auto id = t.get<std::int64_t>();
+                if (id >= 0 && static_cast<std::size_t>(id) < drop.size()) drop[id] = 1;
+            }
+            std::vector<std::uint32_t> kept;
+            kept.reserve(indices.size());
+            for (std::size_t t = 0; t < drop.size(); ++t) {
+                if (drop[t]) continue;
+                kept.insert(kept.end(), indices.begin() + t * 3, indices.begin() + t * 3 + 3);
+            }
+            std::fprintf(stderr, "dropped %zu of %zu triangles\n",
+                         drop.size() - kept.size() / 3, drop.size());
+            if (!kept.empty()) indices.swap(kept);
+        }
     }
 
     const std::size_t source_tris = indices.size() / 3;

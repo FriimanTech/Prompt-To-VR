@@ -25,7 +25,13 @@ list, and it skips itself if it ever runs on a PC VR project):
    checks for placed NPCs, a no-drift check for stationary ones, a band check
    for followers, spawn checks for encounters, and close-and-hit checks for
    enemies hostile to the player.
-4. Writes ``runtime_verification.json`` and ``logs/runtime/verify_<ts>.log``.
+4. With a game design, a second launch checks the game loop
+   (``debug.ptv.verify_flow``); with player weapons in the scene, a third
+   (``debug.ptv.verify_weapons``): a scripted hand holds and fires each
+   weapon at a hostile, and ``evaluate_weapons`` checks the shot left the
+   muzzle, hit, damaged through ctx.combat, kept the projectile pool inside
+   its cap and held the frame rate.
+5. Writes ``runtime_verification.json`` and ``logs/runtime/verify_<ts>.log``.
 
 Report-only: a failed check fails the stage with the exact list of what did
 not hold, and nothing is repaired automatically.
@@ -646,6 +652,167 @@ def evaluate_flow(events: list[dict[str, str]], design: Any, *, exited: bool,
 
 
 # ---------------------------------------------------------------------------
+# Weapons pass (debug.ptv.verify_weapons): a scripted hand holds and fires
+# every player weapon -- see engine/runtime/src/core/WeaponVerifier.h.
+# ---------------------------------------------------------------------------
+
+#: Engine kSettleS plus launch slack, then one budget per weapon (hold 1.2 s,
+#: fire up to 5.5 s, release 0.8 s, plus margin).
+WEAPONS_FIXED_S = 25.0
+WEAPON_PASS_S = 9.0
+MAX_WEAPONS_CAPTURE_S = 240.0
+#: A shot must leave within this of the muzzle socket.
+SHOT_ORIGIN_TOLERANCE_CM = 2.0
+#: A beam held for 2 s must register at least this many damage ticks.
+BEAM_MIN_HITS = 10
+#: Headroom on the p95 frame time for vsync timing jitter, and the share of
+#: frames that may miss a vsync during sustained fire.
+FRAME_JITTER = 0.15
+MAX_DROPPED_FRAMES = 0.02
+
+
+def scene_weapons(scene: dict) -> list[dict]:
+    """The weapons the player wields: entities bound to builtin.weapon /
+    builtin.bow that are not templates, NPC gear or NPCs themselves."""
+    out = []
+    for e in scene.get("entities") or []:
+        if "template" in (e.get("tags") or []) or e.get("attached_to") or e.get("faction"):
+            continue
+        ids = [b.get("builtin_id") or b.get("id") for b in e.get("mechanic_bindings") or []]
+        kind = "bow" if "builtin.bow" in ids else "gun" if "builtin.weapon" in ids else None
+        if kind is not None:
+            out.append({"id": e.get("id"), "kind": kind})
+    return out
+
+
+def weapons_capture_seconds(count: int) -> float:
+    return min(MAX_WEAPONS_CAPTURE_S, WEAPONS_FIXED_S + WEAPON_PASS_S * count)
+
+
+def parse_weapons(text: str) -> list[dict[str, str]]:
+    out: list[dict[str, str]] = []
+    for raw in text.splitlines():
+        if "weapons:" not in raw:
+            continue
+        body = raw.split("weapons:", 1)[1].strip()
+        kv = _kv(body)
+        kv["_event"] = body.split(" ", 1)[0]
+        kv["_text"] = body
+        out.append(kv)
+    return out
+
+
+def _f(v: Optional[str], default: float = 0.0) -> float:
+    try:
+        return float(v) if v is not None else default
+    except ValueError:
+        return default
+
+
+def evaluate_weapons(events: list[dict[str, str]], scene: dict) -> list[VerificationCheck]:
+    """Each player weapon: held, fires from its muzzle, hits and damages a
+    target through ctx.combat, keeps the projectile pool inside its cap and
+    the frame rate up under sustained fire."""
+    cat = "weapons"
+    weapons = scene_weapons(scene)
+    if not weapons:
+        return []
+    begun = [e for e in events if e["_event"] == "begin"]
+    done = [e for e in events if e["_event"] == "done"]
+    checks = [_check("weapons pass ran to the end", cat, bool(begun and done),
+                     "" if done else "no 'weapons: done' line (crash, or the capture ended early)",
+                     evidence=[e["_text"] for e in (begun + done)[:2]])]
+    if not begun:
+        return checks
+    perf = scene.get("performance") or {}
+    fps = float(perf.get("target_fps") or 72)
+    frame_budget_ms = 1000.0 / fps
+    cap = int(perf.get("max_live_projectiles") or 64)
+    for w in weapons:
+        name = w["id"]
+        mine = [e for e in events if e.get("weapon") == name]
+        hold = next((e for e in mine if e["_event"] == "hold"), None)
+        finished = next((e for e in mine if e["_event"] == "weapon_done"), None)
+        shots = [e for e in mine if e["_event"] == "shot"]
+        # Only hits on something: a beam playing over the wall behind a
+        # drone "hits" every tick and damages nothing.
+        hits = [e for e in mine if e["_event"] in ("hit", "projectile_hit")
+                and e.get("target", "world") != "world"]
+        if hold is None:
+            checks.append(_check("weapon was tested", cat, False,
+                                 "the pass never reached it", subject=name))
+            continue
+        checks.append(_check("held by the scripted hand", cat, hold.get("held") == "1",
+                             hold["_text"], subject=name))
+        delivery = (finished or {}).get("delivery", "")
+        n_shots = int(_f((finished or {}).get("shots"), len(shots)))
+        # Five single pulls -- or the whole magazine when it holds fewer (an
+        # RPG has one rocket; the pass never presses reload).
+        magazine = int(_f((finished or {}).get("magazine"), 0))
+        need = 1 if delivery in ("beam", "drawn") else (min(5, magazine) if magazine > 0 else 5)
+        checks.append(_check("fires", cat, n_shots >= need,
+                             f"{n_shots} shot(s), want >= {need}", subject=name,
+                             evidence=[e["_text"] for e in shots[:3]]))
+        errs = [_f(e.get("origin_err_cm")) for e in shots if "origin_err_cm" in e]
+        if errs:
+            worst = max(errs)
+            checks.append(_check("shots leave the muzzle", cat,
+                                 worst <= SHOT_ORIGIN_TOLERANCE_CM,
+                                 f"worst origin error {worst:.2f} cm "
+                                 f"(tolerance {SHOT_ORIGIN_TOLERANCE_CM} cm)", subject=name))
+        has_target = hold.get("target", "none") != "none"
+        # Hits on the TARGET: a prop standing in the line of fire takes every
+        # shot and is not what the weapon was aimed at. A beam's continuity
+        # counts any damageable entity it plays over (drones cross the line).
+        entity_hits = hits
+        if has_target:
+            hits = [e for e in hits if e.get("target") == hold.get("target")]
+        if not has_target:
+            checks.append(_check("hits a target", cat, None,
+                                 "no hostile or NPC template to aim at", subject=name))
+        else:
+            checks.append(_check("hits a target", cat, bool(hits),
+                                 f"{len(hits)} hit(s) on target {hold.get('target')}",
+                                 subject=name, evidence=[e["_text"] for e in hits[:3]]))
+            health = (finished or {}).get("target_health", "")
+            before, _, after = health.partition("->")
+            dealt = sum(_f(e.get("damage")) for e in hits)
+            killed = any(e.get("killed") == "1" for e in hits)
+            ok = killed or dealt > 0.0 or (_f(after, _f(before)) < _f(before))
+            checks.append(_check("damage lands through ctx.combat", cat, ok,
+                                 f"target health {health or '?'}, {dealt:.0f} damage reported"
+                                 + (", killed" if killed else ""), subject=name))
+            if delivery == "beam":
+                ticks = [e for e in entity_hits if _f(e.get("damage")) > 0.0]
+                checks.append(_check("the beam damages continuously", cat,
+                                     len(ticks) >= BEAM_MIN_HITS,
+                                     f"{len(ticks)} damaging tick(s) in 2 s "
+                                     f"(want >= {BEAM_MIN_HITS})", subject=name))
+        if finished is not None:
+            live = int(_f(finished.get("max_live")))
+            checks.append(_check("projectile pool stays inside its cap", cat, live <= cap,
+                                 f"max {live} live, cap {cap}", subject=name))
+            # Frame-to-frame timing jitters around the display period even at
+            # a steady 72 Hz, so the p95 gets headroom; what must not happen
+            # is a missed vsync (a frame over 1.5 periods).
+            p95 = _f(finished.get("p95_ms"))
+            frames = max(1, int(_f(finished.get("frames"), 1)))
+            dropped = int(_f(finished.get("dropped"), 0))
+            median = _f(finished.get("median_ms"), frame_budget_ms)
+            ok: Optional[bool] = (p95 <= frame_budget_ms * (1.0 + FRAME_JITTER)
+                                  and dropped <= max(1, int(frames * MAX_DROPPED_FRAMES)))
+            detail = (f"p95 {p95:.2f} ms (budget {frame_budget_ms:.1f} ms at "
+                      f"{fps:.0f} Hz), {dropped} dropped of {frames} frames")
+            if median < 0.5 * frame_budget_ms:
+                # Frames far shorter than a display period: the compositor was
+                # not pacing the app (headset asleep / not presenting).
+                ok, detail = None, f"not presenting (median frame {median:.2f} ms): " + detail
+            checks.append(_check("frame rate holds under sustained fire", cat, ok, detail,
+                                 subject=name))
+    return checks
+
+
+# ---------------------------------------------------------------------------
 # Stage
 # ---------------------------------------------------------------------------
 
@@ -741,6 +908,9 @@ def run_with_adb(ctx: PipelineContext, runner: Optional[AdbRunner] = None,
     flow_text = ""
     flow_exited = False
     flow_relaunched = False
+    player_weapons = scene_weapons(scene)
+    weapons_log_file = log_file.with_name(log_file.stem + "_weapons.log")
+    weapons_text = ""
     pin = getattr(ctx.settings, "quest_verify_store_pin", None)
 
     def scriptable(enable: bool) -> None:
@@ -789,6 +959,15 @@ def run_with_adb(ctx: PipelineContext, runner: Optional[AdbRunner] = None,
         def running() -> bool:
             rc_p, pid_p = adb_s(["shell", "pidof", package])
             return rc_p == 0 and bool(pid_p.strip())
+
+        def exited() -> bool:
+            # One failed ``pidof`` is not an exit: a busy host makes adb
+            # time out, and reading that as "the game left" cut the game-loop
+            # pass off a second after its pause screen opened.
+            if running():
+                return False
+            sleep(2.0)
+            return not running()
 
         def start_game() -> bool:
             sleep(LAUNCH_SETTLE_S)
@@ -859,7 +1038,7 @@ def run_with_adb(ctx: PipelineContext, runner: Optional[AdbRunner] = None,
                     waited += 5.0
                     if not still_there():
                         raise DeviceGone("the headset disconnected during the game-loop pass")
-                    if not running():
+                    if exited():
                         flow_exited = True
                         break
             if stop_stream is not None:
@@ -872,6 +1051,45 @@ def run_with_adb(ctx: PipelineContext, runner: Optional[AdbRunner] = None,
                 adb_s(["shell", "setprop", "debug.ptv.verify", "0"])
                 flow_relaunched = start_game()
                 adb_s(["shell", "am", "force-stop", package])
+
+        # --- Third pass: the weapons -----------------------------------
+        # A scripted hand holds each player weapon, aims at a hostile and
+        # fires; the engine logs where every shot left and what it hit.
+        if player_weapons:
+            adb_s(["shell", "am", "force-stop", package])
+            adb_s(["shell", "setprop", "debug.ptv.verify", "1"])
+            adb_s(["shell", "setprop", "debug.ptv.verify_flow", "0"])
+            adb_s(["shell", "setprop", "debug.ptv.verify_weapons", "1"])
+            adb_s(["logcat", "-c"])
+            if streamer is not None:
+                stop_stream = streamer(["-s", serial, "logcat", "-v", "time", "-s", "ptv:*"],
+                                       weapons_log_file)
+            budget = weapons_capture_seconds(len(player_weapons))
+            ctx.emit(stage, "info", f"weapons pass: {len(player_weapons)} weapon(s), "
+                     f"up to {budget:.0f} s")
+            if start_game():
+                waited = 0.0
+                while waited < budget:
+                    ctx.raise_if_cancelled()
+                    sleep(5.0)
+                    waited += 5.0
+                    if not still_there():
+                        raise DeviceGone("the headset disconnected during the weapons pass")
+                    if exited():
+                        break
+                    try:
+                        if "weapons: done" in weapons_log_file.read_text(
+                                encoding="utf-8", errors="replace"):
+                            break
+                    except OSError:
+                        pass
+            if stop_stream is not None:
+                weapons_text = stop_stream()
+                stop_stream = None
+            else:
+                _, weapons_text = adb_s(["logcat", "-d", "-v", "time", "-s", "ptv:*"], 60)
+            adb_s(["shell", "setprop", "debug.ptv.verify_weapons", "0"])
+            adb_s(["shell", "am", "force-stop", package])
     except DeviceGone as exc:
         return finish_skipped(str(exc), device_serial=serial, package=package)
     finally:
@@ -884,6 +1102,7 @@ def run_with_adb(ctx: PipelineContext, runner: Optional[AdbRunner] = None,
         for args in (["shell", "am", "force-stop", package],
                      ["shell", "setprop", "debug.ptv.verify", "0"],
                      ["shell", "setprop", "debug.ptv.verify_flow", "0"],
+                     ["shell", "setprop", "debug.ptv.verify_weapons", "0"],
                      ["shell", "setprop", "debug.oculus.guardian_pause", prev_guardian],
                      ["shell", "am", "broadcast", "-a",
                       "com.oculus.vrpowermanager.automation_disable"]):
@@ -907,6 +1126,10 @@ def run_with_adb(ctx: PipelineContext, runner: Optional[AdbRunner] = None,
             flow_log_file.write_text(flow_text, encoding="utf-8")
         checks.extend(evaluate_flow(parse_flow(flow_text), design,
                                     exited=flow_exited, relaunched=flow_relaunched))
+    if player_weapons:
+        if weapons_text and not (weapons_log_file.exists() and weapons_log_file.stat().st_size):
+            weapons_log_file.write_text(weapons_text, encoding="utf-8")
+        checks.extend(evaluate_weapons(parse_weapons(weapons_text), scene))
     failed = [c for c in checks if c.outcome == CheckOutcome.failed]
     status = VerificationStatus.failed if failed else VerificationStatus.passed
     reason = (f"{len(failed)} of {len(checks)} check(s) failed: "

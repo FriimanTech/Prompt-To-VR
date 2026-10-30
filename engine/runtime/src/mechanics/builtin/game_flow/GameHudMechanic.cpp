@@ -8,8 +8,9 @@
 // mistake: it cannot be looked away from and fights the eyes' focus. Turning
 // the wrist up to read it is the Quest-native gesture players already know.
 //
-// Reads ctx.game and ctx.combat only, so it shows the same truth the flow
-// acts on -- never a private copy that could disagree with it.
+// Reads ctx.game, ctx.combat and ctx.weapons only (the held weapon's ammo /
+// heat / reload), so it shows the same truth the flow and the weapon act on
+// -- never a private copy that could disagree with it.
 // ---------------------------------------------------------------------------
 
 #include <algorithm>
@@ -33,6 +34,7 @@ public:
         timer_ = p.value("timer", false);
         score_ = p.value("score", false);
         objective_ = p.value("objective", false);
+        ammo_ = p.value("ammo", true);
         hand_ = std::clamp(p.value("hand", 0), 0, 1);
         text_h_ = std::clamp(p.value("text_height_m", 0.011f), 0.004f, 0.05f);
     }
@@ -107,6 +109,13 @@ public:
                                face, text_h_ * 0.9f, white, TextAlign::Left);
             }
         }
+        if (ammo_ && ctx.weapons != nullptr) {
+            const std::string text = ammo_text(ctx);
+            if (!text.empty()) {
+                y += line;
+                ctx.text->text(text.c_str(), base + up * y, face, text_h_, white);
+            }
+        }
         if (st == GameFlowState::Paused) {
             ctx.text->text("Paused", base + up * (y + line), face, text_h_, white);
         }
@@ -118,6 +127,25 @@ private:
         char buf[16];
         std::snprintf(buf, sizeof(buf), "%d:%02d", t / 60, t % 60);
         return buf;
+    }
+
+    /** The held weapon's magazine / reserve, heat or reload -- whichever hand
+     *  holds one (the weapon hand is usually not the wrist the HUD is on).
+     *  Empty for weapons with nothing to count (infinite ammo, melee, bows). */
+    static std::string ammo_text(MechanicContext& ctx) {
+        for (int h = 1; h >= 0; --h) {
+            const std::uint32_t w = ctx.weapons->held_weapon(h);
+            WeaponState s{};
+            if (w == 0xFFFFFFFFu || !ctx.weapons->state(w, &s)) continue;
+            if (s.reloading) return "Reloading";
+            if (s.overheated) return "Overheated";
+            if (s.heat > 0.0f && s.infinite) {
+                return "Heat " + std::to_string(static_cast<int>(s.heat * 100.0f)) + "%";
+            }
+            if (s.infinite || s.magazine_size <= 0) continue;
+            return std::to_string(s.ammo_in_magazine) + " / " + std::to_string(s.reserve);
+        }
+        return {};
     }
 
     static std::string objective_text(MechanicContext& ctx) {
@@ -141,6 +169,7 @@ private:
     bool timer_{false};
     bool score_{false};
     bool objective_{false};
+    bool ammo_{true};
     int hand_{0};
     float text_h_{0.011f};
 };

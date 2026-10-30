@@ -28,6 +28,11 @@
 
 namespace ptv {
 
+class EffectsSystem;
+class ProjectileSystem;
+class WeaponBoard;
+class WeaponVerifier;
+
 /** Top-level application class.
  *
  * Owns the Vulkan context, the OpenXR session, the ECS world, the physics
@@ -578,6 +583,26 @@ private:
 
     // Which skeleton builtin.hand_pose curls on each hand (IHands).
     std::array<entt::entity, 2> finger_targets_{entt::null, entt::null};
+    // Visual hand anchors (IHands::set_hand_anchor), valid for the frame
+    // they were set in.
+    struct HandAnchor {
+        std::uint64_t frame{0};
+        Vec3 position{0.0f};
+        Quat rotation{1.0f, 0.0f, 0.0f, 0.0f};
+        float weight{0.0f};
+    };
+    std::array<HandAnchor, 2> hand_anchors_{};
+    std::uint64_t frame_index_{1};
+    std::array<Vec3, 2> forearm_dir_{Vec3(0.0f, 0.0f, 1.0f), Vec3(0.0f, 0.0f, 1.0f)};
+    std::array<std::uint64_t, 2> forearm_frame_{0, 0};
+    std::array<std::uint32_t, 2> support_entity_{0xFFFFFFFFu, 0xFFFFFFFFu};
+    std::array<std::uint32_t, 2> hold_request_{0xFFFFFFFFu, 0xFFFFFFFFu};
+    // Wrist position in each default hand's grip frame (HandRig), and the
+    // last grip rotation the hand was placed at: their product is the
+    // forearm's direction when no body drives the arm.
+    std::array<Vec3, 2> hand_wrist_in_grip_{Vec3(0.0f), Vec3(0.0f)};
+    std::array<Quat, 2> last_grip_rot_{Quat(1, 0, 0, 0), Quat(1, 0, 0, 0)};
+    Vec3 hand_forearm_direction(int hand) const;
     // Grip frame -> hand entity frame, measured per hand mesh.
     std::array<Mat4, 2> hand_grip_to_entity_{Mat4(1.0f), Mat4(1.0f)};
     // Horizontal head-facing direction in **stage / world XZ** (Y=0 plane).
@@ -653,6 +678,12 @@ private:
     std::unique_ptr<ComfortService> comfort_svc_;
     std::unique_ptr<AppService> app_svc_;
     std::unique_ptr<TextDrawService> text_svc_;
+    // Weapons and effects (src/gameplay): ctx.vfx, ctx.projectiles, ctx.weapons.
+    std::unique_ptr<EffectsSystem> effects_;
+    std::unique_ptr<ProjectileSystem> projectiles_;
+    std::unique_ptr<WeaponBoard> weapons_;
+    IHands* weapons_hands_{nullptr};
+    void configure_weapon_systems();
     MechanicContext mech_ctx_{};
 
     // Comfort vignette state, per ComfortChannel.
@@ -708,6 +739,10 @@ private:
     // so followers and chasers have something to react to, and cannot die,
     // so one run watches a whole encounter. Hits are still recorded.
     bool verify_mode_{false};
+    // Weapons pass (``debug.ptv.verify_weapons`` = 1): the player stands
+    // still and a scripted hand holds and fires every weapon in turn.
+    bool verify_weapons_{false};
+    std::unique_ptr<WeaponVerifier> weapon_verifier_;
     // Verification only: an enemy that landed a hit on the (protected)
     // player is defeated shortly after, so the waves keep advancing and every
     // NPC type in the plan actually appears during one unattended run.

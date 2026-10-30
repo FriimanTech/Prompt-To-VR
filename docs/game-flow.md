@@ -93,7 +93,7 @@ conservative design derived from the NPC plan.
 - `world_generation` is told the spawn-point ids `reach_location` objectives
   need.
 - The codegen API reference documents `ctx.game`, `ctx.text` and `ctx.app`.
-  `codegen_contracts.py` (API contract v4) rejects, in projects with a game
+  `codegen_contracts.py` (API contract v4 and later) rejects, in projects with a game
   design, a private lives counter, a private respawn that teleports the
   player, and generated restarts / revives.
 

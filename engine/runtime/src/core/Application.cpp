@@ -58,6 +58,10 @@
 #include <glm/gtc/matrix_transform.hpp>
 
 #include "core/NpcRuntime.h"
+#include "gameplay/EffectsSystem.h"
+#include "gameplay/ProjectileSystem.h"
+#include "gameplay/WeaponBoard.h"
+#include "WeaponVerifier.h"
 #include "mechanics/builtin/HandRig.h"
 #include "ptv/api/BodySlots.h"
 #include "ptv/api/Facing.h"
@@ -654,8 +658,45 @@ public:
         return true;
     }
 
+    bool raycast_ignoring(const std::uint32_t* ignore, int count, const Vec3& origin,
+                          const Vec3& dir, float max_dist,
+                          PhysicsRayHit& out) const override {
+        return sphere_cast_ignoring(ignore, count, origin, dir, 0.0f, max_dist, out);
+    }
+
+    bool sphere_cast_ignoring(const std::uint32_t* ignore, int count, const Vec3& origin,
+                              const Vec3& dir, float radius, float max_dist,
+                              PhysicsRayHit& out) const override {
+        out = PhysicsRayHit{};
+        if (!is_finite(origin) || !is_finite(dir) || !std::isfinite(max_dist) ||
+            !std::isfinite(radius)) {
+            return false;
+        }
+        PhysicsWorld::RayFilter filter{};
+        for (int i = 0; ignore != nullptr && i < count; ++i) {
+            if (ignore[i] != InputSnapshot::kInvalidEntity) filter.ignore.push_back(ignore[i]);
+        }
+        Vec3 hit(0.0f);
+        Vec3 normal(0.0f, 1.0f, 0.0f);
+        std::uint32_t entity = InputSnapshot::kInvalidEntity;
+        const bool ok = radius > 1e-4f
+            ? app_->physics_.sphere_cast(origin, dir, radius, max_dist, filter, hit,
+                                         normal, entity)
+            : app_->physics_.raycast(origin, dir, max_dist, filter, hit, normal, entity);
+        if (!ok) return false;
+        out.point = hit;
+        out.normal = normal;
+        out.entity = entity;
+        out.hit = true;
+        return true;
+    }
+
     bool has_body(std::uint32_t entity) const override {
         return app_->physics_.has_body(entity);
+    }
+
+    bool body_center(std::uint32_t entity, Vec3* out) const override {
+        return app_->physics_.body_center(entity, out);
     }
 
     void set_kinematic(std::uint32_t entity, bool kinematic) override {
@@ -798,6 +839,7 @@ public:
 #endif
     }
     bool verify_flow() const override { return app_->verify_flow_; }
+    bool verify_run() const override { return app_->verify_mode_; }
     float uptime_s() const override { return static_cast<float>(app_->uptime_s_); }
     void request_fade(float amount) override {
         if (!std::isfinite(amount)) return;
@@ -1060,6 +1102,71 @@ public:
                                : static_cast<std::uint32_t>(e);
     }
 
+    void set_hand_anchor(int hand, const Vec3& grip_position,
+                         const Quat& grip_rotation, float weight) override {
+        if (hand < 0 || hand > 1) return;
+        if (!std::isfinite(grip_position.x) || !std::isfinite(grip_position.y) ||
+            !std::isfinite(grip_position.z)) {
+            return;
+        }
+        auto& a = app_->hand_anchors_[static_cast<size_t>(hand)];
+        a.frame = app_->frame_index_;
+        a.position = grip_position;
+        a.rotation = glm::normalize(grip_rotation);
+        a.weight = std::clamp(weight, 0.0f, 1.0f);
+    }
+
+    bool hand_anchor(int hand, Vec3* grip_position, Quat* grip_rotation,
+                     float* weight) const override {
+        if (hand < 0 || hand > 1) return false;
+        const auto& a = app_->hand_anchors_[static_cast<size_t>(hand)];
+        if (a.frame != app_->frame_index_ || a.weight <= 0.0f) return false;
+        if (grip_position) *grip_position = a.position;
+        if (grip_rotation) *grip_rotation = a.rotation;
+        if (weight) *weight = a.weight;
+        return true;
+    }
+
+    Vec3 forearm_direction(int hand) const override {
+        if (hand < 0 || hand > 1) return Vec3(0.0f, 0.0f, 1.0f);
+        const auto h = static_cast<size_t>(hand);
+        // The avatar's own forearm, when a body published one recently.
+        if (app_->forearm_frame_[h] + 2 >= app_->frame_index_) {
+            return app_->forearm_dir_[h];
+        }
+        return app_->hand_forearm_direction(hand);
+    }
+
+    void publish_forearm_direction(int hand, const Vec3& dir) override {
+        if (hand < 0 || hand > 1) return;
+        const float len = glm::length(dir);
+        if (!(len > 1e-5f) || !std::isfinite(len)) return;
+        app_->forearm_dir_[static_cast<size_t>(hand)] = dir / len;
+        app_->forearm_frame_[static_cast<size_t>(hand)] = app_->frame_index_;
+    }
+
+    std::uint32_t support_entity(int hand) const override {
+        if (hand < 0 || hand > 1) return InputSnapshot::kInvalidEntity;
+        return app_->support_entity_[static_cast<size_t>(hand)];
+    }
+
+    void set_support_entity(int hand, std::uint32_t entity) override {
+        if (hand < 0 || hand > 1) return;
+        app_->support_entity_[static_cast<size_t>(hand)] = entity;
+    }
+
+    void request_hold(int hand, std::uint32_t entity) override {
+        if (hand < 0 || hand > 1) return;
+        app_->hold_request_[static_cast<size_t>(hand)] = entity;
+    }
+
+    std::uint32_t take_hold_request(int hand) override {
+        if (hand < 0 || hand > 1) return InputSnapshot::kInvalidEntity;
+        const auto e = app_->hold_request_[static_cast<size_t>(hand)];
+        app_->hold_request_[static_cast<size_t>(hand)] = InputSnapshot::kInvalidEntity;
+        return e;
+    }
+
 private:
     Application* app_;
 };
@@ -1241,6 +1348,49 @@ public:
             app_->physics_.set_kinematic(child, true);
         }
         return true;
+    }
+
+    bool attach_by_socket(std::uint32_t child, const char* child_socket,
+                          std::uint32_t parent, const char* anchor) override {
+        World& w = app_->world_;
+        if (!w.valid(child) || !w.valid(parent) || child_socket == nullptr) return false;
+        const auto ce = static_cast<entt::entity>(child);
+        if (!w.registry().all_of<CMesh, CTransform>(ce)) return false;
+        const auto& mesh = w.registry().get<CMesh>(ce);
+        const auto it = mesh.sockets.find(child_socket);
+        if (it == mesh.sockets.end()) {
+            PTV_WARN("attach_by_socket: entity {} has no socket '{}'", child, child_socket);
+            return false;
+        }
+        const float child_scale = w.registry().get<CTransform>(ce).t.scale;
+        const Mat4 sock = glm::translate(Mat4(1.0f), it->second.position * child_scale) *
+                          glm::mat4_cast(it->second.rotation);
+        // The hand's grip frame relative to its wrist joint, measured from
+        // the rig (palm centre + the rig's own grip alignment).
+        Mat4 grip_in_anchor(1.0f);
+        const std::string name = anchor == nullptr ? std::string() : anchor;
+        const ISkeleton* skel_api = app_->mech_ctx_.skeleton;
+        if (skel_api != nullptr &&
+            w.registry().all_of<CSkeleton>(static_cast<entt::entity>(parent))) {
+            std::string lower = name;
+            std::transform(lower.begin(), lower.end(), lower.begin(),
+                           [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+            const bool is_hand = lower.find("hand") != std::string::npos ||
+                                 lower.find("wrist") != std::string::npos;
+            if (is_hand) {
+                const int side = (lower.find("_l") != std::string::npos ||
+                                  lower.find("left") != std::string::npos)
+                                     ? 0 : 1;
+                const auto rig = hand_rig::analyze(*skel_api, parent, side);
+                if (rig.valid) {
+                    grip_in_anchor = glm::translate(Mat4(1.0f), rig.palm_offset_wrist_local) *
+                                     glm::mat4_cast(glm::inverse(rig.grip_to_wrist_rot));
+                }
+            }
+        }
+        const Mat4 local = grip_in_anchor * glm::inverse(sock);
+        return attach(child, parent, anchor, Vec3(local[3]),
+                      glm::normalize(glm::quat_cast(Mat3(local))));
     }
 
     void detach(std::uint32_t child) override {
@@ -1975,13 +2125,83 @@ public:
 
     bool apply_damage(std::uint32_t target, float amount,
                       std::uint32_t instigator) override {
+        return apply_impl(target, amount, instigator, false);
+    }
+
+    bool apply_weapon_damage(std::uint32_t target, float amount,
+                             std::uint32_t instigator) override {
+        const bool on_player = target == static_cast<std::uint32_t>(app_->player_entity_);
+        return apply_impl(target, amount, instigator, !on_player);
+    }
+
+    void set_blocker(std::uint32_t shield, bool enabled, float leak) override {
+        if (enabled) {
+            blockers_[shield] = std::clamp(leak, 0.0f, 1.0f);
+        } else {
+            blockers_.erase(shield);
+        }
+    }
+
+    std::uint64_t blocked_seq(std::uint32_t shield) const override {
+        const auto it = blocked_.find(shield);
+        return it == blocked_.end() ? 0 : it->second;
+    }
+
+    /** A registered shield held by ``target`` that the attacker's line
+     *  to the target passes through, or invalid. */
+    std::uint32_t blocking_shield(std::uint32_t target, std::uint32_t instigator) const {
+        World& w = app_->world_;
+        if (blockers_.empty() || !w.valid(instigator) || !w.has<CTransform>(instigator) ||
+            !w.has<CTransform>(target)) {
+            return InputSnapshot::kInvalidEntity;
+        }
+        for (const auto& [shield, leak] : blockers_) {
+            (void)leak;
+            bool held_by_target = false;
+            if (target == static_cast<std::uint32_t>(app_->player_entity_)) {
+                for (const auto& hand : app_->hands_) {
+                    if (hand.held == static_cast<entt::entity>(shield)) held_by_target = true;
+                }
+            } else if (w.valid(shield) && w.has<CAttachment>(shield) &&
+                       w.get<CAttachment>(shield).parent == target) {
+                held_by_target = true;
+            }
+            if (!held_by_target) continue;
+            const Vec3 from = w.get<CTransform>(instigator).t.position + Vec3(0.0f, 1.1f, 0.0f);
+            Vec3 to = w.get<CTransform>(target).t.position;
+            if (target == static_cast<std::uint32_t>(app_->player_entity_)) {
+                to = app_->last_head_world_pos_ - Vec3(0.0f, 0.35f, 0.0f);
+            }
+            const Vec3 d = to - from;
+            const float len = glm::length(d);
+            if (len < 1e-3f) continue;
+            PhysicsWorld::RayFilter f{};
+            f.ignore.push_back(instigator);
+            Vec3 hit(0.0f), n(0.0f);
+            std::uint32_t e = InputSnapshot::kInvalidEntity;
+            if (app_->physics_.raycast(from, d / len, len + 0.3f, f, hit, n, e) && e == shield) {
+                return shield;
+            }
+        }
+        return InputSnapshot::kInvalidEntity;
+    }
+
+    bool apply_impl(std::uint32_t target, float amount, std::uint32_t instigator,
+                    bool ignore_invuln) {
         World& w = app_->world_;
         if (!w.valid(target) || !w.has<CHealth>(target)) return false;
         if (!std::isfinite(amount) || amount <= 0.0f) return false;
 
         auto& hp = w.get<CHealth>(target);
         if (!hp.alive || hp.death_timer_s >= 0.0f) return false;
-        if (hp.invuln_s > 0.0f) return false;
+        if (hp.invuln_s > 0.0f && !ignore_invuln) return false;
+        // A shield in the way takes the blow.
+        const std::uint32_t shield = blocking_shield(target, instigator);
+        if (shield != InputSnapshot::kInvalidEntity) {
+            ++blocked_[shield];
+            amount *= blockers_[shield];
+            if (amount <= 0.0f) return false;
+        }
 
         // Verification keeps the player alive so a test run can watch the
         // whole encounter; the hit is still recorded below.
@@ -2119,8 +2339,10 @@ private:
         const bool on_player =
             target == static_cast<std::uint32_t>(app_->player_entity_);
         if (on_player) ++player_hits_;
+        // Not in the weapons pass: there the target has to survive long
+        // enough to be shot.
         if (on_player && app_->verify_mode_ && !app_->verify_flow_ &&
-            instigator != InputSnapshot::kInvalidEntity) {
+            !app_->verify_weapons_ && instigator != InputSnapshot::kInvalidEntity) {
             auto& q = app_->verify_defeats_;
             const bool queued = std::any_of(q.begin(), q.end(), [&](const auto& p) {
                 return p.first == instigator;
@@ -2138,6 +2360,8 @@ private:
     Application* app_;
     DamageLog log_{};
     int player_hits_{0};
+    std::unordered_map<std::uint32_t, float> blockers_;
+    std::unordered_map<std::uint32_t, std::uint64_t> blocked_;
 };
 
 class Application::PerceptionService final : public IPerception {
@@ -3156,6 +3380,10 @@ void Application::create_hand_entities() {
             if (rig.valid) {
                 hand_grip_to_entity_[static_cast<size_t>(h)] =
                     rig.grip_to_entity;
+                // The wrist, seen from the grip frame: palm -> wrist is the
+                // forearm's direction for a hand with no arm attached.
+                hand_wrist_in_grip_[static_cast<size_t>(h)] =
+                    Vec3((rig.grip_to_entity * rig.wrist_bind_model)[3]);
                 finger_targets_[static_cast<size_t>(h)] = e;
             } else {
                 PTV_WARN("default hand {} has no recognisable fingers",
@@ -3543,6 +3771,58 @@ void Application::draw_hand_debug_axes(const Vec3 grip_pos[2],
         draw_svc_->line(grip_pos[h], grip_pos[h] + g * Vec3(0, 0, -0.2f),
                         Vec4(1, 1, 1, 1), 0.002f);
     }
+}
+
+void Application::configure_weapon_systems() {
+    if (!effects_ || !projectiles_) return;
+    const ScenePerformance& p = scene_.performance;
+    EffectsBudget b{};
+    b.max_quads = static_cast<std::size_t>(std::max(64, p.max_fx_quads));
+    b.max_decals = static_cast<std::size_t>(std::max(0, p.max_decals));
+    b.max_lights = static_cast<std::size_t>(std::max(0, p.max_flash_lights));
+    effects_->configure(b);
+    renderer_.set_fx_budget(b.max_quads);
+    projectiles_->configure(p.max_live_projectiles, p.max_projectile_meshes);
+    projectiles_->bind(ProjectileSystem::Services{&world_, physics_svc_.get(),
+                                                  combat_svc_.get(), effects_.get(),
+                                                  hands_svc_.get()});
+    std::vector<ProjectileSystem::Preset> presets;
+    for (const auto& e : scene_.projectiles) {
+        ProjectileSystem::Preset pr{};
+        pr.id = e.id;
+        pr.template_name = e.template_entity;
+        ProjectileDesc& d = pr.desc;
+        d.velocity = Vec3(0.0f, 0.0f, -std::max(1.0f, e.speed_mps));
+        d.gravity_scale = e.gravity_scale;
+        d.drag = e.drag;
+        d.radius_m = e.radius_m;
+        d.lifetime_s = e.lifetime_s;
+        d.splash_radius_m = e.splash_radius_m;
+        d.splash_damage = e.splash_damage;
+        d.on_hit = e.on_hit == "stick"     ? ProjectileOnHit::Stick
+                   : e.on_hit == "bounce"  ? ProjectileOnHit::Bounce
+                   : e.on_hit == "explode" ? ProjectileOnHit::Explode
+                                           : ProjectileOnHit::Despawn;
+        d.visual = e.kind == "energy_bolt" ? ProjectileVisual::Bolt : ProjectileVisual::Tracer;
+        d.visual_width_m = std::max(0.004f, e.diameter_m * 1.2f);
+        d.visual_length_m = std::max(0.05f, e.length_m);
+        d.impact = e.on_hit == "explode" ? ImpactStyle::Explosion
+                   : e.kind == "energy_bolt" ? ImpactStyle::Energy
+                   : e.kind == "arrow"       ? ImpactStyle::Dust
+                                             : ImpactStyle::Sparks;
+        presets.push_back(std::move(pr));
+    }
+    projectiles_->set_presets(std::move(presets));
+}
+
+Vec3 Application::hand_forearm_direction(int hand) const {
+    const auto h = static_cast<size_t>(hand);
+    const Vec3 wrist = hand_wrist_in_grip_[h];
+    // OpenXR grip +Y points from the palm back toward the wrist for a hand
+    // closed on a controller; the rig's measured wrist refines it.
+    const Vec3 local = glm::length(wrist) > 0.02f ? glm::normalize(wrist)
+                                                  : Vec3(0.0f, 1.0f, 0.0f);
+    return glm::normalize(last_grip_rot_[h] * local);
 }
 
 void Application::place_hand_entity(int hand, const Vec3& grip_pos,
@@ -4210,6 +4490,9 @@ bool Application::load_scene_at(const std::string& path,
     clone_children_.clear();
     encounter_board_.clear();
     game_flow_board_.clear();
+    if (projectiles_) projectiles_->clear();
+    if (effects_) effects_->clear();
+    if (weapons_) weapons_->clear();
     // Physics bodies are dropped by rebuild_from_world below, which tracks
     // them by body id rather than through the world, so it does not matter
     // that the entities are gone by then.
@@ -4246,6 +4529,7 @@ bool Application::load_scene_at(const std::string& path,
         renderer_.set_performance(scene_.performance);
         governor_.configure(scene_.performance);
     }
+    configure_weapon_systems();
     // The new scene's mechanics declare what they offer as they attach; the
     // player's chosen mode survives the trip if the new scene offers it too.
     mode_available_ = {false, false, false};
@@ -4697,9 +4981,26 @@ void Application::read_verify_mode() {
         flow = v[0] == '1' || v[0] == 't' || v[0] == 'y';
     }
 #endif
+    bool weapons = false;
+#if defined(__ANDROID__)
+    char weapons_value[PROP_VALUE_MAX] = {0};
+    if (__system_property_get("debug.ptv.verify_weapons", weapons_value) > 0) {
+        weapons = weapons_value[0] == '1' || weapons_value[0] == 't' || weapons_value[0] == 'y';
+    }
+#else
+    if (const char* v = std::getenv("PTV_VERIFY_WEAPONS")) {
+        weapons = v[0] == '1' || v[0] == 't' || v[0] == 'y';
+    }
+#endif
+    verify_weapons_ = weapons && !flow;
+    weapon_verifier_ = verify_weapons_ ? std::make_unique<WeaponVerifier>() : nullptr;
+    if (verify_weapons_) {
+        PTV_INFO("verify: WEAPONS mode on (player stands still, a scripted hand "
+                 "holds and fires every weapon, player cannot die)");
+    }
     // The flow pass is a verification run too (scripted walk, telemetry).
     verify_flow_ = flow;
-    verify_mode_ = on || flow;
+    verify_mode_ = on || flow || verify_weapons_;
     verify_time_s_ = 0.0f;
     verify_origin_set_ = false;
     if (flow) {
@@ -4711,7 +5012,7 @@ void Application::read_verify_mode() {
 }
 
 void Application::tick_verify_autopilot(float dt) {
-    if (!verify_mode_ || player_entity_ == entt::null || dt <= 0.0f) return;
+    if (!verify_mode_ || verify_weapons_ || player_entity_ == entt::null || dt <= 0.0f) return;
     verify_time_s_ += dt;
     // Settle first: spawn, ground the body, let the scene's start delay run.
     constexpr float kSettleS = 3.0f;
@@ -5079,6 +5380,9 @@ void Application::attach_skeletons() {
 
         CSkeleton cs{};
         cs.local_pose = skel.bind_pose;
+        // Sockets on a rigged mesh ride the joint nearest them, so a muzzle
+        // on a goblin's built-in rifle follows the animated arm.
+        cs.socket_joint = bind_sockets_to_joints(cm.sockets, skel);
         cs.skeleton = std::move(skel);
         gltf_mesh_load::build_joint_palette(cs.skeleton, cs.local_pose,
                                             cs.palette);
@@ -5111,6 +5415,26 @@ void Application::attach_skeletons() {
     }
     if (rigged > 0) {
         PTV_INFO("Attached {} skeleton(s) from rigged GLBs", rigged);
+    }
+    // Gear authored to sit on a hand by its own grip socket (an NPC's
+    // rifle): seat it now that the hand's rig is known.
+    if (attach_svc_ != nullptr) {
+        std::vector<std::pair<std::uint32_t, CAttachment>> pending;
+        auto av = world_.registry().view<CAttachment>();
+        for (const auto e : av) {
+            const auto& a = av.get<CAttachment>(e);
+            if (!a.child_socket.empty()) pending.emplace_back(static_cast<std::uint32_t>(e), a);
+        }
+        for (const auto& [child, a] : pending) {
+            if (!attach_svc_->attach_by_socket(child, a.child_socket.c_str(), a.parent,
+                                               a.anchor.c_str())) {
+                PTV_WARN("scene: could not seat entity {} by socket '{}' on '{}'", child,
+                         a.child_socket, a.anchor);
+            }
+            if (world_.registry().all_of<CAttachment>(static_cast<entt::entity>(child))) {
+                world_.registry().get<CAttachment>(static_cast<entt::entity>(child)).child_socket.clear();
+            }
+        }
     }
 }
 
@@ -5276,6 +5600,7 @@ int Application::run(const Config& cfg) {
             // is on screen. Position/rotation only -- the pose of the FINGERS
             // is builtin.hand_pose's business.
             const auto he = hand_entities_[static_cast<size_t>(h)];
+            if (hand_valid[h]) last_grip_rot_[static_cast<size_t>(h)] = hand_world_rot[h];
             if (he != entt::null && hand_valid[h] &&
                 world_.registry().all_of<CTransform>(he)) {
                 place_hand_entity(h, hand_world_pos[h], hand_world_rot[h]);
@@ -5424,6 +5749,7 @@ int Application::run(const Config& cfg) {
                 s.head_rotation = head_world_rot;
                 s.head_valid = true;
             }
+            if (weapon_verifier_) weapon_verifier_->patch(s);
             return s;
         };
 
@@ -5461,6 +5787,7 @@ int Application::run(const Config& cfg) {
         // Locomotion, grab and throw all live here.
         // ------------------------------------------------------------
         mech_draw_items_.clear();
+        ++frame_index_;
         if (contacts_svc_) contacts_svc_->begin_frame();
         {
             const InputSnapshot provisional = build_snapshot();
@@ -5494,10 +5821,26 @@ int Application::run(const Config& cfg) {
                     Vec3(pose_correction * Vec4(hand_world_pos[h], 1.0f));
                 hand_world_rot[h] = corr_rot * hand_world_rot[h];
                 aim_world_rot[h] = corr_rot * aim_world_rot[h];
+                if (hand_valid[h]) last_grip_rot_[static_cast<size_t>(h)] = hand_world_rot[h];
+                // A hand anchored to what it holds (IHands::set_hand_anchor,
+                // set by builtin.grab during the Input phase) is drawn on
+                // the item's socket. The anchor was computed before the
+                // motor's correction, so it gets the same correction, and
+                // is written back for Simulate-phase readers (the avatar).
+                Vec3 place_pos = hand_world_pos[h];
+                Quat place_rot = hand_world_rot[h];
+                auto& anchor = hand_anchors_[static_cast<size_t>(h)];
+                if (anchor.frame == frame_index_ && anchor.weight > 0.0f) {
+                    anchor.position = Vec3(pose_correction * Vec4(anchor.position, 1.0f));
+                    anchor.rotation = glm::normalize(corr_rot * anchor.rotation);
+                    place_pos = glm::mix(place_pos, anchor.position, anchor.weight);
+                    place_rot = glm::normalize(
+                        glm::slerp(place_rot, anchor.rotation, anchor.weight));
+                }
                 const auto he = hand_entities_[static_cast<size_t>(h)];
                 if (he != entt::null && hand_valid[h] &&
                     world_.registry().all_of<CTransform>(he)) {
-                    place_hand_entity(h, hand_world_pos[h], hand_world_rot[h]);
+                    place_hand_entity(h, place_pos, place_rot);
                 }
             }
             if (input.head_valid) {
@@ -5542,6 +5885,10 @@ int Application::run(const Config& cfg) {
 
         mechanics_.update(world_, dt, snapshot, mech_ctx_,
                           MechanicPhase::Simulate);
+        if (weapon_verifier_) {
+            weapon_verifier_->tick(dt, world_, mech_ctx_, head_world_pos, head_world_rot,
+                                   scene_.performance.max_live_projectiles);
+        }
 
         // Every motion mechanic has asked for (or not asked for) a vignette
         // this frame; turn that into what the renderer draws.
@@ -5551,6 +5898,11 @@ int Application::run(const Config& cfg) {
         // AFTER Simulate so an impulse requested this frame is drawn this
         // frame, and before the draw list is built below.
         tick_transform_offsets(world_, dt);
+
+        // Projectiles fired this frame start moving now; then every effect
+        // (including the projectiles' own trails) becomes this frame's quads.
+        if (projectiles_) projectiles_->tick(dt);
+        if (effects_) effects_->tick(dt, renderer_);
 
         // Evaluate skeletal poses in the same window and for the same reason:
         // a mechanic that curled a finger from the trigger during Simulate
@@ -5705,7 +6057,15 @@ int Application::run(const Config& cfg) {
                     // space in sync_input/locomotion -- not here -- so
                     // locomotion logic always sees this frame's head
                     // pose, never the previous frame's render snapshot.
-                    renderer_.draw_frame(targets, items, render_env_);
+                    if (effects_) {
+                        // Muzzle flashes and explosions light the scene for
+                        // a few frames.
+                        Renderer::RenderEnv env = render_env_;
+                        effects_->append_lights(env.points);
+                        renderer_.draw_frame(targets, items, env);
+                    } else {
+                        renderer_.draw_frame(targets, items, render_env_);
+                    }
                 });
         } else if (xr_should_render) {
             // begin_xr_frame() opened a real frame but renderer isn't
@@ -5788,6 +6148,13 @@ int Application::run(const Config& cfg) {
                     scene_.performance.max_animated_agents,
                     renderer_.lod_bias(),
                     renderer_.cull_distance(), xr_.foveation_level());
+                // Weapons: live projectiles, effect quads drawn and casts.
+                PTV_INFO("perf_fx: projectiles {} (cap {}) | fx_quads {} (cap {}) | "
+                         "casts {}",
+                         projectiles_ ? projectiles_->live_count() : 0,
+                         scene_.performance.max_live_projectiles,
+                         renderer_.fx_quads_drawn(), scene_.performance.max_fx_quads,
+                         projectiles_ ? projectiles_->casts_last_tick() : 0);
                 telemetry_accum_s_ = 0.0f;
                 telemetry_work_accum_s_ = 0.0f;
                 telemetry_frames_ = 0;
@@ -5929,6 +6296,14 @@ bool Application::initialize(const Config& cfg) {
     comfort_svc_ = std::make_unique<ComfortService>(this);
     app_svc_ = std::make_unique<AppService>(this);
     text_svc_ = std::make_unique<TextDrawService>(this);
+    effects_ = std::make_unique<EffectsSystem>();
+    projectiles_ = std::make_unique<ProjectileSystem>();
+    weapons_hands_ = hands_svc_.get();
+    weapons_ = std::make_unique<WeaponBoard>(&weapons_hands_);
+    mech_ctx_.vfx = effects_.get();
+    mech_ctx_.projectiles = projectiles_.get();
+    mech_ctx_.weapons = weapons_.get();
+    configure_weapon_systems();
     mech_ctx_.locomotion = locomotion_svc_.get();
     mech_ctx_.comfort = comfort_svc_.get();
     mech_ctx_.game = &game_flow_board_;

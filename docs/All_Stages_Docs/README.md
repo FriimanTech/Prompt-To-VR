@@ -9,11 +9,11 @@ Authoritative pipeline order: [`apps/orchestrator/ptv_orchestrator/pipeline/orch
 ```mermaid
 flowchart TD
   subgraph shared [Stages 1-15 shared]
-    S1[1 build_spec] --> S2[2 asset_manifest] --> S3[3 npc_plan]
+    S1[1 build_spec] --> S2[2 asset_manifest] --> S2b[2b interaction_design] --> S3[3 npc_plan]
     S3 --> S3b[3b game_design] --> S4[4 mechanic_plan] --> S5[5 scene_spec]
     S5 --> S6[6 reference_images] --> S7[7 tripo_models]
     S7 --> S8[8 asset_rigging] --> S9[9 asset_animation]
-    S9 --> S10[10 asset_normalization] --> S11[11 asset_contract]
+    S9 --> S10[10 asset_normalization] --> S10b[10b socket_generation] --> S11[11 asset_contract]
     S11 --> S12[12 code_generation] --> S13[13 world_generation]
     S13 --> S14[14 asset_optimization] --> S15[15 scene_compile]
   end
@@ -31,6 +31,7 @@ Stages **1–15** and **17** are identical for PC VR and Quest. Only **stage 16*
 |---|----------|------------------|------------|
 | 1 | `build_spec` | Prompt → structured BuildSpec | [PC](PC_VR_Stages/01_build_spec/README.md) · [Quest](Quest_Stages/01_build_spec/README.md) |
 | 2 | `asset_manifest` | Plan 3D objects (not environment) | [PC](PC_VR_Stages/02_asset_manifest/README.md) · [Quest](Quest_Stages/02_asset_manifest/README.md) |
+| 2b | `interaction_design` | How every item is held, its sockets, how weapons fire | [PC](PC_VR_Stages/02b_interaction_design/README.md) · [Quest](Quest_Stages/02b_interaction_design/README.md) |
 | 3 | `npc_plan` | NPC roles, factions, animate vs slide | [PC](PC_VR_Stages/03_npc_plan/README.md) · [Quest](Quest_Stages/03_npc_plan/README.md) |
 | 3b | `game_design` | Health, lives, respawn, objectives, end screens | [PC](PC_VR_Stages/03b_game_design/README.md) · [Quest](Quest_Stages/03b_game_design/README.md) |
 | 4 | `mechanic_plan` | Reuse-first mechanics + CodeTask DAG | [PC](PC_VR_Stages/04_mechanic_plan/README.md) · [Quest](Quest_Stages/04_mechanic_plan/README.md) |
@@ -40,7 +41,8 @@ Stages **1–15** and **17** are identical for PC VR and Quest. Only **stage 16*
 | 8 | `asset_rigging` | Tripo auto-rig (~30 credits/asset) | [PC](PC_VR_Stages/08_asset_rigging/README.md) · [Quest](Quest_Stages/08_asset_rigging/README.md) |
 | 9 | `asset_animation` | Retarget clips + clip contract | [PC](PC_VR_Stages/09_asset_animation/README.md) · [Quest](Quest_Stages/09_asset_animation/README.md) |
 | 10 | `asset_normalization` | Validate GLBs, record metadata | [PC](PC_VR_Stages/10_asset_normalization/README.md) · [Quest](Quest_Stages/10_asset_normalization/README.md) |
-| 11 | `asset_contract` | Derive sockets (muzzle, grip, …) | [PC](PC_VR_Stages/11_asset_contract/README.md) · [Quest](Quest_Stages/11_asset_contract/README.md) |
+| 10b | `socket_generation` | Find each item's sockets on the mesh (vision + geometry + verify) | [PC](PC_VR_Stages/10b_socket_generation/README.md) · [Quest](Quest_Stages/10b_socket_generation/README.md) |
+| 11 | `asset_contract` | Merge sockets + holds, character model frames | [PC](PC_VR_Stages/11_asset_contract/README.md) · [Quest](Quest_Stages/11_asset_contract/README.md) |
 | 12 | `code_generation` | Multi-agent C++ + compile-verify | [PC](PC_VR_Stages/12_code_generation/README.md) · [Quest](Quest_Stages/12_code_generation/README.md) |
 | 13 | `world_generation` | C++ VR environment → world.scene.json | [PC](PC_VR_Stages/13_world_generation/README.md) · [Quest](Quest_Stages/13_world_generation/README.md) |
 | 14 | `asset_optimization` | LOD decimation + performance profile | [PC](PC_VR_Stages/14_asset_optimization/README.md) · [Quest](Quest_Stages/14_asset_optimization/README.md) |

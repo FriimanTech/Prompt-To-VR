@@ -36,6 +36,8 @@ from .binding_validator import validate_bindings
 from .builtin_source import editable_builtins_note
 from .context import PipelineContext, StageResult
 from .game_flow_plan import reconcile_game_flow_items
+from .interaction_rules import design_excerpt
+from .weapon_plan import reconcile_weapon_items
 from .mechanic_plan_agent import (
     MechanicPlanAgentInput,
     MechanicPlanner,
@@ -101,6 +103,24 @@ def run_with_planner(
         if design is not None else
         "GAME LOOP: no game design for this project."
     )
+    interaction = (ctx.interaction_design
+                   or ctx.store.load_interaction_design(ctx.project_id))
+    excerpt = design_excerpt(interaction)
+    weapon_rule = (
+        "WEAPONS: how every item is held and fires is decided (interaction "
+        "design below). Firing, ammo, reload, recoil, tracers, projectiles, "
+        "beams, muzzle flash, hit detection and weapon damage are "
+        "builtin.weapon; bows are builtin.bow (+ builtin.item_source for the "
+        "quiver); swords / hammers / axes are builtin.melee_weapon; shields "
+        "are builtin.shield; NPCs that shoot are builtin.npc.ranged_attack. "
+        "The scene compiler binds all of them from the design. Plan NO "
+        "shooting hub, fire profile, ammo / reload, recoil, projectile or "
+        "melee-hit mechanic, and no builtin.recoil. Game-specific reactions "
+        "(a target that scores, a HUD) are generated code that READS "
+        "ctx.weapons->hits_since / state. Items:\n" + excerpt
+        if excerpt else
+        "WEAPONS: no interaction design; no weapons are designed."
+    )
     inp = MechanicPlanAgentInput(
         build_spec_json=build_spec.model_dump_json(indent=2),
         asset_manifest_json=manifest.model_dump_json(indent=2),
@@ -130,6 +150,7 @@ def run_with_planner(
             " flight, special abilities), and for wave HUDs that READ"
             " ctx.encounters.",
             loop_rule,
+            weapon_rule,
         ],
     )
 
@@ -179,6 +200,12 @@ def run_with_planner(
     for note in flow_notes:
         ctx.emit(ProjectStage.mechanic_plan, "info", f"game loop: {note}"[:240])
         ctx.store.append_log(ctx.project_id, "mechanic_plan", f"game loop: {note}")
+
+    # Weapons run on builtin.weapon / bow / melee_weapon / shield.
+    plan, weapon_notes = reconcile_weapon_items(plan, interaction, npc_plan)
+    for note in weapon_notes:
+        ctx.emit(ProjectStage.mechanic_plan, "info", f"weapons: {note}"[:240])
+        ctx.store.append_log(ctx.project_id, "mechanic_plan", f"weapons: {note}")
 
     ctx.mechanic_plan = plan
     art = ctx.store.save_mechanic_plan(ctx.project_id, plan)

@@ -23,6 +23,11 @@ dependencies = [
     # (Apr/May 2026). The SDK ships the hosted ``WebSearchTool`` and
     # Pydantic-typed structured outputs used by ``codegen_agent.py``.
     "openai-agents>=0.17,<1.0",
+    # socket_generation: triangle-id back-projection, region PCA and the
+    # per-kind socket solvers work on whole meshes and 768x768 id buffers.
+    "numpy>=2.0",
+    # socket_generation rasterises Gemini's mask polygons and reads renders.
+    "pillow>=10",
 ]
 
 [project.optional-dependencies]

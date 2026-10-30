@@ -109,8 +109,17 @@ const STAGES: StageMeta[] = [
     blurb: "Which objects to generate. The environment is not one of them.",
   },
   {
-    id: "npc_plan",
+    id: "interaction_design",
     step: 3,
+    label: "Interaction design",
+    group: "plan",
+    cost: "llm",
+    blurb:
+      "How each item is held and used: one or two hands, straps, the sockets to find on it, and for weapons how they fire and what they fire. Adds projectile meshes only when they can be seen.",
+  },
+  {
+    id: "npc_plan",
+    step: 4,
     label: "NPC plan",
     group: "plan",
     cost: "llm",
@@ -119,7 +128,7 @@ const STAGES: StageMeta[] = [
   },
   {
     id: "game_design",
-    step: 4,
+    step: 5,
     label: "Game design",
     group: "plan",
     cost: "llm",
@@ -128,7 +137,7 @@ const STAGES: StageMeta[] = [
   },
   {
     id: "mechanic_plan",
-    step: 5,
+    step: 6,
     label: "MechanicPlan",
     group: "plan",
     cost: "llm",
@@ -137,7 +146,7 @@ const STAGES: StageMeta[] = [
   },
   {
     id: "scene_spec",
-    step: 6,
+    step: 7,
     label: "SceneSpec",
     group: "plan",
     cost: "llm",
@@ -145,7 +154,7 @@ const STAGES: StageMeta[] = [
   },
   {
     id: "reference_images",
-    step: 7,
+    step: 8,
     label: "Reference images",
     group: "assets",
     cost: "credits",
@@ -153,7 +162,7 @@ const STAGES: StageMeta[] = [
   },
   {
     id: "tripo_models",
-    step: 8,
+    step: 9,
     label: "Tripo 3D models",
     group: "assets",
     cost: "credits",
@@ -161,7 +170,7 @@ const STAGES: StageMeta[] = [
   },
   {
     id: "character_routing",
-    step: 9,
+    step: 10,
     label: "Character routing",
     group: "assets",
     cost: "llm",
@@ -170,7 +179,7 @@ const STAGES: StageMeta[] = [
   },
   {
     id: "uthana_rigging",
-    step: 10,
+    step: 11,
     label: "Uthana auto-rig",
     group: "assets",
     cost: "credits",
@@ -179,7 +188,7 @@ const STAGES: StageMeta[] = [
   },
   {
     id: "asset_rigging",
-    step: 11,
+    step: 12,
     label: "Auto-rigging",
     group: "assets",
     cost: "credits",
@@ -188,7 +197,7 @@ const STAGES: StageMeta[] = [
   },
   {
     id: "asset_animation",
-    step: 12,
+    step: 13,
     label: "Animation retarget",
     group: "assets",
     cost: "credits",
@@ -196,7 +205,7 @@ const STAGES: StageMeta[] = [
   },
   {
     id: "uthana_motion_plan",
-    step: 13,
+    step: 14,
     label: "Uthana motion plan",
     group: "assets",
     cost: "llm",
@@ -205,7 +214,7 @@ const STAGES: StageMeta[] = [
   },
   {
     id: "uthana_animation",
-    step: 14,
+    step: 15,
     label: "Uthana animation",
     group: "assets",
     cost: "credits",
@@ -214,7 +223,7 @@ const STAGES: StageMeta[] = [
   },
   {
     id: "asset_normalization",
-    step: 15,
+    step: 16,
     label: "Asset normalization",
     group: "assets",
     cost: "free",
@@ -222,17 +231,26 @@ const STAGES: StageMeta[] = [
       "Validates every GLB (header, scale, collision, skinned flag) and writes asset_normalization.json. Changes no geometry.",
   },
   {
+    id: "socket_generation",
+    step: 17,
+    label: "Socket generation",
+    group: "assets",
+    cost: "credits",
+    blurb:
+      "Renders each held item from ten angles, has Gemini find its handle, barrel, straps or blade, and turns those parts into exact grip, muzzle and strap sockets. Verified against overlay renders; cached by GLB hash.",
+  },
+  {
     id: "asset_contract",
-    step: 16,
-    label: "Asset sockets",
+    step: 18,
+    label: "Asset contract",
     group: "assets",
     cost: "free",
     blurb:
-      "Derives named attachment points (muzzle, grip) from geometry, so gameplay code can ask for them by name.",
+      "Merges the sockets and hold profiles with each character's measured model frame into asset_contract.json.",
   },
   {
     id: "world_generation",
-    step: 17,
+    step: 19,
     label: "VR environments",
     group: "build",
     cost: "llm",
@@ -241,7 +259,7 @@ const STAGES: StageMeta[] = [
   },
   {
     id: "code_generation",
-    step: 18,
+    step: 20,
     label: "Gameplay C++",
     group: "build",
     cost: "llm",
@@ -250,7 +268,7 @@ const STAGES: StageMeta[] = [
   },
   {
     id: "asset_optimization",
-    step: 19,
+    step: 21,
     label: "Decimation and LODs",
     group: "compile",
     cost: "free",
@@ -259,7 +277,7 @@ const STAGES: StageMeta[] = [
   },
   {
     id: "scene_compile",
-    step: 20,
+    step: 22,
     label: "Scene compile",
     group: "compile",
     cost: "free",
@@ -268,7 +286,7 @@ const STAGES: StageMeta[] = [
   },
   {
     id: "cmake_build",
-    step: 21,
+    step: 23,
     label: "CMake build (.exe)",
     group: "ship",
     cost: "free",
@@ -277,7 +295,7 @@ const STAGES: StageMeta[] = [
   },
   {
     id: "quest_build",
-    step: 21,
+    step: 23,
     label: "Quest APK build",
     group: "ship",
     cost: "free",
@@ -286,7 +304,7 @@ const STAGES: StageMeta[] = [
   },
   {
     id: "quest_runtime_verify",
-    step: 22,
+    step: 24,
     label: "Verify on headset",
     group: "ship",
     cost: "free",
@@ -298,7 +316,7 @@ const STAGES: StageMeta[] = [
   // the step number is what the timeline shows.
   {
     id: "engine_promotion",
-    step: 22,
+    step: 24,
     label: "Engine promotion",
     group: "ship",
     cost: "free",
@@ -307,7 +325,7 @@ const STAGES: StageMeta[] = [
   },
   {
     id: "engine_promotion",
-    step: 23,
+    step: 25,
     label: "Engine promotion",
     group: "ship",
     cost: "free",

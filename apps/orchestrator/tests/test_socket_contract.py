@@ -136,6 +136,39 @@ def test_sockets_are_converted_from_unit_space_to_metres():
     assert muzzle["rotation"] == [0.0, 0.0, 0.0, 1.0]
 
 
+def test_hold_profile_and_socket_extras_reach_scene_json():
+    from ptv_orchestrator.pipeline.stage_scene_compile import (
+        _mesh_render_fields,
+        hold_violations,
+    )
+
+    contract = {
+        "sockets": {
+            "grip": {"position": [0.0, -0.2, 0.0], "rotation": [0, 0, 0, 1],
+                     "kind": "hand_grip", "confidence": "vision_verified",
+                     "handle_thickness_unit": 0.1, "mirror": "same"},
+            "support": {"position": [0.5, 0.0, 0.0], "rotation": [0, 0, 0, 1],
+                        "kind": "support_grip", "mirror": "flip_z180"},
+            "muzzle": {"position": [0.0, 0.0, 1.0], "rotation": [0, 0, 0, 1],
+                       "kind": "muzzle", "bore_diameter_unit": 0.01},
+        },
+        "hold": {"kind": "two_hand_line", "aim_aligned": True, "two_hand": "optional",
+                 "primary_socket": "grip", "support_socket": "support",
+                 "finger_pose": "trigger", "forward": [0, 0, 1], "up": [0, 1, 0]},
+    }
+    out = _mesh_render_fields({}, 0.8, contract, asset_id="rifle")
+    assert out["sockets"]["grip"]["kind"] == "hand_grip"
+    assert out["sockets"]["grip"]["handle_thickness_m"] == pytest.approx(0.08)
+    assert out["sockets"]["muzzle"]["bore_diameter_m"] == pytest.approx(0.008)
+    assert out["sockets"]["support"]["mirror"] == "flip_z180"
+    assert out["hold"]["kind"] == "two_hand_line" and out["hold"]["forward"] == [0, 0, 1]
+    errors, warnings = hold_violations([{"id": "rifle", "mesh": out}])
+    assert errors == [] and warnings == []
+    out["hold"]["primary_socket"] = "nope"
+    errors, _ = hold_violations([{"id": "rifle", "mesh": out}])
+    assert errors and "missing primary socket" in errors[0]
+
+
 def test_missing_required_socket_fails_loudly_with_available_names():
     empty_contract = {"blaster": {"status": "ok", "space": "unit", "sockets": {}}}
     with pytest.raises(SocketContractError) as excinfo:

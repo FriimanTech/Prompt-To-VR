@@ -58,6 +58,9 @@ from .encounters import (
     place_persistent_npcs,
 )
 from .game_flow_scene import apply_game_flow, game_flow_violations
+from .interaction_rules import engine_drawn_fx_assets
+from .projectile_scale import apply_scales, projectile_scale_corrections
+from .weapon_scene import apply_weapons, weapon_violations
 from .npc_population import repair_npc_plan
 from .gameplay_relocation import (
     relocate_gameplay_layer,
@@ -155,6 +158,11 @@ class EquipSlotContractError(RuntimeError):
 
 class GameFlowContractError(RuntimeError):
     """The game design's loop cannot complete in a compiled scene."""
+
+
+class WeaponContractError(RuntimeError):
+    """A designed weapon cannot work in a compiled scene (no muzzle, no
+    template for its projectile, a bow without limb tips)."""
 
 
 class ModelFrameContractError(RuntimeError):
@@ -324,14 +332,19 @@ def _check_equip_slots(
     the WEARER, so "does this entity have slots" is the wrong question.
     """
     declared: dict[str, list[str]] = {}
+    placed: dict[str, list[str]] = {}
     for e in entities:
         for slot in e.get("equip_slots") or []:
             declared.setdefault(slot["name"], []).append(e["id"])
+            # A spawn template is a blueprint: every NPC type (and every
+            # clone of one) carries the same hand slot by construction.
+            if "template" not in (e.get("tags") or []):
+                placed.setdefault(slot["name"], []).append(e["id"])
 
     out: list[str] = [
         f"equip slot '{name}' is declared by {owners}; slot names must be"
         " unique across the scene or params.slots cannot address them"
-        for name, owners in sorted(declared.items())
+        for name, owners in sorted(placed.items())
         if len(owners) > 1
     ]
 
@@ -706,6 +719,9 @@ def _mesh_render_fields(
     sockets = _sockets_in_meters(contract, socket_scale)
     if sockets:
         out["sockets"] = sockets
+        hold = _hold_for(contract)
+        if hold is not None:
+            out["hold"] = hold
     return out
 
 
@@ -774,7 +790,7 @@ def _sockets_in_meters(
         rot = socket.get("rotation") or [0.0, 0.0, 0.0, 1.0]
         if len(pos) < 3 or len(rot) < 4:
             continue
-        out[name] = {
+        entry: dict[str, Any] = {
             "position": [float(pos[0]) * scale,
                          float(pos[1]) * scale,
                          float(pos[2]) * scale],
@@ -783,7 +799,79 @@ def _sockets_in_meters(
             "rotation": [float(rot[0]), float(rot[1]), float(rot[2]),
                          float(rot[3])],
         }
+        # socket_generation's extras: kind (hand sockets are in the OpenXR
+        # grip frame), confidence, and unit-space lengths turned to metres.
+        for key in ("kind", "confidence", "mirror", "wrap_of"):
+            if socket.get(key):
+                entry[key] = str(socket[key])
+        for unit_key, m_key in (("bore_diameter_unit", "bore_diameter_m"),
+                                ("handle_thickness_unit", "handle_thickness_m"),
+                                ("lateral_offset_unit", "lateral_offset_m")):
+            if socket.get(unit_key) is not None:
+                entry[m_key] = round(float(socket[unit_key]) * scale, 5)
+        out[name] = entry
     return out
+
+
+def _hold_for(contract: dict[str, Any] | None) -> dict[str, Any] | None:
+    """The contract's hold profile, with its sockets checked to exist."""
+    if not contract:
+        return None
+    hold = contract.get("hold")
+    if not isinstance(hold, dict) or hold.get("kind") in (None, "", "none"):
+        return None
+    sockets = contract.get("sockets") or {}
+    if hold.get("primary_socket") not in sockets:
+        return None
+    out = {k: hold[k] for k in ("kind", "aim_aligned", "two_hand", "primary_socket",
+                                "support_socket", "forearm_socket", "finger_pose")
+           if k in hold}
+    for k in ("support_socket", "forearm_socket"):
+        if out.get(k) and out[k] not in sockets:
+            out[k] = ""
+    for k in ("forward", "up"):
+        v = hold.get(k)
+        if isinstance(v, list) and len(v) == 3:
+            out[k] = [float(x) for x in v]
+    return out
+
+
+def hold_violations(entities: list[dict[str, Any]]) -> tuple[list[str], list[str]]:
+    """Holds the runtime cannot solve (errors), and holds it can solve but
+    whose geometry looks wrong (warnings: two hands on the same point, a
+    forearm strap nowhere near the hand strap)."""
+    errors: list[str] = []
+    out: list[str] = []
+    for e in entities:
+        mesh = e.get("mesh") or {}
+        hold = mesh.get("hold")
+        if not isinstance(hold, dict):
+            continue
+        sockets = mesh.get("sockets") or {}
+        prim = sockets.get(hold.get("primary_socket", ""))
+        if prim is None:
+            errors.append(f"entity '{e.get('id')}' hold names missing primary socket "
+                          f"'{hold.get('primary_socket')}'")
+            continue
+        if hold.get("kind") == "forearm_strap" and not sockets.get(
+                hold.get("forearm_socket") or ""):
+            errors.append(f"entity '{e.get('id')}' is held by a forearm strap but has no "
+                          "forearm_strap socket")
+        for key, lo, hi in (("support_socket", 0.0, 1.2), ("forearm_socket", 0.06, 0.5)):
+            other = sockets.get(hold.get(key) or "")
+            if other is None:
+                continue
+            if other.get("wrap_of"):
+                continue
+            d = sum((float(a) - float(b)) ** 2 for a, b in
+                    zip(prim["position"], other["position"])) ** 0.5
+            if key == "support_socket" and d < 0.05:
+                out.append(f"entity '{e.get('id')}': support socket only {d * 100:.1f} cm "
+                           "from the primary grip")
+            if not (lo <= d <= hi):
+                out.append(f"entity '{e.get('id')}': {key} is {d * 100:.0f} cm from the "
+                           f"primary grip (expected {lo * 100:.0f}-{hi * 100:.0f} cm)")
+    return errors, out
 
 
 def _resolve_glb_path(
@@ -802,6 +890,48 @@ def _resolve_glb_path(
     norm = normalization_report.get(asset_id, {}) or {}
     candidate = norm.get("glb_path") or manifest_path_hint
     return candidate or None
+
+
+def _generated_calls(repo_root: Path, project_id: str, pattern: str) -> bool | None:
+    """Whether this project's generated C++ matches ``pattern``; None when the
+    project has no generated sources on disk."""
+    import re as _re
+
+    rx = _re.compile(pattern)
+    found_any = False
+    for kind in ("mechanics", "ai", "dialogue"):
+        root = repo_root / "engine" / "generated" / kind / project_id
+        if not root.is_dir():
+            continue
+        for f in root.rglob("*"):
+            if f.suffix not in (".cpp", ".h", ".hpp"):
+                continue
+            found_any = True
+            if rx.search(f.read_text(encoding="utf-8", errors="replace")):
+                return True
+    return False if found_any else None
+
+
+def mesh_for_asset(
+    asset_id: str,
+    manifest: AssetManifest,
+    normalization_report: dict[str, dict[str, Any]] | None,
+    asset_contract: dict[str, dict[str, Any]] | None,
+) -> dict[str, Any] | None:
+    """The compiled ``mesh`` block for one manifest asset, exactly as an
+    authored entity showing it would get. None when the asset has no GLB."""
+    asset = next((a for a in manifest.items if a.id == asset_id), None)
+    norm = (normalization_report or {}).get(asset_id) or {}
+    if asset is None or not norm.get("glb_path"):
+        return None
+    return {
+        "asset_id": asset_id,
+        "glb_path": norm["glb_path"],
+        "target_scale_meters": asset.target_scale_meters,
+        "collision_shape": asset.collision_shape,
+        **_mesh_render_fields(norm, asset.target_scale_meters,
+                              (asset_contract or {}).get(asset_id), asset_id=asset_id),
+    }
 
 
 def compile_scene_json(
@@ -1038,6 +1168,11 @@ def compile_scene_json(
     socket_violations.extend(deferred_violations)
     if on_warning is not None:
         for warning in deferred_warnings:
+            on_warning(warning)
+    hold_errors, hold_warnings = hold_violations(entities_out)
+    socket_violations.extend(hold_errors)
+    if on_warning is not None:
+        for warning in hold_warnings:
             on_warning(warning)
 
     equip_violations = _check_equip_slots(entities_out, equip_needs)
@@ -1636,6 +1771,29 @@ def run(ctx: PipelineContext) -> StageResult:
     # None for projects from before the game_design stage: they keep the run
     # flow their own generated code provides.
     game_design = ctx.game_design or ctx.store.load_game_design(ctx.project_id)
+    # None for projects from before interaction_design: their generated
+    # weapons stay as they were.
+    interaction_design = (ctx.interaction_design
+                          or ctx.store.load_interaction_design(ctx.project_id))
+    known_generated = {
+        x for it in plan.items if it.code_task is not None
+        for x in (it.id, it.code_task.id)
+    }
+    # Does anything start a "signal"-started encounter? None without engine
+    # source (test fixtures): unknown, kept as planned.
+    start_signal_sent = _generated_calls(ctx.settings.repo_root, ctx.project_id,
+                                         r"encounters\s*->\s*start\s*\(")
+    # Projectiles drawn at the size of the bore they leave (and arrows longer
+    # than the draw); the templates below are built from the corrected sizes.
+    proj_scales, scale_notes = projectile_scale_corrections(
+        interaction_design, manifest, asset_contract)
+    for note in scale_notes:
+        ctx.emit(ProjectStage.scene_compile,
+                 "warning" if "rescaled" in note or "lengthened" in note else "info",
+                 f"projectile scale: {note}"[:300])
+        ctx.store.append_log(ctx.project_id, "scene_compile", f"projectile scale: {note}")
+    weapon_manifest = apply_scales(manifest, proj_scales)
+    drawn_fx_assets = engine_drawn_fx_assets(manifest, interaction_design)
     if npc_plan is not None and npc_plan.npcs:
         # Same deterministic repairs the npc_plan stage applies, so a plan
         # written before encounters existed still gets its companion placed
@@ -1704,6 +1862,7 @@ def run(ctx: PipelineContext) -> StageResult:
                              f"{scene_entry.id}: {note}")
             pop = apply_npc_population(
                 doc, npc_plan, hosted_ai, spec_yaw=spec_yaw,
+                start_signal_sent=start_signal_sent,
                 on_warning=(
                     (lambda m, sid=scene_entry.id: ctx.emit(
                         ProjectStage.scene_compile, "warning", f"{sid}: {m}"))
@@ -1772,6 +1931,34 @@ def run(ctx: PipelineContext) -> StageResult:
             ctx.emit(ProjectStage.scene_compile, "info",
                      f"{scene_entry.id}: game flow bound ({flow['experience']}, "
                      f"lives {flow['lives']}, {len(flow['objectives'])} objective(s))")
+
+        # Weapons: the interaction design decides which built-in runs each
+        # one, what it fires and which NPCs shoot back.
+        weapons = apply_weapons(
+            doc, interaction_design, known_generated=known_generated,
+            mesh_for=lambda aid: mesh_for_asset(aid, weapon_manifest, normalization,
+                                                asset_contract),
+            npc_plan=npc_plan if scene_has_npcs else None,
+            on_warning=lambda m, sid=scene_entry.id: ctx.emit(
+                ProjectStage.scene_compile, "warning", f"{sid}: {m}"),
+            drawn_fx_assets=drawn_fx_assets,
+        )
+        weapon_errors, weapon_warnings = weapon_violations(doc, interaction_design)
+        for w in weapon_warnings:
+            ctx.emit(ProjectStage.scene_compile, "warning", f"{scene_entry.id}: {w}")
+        if weapon_errors:
+            msg = (f"{scene_entry.id}: weapons cannot work: " + "; ".join(weapon_errors))
+            ctx.store.append_log(ctx.project_id, "scene_compile", msg)
+            ctx.store.record_stage(state, ProjectStage.scene_compile,
+                                   ProjectStatus.failed, message=msg[:400])
+            ctx.emit(ProjectStage.scene_compile, "failed", msg[:400])
+            raise WeaponContractError(msg)
+        if weapons.get("weapons") or weapons.get("npc_ranged"):
+            note = (f"{scene_entry.id}: weapons {weapons.get('weapons', [])}, templates "
+                    f"{weapons.get('templates', [])}, sources {weapons.get('sources', [])}, "
+                    f"NPC ranged {weapons.get('npc_ranged', [])}")
+            ctx.emit(ProjectStage.scene_compile, "info", note)
+            ctx.store.append_log(ctx.project_id, "scene_compile", note)
 
         # Every entity is now present -- authored, world-merged and
         # auto-instantiated alike -- so this is the one place a physics value

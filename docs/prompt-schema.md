@@ -29,6 +29,7 @@ A concrete example prompt lives in the `NewProjectPage` sample text.
 |---|---|---|
 | `BuildSpec` | `build_spec.json` | Claude Opus (via `LlmClient`; OpenAI fallback) |
 | `AssetManifest` | `asset_manifest.json` | Claude Sonnet (via `LlmClient`; OpenAI fallback) |
+| `InteractionDesign` | `interaction_design.json` | OpenAI Agents SDK `gpt-5.6-sol` (`WebSearchTool`) + deterministic validate/repair; how every item is held, its sockets, its weapon / melee / shield / bow spec and the projectiles; reconciles manifest. See [sockets.md](sockets.md), [weapons.md](weapons.md) |
 | `NpcPlan` | `npc_plan.json` | OpenAI Agents SDK `gpt-5.6-sol` (no tools); reconciles manifest |
 | `GameDesign` | `game_design.json` | OpenAI Agents SDK `gpt-5.6-sol` (no tools) + deterministic validate/repair; see [game-flow.md](game-flow.md) |
 | `MechanicPlan` | `mechanic_plan.json` | OpenAI Agents SDK `gpt-5.6-sol` (no tools) |
@@ -37,7 +38,8 @@ A concrete example prompt lives in the `NewProjectPage` sample text.
 | Rigging record | `asset_rig.json`, `model_rigged.glb` | Tripo `asset_rigging` stage |
 | Animation record | `asset_animation.json`, `model_animated.glb` | Tripo `asset_animation` stage |
 | Normalization stamp | `asset_normalization.json` | Orchestrator (`asset_normalization`, deterministic) |
-| Socket contract + character model frames | `asset_contract.json` (`sockets`, `frame`) | Orchestrator (`asset_contract`, deterministic) |
+| Socket generation | `assets/<id>/sockets/result.json`, `socket_report.json` | `socket_generation` (Gemini segmentation + numpy solvers + render-and-verify) |
+| `AssetContract`: sockets, holds + character model frames | `asset_contract.json` (`sockets`, `hold`, `frame`) | Orchestrator (`asset_contract`, deterministic merge) |
 | Codegen ledger | `codegen_board.json` | Orchestrator (`code_generation`) |
 | World scene | `world.scene.json` | Offline `ptv_worldgen` (world architect agent) |
 | Compiled scene | `scene.json` | Orchestrator (`scene_compile`, deterministic) |
@@ -116,7 +118,9 @@ on the rig.
 
 `scene_compile` copies these into `scene.json` and `SceneLoader` turns them
 into `CEquipSlots`. It hard-fails when a `builtin.equip` binding names a slot
-no entity declares, or when two entities declare the same slot name.
+no entity declares, or when two placed entities declare the same slot name
+(NPC spawn templates are exempt: every variant of a type, and every clone of
+one, carries the same hand slot by construction).
 
 ## Built-in mechanic ids (reuse these)
 
@@ -131,7 +135,22 @@ builtin.grab
 builtin.throw
 builtin.game_flow        (bound by scene_compile from game_design.json)
 builtin.game_hud         (bound by scene_compile from game_design.json)
+builtin.weapon           (bound by scene_compile from interaction_design.json)
+builtin.bow              (bound by scene_compile from interaction_design.json)
+builtin.melee_weapon     (bound by scene_compile from interaction_design.json)
+builtin.shield           (bound by scene_compile from interaction_design.json)
+builtin.item_source      (bound by scene_compile: quivers, magazine pouches)
+builtin.npc.ranged_attack (bound by scene_compile for NPCs with ranged_attack)
 ```
+
+`scene.json` also carries a `projectiles` table (one entry per designed
+projectile: id, kind, template entity, speed, gravity, drag, radius,
+lifetime, on-hit, splash, diameter, length), read by `SceneLoader` and
+exposed as `ctx.projectiles->preset(id)`; `attached_to.socket` seats an
+attached item by its own socket; and the `performance` block gains the
+weapon caps (`max_live_projectiles`, `max_projectile_meshes`,
+`max_fx_quads`, `max_beams`, `max_decals`, `max_flash_lights`,
+`projectile_max_triangles`).
 
 `AssetItem.forward_hint` (`+x` / `-x` / `+z` / `-z`, optional) names the
 axis an UNRIGGED character faces; rigged characters are measured from their

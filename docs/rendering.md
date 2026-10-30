@@ -17,10 +17,26 @@ generated C++ — the world already carries everything the renderer needs in
 begin render pass (MSAA color + depth, cleared to the horizon color)
   → sky pass      : fullscreen triangle, gradient + sun, depth test/write off
   → geometry pass : UBO-lit, per-primitive mesh, fog + contact-AO + tonemap
+  → fx pass       : weapon effects -- additive (flashes, tracers, beams, sparks)
+                    then alpha (smoke, decals); camera-facing quads, depth-tested
   → text pass     : SDF glyph quads (alpha-blended, depth-tested, no depth write)
   → vignette      : comfort tunnel or gameplay fade to black
 end render pass  → MSAA resolve into the swapchain image
 ```
+
+## Weapon effects (`FxRenderer`, `fx.vert` / `fx.frag`)
+
+`ctx.vfx` (`EffectsSystem`) turns muzzle flashes, tracers, beams, impacts,
+decals, explosions, glows and streaks into a fixed ring of procedural quads
+(`max_fx_quads`, oldest recycled first), uploaded once per frame and drawn in
+two pipelines: additive for light (flashes, tracers, beams, sparks) and
+alpha for matter (smoke, dust, decals). Nothing is textured -- shapes are
+evaluated in `fx.frag` -- so there is no FX atlas to load. Muzzle flashes and
+explosions also add a short-lived point light to the scene UBO, capped at
+`max_flash_lights`. Projectiles with a mesh (rockets, arrows) are drawn by
+render-only proxy entities copied from their hidden template, so they get
+LOD and culling like any mesh (`max_projectile_meshes`). See
+[weapons.md](weapons.md).
 
 ## World-space text
 

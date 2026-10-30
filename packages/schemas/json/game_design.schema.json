@@ -397,7 +397,7 @@
         },
         "rationale": {
           "default": "",
-          "maxLength": 400,
+          "maxLength": 1000,
           "title": "Rationale",
           "type": "string"
         },

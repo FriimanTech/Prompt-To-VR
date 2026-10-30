@@ -128,8 +128,9 @@ repairs anything or reruns earlier stages.
    without anyone holding the controllers. Streamed, not read once at the end: the
    headset's log ring buffer holds well under a minute of NPC telemetry, so
    a final `logcat -d` has already lost the start-up and manifest lines.
-4. Force-stop, `setprop debug.ptv.verify 0` and
-   `vrpowermanager.automation_disable` -- always, even after a failure.
+4. Force-stop, `setprop debug.ptv.verify 0` (and `verify_flow` /
+   `verify_weapons` 0) and `vrpowermanager.automation_disable` -- always,
+   even after a failure.
 
 Checks come from THIS game's `npc_plan.json` and `scene.json`, and each runs
 only when the game calls for it:
@@ -168,6 +169,19 @@ only when the game calls for it:
   winning shows the victory screen; Play Again restarts; Leave Game ends the
   process; the app launches again. A game that cannot kill the player is
   checked for never dying instead.
+- **Weapons (scenes with player weapons):** a THIRD launch with
+  `debug.ptv.verify_weapons 1`. The player stands still and the engine's
+  `WeaponVerifier` supplies a scripted hand: it holds each weapon through
+  `IHands::request_hold`, aims at the nearest hostile (else a clone of an
+  NPC template 8 m ahead), fires five single pulls and then three seconds
+  held (two seconds for a beam; a scripted draw and release for a bow), and
+  drops it. Logged to `logs/runtime/verify_<ts>_weapons.log`; the stage
+  stops waiting at `weapons: done` or after 25 s plus 9 s per weapon (capped
+  at 240 s). Checks per weapon: held, fires, every shot leaves within 2 cm of
+  the muzzle socket, hits the target, the target's health drops through
+  `ctx.combat`, a beam ticks continuously, the projectile pool stays inside
+  `max_live_projectiles`, and p95 frame time holds the frame budget (13.9 ms
+  at 72 Hz). See [weapons.md](weapons.md).
 
 The APK also carries the engine's UI font: `quest_build` copies
 `engine/runtime/assets/fonts/` (Atkinson Hyperlegible Bold + its OFL

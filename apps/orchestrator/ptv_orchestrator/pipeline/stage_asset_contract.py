@@ -92,6 +92,8 @@ def run(ctx: PipelineContext) -> StageResult:
     targets = _resolvable_assets(
         normalization, hints_by_id, ctx.settings.repo_root
     )
+    design = ctx.interaction_design or ctx.store.load_interaction_design(ctx.project_id)
+    generated = _socket_report(ctx)
 
     report: dict[str, dict[str, Any]] = {}
     derived = 0
@@ -106,6 +108,29 @@ def run(ctx: PipelineContext) -> StageResult:
         frame = _frame_for(
             item_by_id.get(asset_id), normalization.get(asset_id) or {}, glb_path
         )
+
+        # socket_generation owns sockets whenever it ran for this asset; with
+        # an interaction design, an asset it did not cover needs none (no
+        # more guessed muzzles on targets and racks).
+        if asset_id in generated:
+            entry = _from_generated(generated[asset_id], hints, glb_path)
+            if frame is not None:
+                entry["frame"] = frame
+            report[asset_id] = entry
+            derived += 1 if entry.get("sockets") else 0
+            skipped += 0 if entry.get("sockets") else 1
+            continue
+        if design is not None:
+            report[asset_id] = {
+                "status": "skipped",
+                "reason": "interaction_design declares no sockets for this asset",
+                "sockets": {},
+                "socket_hints": hints,
+            }
+            if frame is not None:
+                report[asset_id]["frame"] = frame
+            skipped += 1
+            continue
 
         excuse = _not_socketable(category, hints)
         if excuse is not None:
@@ -228,6 +253,39 @@ def _not_socketable(category: Any, hints: list[str]) -> str | None:
         f"no sockets derived: {name} assets have no socket_hints and only"
         " prop assets get the implicit muzzle/grip fallback"
     )
+
+
+def _socket_report(ctx: PipelineContext) -> dict[str, dict[str, Any]]:
+    path = ctx.project_dir / "socket_report.json"
+    if not path.exists():
+        return {}
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return {}
+
+
+def _from_generated(gen: dict[str, Any], hints: list[str], glb_path: Path) -> dict[str, Any]:
+    """A socket_generation result in the contract's shape."""
+    sockets = gen.get("sockets") or {}
+    ok = gen.get("status") == "ok"
+    return {
+        "status": "ok" if ok else "failed",
+        "reason": "" if ok else "; ".join(gen.get("warnings") or [])[:400],
+        "space": "unit",
+        "sockets": sockets,
+        "socket_confidence": {k: v.get("confidence", "vision") for k, v in sockets.items()},
+        "socket_hints": hints,
+        "unsatisfied_hints": [h for h in hints if h not in sockets],
+        "bounds": {"longest_axis": gen.get("longest")},
+        "source_glb": str(glb_path).replace("\\", "/"),
+        "hold": gen.get("hold"),
+        "part_regions": gen.get("part_regions") or {},
+        "cross_section_unit": gen.get("cross_section_unit"),
+        "overlay_paths": gen.get("overlays") or [],
+        "warnings": gen.get("warnings") or [],
+        "method": gen.get("method", "vision"),
+    }
 
 
 def _blocking_failures(

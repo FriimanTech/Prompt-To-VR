@@ -282,5 +282,66 @@ def test_crash_fails_the_base_check() -> None:
     assert crash.outcome == CheckOutcome.failed
 
 
+WEAPON_SCENE = {
+    "performance": {"target_fps": 72, "max_live_projectiles": 64},
+    "entities": [
+        {"id": "pistol", "tags": ["grabbable"],
+         "mechanic_bindings": [{"id": "builtin.weapon", "builtin_id": "builtin.weapon"}]},
+        {"id": "laser", "tags": ["grabbable"],
+         "mechanic_bindings": [{"id": "builtin.weapon", "builtin_id": "builtin.weapon"}]},
+        # NPC gear and templates are not the player's to test.
+        {"id": "npc_gun", "attached_to": {"entity_id": "alien"},
+         "mechanic_bindings": [{"id": "builtin.weapon"}]},
+        {"id": "ptv_projectile_rocket", "tags": ["template"], "mechanic_bindings": []},
+    ],
+}
+
+WEAPON_LOG = "\n".join([
+    "I/ptv: weapons: begin count=2",
+    "I/ptv: weapons: hold weapon=pistol e=12 hand=R held=1 target=alien_1",
+    *[f"I/ptv: weapons: shot weapon=pistol seq={i} delivery=hybrid origin_err_cm=0.00 "
+      f"aim_err_deg=0.4 ammo={17 - i} reloading=0" for i in range(1, 9)],
+    "I/ptv: weapons: hit weapon=pistol target=alien_1 damage=25.0 killed=0 delivery=hybrid",
+    "I/ptv: weapons: weapon_done weapon=pistol delivery=hybrid shots=8 hits=3 "
+    "target_health=100.0->25.0 max_live=0 p95_ms=14.64 median_ms=13.89 dropped=1 frames=396",
+    "I/ptv: weapons: hold weapon=laser e=13 hand=R held=1 target=alien_1",
+    "I/ptv: weapons: shot weapon=laser seq=1 delivery=beam origin_err_cm=3.50 aim_err_deg=0.2",
+    *[f"I/ptv: weapons: hit weapon=laser target=alien_1 damage=0.6 killed=0 delivery=beam"
+      for _ in range(4)],
+    # The wall behind the target does not count.
+    *[f"I/ptv: weapons: hit weapon=laser target=world damage=0.0 killed=0 delivery=beam"
+      for _ in range(20)],
+    "I/ptv: weapons: weapon_done weapon=laser delivery=beam shots=140 hits=4 "
+    "target_health=25.0->22.6 max_live=0 p95_ms=27.80 median_ms=13.90 dropped=30 frames=144",
+    "I/ptv: weapons: done count=2",
+])
+
+
+def test_weapons_pass_checks_each_player_weapon() -> None:
+    assert [w["id"] for w in qv.scene_weapons(WEAPON_SCENE)] == ["pistol", "laser"]
+    checks = qv.evaluate_weapons(qv.parse_weapons(WEAPON_LOG), WEAPON_SCENE)
+    by = {(c.subject, c.name): c.outcome for c in checks}
+    assert by[("", "weapons pass ran to the end")] == CheckOutcome.passed
+    for name in ("held by the scripted hand", "fires", "shots leave the muzzle",
+                 "hits a target", "damage lands through ctx.combat",
+                 "frame rate holds under sustained fire"):
+        assert by[("pistol", name)] == CheckOutcome.passed, name
+    # The laser left 3.5 cm off its muzzle, ticked too rarely, and dropped frames.
+    assert by[("laser", "shots leave the muzzle")] == CheckOutcome.failed
+    assert by[("laser", "the beam damages continuously")] == CheckOutcome.failed
+    assert by[("laser", "frame rate holds under sustained fire")] == CheckOutcome.failed
+
+
+def test_weapons_pass_without_a_target_is_not_applicable() -> None:
+    log = WEAPON_LOG.replace("target=alien_1", "target=none")
+    checks = qv.evaluate_weapons(qv.parse_weapons(log), WEAPON_SCENE)
+    hit = next(c for c in checks if c.subject == "pistol" and c.name == "hits a target")
+    assert hit.outcome == CheckOutcome.not_applicable
+
+
+def test_a_game_without_weapons_has_no_weapons_checks() -> None:
+    assert qv.evaluate_weapons([], {"entities": []}) == []
+
+
 def test_status_enum_values() -> None:
     assert {s.value for s in VerificationStatus} == {"passed", "failed", "skipped"}

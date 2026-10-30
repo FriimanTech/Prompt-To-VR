@@ -37,6 +37,7 @@ class PipelineContext:
     # caches filled as stages run
     build_spec: Any = None
     asset_manifest: Any = None
+    interaction_design: Any = None
     npc_plan: Any = None
     game_design: Any = None
     mechanic_plan: Any = None

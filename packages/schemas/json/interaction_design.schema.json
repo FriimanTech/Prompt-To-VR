@@ -1,0 +1,990 @@
+{
+  "$defs": {
+    "AmmoSpec": {
+      "additionalProperties": false,
+      "properties": {
+        "calibre": {
+          "default": "",
+          "maxLength": 160,
+          "title": "Calibre",
+          "type": "string"
+        },
+        "heat_per_shot": {
+          "default": 0.0,
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "title": "Heat Per Shot",
+          "type": "number"
+        },
+        "heat_vent_per_s": {
+          "default": 0.0,
+          "maximum": 10.0,
+          "minimum": 0.0,
+          "title": "Heat Vent Per S",
+          "type": "number"
+        },
+        "infinite": {
+          "default": false,
+          "title": "Infinite",
+          "type": "boolean"
+        },
+        "magazine": {
+          "default": 0,
+          "maximum": 10000,
+          "minimum": 0,
+          "title": "Magazine",
+          "type": "integer"
+        },
+        "provenance": {
+          "$ref": "#/$defs/Provenance"
+        },
+        "reload": {
+          "$ref": "#/$defs/ReloadMode",
+          "default": "none"
+        },
+        "reload_time_s": {
+          "default": 1.5,
+          "maximum": 30.0,
+          "minimum": 0.0,
+          "title": "Reload Time S",
+          "type": "number"
+        },
+        "reserve": {
+          "default": 0,
+          "maximum": 100000,
+          "minimum": 0,
+          "title": "Reserve",
+          "type": "integer"
+        }
+      },
+      "title": "AmmoSpec",
+      "type": "object"
+    },
+    "BeamSpec": {
+      "additionalProperties": false,
+      "properties": {
+        "color_rgb": {
+          "items": {
+            "type": "number"
+          },
+          "title": "Color Rgb",
+          "type": "array"
+        },
+        "damage_per_s": {
+          "default": 40.0,
+          "maximum": 100000.0,
+          "minimum": 0.0,
+          "title": "Damage Per S",
+          "type": "number"
+        },
+        "max_length_m": {
+          "default": 60.0,
+          "exclusiveMinimum": 0.0,
+          "maximum": 2000.0,
+          "title": "Max Length M",
+          "type": "number"
+        },
+        "width_m": {
+          "default": 0.02,
+          "exclusiveMinimum": 0.0,
+          "maximum": 1.0,
+          "title": "Width M",
+          "type": "number"
+        }
+      },
+      "title": "BeamSpec",
+      "type": "object"
+    },
+    "BowSpec": {
+      "additionalProperties": false,
+      "properties": {
+        "arrow_asset_id": {
+          "default": "",
+          "maxLength": 64,
+          "title": "Arrow Asset Id",
+          "type": "string"
+        },
+        "arrow_projectile_id": {
+          "maxLength": 64,
+          "title": "Arrow Projectile Id",
+          "type": "string"
+        },
+        "arrow_source": {
+          "$ref": "#/$defs/ItemSourceSpec"
+        },
+        "damage": {
+          "default": 60.0,
+          "maximum": 100000.0,
+          "minimum": 0.0,
+          "title": "Damage",
+          "type": "number"
+        },
+        "max_draw_m": {
+          "default": 0.6,
+          "exclusiveMinimum": 0.05,
+          "maximum": 1.5,
+          "title": "Max Draw M",
+          "type": "number"
+        },
+        "max_speed_mps": {
+          "default": 70.0,
+          "exclusiveMinimum": 1.0,
+          "maximum": 500.0,
+          "title": "Max Speed Mps",
+          "type": "number"
+        },
+        "provenance": {
+          "$ref": "#/$defs/Provenance"
+        }
+      },
+      "required": [
+        "arrow_projectile_id"
+      ],
+      "title": "BowSpec",
+      "type": "object"
+    },
+    "DecisionSource": {
+      "enum": [
+        "explicit",
+        "inferred"
+      ],
+      "title": "DecisionSource",
+      "type": "string"
+    },
+    "FingerPose": {
+      "enum": [
+        "wrap",
+        "trigger",
+        "strap",
+        "pinch",
+        "open_support"
+      ],
+      "title": "FingerPose",
+      "type": "string"
+    },
+    "FireMode": {
+      "enum": [
+        "semi",
+        "burst",
+        "auto",
+        "charge",
+        "hold_beam"
+      ],
+      "title": "FireMode",
+      "type": "string"
+    },
+    "FireSystem": {
+      "enum": [
+        "hitscan",
+        "projectile",
+        "hybrid",
+        "beam",
+        "drawn_launcher",
+        "thrown",
+        "none"
+      ],
+      "title": "FireSystem",
+      "type": "string"
+    },
+    "HoldKind": {
+      "enum": [
+        "one_hand",
+        "two_hand_line",
+        "two_hand_wrap",
+        "forearm_strap",
+        "none"
+      ],
+      "title": "HoldKind",
+      "type": "string"
+    },
+    "HoldProfile": {
+      "additionalProperties": false,
+      "properties": {
+        "aim_aligned": {
+          "default": false,
+          "title": "Aim Aligned",
+          "type": "boolean"
+        },
+        "finger_pose": {
+          "$ref": "#/$defs/FingerPose",
+          "default": "wrap"
+        },
+        "forearm_socket": {
+          "default": "",
+          "maxLength": 64,
+          "title": "Forearm Socket",
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/$defs/HoldKind",
+          "default": "none"
+        },
+        "primary_socket": {
+          "default": "",
+          "maxLength": 64,
+          "title": "Primary Socket",
+          "type": "string"
+        },
+        "provenance": {
+          "$ref": "#/$defs/Provenance"
+        },
+        "support_socket": {
+          "default": "",
+          "maxLength": 64,
+          "title": "Support Socket",
+          "type": "string"
+        },
+        "two_hand": {
+          "$ref": "#/$defs/TwoHandMode",
+          "default": "none"
+        }
+      },
+      "title": "HoldProfile",
+      "type": "object"
+    },
+    "ImpactKind": {
+      "enum": [
+        "sparks",
+        "blood",
+        "energy",
+        "dust",
+        "explosion",
+        "none"
+      ],
+      "title": "ImpactKind",
+      "type": "string"
+    },
+    "ItemInteraction": {
+      "additionalProperties": false,
+      "properties": {
+        "asset_id": {
+          "description": "Snake-case identifier, max 64 chars.",
+          "pattern": "^[a-z0-9][a-z0-9_.\\-]{0,63}$",
+          "title": "Asset Id",
+          "type": "string"
+        },
+        "bow": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/BowSpec"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "hold": {
+          "$ref": "#/$defs/HoldProfile"
+        },
+        "item_source": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ItemSourceSpec"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "melee": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MeleeSpec"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "provenance": {
+          "$ref": "#/$defs/Provenance"
+        },
+        "real_world_dimensions": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RealWorldDimensions"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "real_world_reference": {
+          "default": "",
+          "maxLength": 400,
+          "title": "Real World Reference",
+          "type": "string"
+        },
+        "shield": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ShieldSpec"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "sockets": {
+          "items": {
+            "$ref": "#/$defs/SocketSpec"
+          },
+          "maxItems": 12,
+          "title": "Sockets",
+          "type": "array"
+        },
+        "usage": {
+          "$ref": "#/$defs/ItemUsage"
+        },
+        "weapon": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WeaponSpec"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "wielders": {
+          "items": {
+            "$ref": "#/$defs/Wielder"
+          },
+          "maxItems": 2,
+          "title": "Wielders",
+          "type": "array"
+        }
+      },
+      "required": [
+        "asset_id",
+        "usage"
+      ],
+      "title": "ItemInteraction",
+      "type": "object"
+    },
+    "ItemSourceSpec": {
+      "additionalProperties": false,
+      "description": "Where the player reaches to draw a copy of this item (arrows from a\nquiver over the shoulder, magazines from the hip).",
+      "properties": {
+        "body_slot": {
+          "default": "",
+          "maxLength": 32,
+          "title": "Body Slot",
+          "type": "string"
+        },
+        "count": {
+          "default": 0,
+          "maximum": 10000,
+          "minimum": 0,
+          "title": "Count",
+          "type": "integer"
+        },
+        "radius_m": {
+          "default": 0.25,
+          "exclusiveMinimum": 0.0,
+          "maximum": 2.0,
+          "title": "Radius M",
+          "type": "number"
+        },
+        "world_tag": {
+          "default": "",
+          "maxLength": 64,
+          "title": "World Tag",
+          "type": "string"
+        }
+      },
+      "title": "ItemSourceSpec",
+      "type": "object"
+    },
+    "ItemUsage": {
+      "enum": [
+        "held_weapon",
+        "held_tool",
+        "held_shield",
+        "thrown",
+        "worn",
+        "ammo",
+        "projectile",
+        "static_prop",
+        "not_interactive"
+      ],
+      "title": "ItemUsage",
+      "type": "string"
+    },
+    "MeleeSpec": {
+      "additionalProperties": false,
+      "properties": {
+        "blunt": {
+          "default": false,
+          "title": "Blunt",
+          "type": "boolean"
+        },
+        "cooldown_s": {
+          "default": 0.4,
+          "maximum": 10.0,
+          "minimum": 0.0,
+          "title": "Cooldown S",
+          "type": "number"
+        },
+        "damage": {
+          "default": 35.0,
+          "maximum": 100000.0,
+          "minimum": 0.0,
+          "title": "Damage",
+          "type": "number"
+        },
+        "impact": {
+          "$ref": "#/$defs/ImpactKind",
+          "default": "sparks"
+        },
+        "min_speed_mps": {
+          "default": 1.5,
+          "maximum": 50.0,
+          "minimum": 0.0,
+          "title": "Min Speed Mps",
+          "type": "number"
+        },
+        "provenance": {
+          "$ref": "#/$defs/Provenance"
+        },
+        "speed_scale": {
+          "default": 0.15,
+          "maximum": 10.0,
+          "minimum": 0.0,
+          "title": "Speed Scale",
+          "type": "number"
+        }
+      },
+      "title": "MeleeSpec",
+      "type": "object"
+    },
+    "OnHit": {
+      "enum": [
+        "despawn",
+        "stick",
+        "bounce",
+        "explode"
+      ],
+      "title": "OnHit",
+      "type": "string"
+    },
+    "ProjectileKind": {
+      "enum": [
+        "bullet",
+        "rocket",
+        "arrow",
+        "energy_bolt",
+        "grenade",
+        "other"
+      ],
+      "title": "ProjectileKind",
+      "type": "string"
+    },
+    "ProjectileSpec": {
+      "additionalProperties": false,
+      "properties": {
+        "asset_id": {
+          "default": "",
+          "maxLength": 64,
+          "title": "Asset Id",
+          "type": "string"
+        },
+        "calibre": {
+          "default": "",
+          "maxLength": 160,
+          "title": "Calibre",
+          "type": "string"
+        },
+        "diameter_m": {
+          "default": 0.009,
+          "exclusiveMinimum": 0.0,
+          "maximum": 2.0,
+          "title": "Diameter M",
+          "type": "number"
+        },
+        "drag": {
+          "default": 0.0,
+          "maximum": 10.0,
+          "minimum": 0.0,
+          "title": "Drag",
+          "type": "number"
+        },
+        "gravity_scale": {
+          "default": 1.0,
+          "maximum": 10.0,
+          "minimum": 0.0,
+          "title": "Gravity Scale",
+          "type": "number"
+        },
+        "id": {
+          "description": "Snake-case identifier, max 64 chars.",
+          "pattern": "^[a-z0-9][a-z0-9_.\\-]{0,63}$",
+          "title": "Id",
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/$defs/ProjectileKind"
+        },
+        "length_m": {
+          "default": 0.015,
+          "exclusiveMinimum": 0.0,
+          "maximum": 5.0,
+          "title": "Length M",
+          "type": "number"
+        },
+        "lifetime_s": {
+          "default": 3.0,
+          "exclusiveMinimum": 0.0,
+          "maximum": 60.0,
+          "title": "Lifetime S",
+          "type": "number"
+        },
+        "needs_mesh": {
+          "default": false,
+          "title": "Needs Mesh",
+          "type": "boolean"
+        },
+        "on_hit": {
+          "$ref": "#/$defs/OnHit",
+          "default": "despawn"
+        },
+        "provenance": {
+          "$ref": "#/$defs/Provenance"
+        },
+        "radius_m": {
+          "default": 0.0,
+          "maximum": 2.0,
+          "minimum": 0.0,
+          "title": "Radius M",
+          "type": "number"
+        },
+        "speed_mps": {
+          "default": 360.0,
+          "exclusiveMinimum": 0.0,
+          "maximum": 5000.0,
+          "title": "Speed Mps",
+          "type": "number"
+        },
+        "splash_damage": {
+          "default": 0.0,
+          "maximum": 100000.0,
+          "minimum": 0.0,
+          "title": "Splash Damage",
+          "type": "number"
+        },
+        "splash_radius_m": {
+          "default": 0.0,
+          "maximum": 50.0,
+          "minimum": 0.0,
+          "title": "Splash Radius M",
+          "type": "number"
+        },
+        "visual_description": {
+          "default": "",
+          "maxLength": 600,
+          "title": "Visual Description",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "kind"
+      ],
+      "title": "ProjectileSpec",
+      "type": "object"
+    },
+    "Provenance": {
+      "additionalProperties": false,
+      "properties": {
+        "prompt_quote": {
+          "default": "",
+          "maxLength": 400,
+          "title": "Prompt Quote",
+          "type": "string"
+        },
+        "rationale": {
+          "default": "",
+          "maxLength": 1000,
+          "title": "Rationale",
+          "type": "string"
+        },
+        "source": {
+          "$ref": "#/$defs/DecisionSource",
+          "default": "inferred"
+        }
+      },
+      "title": "Provenance",
+      "type": "object"
+    },
+    "RealWorldDimensions": {
+      "additionalProperties": false,
+      "description": "Measured dimensions of the real object this item depicts (or the\nprompt's own numbers). ``length_m`` is the longest extent.",
+      "properties": {
+        "height_m": {
+          "default": 0.0,
+          "maximum": 200.0,
+          "minimum": 0.0,
+          "title": "Height M",
+          "type": "number"
+        },
+        "length_m": {
+          "exclusiveMinimum": 0.0,
+          "maximum": 200.0,
+          "title": "Length M",
+          "type": "number"
+        },
+        "source": {
+          "default": "",
+          "maxLength": 600,
+          "title": "Source",
+          "type": "string"
+        },
+        "width_m": {
+          "default": 0.0,
+          "maximum": 200.0,
+          "minimum": 0.0,
+          "title": "Width M",
+          "type": "number"
+        }
+      },
+      "required": [
+        "length_m"
+      ],
+      "title": "RealWorldDimensions",
+      "type": "object"
+    },
+    "RecoilSpec": {
+      "additionalProperties": false,
+      "properties": {
+        "kick_back_m": {
+          "default": 0.02,
+          "maximum": 0.3,
+          "minimum": 0.0,
+          "title": "Kick Back M",
+          "type": "number"
+        },
+        "kick_up_deg": {
+          "default": 4.0,
+          "maximum": 45.0,
+          "minimum": 0.0,
+          "title": "Kick Up Deg",
+          "type": "number"
+        },
+        "recover_s": {
+          "default": 0.08,
+          "maximum": 2.0,
+          "minimum": 0.01,
+          "title": "Recover S",
+          "type": "number"
+        }
+      },
+      "title": "RecoilSpec",
+      "type": "object"
+    },
+    "ReloadMode": {
+      "enum": [
+        "button",
+        "auto",
+        "magazine_insert",
+        "overheat",
+        "none"
+      ],
+      "title": "ReloadMode",
+      "type": "string"
+    },
+    "ShieldSpec": {
+      "additionalProperties": false,
+      "properties": {
+        "blocks_melee": {
+          "default": true,
+          "title": "Blocks Melee",
+          "type": "boolean"
+        },
+        "blocks_projectiles": {
+          "default": true,
+          "title": "Blocks Projectiles",
+          "type": "boolean"
+        },
+        "leak": {
+          "default": 0.0,
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "title": "Leak",
+          "type": "number"
+        },
+        "provenance": {
+          "$ref": "#/$defs/Provenance"
+        }
+      },
+      "title": "ShieldSpec",
+      "type": "object"
+    },
+    "ShotVisual": {
+      "enum": [
+        "tracer",
+        "energy_bolt",
+        "mesh",
+        "none"
+      ],
+      "title": "ShotVisual",
+      "type": "string"
+    },
+    "SocketKind": {
+      "enum": [
+        "hand_grip",
+        "support_grip",
+        "support_wrap",
+        "hand_strap",
+        "forearm_strap",
+        "muzzle",
+        "projectile_nose",
+        "projectile_tail",
+        "arrow_nock",
+        "arrow_rest",
+        "string_rest",
+        "limb_tip_top",
+        "limb_tip_bottom",
+        "magwell",
+        "strike_base",
+        "strike_tip",
+        "strike_face",
+        "attach_point"
+      ],
+      "title": "SocketKind",
+      "type": "string"
+    },
+    "SocketSpec": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "$ref": "#/$defs/SocketKind"
+        },
+        "name": {
+          "description": "Snake-case identifier, max 64 chars.",
+          "pattern": "^[a-z0-9][a-z0-9_.\\-]{0,63}$",
+          "title": "Name",
+          "type": "string"
+        },
+        "part_description": {
+          "maxLength": 600,
+          "minLength": 3,
+          "title": "Part Description",
+          "type": "string"
+        },
+        "required": {
+          "default": true,
+          "title": "Required",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "name",
+        "kind",
+        "part_description"
+      ],
+      "title": "SocketSpec",
+      "type": "object"
+    },
+    "TwoHandMode": {
+      "enum": [
+        "none",
+        "optional",
+        "required"
+      ],
+      "title": "TwoHandMode",
+      "type": "string"
+    },
+    "WeaponSpec": {
+      "additionalProperties": false,
+      "description": "A ranged weapon, run by ``builtin.weapon`` (or ``builtin.bow``).",
+      "properties": {
+        "ammo": {
+          "$ref": "#/$defs/AmmoSpec"
+        },
+        "beam": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/BeamSpec"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "burst_count": {
+          "default": 3,
+          "maximum": 20,
+          "minimum": 1,
+          "title": "Burst Count",
+          "type": "integer"
+        },
+        "color_rgb": {
+          "items": {
+            "type": "number"
+          },
+          "title": "Color Rgb",
+          "type": "array"
+        },
+        "damage": {
+          "default": 25.0,
+          "maximum": 100000.0,
+          "minimum": 0.0,
+          "title": "Damage",
+          "type": "number"
+        },
+        "falloff_at_range": {
+          "default": 1.0,
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "title": "Falloff At Range",
+          "type": "number"
+        },
+        "fire_mode": {
+          "$ref": "#/$defs/FireMode",
+          "default": "semi"
+        },
+        "fire_system": {
+          "$ref": "#/$defs/FireSystem"
+        },
+        "haptic_amplitude": {
+          "default": 0.6,
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "title": "Haptic Amplitude",
+          "type": "number"
+        },
+        "headshot_mult": {
+          "default": 1.0,
+          "maximum": 20.0,
+          "minimum": 1.0,
+          "title": "Headshot Mult",
+          "type": "number"
+        },
+        "impact": {
+          "$ref": "#/$defs/ImpactKind",
+          "default": "sparks"
+        },
+        "muzzle_flash": {
+          "default": true,
+          "title": "Muzzle Flash",
+          "type": "boolean"
+        },
+        "pellets": {
+          "default": 1,
+          "maximum": 64,
+          "minimum": 1,
+          "title": "Pellets",
+          "type": "integer"
+        },
+        "projectile_id": {
+          "default": "",
+          "maxLength": 64,
+          "title": "Projectile Id",
+          "type": "string"
+        },
+        "provenance": {
+          "$ref": "#/$defs/Provenance"
+        },
+        "range_m": {
+          "default": 100.0,
+          "exclusiveMinimum": 0.0,
+          "maximum": 5000.0,
+          "title": "Range M",
+          "type": "number"
+        },
+        "recoil": {
+          "$ref": "#/$defs/RecoilSpec"
+        },
+        "rpm": {
+          "default": 300.0,
+          "exclusiveMinimum": 0.0,
+          "maximum": 6000.0,
+          "title": "Rpm",
+          "type": "number"
+        },
+        "spread_deg": {
+          "default": 0.5,
+          "maximum": 45.0,
+          "minimum": 0.0,
+          "title": "Spread Deg",
+          "type": "number"
+        },
+        "tracer_every_n": {
+          "default": 1,
+          "maximum": 20,
+          "minimum": 1,
+          "title": "Tracer Every N",
+          "type": "integer"
+        },
+        "visual": {
+          "$ref": "#/$defs/ShotVisual",
+          "default": "tracer"
+        }
+      },
+      "required": [
+        "fire_system"
+      ],
+      "title": "WeaponSpec",
+      "type": "object"
+    },
+    "Wielder": {
+      "enum": [
+        "player",
+        "npc"
+      ],
+      "title": "Wielder",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "items": {
+      "items": {
+        "$ref": "#/$defs/ItemInteraction"
+      },
+      "maxItems": 64,
+      "title": "Items",
+      "type": "array"
+    },
+    "notes": {
+      "default": "",
+      "maxLength": 6000,
+      "title": "Notes",
+      "type": "string"
+    },
+    "omitted": {
+      "items": {
+        "type": "string"
+      },
+      "maxItems": 32,
+      "title": "Omitted",
+      "type": "array"
+    },
+    "projectiles": {
+      "items": {
+        "$ref": "#/$defs/ProjectileSpec"
+      },
+      "maxItems": 16,
+      "title": "Projectiles",
+      "type": "array"
+    },
+    "prompt_id": {
+      "description": "Snake-case identifier, max 64 chars.",
+      "pattern": "^[a-z0-9][a-z0-9_.\\-]{0,63}$",
+      "title": "Prompt Id",
+      "type": "string"
+    }
+  },
+  "required": [
+    "prompt_id"
+  ],
+  "title": "InteractionDesign",
+  "type": "object"
+}

@@ -302,6 +302,113 @@ _BUILTINS: tuple[CatalogEntry, ...] = (
         },
         inputs=("the bound control on whichever hand holds the object",),
     ),
+    # ----- Weapons (interaction_design.json decides which, with what tuning) --
+    CatalogEntry(
+        id="builtin.weapon",
+        summary=(
+            "A ranged weapon that SHOOTS: pistols, rifles, shotguns, blasters, "
+            "launchers, beam guns. Fires from the item's 'muzzle' socket when "
+            "the player holds it and pulls that hand's trigger (or an NPC "
+            "wielding it pulls ctx.weapons->trigger). Delivery: hitscan "
+            "(instant ray), hybrid (instant ray hit + a visible tracer / bolt "
+            "flying to it -- the default for real firearms), projectile "
+            "(ctx.projectiles: travel time, gravity, splash -- rockets, "
+            "grenades, slow bolts) or beam (continuous ray while held). "
+            "Ammo + reload (B / Y face button, auto, overheat, infinite), fire "
+            "modes (semi, burst, auto, charge, hold_beam), spread / pellets, "
+            "damage falloff, recoil, haptics, muzzle flash, impacts and decals "
+            "are all built in; damage goes through ctx.combat. Its rays ignore "
+            "the weapon, the hands and the player. The scene compiler binds "
+            "it from each WeaponSpec; plan NO generated fire / ammo / reload / "
+            "projectile / recoil mechanic for a weapon it covers."
+        ),
+        category="weapon",
+        params={
+            "delivery": "'hitscan' | 'hybrid' | 'projectile' | 'beam'",
+            "fire_mode": "'semi' | 'burst' | 'auto' | 'charge' | 'hold_beam'",
+            "rpm": "float", "damage": "float", "range_m": "float",
+            "spread_deg": "float", "pellets": "int",
+            "ammo": "{magazine, reserve, infinite, reload, reload_time_s, heat_per_shot}",
+            "projectile": "{speed_mps, gravity_scale, radius_m, on_hit, splash_radius_m, "
+                          "splash_damage, visual_template}",
+            "visual": "'tracer' | 'energy_bolt' | 'mesh' | 'none'",
+            "beam": "{damage_per_s, width_m, max_length_m, color_rgb}",
+            "recoil": "{kick_back_m, kick_up_deg, recover_s}",
+        },
+        inputs=("trigger of the hand holding it", "B / Y to reload"),
+    ),
+    CatalogEntry(
+        id="builtin.bow",
+        summary=(
+            "A bow: hold it by its grip, bring an arrow (or an empty hand) to "
+            "the string and squeeze to nock, pull back to draw (haptics "
+            "tighten), let go to loose the arrow through ctx.projectiles at a "
+            "speed set by the draw; it flies with gravity and sticks where it "
+            "lands. The string is drawn procedurally between the limb tips. "
+            "Pair with builtin.item_source on the arrow template for a "
+            "quiver over the shoulder."
+        ),
+        category="weapon",
+        params={"max_draw_m": "float, default 0.6", "max_speed_mps": "float, default 70",
+                "damage": "float, default 60", "arrow_template": "entity id",
+                "allow_empty_draw": "bool, default true"},
+        inputs=("grip of the non-bow hand to nock / draw / release",),
+    ),
+    CatalogEntry(
+        id="builtin.melee_weapon",
+        summary=(
+            "Swords, axes, hammers, clubs, bats: swing to hit. The strike part "
+            "is the segment between its strike_base / strike_tip sockets (or a "
+            "sphere at strike_face for blunt weapons), swept between frames so "
+            "fast swings never pass through a target. Damage scales with swing "
+            "speed above a threshold, once per target per cooldown, through "
+            "ctx.combat, with impacts and haptics."
+        ),
+        category="weapon",
+        params={"damage": "float", "min_speed_mps": "float, default 1.5",
+                "speed_scale": "float", "cooldown_s": "float", "blunt": "bool"},
+        inputs=("swinging the hand that holds it",),
+    ),
+    CatalogEntry(
+        id="builtin.shield",
+        summary=(
+            "A held shield blocks: projectiles and rays already stop on its "
+            "body, and this registers it with ctx.combat so melee hits whose "
+            "path from the attacker passes through it are blocked (with an "
+            "optional leak fraction), with block haptics and sparks. Held by "
+            "builtin.grab's forearm-strap hold."
+        ),
+        category="weapon",
+        params={"blocks_melee": "bool, default true", "leak": "float 0..1, default 0"},
+    ),
+    CatalogEntry(
+        id="builtin.item_source",
+        summary=(
+            "Reach to a body slot (back / shoulder for a quiver, hip for "
+            "magazines, chest for grenades) or a world spot and squeeze an "
+            "empty hand: a copy of the item is spawned into that hand. Bound "
+            "to the item's hidden template."
+        ),
+        category="interaction",
+        params={"body_slot": "'back' | 'shoulder_r' | 'shoulder_l' | 'hip_r' | 'hip_l' | "
+                             "'waist' | 'chest'",
+                "radius_m": "float, default 0.25", "count": "int, 0 = unlimited"},
+        inputs=("grip of an empty hand near the slot",),
+    ),
+    CatalogEntry(
+        id="builtin.npc.ranged_attack",
+        summary=(
+            "An NPC that shoots with the weapon attached to it: finds the "
+            "nearest visible hostile, keeps its firing distance (closing in / "
+            "backing off) through CLocomotionIntent, faces the target, and "
+            "fires builtin.weapon in bursts via ctx.weapons (trigger + aim "
+            "point). Executes the NpcPlan's ranged_attack behaviour."
+        ),
+        category="npc",
+        params={"preferred_range_m": "float, default 8", "min_range_m": "float, default 4",
+                "sight_m": "float, default 25", "burst": "int, default 3",
+                "burst_pause_s": "float, default 1.2", "weapon": "entity id (optional)"},
+    ),
     CatalogEntry(
         id="builtin.hand_pose",
         summary=(
