@@ -136,7 +136,14 @@ Checks come from THIS game's `npc_plan.json` and `scene.json`, and each runs
 only when the game calls for it:
 
 - **Every Quest game (base):** launched, scene loaded, frame loop ran, no
-  crash, every mechanic binding resolves, every GLB loaded. A game with no
+  crash, every mechanic binding resolves, every GLB loaded. A Hands Only game
+  (`player.hands.source = "default"`) must also show its default hands: the
+  engine's 1 Hz `hands:` line must report both hands drawn, finite,
+  0.08-0.45 m across their joints and within 1.2 m of the head. With no
+  controller tracked (the headset on a desk) verify mode holds the visible
+  hands in front of the eyes, so the check runs unattended. These hands once
+  loaded 20 m long -- a room the player stood inside -- while every other
+  check passed. A game with no
   NPCs runs only these; its NPC section reads "not applicable: this game has
   no NPCs".
 - **Placed at load (`persistent_count > 0`):** present, skeleton and clips

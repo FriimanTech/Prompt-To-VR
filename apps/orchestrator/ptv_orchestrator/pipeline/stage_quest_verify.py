@@ -652,6 +652,45 @@ def evaluate_flow(events: list[dict[str, str]], design: Any, *, exited: bool,
 
 
 # ---------------------------------------------------------------------------
+# The player's hands (Hands Only games: the engine's default rigged hands)
+# ---------------------------------------------------------------------------
+
+#: A drawn default hand's joints span this much (0.27 m hand: ~0.26 m).
+HAND_SPAN_RANGE_M = (0.08, 0.45)
+#: A placed hand is within this of the head (held, or scripted in verify).
+HAND_REACH_M = 1.2
+
+
+def evaluate_hands(text: str, scene: dict) -> list[VerificationCheck]:
+    """Hands Only: both default hands drawn, finite, hand-sized and near the
+    head (``hands:`` telemetry). They once loaded 20 m long -- a room the
+    player stood inside -- and every other check still passed."""
+    source = (((scene.get("player") or {}).get("hands") or {}).get("source")
+              or scene.get("hands_source") or "default")
+    if source != "default":
+        return []
+    lines = [l.split("hands:", 1)[1] for l in text.splitlines() if "hands:" in l]
+    good = []
+    for body in lines:
+        sides = [s for s in body.split("|")]
+        ok = len(sides) == 2
+        for s in sides:
+            kv = _kv(s.replace("L:", "").replace("R:", ""))
+            span = _f(kv.get("joint_span_m"))
+            ok = ok and kv.get("drawn") == "1" and kv.get("finite") == "1" \
+                and HAND_SPAN_RANGE_M[0] <= span <= HAND_SPAN_RANGE_M[1] \
+                and _f(kv.get("head_m"), 99.0) <= HAND_REACH_M
+        if ok:
+            good.append(body.strip())
+    return [_check("the player's default hands are drawn", "base", bool(good),
+                   f"{len(good)} of {len(lines)} 'hands:' sample(s) had both hands drawn, "
+                   f"finite, {HAND_SPAN_RANGE_M[0]}-{HAND_SPAN_RANGE_M[1]} m and within "
+                   f"{HAND_REACH_M} m of the head"
+                   + ("" if lines else " (no 'hands:' telemetry at all)"),
+                   evidence=(good or [l.strip() for l in lines])[:3])]
+
+
+# ---------------------------------------------------------------------------
 # Weapons pass (debug.ptv.verify_weapons): a scripted hand holds and fires
 # every player weapon -- see engine/runtime/src/core/WeaponVerifier.h.
 # ---------------------------------------------------------------------------
@@ -1121,6 +1160,7 @@ def run_with_adb(ctx: PipelineContext, runner: Optional[AdbRunner] = None,
     tel = parse_telemetry(log_text)
     checks, npc_summary = evaluate(tel, npc_plan, scene, process_alive=alive,
                                    crash_text=crash_text)
+    checks.extend(evaluate_hands(log_text, scene))
     if design is not None:
         if flow_text and not (flow_log_file.exists() and flow_log_file.stat().st_size):
             flow_log_file.write_text(flow_text, encoding="utf-8")

@@ -3377,7 +3377,18 @@ void Application::create_hand_entities() {
         if (skeleton_svc_) {
             const auto rig = hand_rig::analyze(
                 *skeleton_svc_, static_cast<std::uint32_t>(e), h);
-            if (rig.valid) {
+            bool plausible = rig.valid && glm::length(Vec3(rig.grip_to_entity[3])) < 0.3f;
+            for (int c = 0; c < 4 && plausible; ++c) {
+                for (int r = 0; r < 4; ++r) plausible = plausible && std::isfinite(rig.grip_to_entity[c][r]);
+            }
+            if (rig.valid && !plausible) {
+                // A hand drawn metres from its controller is a hand the
+                // player never sees; held on the grip it is at least there.
+                PTV_WARN("default hand {}: grip alignment is implausible "
+                         "(offset {:.2f} m); using the grip frame as-is", names[h],
+                         glm::length(Vec3(rig.grip_to_entity[3])));
+            }
+            if (plausible) {
                 hand_grip_to_entity_[static_cast<size_t>(h)] =
                     rig.grip_to_entity;
                 // The wrist, seen from the grip frame: palm -> wrist is the
@@ -3385,16 +3396,86 @@ void Application::create_hand_entities() {
                 hand_wrist_in_grip_[static_cast<size_t>(h)] =
                     Vec3((rig.grip_to_entity * rig.wrist_bind_model)[3]);
                 finger_targets_[static_cast<size_t>(h)] = e;
-            } else {
+            } else if (!rig.valid) {
                 PTV_WARN("default hand {} has no recognisable fingers",
                          names[h]);
             }
         }
+
+        // Drawn size, from the bind palette: a hand loaded at the wrong scale
+        // is invisible (20 m: the player stands inside it), so it is dropped
+        // for the procedural block hands, which are at least seen.
+        {
+            const auto& cs = world_.registry().get<CSkeleton>(e);
+            Vec3 lo(1e9f), hi(-1e9f);
+            bool finite = true;
+            for (const auto& m : cs.palette) {
+                const Vec3 t(m[3]);
+                finite = finite && std::isfinite(t.x) && std::isfinite(t.y) && std::isfinite(t.z);
+                lo = glm::min(lo, t);
+                hi = glm::max(hi, t);
+            }
+            const Vec3 ext = hi - lo;
+            const float span = std::max(ext.x, std::max(ext.y, ext.z));
+            if (!finite || span > 0.6f || span < 0.02f) {
+                PTV_WARN("default hand {} would be drawn {:.2f} m across (want ~0.2); "
+                         "using block hands instead", names[h], span);
+                world_.registry().destroy(e);
+                hand_entities_[static_cast<size_t>(h)] = entt::null;
+                finger_targets_[static_cast<size_t>(h)] = entt::null;
+                continue;
+            }
+        }
     }
 
+    if (hand_entities_[0] == entt::null || hand_entities_[1] == entt::null) return;
     PTV_INFO("Default rigged hands ready ({} joints each)",
              world_.registry().get<CSkeleton>(hand_entities_[0])
                  .skeleton.joint_count());
+}
+
+void Application::log_hands_telemetry(const bool tracked[2]) {
+    // What the player can see of their hands, once a second: the Hands Only
+    // hands once loaded at 20 m long and drew nothing visible, with no line
+    // in the log to say so.
+    const char* side[2] = {"L", "R"};
+    std::string line;
+    for (int h = 0; h < 2; ++h) {
+        const auto e = hand_entities_[static_cast<size_t>(h)];
+        const auto id = static_cast<std::uint32_t>(e);
+        const bool has = e != entt::null && world_.valid(id);
+        const bool mesh = has && world_.registry().all_of<CMesh>(e) &&
+                          !world_.registry().get<CMesh>(e).glb_path.empty();
+        bool finite = true;
+        float size_m = 0.0f;
+        if (mesh && world_.registry().all_of<CSkeleton>(e)) {
+            const auto& cs = world_.registry().get<CSkeleton>(e);
+            // Drawn extent: the spread of the joint palette's translations
+            // (a 0.2 m hand spans ~0.15 m of joints).
+            Vec3 lo(1e9f), hi(-1e9f);
+            for (const auto& m : cs.palette) {
+                for (int c = 0; c < 4; ++c) {
+                    for (int r = 0; r < 4; ++r) finite = finite && std::isfinite(m[c][r]);
+                }
+                const Vec3 t(m[3]);
+                lo = glm::min(lo, t);
+                hi = glm::max(hi, t);
+            }
+            if (!cs.palette.empty()) {
+                const Vec3 ext = hi - lo;
+                size_m = std::max(ext.x, std::max(ext.y, ext.z));
+            }
+        }
+        const Vec3 pos = has && world_.registry().all_of<CTransform>(e)
+                             ? world_.registry().get<CTransform>(e).t.position
+                             : Vec3(0.0f);
+        line += fmt::format(
+            "{}{}: tracked={} mesh={} drawn={} finite={} joint_span_m={:.3f} head_m={:.2f}",
+            h == 0 ? "" : " | ", side[h], tracked[h] ? 1 : 0, mesh ? 1 : 0,
+            has && renderer_.drew_entity(id) ? 1 : 0, finite ? 1 : 0, size_m,
+            glm::length(pos - last_head_world_pos_));
+    }
+    PTV_INFO("hands: source={} {}", scene_.hands_source, line);
 }
 
 void Application::create_player_body() {
@@ -3829,6 +3910,21 @@ void Application::place_hand_entity(int hand, const Vec3& grip_pos,
                                     const Quat& grip_rot) {
     const auto he = hand_entities_[static_cast<size_t>(hand)];
     if (he == entt::null || !world_.registry().all_of<CTransform>(he)) return;
+    // A non-finite finger pose draws the whole hand as nothing; put it back
+    // to rest rather than lose the hand.
+    if (auto* cs = world_.registry().try_get<CSkeleton>(he)) {
+        bool finite = true;
+        for (const auto& p : cs->local_pose) {
+            finite = finite && std::isfinite(p.rotation.w) && std::isfinite(p.rotation.x) &&
+                     std::isfinite(p.rotation.y) && std::isfinite(p.rotation.z) &&
+                     std::isfinite(p.translation.x) && std::isfinite(p.translation.y) &&
+                     std::isfinite(p.translation.z);
+        }
+        if (!finite) {
+            PTV_WARN("hand {}: non-finite finger pose; reset to rest", hand == 0 ? "L" : "R");
+            cs->local_pose = cs->skeleton.bind_pose;
+        }
+    }
     // grip_to_entity maps the OpenXR grip frame onto the hand mesh's own
     // frame, measured from the rig (HandRig) when the hands were loaded.
     // Identity for a mesh already authored in the grip frame.
@@ -5604,6 +5700,19 @@ int Application::run(const Config& cfg) {
             if (he != entt::null && hand_valid[h] &&
                 world_.registry().all_of<CTransform>(he)) {
                 place_hand_entity(h, hand_world_pos[h], hand_world_rot[h]);
+            } else if (he != entt::null && verify_mode_ && !weapon_verifier_ &&
+                       world_.registry().all_of<CTransform>(he)) {
+                // Verification on a headset lying on a desk: no controller is
+                // tracked, so hold the visible hands where a player's would
+                // be (in front of the eyes) so the run can confirm they draw.
+                // Only the visual moves; nothing reads this as input.
+                const Vec3 fwd = glm::length(last_head_forward_xz_) > 1e-3f
+                                     ? glm::normalize(last_head_forward_xz_)
+                                     : Vec3(0.0f, 0.0f, -1.0f);
+                const Vec3 right = glm::normalize(glm::cross(fwd, Vec3(0.0f, 1.0f, 0.0f)));
+                const Vec3 at = last_head_world_pos_ + fwd * 0.38f - Vec3(0.0f, 0.25f, 0.0f) +
+                                right * (h == 0 ? -0.18f : 0.18f);
+                place_hand_entity(h, at, glm::quatLookAtRH(fwd, Vec3(0.0f, 1.0f, 0.0f)));
             }
         }
 
@@ -6155,6 +6264,7 @@ int Application::run(const Config& cfg) {
                          scene_.performance.max_live_projectiles,
                          renderer_.fx_quads_drawn(), scene_.performance.max_fx_quads,
                          projectiles_ ? projectiles_->casts_last_tick() : 0);
+                log_hands_telemetry(hand_valid);
                 telemetry_accum_s_ = 0.0f;
                 telemetry_work_accum_s_ = 0.0f;
                 telemetry_frames_ = 0;

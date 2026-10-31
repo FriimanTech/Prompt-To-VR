@@ -114,6 +114,8 @@ if(Python3_Interpreter_FOUND)
              COMMAND ptv_smoke hand_asset "${PTV_HAND_GLB}")
     add_test(NAME ptv_smoke_hand_pose
              COMMAND ptv_smoke hand_pose "${PTV_HAND_GLB}")
+    add_test(NAME ptv_smoke_default_hands
+             COMMAND ptv_smoke default_hands "${PTV_HAND_GLB}")
   endif()
 else()
   message(WARNING

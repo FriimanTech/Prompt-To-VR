@@ -259,7 +259,14 @@ Two rigs come from different places, and the split is not arbitrary:
   renames its joints to the BodySlots vocabulary and mirrors it for the other
   hand at build time. They are ordinary ECS entities carrying the rigged mesh,
   so the same skinned pipeline draws them, and `builtin.hand_pose` curls their
-  fingers from the controller.
+  fingers from the controller. They are drawn `player.hands.scale_m` long
+  (default 0.27 m, the size of a Full Player Avatar's hands). The skinned
+  loader sizes every rig from its bind pose AS DRAWN (`bind_palette_gain`):
+  this Sketchfab export's inverse binds leave out its 100x "Armature" node,
+  and sizing it from the raw vertices drew the hand 20 m long -- invisible
+  from inside. A hand that still loads absurdly sized falls back to block
+  hands, a non-finite finger pose resets to rest, and `ptv_smoke_default_hands`
+  checks size, alignment and visibility on every build.
 - **Full Player Avatar** games use the avatar's OWN hands. The engine creates
   only invisible hand anchors, and `builtin.hand_pose` curls the avatar's
   finger bones when its rig has them. No substitute hands are ever drawn.

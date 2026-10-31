@@ -128,6 +128,8 @@ private:
      *  No-op when the assets are missing, in which case ``hand_entities_``
      *  stays null and the render loop falls back to ``push_hand_mesh``. */
     void create_hand_entities();
+    /** 1 Hz ``hands:`` line: tracked / loaded / drawn / finite / size. */
+    void log_hands_telemetry(const bool tracked[2]);
     // Build the renderer's environment (sky/sun/ambient/fog/point lights) from
     // the loaded ``scene_``. Cached so it isn't rebuilt every frame; defaults
     // are chosen so scenes without an authored sky/lights (e.g. the starter

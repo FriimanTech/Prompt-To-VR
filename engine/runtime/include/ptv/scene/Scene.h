@@ -412,8 +412,11 @@ struct SceneDoc {
      *      so the engine creates only invisible hand anchors.
      */
     std::string hands_source{"default"};
-    /** Longest-axis size of the default hand mesh, metres. */
-    float hands_scale_m{0.20f};
+    /** Longest-axis size of the default hand mesh (wrist stub to fingertip),
+     *  metres. 0.27 draws it as large as a Full Player Avatar's hands: the
+     *  goblin-shooter avatar's wrist -> middle knuckle is 0.168 m, the default
+     *  hand's 0.128 m at 0.20. */
+    float hands_scale_m{0.27f};
     /** Extra rotation (XYZ Euler, degrees) applied in the grip frame on top
      *  of the measured palm alignment, for tuning how a hand sits on a
      *  particular controller. Also applied to an avatar's wrists. */

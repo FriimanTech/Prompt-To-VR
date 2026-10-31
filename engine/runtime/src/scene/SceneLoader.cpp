@@ -91,7 +91,7 @@ SceneDoc LoadSceneJson(const std::string& path) {
             const auto& hj = p["hands"];
             d.hands_source = hj.value("source", std::string("default"));
             d.hands_scale_m =
-                std::clamp(hj.value("scale_m", 0.20f), 0.08f, 0.5f);
+                std::clamp(hj.value("scale_m", 0.27f), 0.08f, 0.5f);
             d.hands_grip_trim_deg =
                 read_vec3(hj.value("grip_trim_deg", Json::array()), Vec3(0.0f));
             d.hands_debug_axes = hj.value("debug_axes", false);

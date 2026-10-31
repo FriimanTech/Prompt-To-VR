@@ -2392,6 +2392,110 @@ static int case_hand_pose(const char* glb) {
     return 0;
 }
 
+// What the player SEES of the default hands in a Hands Only game: the shipped
+// hand, skinned exactly as the GPU does it (palette * scaled vertex), placed
+// the way Application::place_hand_entity places it (grip * grip_to_entity)
+// on a controller 0.4 m in front of the eyes. It must be hand-sized, finite,
+// sit on the controller and be in view -- in the bind pose and in a fist.
+static int case_default_hands(const char* glb) {
+    namespace gml = ptv::gltf_mesh_load;
+    for (const std::string& path : {std::string(glb), other_hand_path(glb)}) {
+        const bool right = path.find("right") != std::string::npos;
+        const int hand = right ? 1 : 0;
+        const char* side = right ? "right" : "left";
+        std::string err;
+        std::vector<gml::SkinnedVertex> verts;
+        std::vector<std::uint32_t> indices;
+        gml::SkeletonData skel;
+        if (!gml::load_glb_skinned(path, 0.2f, verts, indices, skel, err)) {
+            std::fprintf(stderr, "[fail] load_glb_skinned %s: %s\n", path.c_str(), err.c_str());
+            return 1;
+        }
+        TestSkeleton ts;
+        if (!gml::load_glb_skeleton(path, 0.2f, ts.sk, err)) {
+            std::fprintf(stderr, "[fail] load_glb_skeleton %s: %s\n", path.c_str(), err.c_str());
+            return 1;
+        }
+        ts.reset();
+
+        auto skin = [&](const std::vector<ptv::Mat4>& pal, const ptv::Mat4& model,
+                        ptv::Vec3* lo, ptv::Vec3* hi, ptv::Vec3* centre) {
+            *lo = ptv::Vec3(1e9f);
+            *hi = ptv::Vec3(-1e9f);
+            ptv::Vec3 sum(0.0f);
+            for (const auto& v : verts) {
+                ptv::Mat4 m(0.0f);
+                for (int k = 0; k < 4; ++k) {
+                    if (v.weights[k] == 0) continue;
+                    m += pal[v.joints[k]] * (static_cast<float>(v.weights[k]) / 255.0f);
+                }
+                const ptv::Vec3 p(model * (m * ptv::Vec4(v.pos[0], v.pos[1], v.pos[2], 1.0f)));
+                if (!std::isfinite(p.x) || !std::isfinite(p.y) || !std::isfinite(p.z)) return false;
+                *lo = glm::min(*lo, p);
+                *hi = glm::max(*hi, p);
+                sum += p;
+            }
+            *centre = sum / static_cast<float>(std::max<size_t>(1, verts.size()));
+            return true;
+        };
+
+        std::vector<ptv::Mat4> pal;
+        gml::build_joint_palette(skel, skel.bind_pose, pal);
+        ptv::Vec3 lo, hi, c;
+        if (!skin(pal, ptv::Mat4(1.0f), &lo, &hi, &c)) return fail("bind-pose hand has NaN vertices");
+        const ptv::Vec3 ext = hi - lo;
+        const float longest = std::max(ext.x, std::max(ext.y, ext.z));
+        std::printf("[info] %s hand bind: longest %.3f m, centre %.3f %.3f %.3f (unit_scale %.5f)\n",
+                    side, longest, c.x, c.y, c.z, skel.unit_scale);
+        if (longest < 0.12f || longest > 0.30f) {
+            std::fprintf(stderr, "[fail] %s hand is %.3f m long when drawn (want 0.12-0.30)\n",
+                         side, longest);
+            return 1;
+        }
+
+        const auto rig = ptv::hand_rig::analyze(ts, 0, hand, nullptr);
+        if (!rig.valid) return fail("HandRig found no hand");
+        const ptv::Vec3 gt(rig.grip_to_entity[3]);
+        std::printf("[info] %s hand grip_to_entity translation %.3f %.3f %.3f\n", side, gt.x,
+                    gt.y, gt.z);
+        for (int col = 0; col < 4; ++col) {
+            for (int row = 0; row < 4; ++row) {
+                if (!std::isfinite(rig.grip_to_entity[col][row])) {
+                    return fail("grip_to_entity is not finite");
+                }
+            }
+        }
+        if (glm::length(gt) > 0.3f) return fail("grip_to_entity puts the hand >0.3 m from the grip");
+
+        // A controller 0.4 m ahead of eyes at 1.6 m, slightly right and low.
+        const ptv::Vec3 grip_pos(0.15f, 1.35f, -0.4f);
+        const ptv::Mat4 grip = glm::translate(ptv::Mat4(1.0f), grip_pos);
+        const ptv::Mat4 model = grip * rig.grip_to_entity;
+        if (!skin(pal, model, &lo, &hi, &c)) return fail("placed hand has NaN vertices");
+        const float off = glm::length(c - grip_pos);
+        const ptv::Vec3 eye(0.0f, 1.6f, 0.0f);
+        const ptv::Vec3 to = glm::normalize(c - eye);
+        const float angle = glm::degrees(std::acos(glm::dot(to, ptv::Vec3(0, 0, -1))));
+        std::printf("[info] %s hand on the controller: centre %.3f m from the grip, %.1f deg "
+                    "off the view axis\n", side, off, angle);
+        if (off > 0.15f) return fail("the hand is drawn away from the controller");
+        if (angle > 45.0f) return fail("a hand held in front of the eyes is out of view");
+
+        // A full fist, as builtin.hand_pose poses it.
+        for (const auto& f : rig.fingers) {
+            for (const auto& seg : f.segments) {
+                if (seg.joint < 0) continue;
+                ts.set_joint_rotation_from_bind(0, seg.joint, glm::angleAxis(1.2f, seg.curl_axis_local));
+            }
+        }
+        gml::build_joint_palette(skel, ts.pose, pal);
+        if (!skin(pal, model, &lo, &hi, &c)) return fail("a fist has NaN vertices");
+        std::printf("[ok] %s hand: drawn %.3f m long on the controller, fist finite\n", side,
+                    longest);
+    }
+    return 0;
+}
+
 // The player body: grounded, and walls stop it from every direction.
 static int case_player_character() {
     ptv::World world;
@@ -5530,6 +5634,13 @@ int main(int argc, char** argv) {
             return 2;
         }
         return case_hand_pose(argv[2]);
+    }
+    if (what == "default_hands") {
+        if (argc < 3) {
+            std::fprintf(stderr, "usage: ptv_smoke default_hands <hand.glb>\n");
+            return 2;
+        }
+        return case_default_hands(argv[2]);
     }
     if (what == "body_slots") return case_body_slots();
     if (what == "two_bone_ik") return case_two_bone_ik();

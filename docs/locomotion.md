@@ -318,7 +318,7 @@ mechanic defaults to these and lets its own binding `params` override them:
 | `default_locomotion_mode` | `""` | The mode active at start: substring match on `controller` / `head` / `teleport` among the bound modes, else the first bound one. |
 | `default_turn_mode` | `"snap"` | `snap` or `smooth`, when both are bound. |
 | `hands.source` | `"default"` | `default` loads the engine's rigged hands (Hands Only); `avatar` uses the player avatar's own hands and creates meshless anchors. |
-| `hands.scale_m`, `hands.grip_trim_deg`, `hands.debug_axes` | `0.20`, `[0,0,0]`, `false` | Default-hand size, a per-profile grip trim, and an axis overlay for on-device calibration. |
+| `hands.scale_m`, `hands.grip_trim_deg`, `hands.debug_axes` | `0.27`, `[0,0,0]`, `false` | Default-hand size (longest axis, metres; 0.27 matches a Full Player Avatar's hands), a per-profile grip trim, and an axis overlay for on-device calibration. |
 | `slide_max_speed_mps` | `1.5` | Walking pace of the slide. `scene_compile` sets it from the avatar's walk clip. |
 | `slide_accel_tau_s` | `0.12` | Acceleration smoothing time constant. |
 | `slide_decel_tau_s` | `0.18` | Deceleration smoothing time constant. |

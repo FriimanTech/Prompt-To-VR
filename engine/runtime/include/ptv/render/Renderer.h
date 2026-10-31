@@ -192,6 +192,10 @@ public:
     void submit_fx(const FxQuad& q) { fx_items_.push_back(q); }
     void set_fx_budget(std::size_t max_quads) { fx_budget_ = max_quads; }
     std::uint32_t fx_quads_drawn() const { return fx_.quad_count(); }
+    /** True when the last draw list included ``entity``'s mesh (telemetry). */
+    bool drew_entity(std::uint32_t entity) const {
+        return frame_entity_slot_.count(entity) != 0;
+    }
     /** The glyph atlas, for measuring text; null when text is unavailable. */
     const TextAtlas* text_atlas() const {
         return text_.ready() ? &text_.atlas() : nullptr;

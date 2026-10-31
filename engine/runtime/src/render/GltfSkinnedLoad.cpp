@@ -611,6 +611,27 @@ bool glb_probe_skin(const std::string& path, bool* out_has_skin,
     }
 }
 
+/** How much bigger the bind pose is DRAWN than its raw vertices: the scale of
+ *  ``joint_world * inverse_bind`` at bind. It is 1 when the inverse binds
+ *  cancel every ancestor of the skeleton (Tripo, Uthana), and 100 for the
+ *  Sketchfab default hand, whose inverse binds leave out its 100x "Armature"
+ *  node -- sizing that hand from its raw vertices drew it 20 m long, a room
+ *  the player stood inside and could not see. */
+float bind_palette_gain(const SkeletonData& skeleton) {
+    SkeletonData raw = skeleton;
+    raw.unit_scale = 1.0f;
+    std::vector<Mat4> pal;
+    build_joint_palette(raw, raw.bind_pose, pal);
+    std::vector<float> gains;
+    for (const auto& m : pal) {
+        const float g = glm::length(Vec3(m[0]));
+        if (std::isfinite(g) && g > 1e-6f) gains.push_back(g);
+    }
+    if (gains.empty()) return 1.0f;
+    std::nth_element(gains.begin(), gains.begin() + gains.size() / 2, gains.end());
+    return gains[gains.size() / 2];
+}
+
 bool load_glb_skeleton(const std::string& path, float target_scale_meters,
                        SkeletonData& out_skeleton, std::string& err,
                        const ModelFrame* frame) {
@@ -637,7 +658,8 @@ bool load_glb_skeleton(const std::string& path, float target_scale_meters,
         out_skeleton.unit_scale = frame->scale_for(target_scale_meters);
         return true;
     }
-    const float extent = longest_axis_from_accessors(model, sel.mesh_nodes);
+    const float extent =
+        longest_axis_from_accessors(model, sel.mesh_nodes) * bind_palette_gain(out_skeleton);
     out_skeleton.unit_scale =
         (target_scale_meters > 1e-4f && extent > 1e-6f)
             ? (target_scale_meters / extent)
@@ -847,12 +869,32 @@ bool load_glb_skinned(const std::string& path, float target_scale_meters,
     }
     if (need_normals) compute_vertex_normals(out_indices, out_verts);
 
+    // Bounds of the bind pose AS DRAWN (palette applied), not of the raw
+    // vertices: they differ whenever the inverse binds do not cancel the
+    // skeleton's ancestors (see bind_palette_gain).
+    std::vector<Mat4> bind_pal;
+    {
+        SkeletonData raw = out_skeleton;
+        raw.unit_scale = 1.0f;
+        build_joint_palette(raw, raw.bind_pose, bind_pal);
+    }
     float lo[3] = {1e30f, 1e30f, 1e30f};
     float hi[3] = {-1e30f, -1e30f, -1e30f};
     for (const auto& v : out_verts) {
+        Mat4 m(0.0f);
+        float wsum = 0.0f;
+        for (int k = 0; k < 4; ++k) {
+            if (v.weights[k] == 0 || v.joints[k] >= bind_pal.size()) continue;
+            const float w = static_cast<float>(v.weights[k]) / 255.0f;
+            m += bind_pal[v.joints[k]] * w;
+            wsum += w;
+        }
+        const Vec3 p = wsum > 1e-4f ? Vec3(m * Vec4(v.pos[0], v.pos[1], v.pos[2], 1.0f))
+                                    : Vec3(v.pos[0], v.pos[1], v.pos[2]);
         for (int k = 0; k < 3; ++k) {
-            lo[k] = std::min(lo[k], v.pos[k]);
-            hi[k] = std::max(hi[k], v.pos[k]);
+            if (!std::isfinite(p[k])) continue;
+            lo[k] = std::min(lo[k], p[k]);
+            hi[k] = std::max(hi[k], p[k]);
         }
     }
     const float extent = std::max(hi[0] - lo[0],
@@ -875,8 +917,8 @@ bool load_glb_skinned(const std::string& path, float target_scale_meters,
         }
     }
     out_skeleton.unit_scale = scale;
-    // In the bind pose the palette is the identity (or, with a frame, the
-    // pivot, whose rotation is about Y and so leaves heights alone).
+    // ``lo`` is the drawn bind pose; a frame's pivot rotates about Y and so
+    // leaves heights alone.
     out_skeleton.bind_min_y =
         lo[1] * scale -
         (framed ? (frame->sole_y + 0.5f * frame->height) * scale : 0.0f);

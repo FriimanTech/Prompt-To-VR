@@ -343,5 +343,22 @@ def test_a_game_without_weapons_has_no_weapons_checks() -> None:
     assert qv.evaluate_weapons([], {"entities": []}) == []
 
 
+HANDS_OK = ("I/ptv: hands: source=default L: tracked=0 mesh=1 drawn=1 finite=1 "
+            "joint_span_m=0.256 head_m=0.47 | R: tracked=0 mesh=1 drawn=1 finite=1 "
+            "joint_span_m=0.257 head_m=0.47")
+
+
+def test_default_hands_must_be_drawn_hand_sized() -> None:
+    scene = {"player": {"hands": {"source": "default"}}}
+    ok = qv.evaluate_hands(HANDS_OK, scene)
+    assert [c.outcome for c in ok] == [CheckOutcome.passed]
+    # The 20 m hand: drawn, finite, and a room the player stands inside.
+    giant = HANDS_OK.replace("joint_span_m=0.256", "joint_span_m=19.800")
+    assert qv.evaluate_hands(giant, scene)[0].outcome == CheckOutcome.failed
+    assert qv.evaluate_hands("", scene)[0].outcome == CheckOutcome.failed
+    # Full Player Avatar games use the avatar's hands: not checked here.
+    assert qv.evaluate_hands("", {"player": {"hands": {"source": "avatar"}}}) == []
+
+
 def test_status_enum_values() -> None:
     assert {s.value for s in VerificationStatus} == {"passed", "failed", "skipped"}
