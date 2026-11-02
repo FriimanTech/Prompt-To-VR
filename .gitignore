@@ -4,8 +4,8 @@
 .env
 .env.*
 *.env
-!.env.example
-!apps/web/.env.example
+# Templates with empty values are safe to commit, in any folder.
+!**/.env.example
 *.pem
 *.key
 *.p12
