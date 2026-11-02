@@ -1,6 +1,8 @@
 # Build and run
 
-For the full 17-stage pipeline (including Quest APK builds), see
+For the full pipeline (23 shared stages, then `cmake_build` +
+`engine_promotion` on PC VR or `quest_build` + `quest_runtime_verify` +
+`engine_promotion` on Quest), see
 [`All_Stages_Docs/README.md`](All_Stages_Docs/README.md).
 
 ## The hand-authored sample (no API keys required)
@@ -60,11 +62,16 @@ On success:
 ## Quest standalone (APK)
 
 When `ProjectState.target_device` is `quest`, stage 16 runs `quest_build` instead
-of `cmake_build`, followed by `quest_runtime_verify`, which runs the APK on the
-connected headset and checks the NPCs this game asked for (report-only; skipped
-when no headset is connected; never part of PC VR). **Verify on headset** in the
-web panel re-runs it. The web panel's **Launch latest build** uses `adb install -r`
-and starts the NativeActivity on a connected Quest 3.
+of `cmake_build`, followed by `quest_runtime_verify` (16b), which runs the APK on
+the connected headset and checks the NPCs, the game loop, weapons, textures,
+the user's optimization locks and memory that this game calls for (report-only;
+skipped when no headset is connected; never part of PC VR). A memory failure
+re-runs `asset_optimization` → `scene_compile` → `quest_build` → verify, at most
+`quest_memory_max_correction_rounds` (default 2) times. **Verify on headset** in
+the web panel (`POST /api/projects/<id>/verify`) re-runs it. The APK is always
+downloadable from `GET /api/projects/<id>/apk`. The web panel's **Launch latest
+build** uses `adb install -r` and starts the NativeActivity on a connected
+Quest 3.
 
 Prerequisites: Android SDK/NDK, `adb`, and a USB-connected headset. See
 [`quest-build.md`](quest-build.md) for the full toolchain checklist, APK

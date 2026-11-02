@@ -5,22 +5,37 @@ This doc describes how the hand-authored engine core is laid out.
 ## Public headers
 
 All engine-public headers live under `engine/runtime/include/ptv/`. Generated
-code is restricted to these prefixes (enforced by
+gameplay code may include (enforced by
 [`engine/tools/check_generated_bounds.py`](../engine/tools/check_generated_bounds.py)
 and the orchestrator's
-[`bounds.py`](../apps/orchestrator/ptv_orchestrator/pipeline/bounds.py)):
+[`bounds.py`](../apps/orchestrator/ptv_orchestrator/pipeline/bounds.py)) the
+`ptv/api/` headers listed exactly in those files (`IMechanic.h`,
+`IBehaviour.h`, `IDialogueHook.h`, `InputSnapshot.h`, `MechanicContext.h`),
+anything under `ptv/ecs/`, `ptv/math/`, `ptv/mechanics/`, `ptv/dialogue/`,
+`ptv/ai/`, `glm/`, `entt/`, `nlohmann/`, an allowlist of pure std headers,
+and bare-filename headers of its own task or a declared `depends_on` task.
+World builders (`engine/generated/world/`) get only `ptv/api/IWorldBuilder.h`,
+std and glm.
 
 - `ptv/api/` — `IMechanic`, `IBehaviour`, `IDialogueHook` and the register
-  macros, plus `InputSnapshot` (live controller/headset input) and
-  `MechanicContext` (locomotion / physics / debug-draw / hand / transform-fx /
-  haptics / socket / skeleton services, plus `game` / `app` / `text` from
-  `GameFlow.h`: the game loop, Leave Game / fades / respawn placement, and
-  world-space SDF text), and `Facing.h` -- the single yaw convention
-  (`yaw_from_forward`, `rotation_facing`, `facing_of`, `heading_error`).
+  macros, `InputSnapshot` (live controller/headset input) and
+  `MechanicContext`, whose services are: `locomotion`, `physics`, `contacts`,
+  `spawn`, `attach`, `combat`, `perception`, `nav`, `draw`, `hands`, `fx`
+  (transform juice), `haptics`, `sockets`, `skeleton`, `equip`,
+  `interactive`, `persistence`, `transition`, `ui`, `comfort`, `encounters`,
+  `game` / `app` (`GameFlow.h`: the game loop, Leave Game, fades, respawn
+  placement), `text` (world-space SDF text), `vfx` (`Effects.h`),
+  `projectiles` (`Projectiles.h`) and `weapons` (`Weapons.h`).
+  `MechanicContext.h` pulls in `Effects.h`, `GameFlow.h`,
+  `InteractiveState.h`, `Projectiles.h` and `Weapons.h`. Also here:
+  `Facing.h` -- the single yaw convention (`yaw_from_forward`,
+  `forward_from_yaw`, `rotation_facing`, `facing_of`, `heading_error`),
+  `BodySlots.h` (canonical body-slot vocabulary) and `IWorldBuilder.h`.
 - `ptv/ecs/` — `World`, core ECS components (`CTransform`, `CMesh`, `CPhysics`, …),
   plus `TransformOffset.h` (the draw-time visual-offset layer) and
   `Skeleton.h` (the per-frame pose tick).
-- `ptv/scene/` — `SceneDoc`, `LoadSceneJson`, `ApplySceneToWorld`.
+- `ptv/scene/` — `SceneDoc`, `LoadSceneJson`, `ApplySceneToWorld` (engine
+  side; not on the generated-code allowlist).
 - `ptv/math/` — `Vec3`, `Quat`, `Transform` (glm wrappers).
 - `ptv/mechanics/` — `MechanicRegistry`, `MechanicHost`.
 - `ptv/dialogue/`, `ptv/ai/` — reserved for future dialogue / AI systems.
@@ -64,7 +79,12 @@ Haptics use core `xrApplyHapticFeedback` and need no extension.
 
 Thin wrapper around an EnTT registry with a stable `string_id → entity` map.
 Core components: `CTransform`, `CMesh`, `CPhysics`, `CMechanicBinding`,
-`CTag`, `CTransformOffset`, `CSkeleton`, `CAnimator`.
+`CTag`, `CTransformOffset`, `CSkeleton`, `CAnimator`. Gameplay components
+(all under `ptv/ecs/`): `CHealth`, `CFaction`, `CLocomotionIntent` (an NPC's
+desired velocity, consumed by `builtin.character_locomotion`), `CAttachment`,
+`CEquipSlots` / `CEquipped`, `CHoldProfile`, `CSocketInfo`, `CInteractive`,
+`CMovable`, `CHighlight`, `CUiPanel`, `CMirrorSurface`, `CSelfViewHide`,
+`CStaticBatch`, plus `CInlineMesh` / `CPrimitive` for world-builder geometry.
 
 ### Transform FX (`ptv::tick_transform_offsets`)
 
@@ -265,10 +285,28 @@ A static registry of `IMechanic` / `IBehaviour` / `IDialogueHook`
 factories. Each built-in mechanic lives in its own module under
 `src/mechanics/builtin/<mechanic>/` and registers itself at static-init
 time; generated modules do the same from
-`engine/generated/{mechanics,ai,dialogue}/`.
+`engine/generated/{mechanics,ai,dialogue}/`. The engine injects no player
+mechanic: every built-in that runs is bound in `scene.json`.
 `src/mechanics/BuiltinMechanics.cpp` holds no mechanics any more — it is
 purely the link anchor that stops MSVC discarding the module objects (they
 are referenced by nothing but their static constructors).
+
+Registered built-in ids (`PTV_REGISTER_MECHANIC` under
+`src/mechanics/builtin/`):
+
+| Area | Ids |
+|---|---|
+| Player locomotion / turning | `builtin.locomotion.teleport` (alias `builtin.teleport`), `builtin.locomotion.slide.head_relative`, `builtin.locomotion.slide.controller_relative`, `builtin.locomotion.snap_turn` (alias `builtin.snap_turn`), `builtin.locomotion.smooth_turn`, `builtin.movement_settings_menu` |
+| Player body | `builtin.hand_pose`, `builtin.avatar_body`, `builtin.mirror_surface`, `builtin.head_interior` |
+| Interaction | `builtin.grab`, `builtin.throw`, `builtin.equip`, `builtin.ui_panel`, `builtin.recoil` (legacy; stripped by the weapon reconcile when an interaction design exists) |
+| Weapons | `builtin.weapon`, `builtin.bow`, `builtin.melee_weapon`, `builtin.shield`, `builtin.item_source`, `builtin.npc.ranged_attack` |
+| NPCs | `builtin.character_locomotion`, `builtin.npc.follow`, `builtin.npc.melee_chase`, `builtin.encounter_director` |
+| World affordances | `builtin.door`, `builtin.container`, `builtin.mover`, `builtin.switchable`, `builtin.breakable`, `builtin.harvestable` |
+| Game loop | `builtin.game_flow`, `builtin.game_hud` |
+
+The planner-facing descriptions, params and player `role:` mapping live in
+`apps/orchestrator/ptv_orchestrator/engine_catalog.py`; see
+[engine-growth.md](engine-growth.md).
 
 `MechanicHost::attach_bindings(world, ctx)` walks every `CMechanicBinding`
 and instantiates the matching mechanic, collapsing `MechanicScope::Player`
@@ -358,11 +396,18 @@ until the player walks into the first doorway.
 
 Every generated C++ file MUST:
 
-- live under `engine/generated/{mechanics,ai,dialogue}/<project_id>/<name>.cpp`,
-- implement `ptv::IMechanic`, `ptv::IBehaviour`, or `ptv::IDialogueHook`,
+- live under `engine/generated/{mechanics,ai,dialogue}/<project_id>/` (world
+  builders under `engine/generated/world/<project_id>/`), as `.cpp` plus
+  optional `.h` / `.hpp` task-local headers,
+- implement `ptv::IMechanic`, `ptv::IBehaviour` (context-taking `on_attach` /
+  `on_tick`), `ptv::IDialogueHook`, or `ptv::IWorldBuilder` (world/ only),
 - register itself via `PTV_REGISTER_MECHANIC("<id>", TypeName)` or sibling
-  macros,
+  macros, in a `.cpp` only,
 - only include whitelisted headers (see [`bounds.py`](../apps/orchestrator/ptv_orchestrator/pipeline/bounds.py)).
 
-The orchestrator's code-gen stage strips non-whitelisted `#include` lines
-and rejects paths outside the three allowed subtrees.
+An include violation fails the CodeTask loudly (it is fed back to the agent
+as repair context, never silently stripped), and paths outside the allowed
+subtrees are rejected. `codegen_contracts.py` (API contract v5) additionally
+rejects code that compiles but fights the engine: context-free AI, finding
+the player by name, private damage inboxes, private lives / respawn /
+restart, and private weapons, ammo or muzzle raycasts.

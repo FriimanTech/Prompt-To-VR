@@ -65,7 +65,19 @@ model to:
 
 1. Try `builtin` (catalog id covers it as-is).
 2. Try `builtin+config` (catalog id covers it with parameter tweaks).
-3. Only emit `generate` when no catalog entry reasonably fits.
+3. Try `builtin+config_code_edit` (copy a built-in's source and edit it into
+   a NEW generated mechanic; the built-in itself is never modified, and the
+   copy takes over the base built-in's player `role:`).
+4. Only emit `generate` when no catalog entry reasonably fits.
+
+Deterministic reconciles then run over the agent's plan: the player-roles
+reconcile (`PLAYER_ROLES` in `engine_catalog.py` — `role:fingers`,
+`role:body`, `role:teleport`, `role:slide_head`, `role:slide_controller`,
+`role:snap_turn`, `role:smooth_turn`, `role:movement_settings_menu`; one
+mechanic per role, none for roles the game lacks) and the weapon reconcile
+(`weapon_plan.py`), which makes every designed weapon `builtin+config` of
+`builtin.weapon` / `bow` / `melee_weapon` / `shield` (+ `item_source`,
+`npc.ranged_attack`) and removes generated weapon tasks and `builtin.recoil`.
 
 The stage emits an SSE event `info: reuse=N (builtin/builtin+config),
 generate=M` so the UI can highlight how much of the game came from the
@@ -128,14 +140,17 @@ Here is what the system does, step by step:
    * `superman_legs` → no catalog entry fits, so a `generate` task is
      emitted for a body-anchor hook that positions the legs mesh.
 
-4. **Code-generation stage** writes
+4. **World generation** writes procedural city geometry into
+   `world.scene.json`. It runs BEFORE code generation, so gameplay code is
+   written against the ids the world actually declared.
+
+5. **Code-generation stage** writes
    `engine/generated/mechanics/<pid>/superman_hover_toggle.cpp` and
    `engine/generated/mechanics/<pid>/superman_flight.cpp`, both
-   subclassing `IMechanic` from the public engine surface only.
-
-5. **World generation** writes procedural city geometry into
-   `world.scene.json`. **Scene-compile + cmake_build** (or `quest_build`)
-   compile the runtime + new mechanics and link the launcher.
+   subclassing `IMechanic` from the public engine surface only (flight uses
+   `ctx.locomotion->set_vertical_mode(VerticalMode::Free)`).
+   **Scene-compile + cmake_build** (or `quest_build`) then compile the
+   runtime + new mechanics and link the launcher.
 
 6. **Engine-promotion stage** sees the two new sidecars
    (`superman_hover_toggle.codetask.json`,
@@ -172,12 +187,12 @@ first game paid for.
 ## Practical guidance for prompts
 
 * If your prompt names a movement style explicitly ("teleport-only",
-  "smooth/sliding locomotion"), the planner plans just that one. If your
-  prompt is silent, you'll get all three locomotion modes plus the in-game
-  picker — same as the starter room. Either way the engine attaches all
-  four locomotion mechanics at scene load, since the runtime picker can
-  switch to any of them; the plan decides which one is *selected* by
-  default, not which ones exist.
+  "smooth/sliding locomotion"), the BuildSpec `movement` block lists just
+  that one. If a travelling game's prompt is silent, you get all three
+  locomotion modes plus `builtin.movement_settings_menu`. The engine injects
+  no player mechanic: `scene_compile` binds exactly the roles the BuildSpec
+  names on `player_rig`, and a game with no locomotion is a valid stationary
+  game. See [`docs/locomotion.md`](locomotion.md).
 
 * Promotion is conservative: it only registers mechanics whose
   `cmake_build` or `quest_build` succeeded. Broken builds never pollute the catalog.
@@ -189,7 +204,8 @@ first game paid for.
 
 | Concern              | File                                                                       |
 | -------------------- | -------------------------------------------------------------------------- |
-| Static built-in list | `apps/orchestrator/ptv_orchestrator/engine_catalog.py`                     |
+| Static built-in list + `PLAYER_ROLES` | `apps/orchestrator/ptv_orchestrator/engine_catalog.py`      |
+| Weapon reconcile     | `apps/orchestrator/ptv_orchestrator/pipeline/weapon_plan.py`               |
 | Reuse-first prompts  | `apps/orchestrator/ptv_orchestrator/pipeline/prompts.py`                   |
 | Catalog injection    | `apps/orchestrator/ptv_orchestrator/pipeline/stage_mechanic_plan.py`       |
 | Promotion stage      | `apps/orchestrator/ptv_orchestrator/pipeline/stage_engine_promotion.py`    |

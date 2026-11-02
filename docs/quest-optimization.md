@@ -63,7 +63,7 @@ onto these settings:
 | Draw distance | `auto`, `far`, `performance` | `far` = the governor never shortens it, small-object cull at 0.5 px |
 | Room culling | `auto`, `off` | |
 | Anti-aliasing | `auto`, `high` | 4x MSAA always (a rebuild setting) |
-| Frame rate | `auto` (72 Hz), `90`, `120` | budget 11.1 / 8.3 ms, through `XR_FB_display_refresh_rate` |
+| Frame rate | `auto` (72 Hz), `90`, `120` | budget 11.1 / 8.3 ms, through `XR_FB_display_refresh_rate` (the closest supported rate not above the request; the governor budgets from the scene's `refresh_hz`) |
 
 Not user-controllable, because they save work without lowering visible
 quality: multiview, instancing, batching, dedupe, frames in flight, ASTC, mips,
@@ -76,7 +76,8 @@ Quest 3; FFR is offered).
 texture, draw distance, culling, fps / Hz, anti-aliasing, graphics or visual
 quality, performance) decides whether to call a model at all; no match means
 empty preferences and no call. Otherwise one light-tier structured-output
-call maps the wording, and a deterministic validator keeps only settings whose
+call (`claude_light_model` through `LlmClient`, OpenAI fallback) maps the
+wording, and a deterministic validator keeps only settings whose
 **quote appears verbatim** in its source text, applies box-wins, clamps
 requests past the hard limits and records unsupported ones (eye tracking, no
 compression and turning memory protection off are detected without the model
@@ -87,9 +88,15 @@ never shapes gameplay. Output: `optimization_preferences.json`
 **Locks.** `asset_optimization` applies the preferences on top of the
 automatic profile (`apply_overrides`) and every override becomes a lock in
 `performance.locks` with the value, source and quote. `SceneLoader` reads the
-locks and `QualityGovernor` builds its ladders only from unlocked knobs; when
-only locked knobs remain it logs `governor: over budget, blocked by user
-settings`. Verification checks the locks held on the device and reports a
+`ffr` (plus its `level`), `resolution`, `lod`, `draw_distance` and
+`room_culling` locks; `QualityGovernor` never moves a pinned knob. What pins
+a governor knob: FFR `off` / `fixed`, resolution `off` / `high`, model detail
+`detail`, draw distance `far`. FFR `max` does not pin it but caps the ladder
+at the locked level. `performance` values (and `auto`) leave the knob to the
+governor. When the governor is over budget and no unlocked step remains, it
+logs `governor: over budget, blocked by user settings (<gpu> ms GPU, <cpu> ms
+CPU of <budget> ms)` once if any knob is locked, otherwise `governor: over
+budget with every quality step already taken`. Verification checks the locks held on the device and reports a
 user-caused frame miss as a **warning**, never a failure.
 
 **Warnings never block.** The New Project page previews the parsed overrides
@@ -136,9 +143,19 @@ allowance and a reserved audio slot. Outputs: always-resident set, streamable
 set, steady and peak estimates, and `resident_memory_budget_mb` for the
 runtime.
 
+The engine baseline defaults to 260 MB (measured); render targets count 3
+swapchain images x 2 eyes x 1680x1760 x 4 B x the render-scale ceiling
+squared, plus the foveation maps.
+
 **Calibration:** every verified run records measured versus estimated peak in
-`projects/memory_calibration.json`; estimates are multiplied by the worst
-ratio seen (never below 1), so an optimistic model widens its own margin.
+`projects/memory_calibration.json` (`{"multiplier", "runs": [{project_id,
+estimated_mb, measured_mb, ratio}]}`, one run kept per project, the latest
+replacing the earlier one). The multiplier is the worst ratio across those
+runs (never below 1; a missing or unreadable file reads as 1). It multiplies
+only the categories labelled `estimate` — meshes (both LOD groups), static
+batches, simulation and heap fragmentation — never the exact ones (baseline,
+textures, palettes, clips, render targets, per-frame buffers, pools), so an
+optimistic model widens its own margin.
 
 ### Fit decision and automatic corrections
 
@@ -146,7 +163,9 @@ ratio seen (never below 1), so an optimistic model widens its own margin.
 - **Residency:** only the always-resident set fits — streaming keeps the rest
   under the target. Normal for large worlds, not a warning.
 - **Over:** corrections run least-visible-first, re-estimating after each:
-  textures the player cannot get close to one size step down; background LOD0
+  textures the player cannot get close to (importance `background` /
+  `projectile`, or closest view beyond 8 m) one size step down (never below
+  256 px); background LOD0
   budgets x0.6; a user's render scale `high` back to 1.0x; only then near and
   held textures. Never: removing entities, NPCs, encounters or weapons, or a
   solid colour instead of a texture. If it still does not fit, the APK is
@@ -179,11 +198,17 @@ second on a background thread, adds queued loads, and acts on the
 | Level | Projected | Action |
 |---|---|---|
 | green | < 4.25 GiB | normal |
-| yellow | 4.25-4.5 GiB | no speculative prefetch; evict long-unused streamable meshes |
-| red | 4.5-4.8 GiB, or `MemAvailable` < 512 MB, or `APP_CMD_LOW_MEMORY` | evict every invisible mesh above the floor, defer high-detail loads, purge the heap, log the top consumers |
-| critical | >= 4.8 GiB | also draw visible meshes at their coarsest resident LOD |
+| yellow | 4.25-4.5 GiB | no speculative prefetch; evict streamable meshes unused for 108+ frames (~1.5 s), one per frame |
+| red | 4.5-4.8 GiB, or `MemAvailable` < 512 MB, or `APP_CMD_LOW_MEMORY` | evict streamable meshes not drawn this frame or the last (up to 8 per frame, never the floor), defer non-floor loads, purge the heap, log the top consumers |
+| critical | >= 4.8 GiB | also draw visible meshes at their coarsest resident LOD (first-person items excepted) |
 
-Levels fall back only 128 MB under their threshold. A failed GPU buffer
+The projection is smaps PSS + KGSL unmapped GPU memory (or the engine's
+texture + mesh + target + frame accounting when KGSL is unreadable) + queued
+stream loads. The GiB figures are for the default 4.5 GiB target; the
+thresholds scale with the scene's `memory_target_mb` (yellow at 4352/4608 of
+it, red at the target, critical at 4915/4608). Levels rise straight to the
+wanted level but fall back one level at a time, and only once the projection
+is 128 MB under the current level's threshold. A failed GPU buffer
 allocation is recoverable: the renderer waits for the GPU, frees retired and
 invisible streamable meshes (never the floor), purges the heap and retries
 once; if that fails too the mesh stays at its lower LOD and the failure is

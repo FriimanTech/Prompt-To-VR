@@ -13,6 +13,13 @@ web panel starts runs through `POST /api/projects/{id}/run` in four modes
 | **Resume** | from the first stage whose latest record is not `succeeded` | Yes |
 | **Resume from…** | the chosen stage and everything after it | Yes, for stages before it |
 | **Run only…** | just the chosen stage | Yes |
+| **Verify on headset** (Quest only) | `quest_runtime_verify` via `POST /api/projects/{id}/verify` | Yes; refused for PC VR projects |
+
+The request body picks the mode: `stage` → `run_stage`, `resume_from` →
+`resume_from_stage`, `resume: true` → `resume_pipeline`, none →
+`run_pipeline`. The stage list comes from `_stages_for(target_device)`:
+the shared stages, then `cmake_build` + `engine_promotion` (PC VR) or
+`quest_build` + `quest_runtime_verify` + `engine_promotion` (Quest).
 
 Every stage is written to make a Resume cheap:
 
@@ -95,8 +102,9 @@ it doubles as a manual unstick.
 
 **Resume** restarts at the first stage whose latest record is not
 `succeeded`. A stage added to the pipeline later (for example
+`optimization_preferences`, `interaction_design`, `game_design`,
 `character_routing`, `uthana_rigging`, `uthana_motion_plan`,
-`uthana_animation`) has no record at all in an older project, so Resume starts
+`uthana_animation`, `socket_generation`) has no record at all in an older project, so Resume starts
 there and runs everything after it.
 
 The paid stages after it keep their ledgers, so they re-bill nothing:
@@ -107,7 +115,24 @@ The paid stages after it keep their ledgers, so they re-bill nothing:
 - `uthana_animation.json`
 
 Uthana motions are additionally reused by name across the whole Uthana
-organisation.
+organisation, and `socket_generation` caches each asset's result by GLB hash +
+spec + pipeline version (`assets/<id>/sockets/result.json`).
+
+`world_generation` now runs **before** `code_generation` (codegen reads the
+`world*.scene.json` files for the ids the world declared). Resume from
+`world_generation` re-runs both; Resume from `code_generation` reuses the
+world already on disk.
+
+## The Quest memory correction loop
+
+On Quest, `quest_runtime_verify` is wrapped by
+`_verify_with_memory_corrections`. When the headset measures a memory failure
+the stage writes `memory_feedback.json` (and updates
+`projects/memory_calibration.json`); the orchestrator then re-runs
+`asset_optimization` → `scene_compile` → `quest_build` → verify, at most
+`quest_memory_max_correction_rounds` (default 2) times, emitting a
+`correction round N of M` warning each time. A stale `memory_feedback.json`
+from a previous run is deleted first. Every round's APK stays downloadable.
 
 ## Terminal status is guaranteed
 

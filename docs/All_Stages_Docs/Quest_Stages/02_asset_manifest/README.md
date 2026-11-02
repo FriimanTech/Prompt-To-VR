@@ -2,7 +2,7 @@
 
 # Stage 2: AssetManifest
 
-> **Pipeline position:** after `build_spec` → before `npc_plan`  
+> **Pipeline position:** after `optimization_preferences` → before `interaction_design`  
 > **Target:** shared (PC VR and Quest)  
 > **Primary code:** [`apps/orchestrator/ptv_orchestrator/pipeline/stage_asset_manifest.py`](../../../../apps/orchestrator/ptv_orchestrator/pipeline/stage_asset_manifest.py)  
 > **Primary artifacts:** `projects/<project_id>/asset_manifest.json`
@@ -11,163 +11,116 @@
 
 ### What this stage is
 
-The **AssetManifest stage** plans every **3D object** the game needs: characters, props, weapons, FX, and UI meshes. It produces `asset_manifest.json`, a list of `AssetItem` entries with generation strategy, scale, collision hints, rigging flags, animation intents, and socket hints.
+The **AssetManifest stage** plans every **3D object** the game needs — characters, props, weapons, FX and UI meshes — as a list of `AssetItem`s: reference-image prompt, Tripo settings, real-world scale, collision shape, rig / animation hints, socket hints and importance.
 
 ### Why it exists
 
-BuildSpec says *what* the game is; AssetManifest says *which GLB files* Tripo must produce. Separating object assets from the VR **environment** (which is C++ world generation, not Tripo) keeps the 3D pipeline focused and cheaper.
+BuildSpec says *what* the game is; the manifest says *which GLBs* get made. Every item costs a reference image plus a paid Tripo call, so the manifest is also the main cost decision. The VR **environment** is not in it: the world is authored in C++ by `world_generation`.
 
-### Inputs (what enters)
+### Inputs
 
 | Input | Location |
 |-------|----------|
-| BuildSpec | `projects/<id>/build_spec.json` |
+| BuildSpec | `projects/<id>/build_spec.json` (or `ctx.build_spec`) |
 
-### Outputs (what it produces)
+### Outputs
 
 | Output | Location |
 |--------|----------|
-| AssetManifest | `projects/<id>/asset_manifest.json` |
-
-Each item includes: `id`, `category`, `strategy` (`image_to_3d` or `text_to_3d`), `reference` prompt text, `tripo` settings, `rigged`, `animations[]`, `socket_hints`, `target_scale_meters`, `collision_shape`.
+| AssetManifest (1..48 items) | `projects/<id>/asset_manifest.json` |
+| Stage record (e.g. `"Planned 9 assets (dropped 3 audio asset(s) (...); ...)"`) | `project_state.json` |
 
 ### Where output goes next
 
-- **`npc_plan`** may rewrite `rigged` / `animations` to match prompt intent.
-- **`reference_images`**, **`tripo_models`**, rigging, animation, normalization, contract, optimization, and **`scene_compile`** all read the manifest.
+- **`interaction_design`** reads it and may rewrite it (appends seen projectile assets, corrects real-world scale, mirrors `socket_hints`, marks held items `hero`, drops engine-drawn FX meshes).
+- **`npc_plan`** reconciles `rigged` / `animations` for characters.
+- `reference_images`, `tripo_models`, character routing, rigging, animation, normalization, sockets, contract, optimization and `scene_compile` all read it.
 
-### Key concepts and terms
+### Models, providers and effort
 
-- **AssetItem** — One row in the manifest; maps 1:1 to a folder under `projects/<id>/assets/<asset_id>/`.
-- **Environment category** — Items tagged `environment` are **dropped** if any non-environment items exist. The world is built in C++ (`world_generation`), not as a Tripo GLB.
-- **Audio items** — Items naming a *sound* (`pistol_shot_audio`, "Audio: UI Click") are **dropped** the same way. Sound has no shape, so a Tripo call for one buys a silent blob.
-- **Rigging / animations** — Initial hints only; `npc_plan` reconciles them before credits are spent on Tripo rigging.
+One `LlmClient.generate_json` call with `model=claude_light_model` (`claude-sonnet-4-6`) and system prompt `ASSET_MANIFEST_SYSTEM`; fallback is OpenAI `gpt-5.6-sol` at `openai_light_reasoning_effort` = `medium`. One extra call if NPC roster variants are missing.
 
-### End-to-end flow (plain language)
+### Failure behavior
 
-1. Load BuildSpec JSON.
-2. Call **Claude Sonnet** with `ASSET_MANIFEST_SYSTEM` and the BuildSpec embedded in the user message.
-3. Validate response as `AssetManifest`.
-4. Post-filter: remove stray `environment` items and any item naming a sound, when other objects survive.
-5. Save manifest and succeed.
+Invalid JSON / schema mismatch or a provider error fails the stage. Missing roster variants after the retry are a **warning** (those NPC types simply won't exist).
 
 ---
 
 ## Detailed stage deep dive
 
-### Exact execution trace (`stage_asset_manifest.run`)
+### Execution trace (`stage_asset_manifest.run`)
 
-| Step | Action | Detail |
-|------|--------|--------|
-| 1 | emit + `record_stage(running)` | Standard stage bookkeeping |
-| 2 | Load BuildSpec | `ctx.build_spec` cache or `load_build_spec()` |
-| 3 | `make_llm()` | Same factory as stage 1 |
-| 4 | Embed full BuildSpec JSON in user message | Instructs model to emit AssetManifest |
-| 5 | `generate_json(..., model=claude_light_model, system=ASSET_MANIFEST_SYSTEM)` | **Sonnet**, not Opus — cheaper planning pass |
-| 6 | `AssetManifest.model_validate()` | Schema enforcement |
-| 7 | **Reconcile: environment + audio post-filter** | See below |
-| 8 | `save_asset_manifest()` | Writes disk; caches on `ctx.asset_manifest` |
-| 9 | Success message | Includes dropped environment count if any |
+| Step | Code | Detail |
+|------|------|--------|
+| 1 | emit `running`, `record_stage(running)` | |
+| 2 | Load BuildSpec | `ctx.build_spec` or `store.load_build_spec` |
+| 3 | `generate_json(prompt, schema=AssetManifest.model_json_schema(by_alias=True), system=ASSET_MANIFEST_SYSTEM, model=claude_light_model)` | Full BuildSpec JSON embedded; for Hands Only the message adds "plan NO player-avatar / player-body item; hand-shaped props (gloves, gauntlets) are ordinary props with `wearable_region` set" |
+| 4 | `AssetManifest.model_validate` | |
+| 5 | `missing_roster_assets` | Every `npc_roster` variant needs a manifest item; if any is missing, one retry naming them; still missing → warning |
+| 6 | `normalise_roster_items` | Roster variants forced to `category: character`, `character_role: npc` (so they get a T-pose reference, a rig and clips); emits `info` |
+| 7 | `_partition` | Drops `environment` and audio items (below) |
+| 8 | Hands Only filter | Drops items where `is_player_avatar_item` (role `player_avatar`, or a character whose id/name/style notes name the player's body) |
+| 9 | `ctx.asset_manifest = manifest`; `store.save_asset_manifest` | |
+| 10 | `record_stage(succeeded)` with notes; emit `"N assets"` | |
 
-### Reconcile filter (deterministic, after LLM)
+### Deterministic drops
 
-`_partition()` splits the model's answer into three buckets and keeps only the first, but **only when the first is non-empty** — `AssetManifest` requires ≥1 item, so emptying it would turn a wasted API call into a crashed pipeline.
+Every drop only applies **when something else survives** — `AssetManifest` requires at least one item, and an empty manifest is worse than one wasted Tripo call.
 
-| Bucket | Rule | Why it cannot be a GLB |
-|--------|------|------------------------|
-| kept | everything else | — |
-| environment | `category == environment` | The VR environment is authored in C++ by `world_generation`. |
-| audio | `is_audio_item()` | Sound has no shape. |
+| Dropped | Rule | Why |
+|---------|------|-----|
+| Environment | `category == environment` | The world is C++ (`world_generation`), not a GLB |
+| Audio | `is_audio_item()` | Sound has no shape; it would buy a picture of a gunshot and a silent blob |
+| Player body (Hands Only) | `is_player_avatar_item()` | Hands Only uses the engine's default hands |
 
-Both are belt-and-suspenders behind `ASSET_MANIFEST_SYSTEM`, which forbids each of them outright. The prompt is advice; a fallback model may not take it, and every surviving item costs a reference image plus a paid Tripo call.
+`is_audio_item` matches whole tokens of `id` + `name` against `_AUDIO_TOKENS` (`audio`, `sfx`, `soundfx`, `sound(s)`, `soundscape`, `soundtrack`, `music`, `bgm`, `foley`, `voiceover`, `vox`, `ambience`) and stands down when a `_SOUND_SOURCE_TOKENS` word names a physical sound-making object (speaker, radio, siren, alarm, bell, jukebox, drum, guitar, microphone…). It is fail-open on purpose: a wrong keep costs one call, a wrong drop deletes an asset the game needs. Near-misses that name geometry (`stinger`, `ambient`, `horn`, `track`) are not audio words. Both prompts (`BUILD_SPEC_SYSTEM`, `ASSET_MANIFEST_SYSTEM`) forbid audio items; this code is the backstop for fallback models.
 
-#### `is_audio_item()`
+### `AssetItem` fields that matter downstream
 
-Three real runs planned audio as geometry: `pistol_shot_audio` / `rifle_shot_audio` / `target_impact_audio` as `fx`, and nine `Audio: …` items as `ui` — which is how they got past a category-only check. Each one generated a picture of a gunshot, a mesh of that picture, and a silent blob in the scene.
+| Field | Purpose | Changed later? |
+|-------|---------|----------------|
+| `id` | Folder `assets/<id>/`, every reference | No |
+| `category` (`character`, `prop`, `fx`, `ui`, `environment`) | Routing | Roster variants forced here |
+| `character_role` (`none`, `npc`, `player_avatar`, …) | NPC vs player body | Roster variants forced here |
+| `wearable_region` | Hand / forearm-shaped props | No |
+| `reference` (`prompt`, `pose`, `coverage`, …) | Reference image request | No |
+| `strategy`, `tripo` (`texture`/`pbr` true, `texture_alignment`, `face_limit`, `model_version`) | Tripo request | No |
+| `target_scale_meters` | World size | `interaction_design` (real dimensions) |
+| `collision_shape` | Physics metadata | No |
+| `rigged`, `animations[]` (semantic intents) | Rig / clip gates | **`npc_plan` reconcile** |
+| `socket_hints` | Socket names | `interaction_design` mirrors the design |
+| `importance`, `max_triangles` | Optimization budget | `interaction_design` sets held items to `hero` |
+| `hold_rotation_offset_deg`, `forward_hint` | Optional manual grip / facing corrections | No |
 
-The matcher is whole-token over `id` and `name`, so `soundproof_panel` and `Audiotorium Seats` survive. It stands down entirely when the item also names a physical sound-**making** object (speaker, radio, alarm bell, klaxon, jukebox): those are props with silhouettes, and the failure directions are not symmetric — a wrong drop deletes geometry the game needs, a wrong keep costs one call. Near-misses that name real geometry are deliberately excluded from the audio vocabulary: `stinger` (a missile), `ambient` (lighting), `horn`, `track`.
+### Resume
 
-Audio the prompt asks for belongs in the mechanic that triggers it, not the asset list. `BUILD_SPEC_SYSTEM` now says the same thing one stage earlier, since that is where the `Audio` entries originated.
-
-### Per-AssetItem contract for downstream stages
-
-| Field | Purpose | Overwritten later? |
-|-------|---------|-------------------|
-| `id` | Directory `assets/<id>/`, all references | No |
-| `category` | `character` → npc_plan; props/weapons/etc. | No |
-| `strategy` | `image_to_3d` → stage 6+7; `text_to_3d` skips images | No |
-| `reference.*` | Image/Tripo prompts | No |
-| `rigged`, `animations[]` | Rigging/animation gates | **Yes — npc_plan reconcile** |
-| `socket_hints` | Names for `ptv_glb_sockets` | No |
-| `target_scale_meters` | World scale, capsule height, socket scale | No |
-| `collision_shape` | Metadata → scene physics | No |
-
-### Artifact I/O
-
-| Read | Write |
-|------|-------|
-| `build_spec.json` | `asset_manifest.json` |
-| | `project_state.json` stage record |
-
-**Note:** Stage 3 may rewrite `asset_manifest.json` in the same pipeline pass after saving npc_plan.
-
-### SSE events
-
-`running` → optional `info` naming any dropped audio ids → `succeeded` with `"N assets"`, plus a parenthesised note per bucket, e.g. `"N assets (dropped 1 environment asset(s); world is C++-generated; dropped 3 audio asset(s) (pistol_shot_audio, …); the manifest describes geometry only)"`.
-
-### Resume / idempotency
-
-No skip logic — each run calls the LLM and overwrites the manifest. If you resume at stage 2, stage 1's BuildSpec is assumed already on disk.
-
-### Failure modes
-
-| Condition | Result |
-|-----------|--------|
-| LLM invalid JSON | Stage fails |
-| Manifest empty after filter | Validation error (requires ≥1 item) |
-| npc_plan reconcile (stage 3) | Clears `rigged`/`animations` for slide NPCs — not a failure |
+No skip logic: resuming at this stage calls the LLM again and overwrites the manifest (later stages then rewrite it again).
 
 ### Important files
 
 | File | Role |
 |------|------|
-| `stage_asset_manifest.py` | Stage + filter |
-| `asset_manifest.py` (schema) | `AssetItem`, `AssetCategory`, strategies |
-| `prompts.py` | `ASSET_MANIFEST_SYSTEM` — objects only, not environment |
+| `pipeline/stage_asset_manifest.py` | Stage, roster checks, drops |
+| `pipeline/player_experience.py` | `is_player_avatar_item` |
+| `pipeline/prompts.py` | `ASSET_MANIFEST_SYSTEM` |
+| `packages/schemas/ptv_schemas/asset_manifest.py` | `AssetItem`, `AssetCategory`, `CharacterRole`, `AnimationIntent` |
 
 ### Settings
 
-| Setting | Value |
-|---------|-------|
-| `claude_light_model` | `claude-sonnet-4-6` (explicitly passed to API call) |
+| Setting (env var) | Default |
+|-------------------|---------|
+| `claude_light_model` (`CLAUDE_LIGHT_MODEL`) | `claude-sonnet-4-6` |
+| `openai_light_model` (`OPENAI_LIGHT_MODEL`) | `gpt-5.6-sol` |
+| `openai_light_reasoning_effort` (`OPENAI_LIGHT_REASONING_EFFORT`) | `medium` |
+| shared token / timeout settings | see Stage 1 |
 
-### LLM prompt contract
+### Quest-specific notes
 
-`ASSET_MANIFEST_SYSTEM` instructs objects-only output, rig/animation hints, socket_hints, and scale. The environment filter is code-enforced because models sometimes still emit environment GLBs.
-
-### After stage 3
-
-Post-npc_plan manifest is authoritative for `rigged`/`animations` — stage 2 values may be overwritten.
-
-### Hands Only drops the player body
-
-When `BuildSpec.player_experience` is `hands_only`, every item with
-`character_role: player_avatar` (or a character whose text names the player's
-body) is removed before anything is billed -- no reference image, Tripo mesh,
-rig or animation for a body nobody sees. Hand-shaped props are kept as
-ordinary props and labelled with `AssetItem.wearable_region` (`hands`,
-`forearms`, ...). `AssetItem.hold_rotation_offset_deg` is an optional manual
-grip correction that scene_compile forwards to `builtin.grab`.
-
----
-
-## Extend this folder
-
-- `artifacts.md` — AssetItem field reference
-- `schemas.md` — category and strategy enums
-- `failure-modes.md` — reconcile with npc_plan
+None in this stage; the Quest asset budget is enforced later by `asset_optimization`.
 
 ## See also
 
-- [`docs/architecture.md`](../../../architecture.md) — objects vs C++ environment split
-- Stage 3 [`03_npc_plan`](../03_npc_plan/README.md) — manifest reconciliation
+- [`docs/architecture.md`](../../../architecture.md) — objects vs C++ environment
+- [`docs/prompt-schema.md`](../../../prompt-schema.md) — schema reference
+- [`docs/npc-and-ai.md`](../../../npc-and-ai.md) — NPC roster and variants
+- Next stage: [`02b_interaction_design`](../02b_interaction_design/README.md)

@@ -6,8 +6,9 @@
 +----------------+       +--------------------+       +-----------------+
 | Web (Vite/TS)  |<----->| Orchestrator (FastAPI) |<->| Provider APIs   |
 |                |  SSE  |                    |  HTTP | Anthropic        |
-| projects / UI  |       | pipeline / storage |       | Google (Imagen) |
-+----------------+       +----------+---------+       | Tripo            |
+| projects / UI  |       | pipeline / storage |       | OpenAI           |
++----------------+       +----------+---------+       | Google (Gemini)  |
+                                    |                  | Tripo, Uthana    |
                                     |                  +-----------------+
                                     |  writes to projects/<id>/
                                     v
@@ -49,6 +50,12 @@ flowchart TD
   Prompt --> OptPrefs["optimization_preferences.json (Custom Quest Optimizations)"]
   OptPrefs --> Optimize
   BuildSpec --> AssetManifest[asset_manifest.json]
+  AssetManifest --> Interaction[interaction_design.json]
+  Interaction --> AssetManifest
+  Interaction --> NpcPlan
+  Interaction --> MechanicPlan
+  Interaction --> Sockets
+  Interaction --> SceneCompile
   Prompt --> NpcPlan[npc_plan.json]
   AssetManifest --> NpcPlan
   NpcPlan --> AssetManifest
@@ -66,17 +73,25 @@ flowchart TD
   NpcPlan --> SceneSpec
   SceneSpec --> Refs[images/*/ref_NN.png]
   Refs --> Tripo[assets/*/model.glb]
-  Tripo --> Rigging[asset_rigging]
+  Tripo --> Routing[character_routing.json]
+  NpcPlan --> Routing
+  Routing --> UthanaRig["uthana_rigging → model_uthana_rigged.glb"]
+  UthanaRig --> Rigging[asset_rigging]
   Rigging --> Animation[asset_animation]
-  Animation --> Normalize[asset_normalization.json]
-  NpcPlan --> Rigging
-  Normalize --> Contract["asset_contract: sockets + character model frame"]
-  Contract --> CppGen
-  MechanicPlan --> CppGen["engine/generated/<kind>/<project_id>/*.cpp"]
+  Animation --> UthanaPlan[uthana_motion_plan.json]
+  UthanaPlan --> UthanaAnim["uthana_animation → model_animated.glb"]
+  UthanaAnim --> Normalize[asset_normalization.json]
+  Normalize --> Sockets["socket_generation → socket_report.json"]
+  Sockets --> Contract["asset_contract: sockets + holds + character model frame"]
   BuildSpec --> WorldGen
   AssetManifest --> WorldGen
-  CppGen --> WorldGen[world_generation → world.scene.json]
-  WorldGen --> Optimize["asset_optimization: LODs + ASTC textures + profile/locks + memory fit"]
+  GameDesign --> WorldGen
+  Contract --> WorldGen[world_generation → world.scene.json]
+  WorldGen --> CppGen
+  Contract --> CppGen
+  MechanicPlan --> CppGen["engine/generated/<kind>/<project_id>/*.cpp"]
+  CppGen --> Optimize["asset_optimization: LODs + ASTC textures + profile/locks + memory fit"]
+  WorldGen --> Optimize
   Normalize --> Optimize
   Contract --> Optimize
   WorldGen --> SceneCompile[scene.json]
@@ -91,7 +106,7 @@ flowchart TD
   CppGen --> QuestApk
   CMake --> Promote[engine_promotion]
   QuestApk --> QuestVerify["quest_runtime_verify: NPCs, loop, weapons, textures, locks, memory"]
-  QuestVerify -->|memory failure, max 2 rounds| Optimize
+  QuestVerify -->|memory failure, quest_memory_max_correction_rounds, default 2| Optimize
   QuestVerify --> Promote
   CMake --> Launch[OpenXR via Quest Link]
   QuestApk --> AdbLaunch[adb install + NativeActivity]
@@ -231,6 +246,7 @@ The chain is deliberately narrow so a static scene pays nothing:
 |---|---|---|
 | Add a skeleton to a generated creature | `asset_rigging` (Tripo rig-check + rig) | `model_rigged.glb` |
 | Retarget preset clips onto that skeleton | `asset_animation` (Tripo retarget) | `model_animated.glb` + intent→clip map |
+| Rig a humanoid with fingers + merge its motions (Uthana-routed characters) | `uthana_rigging`, `uthana_motion_plan`, `uthana_animation` | `model_uthana_rigged.glb` → `model_animated.glb` (see [uthana.md](uthana.md)) |
 | Parse skin, hierarchy, `JOINTS_0`/`WEIGHTS_0`, IBMs, clips | `GltfSkinnedLoad.cpp` | `SkinnedVertex` (48 B) + `SkeletonData` |
 | Preserve the rig through decimation | `ptv_glb_optimize` | LOD chain with a byte-identical skeleton at every level |
 | Record that an asset is rigged | `asset_optimization` → `scene_compile` | `mesh.skinned` / `mesh.joint_count` in `scene.json` |
@@ -383,5 +399,6 @@ own worker threads internally.
 
 Every stage is idempotent: rerunning it rewrites its artifacts. The
 orchestrator's `resume_pipeline()` skips stages whose last `StageRecord`
-status is `succeeded`. See
+status is `succeeded`; full runs, Resume from, single-stage runs and Abort are
+described in [`run-lifecycle.md`](run-lifecycle.md). See
 [`apps/orchestrator/ptv_orchestrator/pipeline/orchestrator.py`](../apps/orchestrator/ptv_orchestrator/pipeline/orchestrator.py).

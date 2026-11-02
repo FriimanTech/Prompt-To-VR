@@ -3,105 +3,111 @@
 > **Pipeline position:** after `scene_spec` → before `tripo_models`  
 > **Target:** shared (PC VR and Quest)  
 > **Primary code:** [`apps/orchestrator/ptv_orchestrator/pipeline/stage_reference_images.py`](../../../../apps/orchestrator/ptv_orchestrator/pipeline/stage_reference_images.py)  
-> **Primary artifacts:** `projects/<project_id>/images/<asset_id>/*.{png,jpg,webp}`
+> **Primary artifacts:** `projects/<project_id>/images/<asset_id>/<asset_id>_ref_00.png` (or `.jpg`), `images/<asset_id>/reference_prompt.txt`
 
 ## Main stage summary
 
 ### What this stage is
 
-The **reference images stage** generates 2D reference pictures for each asset that will use Tripo's **image-to-3D** pipeline. These images are what Tripo turns into textured GLB meshes in the next stage.
+The reference images stage draws one 2D picture per object asset whose `strategy` is `image_to_3d`. Tripo turns that picture into a textured GLB in the next stage. Images are generated with Google's Gemini native image model (`gemini-3.1-flash-image`); Imagen is no longer used.
 
 ### Why it exists
 
-Tripo's best results come from a clear reference image aligned with your art direction. The manifest's `reference` text becomes an image prompt; Gemini/Imagen produces the actual pixels.
+Tripo image-to-3D gives far better meshes from a clean, well-framed picture than from text. This stage also decides the **pose** a character is drawn in (T-pose for humanoids, neutral side-on stance for quadrupeds), because rigging later depends on it. That decision is made in code from facts already on disk, not taken on trust from the asset-manifest agent.
 
-### Inputs (what enters)
+### Inputs
 
-| Input | Location |
-|-------|----------|
-| AssetManifest | `asset_manifest.json` |
-| Per-item | `strategy == image_to_3d`, `reference` prompt text |
+| Input | Location | Used for |
+|-------|----------|----------|
+| AssetManifest | `projects/<id>/asset_manifest.json` | `strategy`, `reference.prompt`, `reference.negative_prompt`, `reference.aspect_ratio` (default `1:1`), `reference.number_of_images` (pinned to 1), `reference.pose` (shape hint only), `reference.coverage`, `style_notes`, `character_role` |
+| NpcPlan | `projects/<id>/npc_plan.json` (optional) | Which asset ids are NPC actors (`npcs[].asset_id`) and so get a character pose |
 
-### Outputs (what it produces)
+### Outputs
 
 | Output | Location |
 |--------|----------|
-| Reference images | `projects/<id>/images/<asset_id>/ref_*.png` (or jpg/webp) |
+| Reference image(s) | `images/<asset_id>/<asset_id>_ref_00.png` (`.jpg` if Gemini returns JPEG) |
+| Exact prompt sent | `images/<asset_id>/reference_prompt.txt` |
+| Per-asset errors | project log `reference_images` |
 
 ### Where output goes next
 
-**`tripo_models`** uploads the best reference image per asset to Tripo V3 image-to-model.
+- **`tripo_models`** uploads the first image (alphabetical) in `images/<asset_id>/` to Tripo image-to-model.
+- **`character_routing`** shows the image and reads `reference_prompt.txt` when it judges a character's body plan.
 
-### Key concepts and terms
+### Models / providers
 
-- **image_to_3d vs text_to_3d** — Only `image_to_3d` assets get reference images. `text_to_3d` assets skip this stage and go straight to Tripo text-to-model.
-- **Idempotent skip** — If images already exist on disk from a prior run, that asset is skipped (no API call). Resume-friendly.
-- **Per-asset failure** — One bad asset logs a warning; the stage still succeeds if others produce images.
+| Provider | Model | Call |
+|----------|-------|------|
+| Google GenAI (`google-genai` package) | `gemini-3.1-flash-image` (setting `gemini_image_model`) | `client.models.generate_content(..., config=GenerateContentConfig(response_modalities=["IMAGE"], image_config=ImageConfig(aspect_ratio=...)))` |
 
-### End-to-end flow (plain language)
+No reasoning-effort setting applies. Cost is Google's per-image price; there are no Tripo credits here.
 
-1. Loop manifest items with `strategy == image_to_3d`.
-2. Skip items that already have images on disk.
-3. Compose prompt from asset `reference` field + style hints.
-4. Call **Google GenAI** (`gemini-3.1-flash-image`) to generate an image.
-5. Save to `images/<asset_id>/`.
-6. Record success with count of images produced.
+### Failure behavior
+
+- One asset failing (API error, no inline image returned) is logged, emitted as a `warning`, and the loop continues. The stage still **succeeds**.
+- A missing `GOOGLE_API_KEY` only fails when an asset actually needs generating; it surfaces as a per-asset warning, not a stage failure. An asset with no image later falls back to Tripo **text-to-3D** in `tripo_models`.
 
 ---
 
 ## Detailed stage deep dive
 
-### Loop structure (`run`)
+### Files and functions
 
-1. emit + record running
-2. Load asset_manifest
-3. For each item where `strategy == image_to_3d`:
-   - `item_dir = projects/<id>/images/<asset_id>/`
-   - **`_existing_images(item_dir)`** — if any `.png/.jpg/.webp` exists → skip (idempotent)
-   - Lazy-create `GoogleImageClient` on first needed asset
-   - `_compose_prompt(item)` from manifest `reference` fields
-   - `client.generate(..., prefer="gemini")` → write bytes to disk
-   - On exception: `append_log`, emit `warning`, **continue next asset**
-4. record succeeded even if some assets warned
+| Symbol | Role |
+|--------|------|
+| `run(ctx)` | Stage entry |
+| `resolve_pose(item, npc_asset_ids)` | Decides `natural` / `t_pose` / `neutral_quadruped` |
+| `_npc_asset_ids(ctx)` | Reads `npc_plan.json`; a missing or malformed plan returns an empty set (never fails the stage) |
+| `compose_prompt(item, pose)` | Base prompt + `Style:` line + pose clause + coverage clause |
+| `compose_negative_prompt(item, pose)` | Asset negatives + pose negatives + coverage negatives, comma-joined |
+| `_existing_images(item_dir)` | Idempotency check |
+| `GoogleImageClient.generate(...)` | [`packages/provider-clients/ptv_providers/google_image_client.py`](../../../../packages/provider-clients/ptv_providers/google_image_client.py) |
 
-### Idempotent resume
+`compose_prompt` and `resolve_pose` are also imported by `stage_character_routing` to rebuild the prompt when `reference_prompt.txt` is missing.
 
-Delete `images/<asset_id>/` to force regeneration for that asset. If all image_to_3d assets already have files, **no Google client is constructed** — resume works without API key.
+### Algorithm
 
-### Artifact paths
+1. Load the manifest and the NPC actor ids.
+2. For each item with `strategy == image_to_3d` (text-to-3D items are skipped):
+   1. If `images/<asset_id>/` already holds any `.png/.jpg/.jpeg/.webp`, reuse it and emit `info` (no API call).
+   2. `resolve_pose`:
+      - an asset is a *character actor* when `character_role` is `player_avatar` or `npc`, or its id is in the NpcPlan (including `slide_no_animation` NPCs, so the GLB stays reusable in other 3D tools);
+      - non-actors are always `natural` (e.g. a `category: character` duck used only as a grabbable prop);
+      - actors get `neutral_quadruped` only if the agent's hint said so, otherwise `t_pose`.
+   3. Compose the prompt. T-pose and quadruped each append a fixed clause and fixed negatives; `coverage == neck_down` (posed characters only) appends a "feet to neck, no head" clause and negatives.
+   4. Write `reference_prompt.txt`, then call Gemini with `filename_prefix="<asset_id>_ref"`, `prefer="gemini"`.
+3. Record the stage succeeded with every image path (new and reused) as artifacts.
 
-Writes: `images/<asset_id>/<asset_id>_ref*.png` (or jpg/webp)
+### Provider details
 
-Reads: `asset_manifest.json` only (scene_spec is ordering predecessor, not data dependency)
+- The Google client is built **lazily**: if every asset is already imaged, no client is created and the stage runs without a Google key.
+- Gemini has no negative-prompt field, so the client folds it into the text as `Avoid in the image: ...`.
+- `prefer="imagen"` and `generate_with_imagen` still exist but are deprecated (Imagen 4 endpoints discontinued 2026-08-17) and are not used by the pipeline.
+- Output files are named `<prefix>_<index:02d>.png|.jpg` from the inline image MIME type.
 
-### External API
+### Settings
 
-`GoogleImageClient` via `ptv_providers`:
+| Setting | Env var | Default |
+|---------|---------|---------|
+| `google_api_key` | `GOOGLE_API_KEY` | none |
+| `gemini_image_model` | `GEMINI_IMAGE_MODEL` | `gemini-3.1-flash-image` |
 
-- `settings.google_api_key`
-- `settings.gemini_image_model` (default `gemini-3.1-flash-image`)
-- `response_modalities=["IMAGE"]`
+### Resume / regeneration
 
-### SSE
+Delete `images/<asset_id>/` to force a new picture for that asset. Note that a new picture does not by itself re-run Tripo: `tripo_models` skips any asset that already has a valid GLB.
 
-`running` → `info` (reuse/skip counts) → `warning` per failed asset → `succeeded`
+### SSE events
 
-### Failure modes
+`running` → `info` (pose chosen, reuse, image count per asset) → `warning` per failed asset → `succeeded` (`"N reference images (M asset(s) reused from disk)"`).
 
-Per-asset failure never fails stage. Missing key fails on first asset needing generation.
+### Quest notes
 
-### Filename pattern
-
-`<asset_id>_ref*.png` under `images/<asset_id>/`. Tripo stage picks best image via `_pick_reference_image()`.
-
----
-
-## Extend this folder
-
-- `artifacts.md` — image naming conventions
-- `failure-modes.md` — resume and partial success
+Nothing Quest-specific happens here; the same images feed both targets.
 
 ## See also
 
 - [`docs/provider-setup.md`](../../../provider-setup.md) — API keys
-- Stage 7 [`07_tripo_models`](../07_tripo_models/README.md)
+- [`docs/npc-and-ai.md`](../../../npc-and-ai.md) — NpcPlan, which drives pose
+- [`docs/uthana.md`](../../../uthana.md) — why T-posed humanoids matter for rigging
+- Next: [`07_tripo_models`](../07_tripo_models/README.md)

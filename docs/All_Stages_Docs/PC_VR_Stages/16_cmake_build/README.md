@@ -2,122 +2,124 @@
 
 > **Pipeline position:** after `scene_compile` → before `engine_promotion`  
 > **Target:** PC VR only (`target_device == pcvr`)  
-> **Primary code:** [`apps/orchestrator/ptv_orchestrator/pipeline/stage_cmake.py`](../../../../apps/orchestrator/ptv_orchestrator/pipeline/stage_cmake.py)  
-> **Primary artifacts:** `projects/<project_id>/builds/cmake-current/`, `logs/cmake.log`, `<Title>.exe`
+> **Primary code:** [`apps/orchestrator/ptv_orchestrator/pipeline/stage_cmake.py`](../../../../apps/orchestrator/ptv_orchestrator/pipeline/stage_cmake.py), [`build/cmake_runner.py`](../../../../apps/orchestrator/ptv_orchestrator/build/cmake_runner.py)  
+> **Primary artifacts:** `projects/<project_id>/builds/cmake-current/`, `projects/<project_id>/logs/cmake.log`, `<Title>.exe`
 
 ## Main stage summary
 
 ### What this stage is
 
-The **CMake build stage** configures and compiles the native Windows VR executable. It links the hand-authored engine runtime, this project's generated C++ mechanics, and loads `scene.json` at launch. Quest projects skip this stage and use **`quest_build`** instead.
+The CMake build stage configures and compiles the native Windows VR executable from the engine source tree (`engine/`). The result contains the hand-authored runtime and this project's generated C++. The executable is the shared `ptv_starter_room` host, renamed to the game's title, and it loads the project's `scene.json` at launch. Quest projects run [`quest_build`](../../Quest_Stages/16_quest_build/README.md) instead.
 
 ### Why it exists
 
-Planning and asset stages produce JSON and source files; the player needs a runnable `.exe`. CMake + MSVC turn the engine tree into a binary you launch through OpenXR (Quest Link on PC VR).
+Earlier stages produce JSON, GLBs and C++ sources. The player needs a runnable `.exe` launched through OpenXR (Quest Link). The build directory is stable across runs, so vcpkg packages and object files are reused instead of being rebuilt cold on every resume.
 
-This stage reuses the **same build directory** as codegen's compile-verify step (`builds/cmake-current`) so vcpkg packages and object files are incremental, not cold every time.
-
-### Inputs (what enters)
+### Inputs
 
 | Input | Location |
 |-------|----------|
-| Scene | `projects/<id>/scene.json` |
-| Generated C++ | `engine/generated/**/<project_id>/` |
-| Engine source | `engine/` (CMake root) |
+| Engine CMake root | `Settings.engine_dir` (`engine/`) with vcpkg manifest `engine/vcpkg.json` |
+| Generated C++ | `engine/generated/**/<project_id>/`, selected by `PTV_GENERATED_PROJECT_ID` |
+| Promoted sources the plan reuses | from `promoted_sources_for_plan()` → `PTV_GENERATED_EXTRA_SOURCES` |
+| Scene | `projects/<id>/scene.json` (also the source of the exe name via its `title`) |
 
-CMake cache variables set by orchestrator:
+CMake cache variables passed by the stage:
 
-- `PTV_SCENE_JSON` — path to scene file
-- `PTV_GENERATED_PROJECT_ID` — project id namespace
-- `PTV_PROJECT_DIR` — project workspace
-- `PTV_APP_NAME` — exe base name from scene title
+| Variable | Value |
+|----------|-------|
+| `PTV_GENERATED_PROJECT_ID` | project id (only this game's generated code is compiled, so two games' same-named tasks cannot collide) |
+| `PTV_GENERATED_EXTRA_SOURCES` | `;`-joined absolute paths of reused promoted `.cpp` files from other projects |
+| `PTV_SCENE_JSON` | forward-slash path to `scene.json` |
+| `PTV_PROJECT_DIR` | forward-slash project workspace |
+| `PTV_APP_NAME` | executable base name (see below) |
+| `CMAKE_TOOLCHAIN_FILE` | `<vcpkg_root>/scripts/buildsystems/vcpkg.cmake`, only when `vcpkg_root` is set |
 
-### Outputs (what it produces)
+### Outputs
 
 | Output | Location |
 |--------|----------|
-| Build tree | `projects/<id>/builds/cmake-current/` |
-| Log | `projects/<id>/logs/cmake.log` (truncated each run) |
-| Executable | `<Title>.exe` or `ptv_starter_room.exe` under build dir |
-| State | `latest_build_exe`, `ready_to_launch` marker |
+| Build tree | `projects/<id>/builds/cmake-current/` (stable; shared with codegen's compile-verify) |
+| Log | `projects/<id>/logs/cmake.log` (truncated each run; the stage artifact) |
+| Executable | `builds/cmake-current/samples/starter-room/<Release|Debug>/<Title>.exe` |
+| State | `latest_build_exe`, `latest_build_dir`, `current_stage = ready_to_launch`, `status = succeeded` |
+| Stage records | `cmake_configure` and `cmake_build`, recorded separately |
 
 ### Where output goes next
 
-- **Launch** — orchestrator runs exe via OpenXR (Quest Link)
-- **`engine_promotion`** — runs after successful build
+- **`engine_promotion`** (Stage 17) runs next.
+- **Launch:** `POST /projects/{project_id}/launch` runs `latest_build_exe` with the project's scene through OpenXR (Quest Link).
 
-### Key concepts and terms
+### Failure behavior
 
-- **CMake configure vs build** — Two phases recorded separately (`cmake_configure`, `cmake_build`). Configure generates project files and runs vcpkg; build invokes MSVC to compile/link.
-- **Stable build dir** — `cmake-current` preserves vcpkg install between resumes (avoids re-downloading ~22 packages).
-- **ptv_starter_room** — Shared runtime host target; loads whichever `scene.json` you pass. Per-project exe name comes from scene title.
-- **STATUS_CONTROL_C_EXIT** — Windows exit code when cmake was killed externally (uvicorn reload, Ctrl+C). Stage auto-retries configure once.
-
-### End-to-end flow (plain language)
-
-1. Truncate `cmake.log` for clean output.
-2. Run `configure_and_build()` with VS 2026 generator and vcpkg manifest.
-3. Stream log lines to UI (configure vs build stages).
-4. On success, locate exe, set `ready_to_launch`.
-5. On failure, record which phase failed with first error line excerpt.
+- **Configure** counts as succeeded only if the log contained `Build files have been written to`. Otherwise `cmake_configure` is `failed`, with the first recognized error line, an "interrupted" message, or "see logs/cmake.log".
+- **Build** counts as succeeded when configure succeeded and the exit code is 0. Otherwise `cmake_build` is `failed`, with the first error line or an "interrupted, Resume to retry" message.
+- If cmake is killed externally (`STATUS_CONTROL_C_EXIT`, `0xC000013A` / `-1073741510`) **before configure finished**, the stage truncates the log and retries automatically **once**.
+- The stage **does not raise** on a build failure. It records the failed stages and returns a `StageResult`, and the orchestrator's stage status reflects the failure. On success with no exe found, state is not moved to `ready_to_launch`.
 
 ---
 
 ## Detailed stage deep dive
 
-### Sub-stages inside one module
+### Execution trace (`stage_cmake.run`)
 
-`stage_cmake.run()` records both **`cmake_configure`** and **`cmake_build`** separately in project_state so UI shows whether vcpkg/configure failed vs C++ compile/link failed.
+1. Emit `cmake_configure running`, `record_stage(cmake_configure, running)`.
+2. `build_dir = projects/<id>/builds/cmake-current`; `app_name = _project_app_name(ctx)`.
+3. Truncate `logs/cmake.log`.
+4. `_run_once()` → `configure_and_build(source_dir=engine_dir, build_dir, generator, platform, config, vcpkg_root, extra_cache, on_line=_sink, **proc_hooks(ctx))`.
+5. Retry once on Ctrl+C exit before configure finished.
+6. Record `cmake_configure` and `cmake_build` (artifact: `logs/cmake.log`), then emit `cmake_build succeeded|failed` with `exit=<code> :: <first error>`.
+7. On success, `_find_exe()`. If found, set state and emit `ready_to_launch ready <exe name>`.
 
-### Stable build directory
+### `configure_and_build()` (`build/cmake_runner.py`)
 
-`projects/<id>/builds/cmake-current/` — reused across resumes. Preserves vcpkg install + CMakeCache (avoids re-downloading ~22 packages).
+1. Configure: `cmake -S engine -B build_dir -G "<cmake_generator>" -A <cmake_generator_platform> -D<cache vars…> [-DCMAKE_TOOLCHAIN_FILE=…]`.
+2. Build: `cmake --build build_dir --config <cmake_build_config> --parallel`.
+3. cmake runs in its own process group so a uvicorn reload or Ctrl+C in the parent does not kill it. `proc_hooks` registers the child so Abort kills the whole tree (cmake → msbuild → compilers).
 
-`logs/cmake.log` **truncated** at start of each run — only current attempt visible.
+The stage does **not** use `engine/CMakePresets.json`. Those presets (`vs2026-x64` with toolset `v145`, `ninja-x64`) are for manual builds; see [`docs/build-and-run.md`](../../../build-and-run.md). The stage passes no `-T` toolset, so Visual Studio uses the generator's default toolset (v145 for VS 18 2026).
 
-### CMake cache variables set
+### Executable name (`_project_app_name`)
 
-| Variable | Value |
-|----------|-------|
-| `PTV_GENERATED_PROJECT_ID` | project id |
-| `PTV_SCENE_JSON` | forward-slash path to `scene.json` |
-| `PTV_PROJECT_DIR` | project workspace |
-| `PTV_APP_NAME` | sanitized title from scene.json |
+The name comes from `scene.json`'s `title`, falling back to the project id. Characters Windows forbids (`<>:"/\|?*`, control chars) become spaces, whitespace is collapsed, and trailing dots and spaces are trimmed. `samples/starter-room/CMakeLists.txt` sets `OUTPUT_NAME` to `PTV_APP_NAME` when it is defined.
 
-### `configure_and_build()` flow
+### Finding the exe (`_find_exe`)
 
-1. CMake configure with VS 2026 generator + vcpkg manifest
-2. Log sink watches for `"Build files have been written to"` → switches SSE routing from configure to build phase
-3. Collect error lines (`: error `, `fatal error`, etc.) for user message
-4. On `STATUS_CONTROL_C_EXIT` before configure done: **retry once** with fresh log (uvicorn reload / Ctrl+C kill)
+The stage looks for these, in order:
 
-### Success path
+1. `samples/starter-room/<config>/<Title>.exe`, then the other config
+2. `ptv_starter_room.exe` in both configs
+3. `apps/ptv_game/<config|other>/ptv_game.exe`
+4. any `*.exe` under the build dir except `CompilerIdCXX.exe`, `ptv_smoke.exe` and `ptv_glb_validate.exe`
 
-1. `_find_exe(build_dir, config, app_name)` — prefers `<Title>.exe` under `samples/starter-room/<Release|Debug>/`
-2. Sets `state.latest_build_exe`, `latest_build_dir`
-3. Sets `current_stage = ready_to_launch`, emits `ready_to_launch`
+### Log routing
 
-Exe is shared `ptv_starter_room` host loading project's scene.json at launch.
+Every line goes to `cmake.log`. Lines are emitted as `log` events on `cmake_configure` until `Build files have been written to` is seen, then on `cmake_build`. Error excerpts are collected from lines containing `: error `, `error c` or `fatal error`, and lines starting `error:` or `cmake error`.
 
-### Quest counterpart
+### Settings (`settings.py`, `.env`, no prefix)
 
-Quest projects use `stage_quest_build` instead — identical scene.json and generated C++, different packaging.
+| Setting | Env var | Default |
+|---------|---------|---------|
+| `cmake_generator` | `CMAKE_GENERATOR` | `Visual Studio 18 2026` |
+| `cmake_generator_platform` | `CMAKE_GENERATOR_PLATFORM` | `x64` |
+| `cmake_build_config` | `CMAKE_BUILD_CONFIG` | `Release` |
+| `vcpkg_root` | `VCPKG_ROOT` | unset (no toolchain file is passed) |
 
-See [`docs/build-and-run.md`](../../../build-and-run.md).
+`CMAKE_GENERATOR` and `CMAKE_GENERATOR_PLATFORM` are also environment variables cmake reads itself. The stage passes `-G`/`-A` explicitly, so the values agree either way.
 
-### Orchestrator project lock
+### PC VR vs Quest at stage 16
 
-Prevents concurrent pipeline runs from two cmake processes racing vcpkg install lock on same build dir.
-
----
-
-## Extend this folder
-
-- `failure-modes.md` — cmake.log reading guide
-- `settings.md` — generator and vcpkg paths
+| Aspect | `cmake_build` | `quest_build` |
+|--------|---------------|---------------|
+| Build tool | CMake + MSVC | Gradle + NDK |
+| Output | `<Title>.exe` | `app-debug.apk` |
+| Assets | read from the project directory | bundled in the APK |
+| Next stage | `engine_promotion` | `quest_runtime_verify` |
+| State field | `latest_build_exe` | `latest_build_apk` |
 
 ## See also
 
-- [`docs/build-and-run.md`](../../../build-and-run.md) — manual build instructions
-- [`docs/quest-build.md`](../../../quest-build.md) — Quest counterpart
-- Quest stage 16 [`16_quest_build`](../../Quest_Stages/16_quest_build/README.md)
+- [`docs/build-and-run.md`](../../../build-and-run.md): toolchain and manual builds
+- [`docs/engine-growth.md`](../../../engine-growth.md): promoted sources in the build
+- Quest counterpart: [`16_quest_build`](../../Quest_Stages/16_quest_build/README.md)
+- Next: [`17_engine_promotion`](../17_engine_promotion/README.md)

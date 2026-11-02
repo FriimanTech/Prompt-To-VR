@@ -14,14 +14,18 @@ The repo is a monorepo:
   C++ is allowed (`world/` = offline VR environment builders).
 - `engine/worldgen` — offline `ptv_worldgen` host for generated world builders.
 - `engine/android` — Gradle template the Quest build stage instantiates per project.
-- `engine/tools` — scene compiler, GLB validator, socket derivation, bounds check.
+- `engine/tools` — scene compiler, GLB validator / optimizer (meshoptimizer LODs),
+  KTX2 texture compressor, GLB view renderer and socket derivation, bounds check.
+- `engine/promoted` — generated modules promoted into the reuse catalog.
 - `packages/schemas` — strict Pydantic + JSON schemas used across the pipeline.
-- `packages/provider-clients` — Anthropic, Google GenAI, Tripo clients.
+- `packages/provider-clients` — Anthropic, OpenAI, Google GenAI, Tripo V3 and
+  Uthana clients (plus the shared `LlmClient` with Claude → OpenAI fallback).
 - `samples/starter-room` — hand-authored demo scene that boots without calling
   any LLM.
-- `projects/` — per-project local artifact workspace (created by the orchestrator).
+- `projects/` — per-project local artifact workspace (created by the orchestrator,
+  git-ignored).
 - `docs/` — end-user documentation; **`docs/All_Stages_Docs/`** has per-stage
-  relearning guides (Summary + deep dive for all 17 stages).
+  relearning guides (summary + deep dive for every stage, PC VR and Quest).
 
 ## Quick links
 
@@ -36,44 +40,68 @@ The repo is a monorepo:
 - [`docs/prompt-schema.md`](docs/prompt-schema.md)
 - [`docs/world-generation.md`](docs/world-generation.md)
 - [`docs/npc-and-ai.md`](docs/npc-and-ai.md)
+- [`docs/game-flow.md`](docs/game-flow.md) — health, lives, objectives, end screens
+- [`docs/weapons.md`](docs/weapons.md) and [`docs/sockets.md`](docs/sockets.md)
+- [`docs/uthana.md`](docs/uthana.md) — character routing, rigging and motions
+- [`docs/rendering.md`](docs/rendering.md) and [`docs/quest-optimization.md`](docs/quest-optimization.md)
 - [`docs/runtime-subsystems.md`](docs/runtime-subsystems.md)
 - [`docs/project-layout.md`](docs/project-layout.md)
 - [`docs/troubleshooting.md`](docs/troubleshooting.md)
 
-## High-level flow (17 stages)
+## High-level flow
 
-Shared stages **1–15** are identical for `pcvr` and `quest`. Only **stage 16**
-branches on `ProjectState.target_device` (the PC VR vs Quest toggle in New
-Project, mirrored into `BuildSpec.target_device`).
+The authoritative order is `_SHARED_STAGES`, `_PCVR_TAIL` and `_QUEST_TAIL` in
+[`apps/orchestrator/ptv_orchestrator/pipeline/orchestrator.py`](apps/orchestrator/ptv_orchestrator/pipeline/orchestrator.py).
+Stages 1–15 are identical for `pcvr` and `quest`; only the build tail branches
+on `ProjectState.target_device` (the PC VR / Quest toggle in New Project,
+mirrored into `BuildSpec.target_device`).
 
 ```
 prompt
-  →  1. BuildSpec (Claude Opus)
-  →  2. AssetManifest (Claude Sonnet)     # objects only; environment is C++
-  →  3. NPC plan (OpenAI gpt-5.6-sol)
-  → 3b. Game design (OpenAI gpt-5.6-sol)  # health, lives, objectives, endings
-  →  4. MechanicPlan (OpenAI gpt-5.6-sol)
-  →  5. SceneSpec (OpenAI gpt-5.6-sol, per scene)
-  →  6. Reference images (Gemini)
-  →  7. Tripo image-to-3D (textured + PBR)
-  →  8. Auto-rigging (Tripo)
-  →  9. Animation retarget (Tripo)
-  → 10. Asset normalization
-  → 11. Asset contract (deterministic sockets + character model frames)
-  → 12. C++ code generation (OpenAI Agents + compile-verify)
-  → 13. World generation (C++ environment → world.scene.json)
-  → 14. Asset optimization (LOD decimation)
-  → 15. Scene compile (merge world + gameplay → scene.json)
-  → 16. pcvr: cmake_build (.exe)  |  quest: quest_build (APK)
-        quest only: quest_runtime_verify (run on the headset, check the NPCs
-        and walk the game loop; report-only, skipped with no headset)
-  → 17. Engine promotion (reuse catalog)
+  →  1.  build_spec               Claude Opus (OpenAI fallback)
+  →  1b. optimization_preferences user's Quest optimization overrides → locks
+  →  2.  asset_manifest           Claude Sonnet; objects only (environment is C++)
+  →  2b. interaction_design       how each item is held / fired; its sockets
+  →  3.  npc_plan                 roles, factions, animate vs slide, encounters
+  →  3b. game_design              health, lives, objectives, endings, menus
+  →  4.  mechanic_plan            built-in vs generated; controller bindings
+  →  5.  scene_spec               one per scene, validate-and-repair
+  →  6.  reference_images         Gemini image generation
+  →  7.  tripo_models             Tripo V3 image-to-3D (textured + PBR)
+  →  7b. character_routing        Tripo or Uthana per character
+  →  8a. uthana_rigging           Uthana auto-rig (with fingers)
+  →  8.  asset_rigging            Tripo rig-check + rig
+  →  9.  asset_animation          Tripo animation retarget
+  →  9b. uthana_motion_plan       pick each character's Uthana motions
+  →  9c. uthana_animation         resolve, download, merge Uthana clips
+  → 10.  asset_normalization      validate GLBs, scale / collision metadata
+  → 10b. socket_generation        Gemini vision + geometry finds sockets
+  → 11.  asset_contract           sockets, holds, character model frames
+  → 12.  world_generation         C++ IWorldBuilder → world.scene.json
+  → 13.  code_generation          C++ gameplay modules + compile-verify loop
+  → 14.  asset_optimization       LODs, KTX2 textures, memory fit
+  → 15.  scene_compile            world + gameplay + weapons → scene.json
+  → 16.  pcvr:  cmake_build       Windows .exe
+         quest: quest_build       standalone APK (Gradle + NDK)
+  → 16b. quest only: quest_runtime_verify
+                                  run on the headset: NPCs, game loop, weapons,
+                                  textures, memory. A failed check fails the
+                                  stage (the APK stays downloadable); no headset
+                                  = skipped, not failed; a memory failure re-runs
+                                  14 → 15 → 16 first
+  → 17.  engine_promotion         index generated modules for reuse
 ```
+
+World generation runs **before** code generation so the C++ gameplay agents can
+reference the ids of rooms, doors and spawn zones the world actually declared.
 
 The engine core is hand-authored and reusable. Generation only produces assets,
 scene data, bounded gameplay modules, and offline world builders. Built-in VR
-mechanics (teleport, slide, snap turn, grab, throw, character locomotion, etc.)
-are reused whenever possible and are data-driven via `SceneSpec.mechanic_bindings`.
+mechanics (teleport, slide, snap / smooth turn, grab, throw, hand pose, avatar
+body, equip, character locomotion, NPC follow / melee chase, encounter director,
+game flow + HUD, and the weapon set: weapon, bow, melee weapon, shield, item
+source, NPC ranged attack) are reused whenever possible and are data-driven via
+`SceneSpec.mechanic_bindings`.
 
 ## Minimal first-run (once prerequisites are installed and keys filled in)
 
@@ -139,25 +167,30 @@ Optional: install **Git** if you don't already have it.
 
 | Provider | Used for | Required? | Where to get a key |
 |---|---|---|---|
-| Anthropic | BuildSpec + AssetManifest (Claude structured JSON) | Yes | <https://console.anthropic.com> → *API Keys* |
-| OpenAI | NPC plan, MechanicPlan, SceneSpec, code generation, world generation (Agents SDK); also automatic fallback when Claude is unavailable | Yes (recommended even if Claude is primary) | <https://platform.openai.com/api-keys> |
-| Google AI Studio | Gemini reference images | Yes | <https://aistudio.google.com/app/apikey> |
-| Tripo | Image-to-3D, rigging, animation retarget | Yes | <https://developers.tripo3d.ai> |
+| Anthropic | BuildSpec, AssetManifest, optimization preferences (Claude structured JSON) | Recommended (falls back to OpenAI when blank) | <https://console.anthropic.com> → *API Keys* |
+| OpenAI | Every Agents SDK stage (interaction design, NPC plan, game design, mechanic plan, scene spec, character routing, Uthana motion plan, world + code generation); Claude fallback | Yes | <https://platform.openai.com/api-keys> |
+| Google AI Studio | Gemini reference images and socket vision (socket generation falls back to geometry-only without it) | Yes | <https://aistudio.google.com/app/apikey> |
+| Tripo | Image-to-3D, rig-check, rigging, animation retarget (V3 API) | Yes | <https://developers.tripo3d.ai> |
+| Uthana | Player-avatar / humanoid auto-rig with fingers, locomotion and idle motions | Optional (without it every character routes to Tripo, so the player avatar gets no finger joints) | <https://uthana.com> |
 
 ## 3. Environment variables to fill
 
-Copy `.env.example` to `.env` at the repo root and fill in at least:
+Copy `.env.example` to `.env` at the repo root and fill in the keys. `.env`
+(and every `.env.*` variant except `.env.example`) is git-ignored; never commit
+real keys.
 
 ```
-ANTHROPIC_API_KEY=sk-ant-...
-OPENAI_API_KEY=sk-...            # required for planning/codegen/world stages
-GOOGLE_API_KEY=...
-TRIPO_API_KEY=...
+ANTHROPIC_API_KEY=
+OPENAI_API_KEY=
+GOOGLE_API_KEY=
+TRIPO_API_KEY=
+UTHANA_API_KEY=
 VCPKG_ROOT=C:\src\vcpkg
 ```
 
-The orchestrator reads `.env` via `python-dotenv`. The frontend picks up the
-orchestrator port from its own `apps/web/.env`.
+The orchestrator reads `.env` via `pydantic-settings`. The frontend picks up the
+orchestrator URL from its own `apps/web/.env` (`VITE_API_BASE_URL`, default
+`http://127.0.0.1:8787`).
 
 ## 4. Things that are scaffolded but blocked on your action
 

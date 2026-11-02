@@ -35,14 +35,17 @@ A concrete example prompt lives in the `NewProjectPage` sample text.
 | `MechanicPlan` | `mechanic_plan.json` | OpenAI Agents SDK `gpt-5.6-sol` (no tools) |
 | `SceneSpec` | `scene_spec.<scene_id>.json`, `scene_spec.json` | OpenAI Agents SDK `gpt-5.6-sol` (per scene) |
 | `CodeTask` (embedded in MechanicPlan) | `*.codetask.json` beside generated `*.cpp` | MechanicPlan stage (executed by codegen agents) |
+| Character routing | `character_routing.json` (+ `tripo_rig_check.json`) | `character_routing` (Tripo rig-check + OpenAI agent); see [uthana.md](uthana.md) |
+| Uthana rig record | `uthana_rig.json`, `model_uthana_rigged.glb` | `uthana_rigging` |
 | Rigging record | `asset_rig.json`, `model_rigged.glb` | Tripo `asset_rigging` stage |
-| Animation record | `asset_animation.json`, `model_animated.glb` | Tripo `asset_animation` stage |
+| Animation record | `asset_animation.json`, `model_animated.glb` | Tripo `asset_animation` stage, and `uthana_animation` (`provider: "uthana"`) |
+| Uthana motion plan / ledger | `uthana_motion_plan.json`, `uthana_animation.json` | `uthana_motion_plan`, `uthana_animation` |
 | Normalization stamp | `asset_normalization.json` | Orchestrator (`asset_normalization`, deterministic) |
 | Socket generation | `assets/<id>/sockets/result.json`, `socket_report.json` | `socket_generation` (Gemini segmentation + numpy solvers + render-and-verify) |
 | `AssetContract`: sockets, holds + character model frames | `asset_contract.json` (`sockets`, `hold`, `frame`) | Orchestrator (`asset_contract`, deterministic merge) |
 | Codegen ledger | `codegen_board.json` | Orchestrator (`code_generation`) |
 | World scene | `world.scene.json` | Offline `ptv_worldgen` (world architect agent) |
-| Compiled scene | `scene.json` | Orchestrator (`scene_compile`, deterministic) |
+| Compiled scene | `scene.json` (+ `scene.<scene_id>.json` per scene) | Orchestrator (`scene_compile`, deterministic) |
 | `OptimizationPreferences` | `optimization_preferences.json` | `optimization_preferences` stage: keyword gate + one light `LlmClient` call + deterministic validator; see [quest-optimization.md](quest-optimization.md) |
 | `PerformanceProfile` | `performance` block in `scene.json` (+ `__performance__` in `asset_normalization.json`); includes `locks` from OptimizationPreferences | Orchestrator (`asset_optimization`, deterministic) |
 | Scene complexity + memory estimate | `scene_complexity.json`, `performance.complexity` / `performance.memory_estimate` in `scene.json`, `memory_status.json` | Orchestrator (`scene_compile`, deterministic) |
@@ -52,7 +55,7 @@ A concrete example prompt lives in the `NewProjectPage` sample text.
 | `AcceptanceTestPlan` | `acceptance_test_plan.json` | (optional) Claude Sonnet |
 
 See [`All_Stages_Docs/README.md`](All_Stages_Docs/README.md) for the full
-17-stage artifact flow.
+per-stage artifact flow (stage folders `01_build_spec` … `17_engine_promotion`).
 
 ## Stage caps (updated for full VR-game generation)
 
@@ -127,6 +130,9 @@ one, carries the same hand slot by construction).
 
 ## Built-in mechanic ids (reuse these)
 
+The live list is `GET /api/engine/catalog` (the same data the mechanic planner
+sees, from `engine_catalog.py`). The common ones:
+
 ```
 builtin.teleport
 builtin.locomotion.teleport
@@ -134,8 +140,20 @@ builtin.locomotion.slide.head_relative
 builtin.locomotion.slide.controller_relative
 builtin.snap_turn
 builtin.locomotion.snap_turn
+builtin.locomotion.smooth_turn
+builtin.movement_settings_menu
+builtin.hand_pose
+builtin.avatar_body
 builtin.grab
 builtin.throw
+builtin.equip
+builtin.door / builtin.switchable / builtin.container / builtin.mover
+builtin.breakable / builtin.harvestable
+builtin.ui_panel
+builtin.character_locomotion
+builtin.npc.follow
+builtin.npc.melee_chase
+builtin.encounter_director
 builtin.game_flow        (bound by scene_compile from game_design.json)
 builtin.game_hud         (bound by scene_compile from game_design.json)
 builtin.weapon           (bound by scene_compile from interaction_design.json)

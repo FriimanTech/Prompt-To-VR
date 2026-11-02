@@ -79,8 +79,9 @@ text (with a warning), never the game.
 angle to fade the whole view to black; the game loop's respawns and
 restarts use it, independent of the player's comfort-vignette setting.
 
-Both eyes are recorded sequentially into one command buffer and submitted with a
-single fence wait per frame (the existing single-frame-in-flight model).
+Without multiview, both eyes are recorded sequentially into the same frame's
+command buffer (`view_base` 0 then 1). Frames in flight follow the frame-flow
+section above: up to two on Quest (`frames_in_flight`), always one on desktop.
 
 ## MSAA
 
@@ -106,8 +107,12 @@ the sky and geometry shaders:
 | `sky_top` (`.w`) | Zenith color (also used as the up-hemisphere ambient + rim); `.w` = exposure. |
 | `sky_horizon` (`.w`) | Horizon/fog color and fog density. |
 | `ambient` (`.w`) | Ground-bounce color and ambient intensity. |
-| `camera_pos` (`.w`) | Camera world position (renderer-computed) and point-light count. |
+| `camera_pos[2]` | Each eye's world position (renderer-computed). |
+| `misc` (`.x`) | Active point-light count. |
 | `points[8]` | Up to 8 point lights (position + range, color + intensity). |
+
+The block starts with both eyes' `view_proj`, `inv_view_proj` and `inv_proj`
+matrices.
 
 ### The environment is fully author-controlled (no engine overrides)
 
@@ -187,8 +192,9 @@ between them costs a single `vkCmdBindPipeline`.
 
 | | Static | Skinned |
 |---|---|---|
-| Vertex struct | `LitVertex`, 40 B | `SkinnedVertex`, 48 B |
-| Attributes | pos, normal, color | + `JOINTS_0` (`R8G8B8A8_UINT`), `WEIGHTS_0` (`R8G8B8A8_UNORM`) |
+| GPU vertex | `GpuVertex`, 24 B | `GpuSkinnedVertex`, 32 B |
+| CPU load struct | `LitVertex`, 48 B | `SkinnedVertex`, 56 B |
+| Attributes | pos, octahedral normal, uv, color | + `JOINTS_0` (`R8G8B8A8_UINT`), `WEIGHTS_0` (`R8G8B8A8_UNORM`) |
 | Vertex shader | `scene.vert` | `scene_skinned.vert` |
 
 Static meshes deliberately keep the narrower vertex. Quest 3 is
@@ -204,9 +210,9 @@ nothing.
 `set 0, binding 1` — host-visible, persistently mapped, grown in powers of two,
 and filled once per frame *before* the per-eye loop (palettes are world-space,
 so both eyes read the same data). A draw records only where its slice starts,
-carried in `pc.params.y`, an already-unused push-constant component: the block
-is at 160 bytes against Vulkan's guaranteed 128, so it must not grow. The
-alternative — a descriptor set per skinned mesh — would put every character on
+carried in its instance record's `params.y` (`instances.inst[gl_InstanceIndex]`,
+`set 0, binding 2`), so instanced clones of one character each carry their own
+pose and the 48-byte push-constant block does not grow. The alternative — a descriptor set per skinned mesh — would put every character on
 its own binding change, which lands directly on the draw-call budget below.
 
 Normals use `mat3(model * skin)` rather than a full inverse-transpose, the
@@ -225,8 +231,10 @@ from the palette.
 A fullscreen triangle (no vertex input, depth off) reconstructs a world-space
 view ray from the per-eye `inverse(projection * view)` (a small mat4 push
 constant) and renders a top→horizon gradient with a soft sun disk and glow, then
-ACES-tonemaps. It is drawn first each eye so it fills the background; geometry
-fog reuses the same horizon color so the world melts into the sky at distance.
+ACES-tonemaps. It is drawn AFTER the opaque geometry, at the far plane with a
+`LESS_OR_EQUAL` depth test, so it only shades pixels nothing covered (drawing it
+first shaded the whole screen and then overdrew most of it); geometry fog reuses
+the same horizon color so the world melts into the sky at distance.
 
 ## Primitive shapes
 
@@ -296,9 +304,10 @@ Link. There is no shadow pass, no bloom, and no fullscreen post; the costs are
 MSAA, one extra fullscreen sky pass, and a slightly heavier fragment shader.
 
 Meta's published guidance for Quest 3 is **1.3M–1.8M triangles per frame** and
-**200–300 draw calls** for a busy simulation. Since the renderer is still
-two-pass stereo, draw calls are `2 x visible entities`, so the visible entity
-count is the practical ceiling.
+**200–300 draw calls** for a busy simulation. With multiview one draw covers
+both eyes; without it (desktop, or a Quest scene `scene_complexity` left at
+or below 120 estimated p95 draws) each eye records its own pass, so draw
+calls are about `2 x` the drawn (instanced / batched) items.
 
 "Busy simulation" is Meta's own term for an app with many animated NPCs, and
 they call out animation and skinning specifically as work that delays the
@@ -321,7 +330,7 @@ and culls sooner. Policy lives in one place:
   distance culling effectively OFF, MSAA 4x, foveation off.
 - `standard` (<= 24 assets, <= 100 entities): 35k ceiling, culling off,
   MSAA 4x, foveation low.
-- `large` (<= 48 assets, <= 250 entities): 18k ceiling, culling on at 120 m,
+- `large` (<= 250 mesh entities, any asset count): 18k ceiling, culling on at 120 m,
   MSAA 2x, foveation medium.
 - `massive` (> 250 mesh entities): 10k ceiling, culling at 80 m, foveation
   high, LRU mesh eviction on.
@@ -373,9 +382,15 @@ detail follows what the eye can actually resolve rather than fixed distances:
 - **hysteresis** — at most one level coarser per frame, and back to a finer
   level only once the current one is `lod_hysteresis` (20%) over the limit;
 - a global **`lod_bias`** the adaptive governor raises under load scales the
-  pixel limit;
+  pixel limit (`limit = lod_screen_error_px x (1 + lod_bias)`);
+- each level's error is taken as the running maximum over the finer levels,
+  so a coarser level never counts as more accurate than a finer one;
 - **speed-aware prefetch** — the level the player will need 1.5 s ahead (from
-  the smoothed camera motion) is requested early; off under memory pressure;
+  the smoothed camera motion) is requested early; only when the camera moves
+  faster than 0.5 m/s, never for rigged meshes, and off under any memory
+  pressure;
+- first-person entities (held / worn) always use LOD0, and at `critical`
+  memory pressure every other visible mesh drops to its coarsest level;
 - assets compiled before LOD errors existed fall back to the scene's
   `lod_switch_distances_m`.
 
@@ -484,7 +499,7 @@ them. Only GPU buffers are evicted: entities, colliders, AI and game state are
 never touched.
 
 **Rigged meshes are the exception, and are uploaded up front.** The streaming
-worker only knows how to build 40-byte static vertices; letting it touch a
+worker only knows how to build static vertices; letting it touch a
 rigged path would cache a static slot under that path and the entity would draw
 through the wrong pipeline forever. `Application::attach_skeletons()` therefore
 loads every rigged asset (and its whole LOD chain) synchronously at scene load
@@ -518,9 +533,14 @@ is heavy); a user's "FFR off" drops the density map entirely.
 The swapchain is allocated at `render_scale_ceiling` x the recommended eye
 resolution (1.0 by default, up to 1.25 with the `high` override, within
 `maxImageRect`). The governor may submit a centred sub-rectangle down to
-`render_scale_floor` (0.85) through `imageRect`; centred so the density map's
-centre stays on the lens centre. `XR_FB_display_refresh_rate` requests
-`refresh_hz` (72 by default; 90 / 120 on request) and the frame budget follows.
+`render_scale_floor` (0.85 by default; the governor clamps it to 0.5-1.0,
+and resolution `off` / `high` lock the scale) through `imageRect`; centred so
+the density map's centre stays on the lens centre. `XR_FB_display_refresh_rate`
+enumerates the supported rates and requests the closest one not above
+`refresh_hz` (72 by default; 90 / 120 on request), logging the result
+(`XR: display refresh -> N Hz`). The governor's frame budget is
+`1000 / refresh_hz` from the scene (falling back to `target_fps`, then 72),
+not the rate the runtime actually granted.
 
 ## Adaptive quality governor
 
@@ -533,29 +553,50 @@ visible first:
   FFR up to the maximum → `lod_bias` +0.5 → cull distance x0.8.
 - **CPU-bound:** cull distance x0.8 → `lod_bias` +0.5.
 
-After every step it waits out a cooldown (half a second of frames) and probes
-the next window: a step that bought less than 3% of the bottleneck's time is
-marked ineffective for the scene and skipped from then on. Relaxation walks
-back in reverse, more slowly. A knob the user locked ("Custom Quest
-Optimizations") is never moved; when only locked knobs remain it logs
-`governor: over budget, blocked by user settings`, which verification reports
-as a warning, not a failure. Memory is not the governor's job — see
+A frame is bad when its wall time or its worse of GPU / CPU time exceeds 110%
+of the budget, good when both are under 75%. It escalates after
+`escalate_after_bad_frames` (30) consecutive bad frames, trying the other
+ladder if the bottleneck's ladder is exhausted, and relaxes one step after
+`relax_after_good_frames` (180) good ones. After every step it waits out a
+cooldown (`max(20, refresh / 2)` frames, about half a second) and probes the
+next window: a step that bought less than 3% of the bottleneck's time is
+marked ineffective for the scene and skipped from then on. Relaxation undoes
+the recorded steps in reverse order. Bounds come from `performance.governor`
+(`max_lod_bias` 2, `min_cull_distance_m` at least 25 m, `max_foveation_level`
+3 on Quest / 0 on PC VR). A knob the user locked ("Custom Quest
+Optimizations") is never moved; when no unlocked step remains it logs
+`governor: over budget, blocked by user settings (...)` (or `... with every
+quality step already taken` when nothing is locked), which verification
+reports as a warning, not a failure. Each step logs `governor: GPU-bound ->
+<knob> (step N: ffr F scale S lod_bias B cull Cm)`. Memory is not the governor's job — see
 `MemoryGuard` in `docs/quest-optimization.md`.
 
 ## On-device telemetry
 
-About once a second the runtime logs three lines:
+About once a second (only while the XR runtime asks for frames) the runtime
+logs four lines, plus a hands line:
 
 - `perf:` FPS, frame work ms, CPU ms, GPU ms (timestamps; the start stamp is
   written at bottom-of-pipe so a queued second frame does not inflate it), draw
   calls / pipeline / descriptor binds, drawn vs considered entities with
   frustum / distance / small / room culled counts and merged batches, visible
   triangles, residency, rigs, and the current `lod_bias`, cull distance, FFR
-  level and render scale;
-- `tex:` resident textures and MB, ASTC vs decoded, missing, mesh and target MB;
-- `mem:` total PSS (smaps + unmapped GPU memory), the projection MemoryGuard
-  acts on, per-category engine accounting, system `MemAvailable`, level and
-  evictions.
+  level and render scale:
+  `perf: F fps | work A ms avg, W ms worst | cpu C ms | gpu G ms avg, X ms worst
+  | calls N pipes P sets S | draw D of E (cull frustum a dist b small c room d,
+  batches e) | tris T | meshes M resident (R tris), Q streaming | rigs K
+  (J animating, budget B) | lod_bias L cull Um ffr V scale Z`;
+- `perf_fx:` live projectiles vs cap, FX quads drawn vs cap, casts last tick;
+- `tex:` resident textures and MB, KTX2 vs decoded, missing (and missing
+  draws), ASTC support, mesh and target MB, instances;
+- `mem:` total (smaps PSS + unmapped GPU memory) against target / ceiling /
+  limit, the projection MemoryGuard acts on, the smaps and KGSL parts,
+  per-category engine accounting, queued loads, system `MemAvailable`, level
+  and evictions:
+  `mem: pss P MB (target T, ceiling C, limit L) | projected J | smaps S |
+  gpu_unmapped G | tex X | mesh M | targets R | reserved Q | sys_avail A |
+  level green|yellow|red|critical | evict N` (`gpu_unmapped` is -1 when KGSL
+  is unreadable).
 
 `debug.ptv.perf_override` (an engineering property, never set by the pipeline)
 switches multiview, the density map, frames in flight, a fixed FFR level, the

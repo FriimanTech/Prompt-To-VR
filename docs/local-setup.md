@@ -23,11 +23,20 @@ C++ toolchain.
 
 5. **uv** — install with `winget install --id=astral-sh.uv -e`, then open a
    new PowerShell so `uv` is on PATH. uv downloads a managed CPython 3.13
-   for this repo; you do not need a global Python install.
-6. **Node.js 20+** and npm.
+   for this repo; you do not need a global Python install. (The packages
+   declare `requires-python >= 3.11`; 3.13 is what the venv is pinned to.)
+6. **Node.js 20+** and npm (the web app uses Vite 5; `package.json` pins no
+   `engines` field).
 7. **Meta Quest Link** desktop app. Connect the Quest 3 by Link cable (or
    enable Air Link) and — once connected — open *Settings → Beta* and click
    *Set Oculus as active OpenXR runtime*.
+8. **Quest target only:** Android SDK (compile/target SDK 34, `minSdk` 32),
+   NDK `30.0.15729638` (the `android_ndk_version` default), JDK 17, and
+   `adb`. The Gradle wrapper (8.9, Android Gradle Plugin 8.7.0) ships in
+   `engine/android`. The orchestrator finds them via `ANDROID_HOME` /
+   `ANDROID_NDK_HOME` / `adb` on PATH, or `ANDROID_SDK_ROOT`,
+   `ANDROID_NDK_HOME`, `ADB_PATH` in `.env`. See
+   [`quest-build.md`](quest-build.md).
 
 ## Repo setup
 
@@ -35,7 +44,8 @@ C++ toolchain.
 cd C:\Users\micha\Documents\Prompt-To-VR
 copy .env.example .env
 # then open .env in an editor and fill in ANTHROPIC_API_KEY, OPENAI_API_KEY,
-# GOOGLE_API_KEY, TRIPO_API_KEY, and VCPKG_ROOT.
+# GOOGLE_API_KEY, TRIPO_API_KEY, and VCPKG_ROOT. For Uthana-rigged characters
+# also add UTHANA_API_KEY=... (it is not in .env.example yet).
 ```
 
 ## Python side
@@ -71,7 +81,10 @@ ctest --preset vs2026-x64-release
 ```
 
 The first `cmake --preset vs2026-x64` downloads and builds Vulkan / OpenXR /
-GLFW / Jolt / EnTT / VMA / ImGui / TinyGLTF / spdlog through vcpkg. Expect
+GLFW / Jolt / EnTT / VMA / ImGui / TinyGLTF / spdlog, plus `meshoptimizer`
+(LOD decimation in `ptv_glb_optimize`) and `ktx` (KTX2 ASTC compression in
+`ptv_texture_compress`) through vcpkg. Other presets: `ninja-x64` /
+`ninja-x64-release` and `vs2026-x64-debug`. Expect
 10-30 minutes the first time; subsequent configures are cached.
 
 ## Quick sanity check

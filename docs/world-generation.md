@@ -22,14 +22,19 @@ single reference image.
 ## Pipeline
 
 ```
-build_spec -> asset_manifest -> npc_plan -> mechanic_plan -> scene_spec
-  -> reference_images -> tripo_models -> asset_rigging -> asset_animation
-  -> asset_normalization -> asset_contract
+build_spec -> optimization_preferences -> asset_manifest
+  -> interaction_design -> npc_plan -> game_design -> mechanic_plan
+  -> scene_spec -> reference_images -> tripo_models -> character_routing
+  -> uthana_rigging -> asset_rigging -> asset_animation
+  -> uthana_motion_plan -> uthana_animation
+  -> asset_normalization -> socket_generation -> asset_contract
   -> world_generation (this stage)
   -> code_generation (mechanics DAG)
   -> asset_optimization (decimation + LOD chain)
   -> scene_compile (merge world + gameplay, per scene)
-  -> cmake_build | quest_build -> engine_promotion
+  -> cmake_build
+     | quest_build -> quest_runtime_verify (memory-correction loop)
+  -> engine_promotion
 ```
 
 `world_generation` runs **before** `code_generation`, which is the reverse of
@@ -47,7 +52,7 @@ calls a mechanic, so it has nothing to learn from gameplay code.
 The scene list IS the environment list. `_environment_jobs` walks
 `BuildSpec.scenes` and skips a scene that names `reuse_environment_from` (it
 shares a sibling's environment; generating it again would pay for a second
-xhigh-reasoning agent run to produce the same place twice). Past
+full agent run to produce the same place twice). Past
 `world_max_environments` the list is capped, and the cap always keeps the entry
 point — a game that drops its first scene has nowhere to start.
 
@@ -94,7 +99,12 @@ The steps, per environment:
 6. On an exhausted budget, emit a deterministic **fallback world for that
    environment only** — one bad place must not take a whole game down. The
    stage still succeeds, and its message names which environment fell back so
-   it can be regenerated alone.
+   it can be regenerated alone. The fallback is built in a clean host with no
+   project sources (`builds/worldgen_fallback`, `PTV_WORLD_PROJECT_ID=""`) and
+   runs `builtin.world.fallback`: a 60 m grid ground, a 24 x 24 x 4 m wall
+   shell, three steps, one sun and a spawn at the origin. It declares no nav
+   regions, NPC spawn zones or anchors, so NPCs there use steering only and
+   spawn zones come from the scene compiler's derivation.
 
 A single-environment project keeps the historical layout exactly: one
 directory, `generated.world.<project_id>`, no namespace requirement, and
@@ -177,9 +187,12 @@ inside `namespace ptv::world` in a `.cpp`.
 `WorldContext` (pure data builder): `sky`, `ground`, `light`, `player_spawn`,
 `spawn_primitive` (box/plane/cylinder/sphere/ramp), `add_mesh` (arbitrary
 procedural triangles), `place_object` (anchor a prop GLB), `nav_region` /
-`nav_link` (declare the walkable space), `npc_spawn_zone` (declare where NPCs
-enter during play), `npc_anchor` (declare where an NPC placed at load
-stands), `seed()`. Header-only
+`nav_link` (declare the walkable space), `interactive` (something whose state
+changes, e.g. a door), `spawn_point` (extra named arrival points),
+`portal` (a way into another environment), `npc_spawn_zone` (declare where
+NPCs enter during play), `npc_anchor` (declare where an NPC placed at load
+stands), `seed()`. `npc_spawn_zone` and `npc_anchor` have default no-op
+bodies; the rest are pure virtual. Header-only
 convenience builders live in `ptv::world::helpers` (`building_grid`, `wall_shell`,
 `path`, `platform_set`).
 
@@ -188,8 +201,17 @@ knows this level's layout -- it just created it. NPCs cannot infer it, and
 without a declaration they fall back to local obstacle avoidance, which
 cannot find a doorway. Reconstructing the topology from finished geometry
 (the Recast approach) would rebuild something the author already knew. A
-deterministic validator then checks the declaration against itself before the
-world is accepted. See [navigation.md](navigation.md).
+deterministic validator (`_validate_navigation` in
+`stage_world_generation.py`) then checks the declaration against itself before
+the world is accepted. With no regions declared it checks nothing (steering
+only is legal). Otherwise: no malformed or duplicate region ids; every region
+at least 0.5 m x 0.5 m; every link names two known regions and its crossing
+`point` lies within 1.5 m (XZ) of BOTH regions; the player spawn lies inside a
+region; every region is reachable from the spawn's region (honouring
+`bidirectional`); and every `npc_spawn_zone` / `npc_anchor` position lies
+inside some region. `NavLinkDesc` can also name a `gated_by` interactive plus
+`gate_state_key` (default `"open"`) / `gate_state_value`, so a closed door
+closes the route. See [navigation.md](navigation.md).
 
 `npc_spawn_zone(NpcSpawnZoneDesc{id, position, radius, tags})` marks a gate,
 tunnel mouth or ridge where arriving NPCs appear. When the NPC plan has
@@ -205,7 +227,8 @@ an NPC that is PLACED AT LOAD stands: a guard by the gate, a vendor behind the
 counter, a turret on the wall. The brief asks for one per copy whenever the
 NPC plan places NPCs that are not companions. Anchors are written to the
 world's `npc_anchors`, validated to sit inside a declared `nav_region` (as
-spawn zones now are too), and copied into `scene.json`, where the scene
+spawn zones are too; both checks only run when the world declares regions),
+and copied into `scene.json`, where the scene
 compiler puts each matching NPC on one. Companions that follow the player
 need none; they start beside the spawn.
 
@@ -243,7 +266,8 @@ values read on screen.
 - Standalone CMake project (its own `vcpkg.json`: nlohmann-json + glm). Configure
   with `-DPTV_WORLD_PROJECT_ID=<id>` to compile that project's world sources; the
   stage builds it into `projects/<id>/builds/worldgen`.
-- `ptv_worldgen --out <scene.json> [--builder <id>] [--seed <n>] [--assets <map.json>]`.
+- `ptv_worldgen --out <scene.json> [--builder <id>] [--seed <n>] [--assets <map.json>] [--list]`
+  (`--seed` defaults to 1).
 - Always ships a `builtin.world.fallback` builder (the deterministic fallback).
 
 ## scene.json additions (version 2)
@@ -257,7 +281,8 @@ values read on screen.
 - Lights carry an optional `direction` and, for point lights, an optional
   `range` (falloff radius in meters; the runtime uses 20 m when unset).
 - `navigation`: `{ regions: [{id, min, max, floor_y}], links: [{from, to,
-  point, cost_multiplier?, bidirectional?}] }`. Omitted entirely when the
+  point, cost_multiplier?, bidirectional?, gated_by?, gate_state_key?,
+  gate_state_value?}] }`. Omitted entirely when the
   builder declared none, which the runtime reads as "steering only" rather
   than "nowhere is walkable". Carried through the scene-compile merge and
   loaded into `ptv::nav::NavGraph`.
@@ -311,12 +336,12 @@ Source: `engine/worldgen/samples/starter_city.cpp`.
   a busy Quest 3 scene is roughly 200–300 draw calls, so this is a performance
   bound as much as a correctness one.
 
-## Deferred / follow-ups
+## Formerly deferred (now landed)
 
-- Renderer: a dedicated lights UBO + a separate gradient-skybox pass. Today the
-  framebuffer clears to the sky horizon color and the fragment shader uses a
-  fixed 3-point + fog model; scene lights are parsed and available.
-- Locomotion: a full Jolt `CharacterVirtual` player capsule so **smooth**
-  locomotion is blocked by walls. Today teleport already lands on real generated
-  geometry via physics raycast; smooth locomotion is free-fly on XZ.
-- GPU texture / PBR decode for Tripo object GLBs (still vertex-color).
+- Renderer: the scene's sun / ambient / fog / exposure and up to 8 range-
+  attenuated point lights reach `scene.frag` through the per-frame uniform, and
+  the gradient sky + sun disk is its own pass (`sky.vert` / `sky.frag`).
+- Locomotion: the player is a Jolt `CharacterVirtual` (`PhysicsWorld.cpp`), so
+  smooth locomotion is blocked by generated walls.
+- Object GLB textures are decoded and uploaded (`render/TextureCache.cpp`,
+  KTX2 on Quest); see [`rendering.md`](rendering.md).

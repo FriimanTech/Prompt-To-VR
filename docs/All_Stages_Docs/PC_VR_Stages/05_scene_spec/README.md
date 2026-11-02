@@ -3,213 +3,190 @@
 > **Pipeline position:** after `mechanic_plan` → before `reference_images`  
 > **Target:** shared (PC VR and Quest)  
 > **Primary code:** [`apps/orchestrator/ptv_orchestrator/pipeline/stage_scene_spec.py`](../../../../apps/orchestrator/ptv_orchestrator/pipeline/stage_scene_spec.py)  
-> **Primary artifacts:** `projects/<project_id>/scene_spec.<scene_id>.json`, `scene_spec.json`
+> **Primary artifacts:** `projects/<project_id>/scene_spec.<scene_id>.json` (one per scene), `scene_spec.json` (entry-point copy)
 
 ## Main stage summary
 
 ### What this stage is
 
-The **SceneSpec stage** composes one structured scene document per game scene: which entities spawn where, which assets and mechanics they use, player spawn, environment tags, and NPC setup (health, faction, locomotion). It produces `scene_spec.<scene_id>.json` files plus a canonical entry-point copy.
+The **SceneSpec stage** composes one structured **gameplay** layout per
+`BuildSpec.scenes` entry: which entities exist, where, with which mesh
+(asset), physics, tags, health / faction, attachments, equip slots and
+mechanic bindings, plus the player spawn, lights, sky colour and ambient
+level. Scenes are composed in parallel by an agent with a deterministic
+validate-and-repair loop.
+
+The **environment is not composed here**: it is C++ authored later by the
+world architect (`world_generation`) and merged in by `scene_compile`. This
+stage places gameplay entities only.
 
 ### Why it exists
 
-BuildSpec lists scenes at a high level; MechanicPlan lists mechanics. SceneSpec is where those are **wired together** into something the deterministic scene compiler can merge with the C++ world and GLB assets.
-
-Without schema validation here, the codegen agent and scene compiler would see inconsistent entity lists.
+The BuildSpec lists scenes at a high level and the MechanicPlan lists
+mechanics; SceneSpec wires assets and mechanics onto concrete entities so the
+deterministic scene compiler can merge them with the generated world and the
+optimized GLBs.
 
 ### Inputs (what enters)
 
-| Input | Location |
-|-------|----------|
-| BuildSpec | `build_spec.json` |
-| AssetManifest | `asset_manifest.json` |
-| MechanicPlan | `mechanic_plan.json` |
-| NpcPlan | `npc_plan.json` |
+| Input | Location | What the agent sees |
+|-------|----------|---------------------|
+| BuildSpec | `build_spec.json` | Meta (title, pitch ≤600 chars, game type, locomotion, comfort, player height, constraints), THIS scene in full, other scenes' id + name |
+| AssetManifest | `asset_manifest.json` | Per asset: id, name, category, `character_role`, style notes (≤400 chars), target scale, collision shape, `rigged`, pre-computed `glb_path` = `assets/<asset_id>.glb` |
+| MechanicPlan | `mechanic_plan.json` | Per item: id, name, type, classification, `binding_id`, config, brief (≤400 chars), `depends_on_assets`, `required_in_scenes` |
+| NpcPlan | `npc_plan.json` | Per NPC: role, faction, `hostile_to`, movement style, max health, walk / run / turn speeds, spawn counts and `waves` |
+
+The full multi-scene dump (~39K tokens on a large brief) is compressed to
+~5–8K tokens per scene. GameDesign and InteractionDesign are **not** inputs;
+the scene compiler binds the game director and weapons from them later.
 
 ### Outputs (what it produces)
 
 | Output | Location |
 |--------|----------|
-| Per-scene specs | `scene_spec.<scene_id>.json` |
-| Entry copy | `scene_spec.json` (entry-point scene) |
+| Per-scene spec | `projects/<id>/scene_spec.<scene_id>.json` |
+| Entry-point copy | `projects/<id>/scene_spec.json` (the `entry_point` scene, or the only scene) |
+| Per-scene agent log | `projects/<id>/logs/scene_spec.log` (lines prefixed `[<scene_id>]`) |
+
+Spec files for scenes the BuildSpec no longer has are deleted
+(`run_reset.remove_stale_scene_files`), because later stages glob
+`scene_spec*.json`.
 
 ### Where output goes next
 
-- **`reference_images` / `tripo_models`** — indirect (assets referenced by id)
-- **`asset_optimization`** — instance counts for triangle budgeting
-- **`code_generation`** — scene context for agents
-- **`scene_compile`** — primary consumer
+- **`world_generation`** / **`code_generation`** — scene context for the agents.
+- **`asset_optimization`** — instance counts for triangle budgeting.
+- **`scene_compile`** — the primary consumer: merges with `world.scene.json`, fills sockets / holds from `asset_contract.json`, merges MechanicPlan config, binds weapons and the game director, validates equip slots and asset references.
 
-### Key concepts and terms
+### Models / providers
 
-- **Validate-and-repair loop** — After the agent emits a SceneSpec, deterministic checks run (asset coverage, valid mechanic binding ids). Problems are fed back to the **same agent session** for repair, up to `scene_spec_max_repair_rounds`. There is no "environment presence" check: the environment is authored in C++ by the world architect and merged in by the scene compiler.
-- **Parallel workers** — Multiple scenes compose concurrently via `ThreadPoolExecutor` (capped by `scene_spec_max_parallel_workers`).
-- **Compressed context** — Each scene agent gets a ~5–8K token summary instead of the full multi-scene dump (~39K).
-- **Idempotent resume** — If valid `scene_spec.*.json` already exist on disk, stage may skip LLM calls. "Valid" includes **asset coverage against the current manifest**, not just schema validity.
-- **Equip slots** — An entity can declare `equip_slots[]`: named places on a *wearer* (a hip holster, a back sheath) that `builtin.equip` snaps items into.
+- OpenAI Agents SDK agent (`SceneSpecComposer`), one per scene, `gpt-5.6-sol`, reasoning effort `medium`, verbosity `medium`, `max_tokens` = `scene_spec_max_output_tokens` (64,000), **no tools**.
+- Repair rounds reuse the same agent session (`SQLiteSession`, id `ptv-scene-<project_id>-<scene_id>`).
+- System prompt `scene_spec_system(target_device, max_entities=scene_spec_max_entities)` — the entity budget and the Quest / PC VR device clause are baked in.
+- No other provider; cost scales with the number of scenes not already on disk.
 
-### End-to-end flow (plain language)
+### Failure behaviour
 
-1. For each scene in BuildSpec, spawn a **SceneSpecComposer** agent (`gpt-5.6-sol`).
-2. Agent produces SceneSpec JSON.
-3. `_validate_scene_semantics()` checks coverage and bindings.
-4. If invalid, feed errors back and repair (same session).
-5. Save per-scene files; copy entry scene to `scene_spec.json`.
+- A scene that still fails schema or semantic validation after `scene_spec_max_repair_rounds` raises `SceneSpecAgentError`; any worker exception **fails the whole stage**. Scenes already saved stay on disk and are reused on Resume.
 
 ---
 
 ## Detailed stage deep dive
 
-### Parallelism and fast-path resume
+### Files and functions
 
-This stage is one of the most complex planners. It can **skip LLM entirely** if valid `scene_spec.<scene_id>.json` files already exist on disk.
+| File | Role |
+|------|------|
+| `pipeline/stage_scene_spec.py` | `run` → `run_with_composer_factory(ctx, _default_composer_factory)`; `_try_load_existing_scene_spec`, `_finalize_all_existing`, `_compose_one_scene`, `_validate_scene_semantics`, `_build_user_message`, `_StaticContext`, `_Heartbeat` |
+| `pipeline/scene_spec_agent.py` | `SceneSpecComposer`, `SceneSpecAgentError`, `SceneSpecOutputError`, `build_repair_message`, `build_truncation_message` |
+| `pipeline/scene_spec_wire.py` | Strict wire schema `WireSceneSpec` and `to_scene_spec()` mapping |
+| `pipeline/agent_output_capture.py` | Keeps raw model output and turns validation failures into field-level issues |
+| `packages/schemas/ptv_schemas/scene_spec.py` | `SceneSpec`, `EntitySpec`, `MeshRef`, `MechanicBinding`, `EquipSlotSpec`, … |
 
-### Entry: `run_with_composer_factory`
+### Execution trace
 
-1. emit + record running
-2. Load BuildSpec
-3. **`_try_load_existing_scene_spec()` per scene** — if ALL scenes valid on disk → `_finalize_all_existing()` and return (no API)
-4. Load manifest, mechanic_plan, npc_plan; bridge OpenAI key
-5. `_StaticContext.build()` — compresses assets/mechanics/NPCs (~5–8K tokens per scene vs ~39K dump)
-6. `ThreadPoolExecutor(max_workers=scene_spec_max_parallel_workers)` — default 3 parallel scene agents
+1. Emit `running`; load BuildSpec, AssetManifest and MechanicPlan.
+2. **Reuse check per scene** (`_try_load_existing_scene_spec`). A file on disk is reused only if it parses as `SceneSpec`, its `scene_id` matches, every `mesh.asset_id` is in the **current** manifest, and every `generated.*` binding is still generated by the **current** plan. A rejected file gets an `info` event saying why ("recomposing, it references 8 asset(s) absent from…").
+3. All scenes reusable → `_finalize_all_existing`: re-stamp `scene_spec.json`, remove stale files, succeed with "Reused N scenes already on disk" — no API call.
+4. Otherwise bridge `OPENAI_API_KEY`, load NpcPlan, build `_StaticContext`, and run scenes through a `ThreadPoolExecutor` of `min(scene_spec_max_parallel_workers, scene count)`.
+5. Each worker: reuse if valid, else build a composer and `_compose_one_scene`; a `_Heartbeat` emits "still composing … (Ns elapsed)" every 30 s. Each composed scene is **saved immediately** (crash-safe), plus the entry-point copy.
+6. Collect results in BuildSpec order, remove stale spec files, succeed with "Composed N scenes".
 
-### Per-scene worker
+### Binding ids
 
-For each BuildSpec scene id:
-
-- If file exists and validates → reuse + `_ensure_entrypoint_canonical()`
-- Else `_compose_one_scene()` with `_Heartbeat` (SSE every 30s during long calls)
-- **Save `scene_spec.<scene_id>.json` immediately** after each scene — crash-safe partial progress
+`_compress_mechanics` pre-computes each item's `binding_id`: `generated.<code_task_id>` for `generate` and `builtin+config_code_edit`, otherwise the item's `builtin_id`. The agent copies it into `MechanicBinding.mechanic_id`.
 
 ### Validate-and-repair loop (`_compose_one_scene`)
 
-```
-for attempt in 0..scene_spec_max_repair_rounds:
-    scene = composer.compose(initial_message OR build_repair_message(issues))
-    issues = _validate_scene_semantics(scene, manifest, plan, ...)
-    if issues empty: return scene
-    else if attempts left: continue same SQLiteSession
-    else: raise SceneSpecAgentError
-```
+For `attempt` in `0..scene_spec_max_repair_rounds`:
 
-**Validation checks:** matching scene_id, non-empty entities, every manifest asset referenced, mechanic binding ids exist in MechanicPlan.
+| Outcome | Next message |
+|---------|--------------|
+| `SceneSpecOutputError`, truncated at the token cap | `build_truncation_message(max_entities)` — asks for FEWER entities |
+| `SceneSpecOutputError`, invalid output | `build_repair_message(field-level issues)` |
+| `SceneSpecAgentError` (transport, turn budget, API) | The original brief again |
+| Valid output with semantic issues | `build_repair_message(issues)` |
+| Valid, no issues | Done |
 
-### SceneSpecComposer agent
+On the last attempt any of the failures is raised.
 
-- OpenAI Agents SDK + **SQLiteSession** (repair context preserved across rounds)
-- Model: `scene_spec_model`, effort `scene_spec_reasoning_effort`, verbosity `scene_spec_verbosity`, explicit `scene_spec_max_output_tokens`
-- No WebSearch
+### Semantic checks (`_validate_scene_semantics`)
+
+| Check | Issue |
+|-------|-------|
+| `scene_id` equals the BuildSpec scene id | scene_id mismatch |
+| `entities` non-empty | empty scene |
+| Every manifest asset id appears on at least one entity's `mesh` | coverage gap (first 20 listed) |
+| Every `mechanic_id` is a plan `binding_id` or starts with `builtin.` | unknown mechanic ids |
+
+There is deliberately **no environment-presence check**: the environment belongs to the world architect.
 
 ### Strict structured output
 
-The agent's `output_type` is **not** `SceneSpec` but `WireSceneSpec`
-(`pipeline/scene_spec_wire.py`) with `strict_json_schema=True`, mapped back to
-`SceneSpec` by `to_scene_spec()`. OpenAI strict mode then constrains decoding,
-so malformed JSON and ids that violate the `IdStr` pattern become impossible
-rather than merely discouraged.
+The agent's `output_type` is `WireSceneSpec` with `strict_json_schema=True`,
+mapped back to `SceneSpec` by `to_scene_spec()`. Strict mode constrains
+decoding, so malformed JSON and ids violating the `IdStr` pattern cannot be
+produced. `SceneSpec` itself cannot be the wire schema because strict mode
+needs `additionalProperties: false` everywhere:
 
-`SceneSpec` itself cannot be the wire schema: strict mode requires
-`additionalProperties: false` everywhere, and `MeshRef.sockets` and
-`MechanicBinding.params` are open-ended dicts. The wire model drops `sockets`
-(the scene compiler fills them from `asset_contract.json`) and carries
-`params` as a list of `(key, value_json)` pairs.
+- `MeshRef.sockets` is dropped (the scene compiler fills sockets from `asset_contract.json`); `MeshRef.hold` is not on the wire either.
+- `MechanicBinding.params` is carried as `param_overrides`: a list of `{key, value_json}` pairs holding **per-entity overrides only** — the MechanicPlan config is merged in by the scene compiler.
+- `attached_to` and `equip_slots` are mirrored verbatim; a field the wire schema omits is one the agent cannot emit.
 
-Non-strict output caused a real ten-minute triple failure: the SDK redacts
-model payloads by default, so a Pydantic validation error arrived as the single
-line `Invalid JSON when parsing model output`, the repair turn had nothing to
-say, and the agent repeated the same mistake until the budget ran out.
-`agent_output_capture.make_capturing_schema` now keeps the raw output, which is
-written to `logs/scene_spec.log` and turned into field-level repair
-instructions. Truncation at the token cap takes a separate branch that asks for
-FEWER entities instead of "fix these problems".
+Raw output is kept by `make_capturing_schema` and written to `logs/scene_spec.log`, so a failure becomes field-level repair instructions rather than the SDK's redacted "Invalid JSON when parsing model output".
 
-### Outputs
+### NPC placement instructions
 
-| File | Purpose |
-|------|---------|
-| `scene_spec.<scene_id>.json` | Per-scene gameplay layout |
-| `scene_spec.json` | Copy of entry-point scene (or sole scene) |
+When the NPC plan has NPCs the brief tells the agent, per NPC asset: set `health` from `max_health` and `faction` from faction + `hostile_to`; bind `builtin.character_locomotion` with the locomotion numbers (`animated: false` for `slide_no_animation`); use `physics.kind: kinematic` and a `capsule` collider; and for wave / over-count types place ONE hidden copy tagged `template` far away instead of every instance (the runtime `builtin.encounter_director` clones it).
 
-Pre-computed `glb_path`: `assets/<asset_id>.glb` injected in agent message.
+### Entities and equip slots
 
-### SSE events
+`EntitySpec`: `id`, `name`, `transform`, `mesh` (`asset_id`, `glb_path`), `physics` (static / dynamic / kinematic, mass, collision shape, restitution, friction), `mechanic_bindings`, `tags` (≤16), `health`, `faction`, `attached_to` (`entity_id`, `anchor`, `socket`, offset), `equip_slots` (≤24).
 
-`running`, `info` (parallelism, per-scene start/done/reuse, repair round N), heartbeat `info`, `succeeded`
-
-### Failure modes
-
-Worker exception fails whole stage. Validation exhaustion → SceneSpecAgentError.
-
-### Settings
-
-`scene_spec_model`, `scene_spec_reasoning_effort`, `scene_spec_verbosity`, `scene_spec_max_output_tokens` (64000), `scene_spec_max_entities` (120), `scene_spec_max_parallel_workers` (3), `scene_spec_max_repair_rounds` (2), `scene_spec_agent_max_turns`
-
-### `_validate_scene_semantics()` checks (deterministic)
-
-| Check | Failure theme |
-|-------|---------------|
-| `scene.id` matches BuildSpec | Wrong scene file |
-| `entities` non-empty | Empty scene |
-| Every manifest asset id on some entity | Coverage gap |
-| Mechanic binding ids exist in plan | Invalid binding |
-
-Non-empty issues → repair via `build_repair_message()` in same SQLiteSession.
-
-### Parallel worker isolation
-
-Each scene gets its own `SceneSpecComposer` + session id. Workers share read-only `_StaticContext` only. Thread pool collects results in BuildSpec scene order.
-
-### `_StaticContext` compression
-
-Full manifest/plan dump (~39K tokens) compressed to ~5–8K per scene: asset id/category/glb_path, mechanic summaries, NPC role/faction/movement.
-
-### Repair issue examples
-
-Missing manifest asset references, invalid mechanic binding ids, missing environment tag, empty entities — all fed back via `build_repair_message()` into same SQLiteSession.
-
-### Crash-safe saves
-
-Each scene written to disk immediately after compose — resume after crash may have partial scene files; fast-path loads valid ones only.
-
-### Reuse must match the CURRENT manifest
-
-`_try_load_existing_scene_spec()` used to check only the Pydantic schema and the scene id. A scene composed against an earlier manifest therefore sailed through the fast path: one real run reported "Reused 1 scenes already on disk" for a scene naming eight assets that no longer existed, so eight meshes pointed at GLBs that were never generated and the two weapons the game *did* have appeared nowhere.
-
-Reuse now also requires every `mesh.asset_id` to exist in the current `AssetManifest`. A rejected scene is recomposed, and the reason is emitted as an `info` event naming the absent ids, so "why did it re-run" has an answer on screen instead of in a diff. `scene_compile` enforces the same invariant as a hard failure, in case a scene reaches it another way.
-
-### Equip slots (`EquipSlotSpec`)
-
-An `EntitySpec` may declare up to 24 `equip_slots`. A slot is a place **on the wearer** — never on the holster prop, which is set dressing:
+An `EquipSlotSpec` is a place **on the wearer** (a hip holster), never on the holster prop:
 
 | Field | Meaning |
 |-------|---------|
 | `name` | Slot id gameplay refers to (`hip_holster_r`) |
-| `body_slot` | Where on the body: `hand_r`, `hand_l`, `waist`, `wrist_l`, `wrist_r`, `back`, `chest`, `head` |
+| `body_slot` | `hand_r`, `hand_l`, `waist`, `wrist_l`, `wrist_r`, `back`, `chest`, `head` |
 | `host_item_slot` / `host_socket` | For a slot hosted on an already-equipped item |
-| `local_position` / `local_rotation` | Offset from the body slot, e.g. `[0.16, -0.05, 0.02]` from `waist` for a right hip |
-| `snap_radius_m` | How near an item must come to snap in — 0.15–0.25 for a holster |
+| `local_position` / `local_rotation` | Offset from the body slot |
+| `snap_radius_m` | How near an item must come to snap in |
 | `exclusive` | One item at a time (default true) |
-| `accepts_tags` | Which items fit; an empty list lets a rifle into a pistol holster |
+| `accepts_tags` | Which items fit (empty = anything) |
 
-The strict wire model (`scene_spec_wire.py`) mirrors the field verbatim. It has to: strict mode permits **only** the declared surface, so a field the wire schema omits is one the agent physically cannot emit.
+`builtin.equip` uses them; `scene_compile` validates slot names and uniqueness.
 
 ### The player's bindings
 
-`player_rig` (meshless, tagged `player_rig`) hosts `builtin.hand_pose` and the
-locomotion, turning and settings-menu items the MechanicPlan lists -- nothing
-else. In Full Player Avatar the `player_avatar` entity binds
-`builtin.avatar_body` itself. A Hands Only scene has no avatar entity. The
-compiler fills in anything forgotten and rejects contradictions.
+`player_rig` (meshless, tagged `player_rig`) hosts `builtin.hand_pose` and the locomotion, turning and settings-menu items the MechanicPlan lists — nothing else. In Full Player Avatar the `player_avatar` entity binds `builtin.avatar_body`; a Hands Only scene has no avatar entity. `scene_compile` fills in anything forgotten and rejects contradictions.
 
----
+### Settings (`apps/orchestrator/ptv_orchestrator/settings.py`)
 
-## Extend this folder
+| Setting | Env var | Default |
+|---------|---------|---------|
+| `scene_spec_model` | `SCENE_SPEC_MODEL` | `gpt-5.6-sol` |
+| `scene_spec_reasoning_effort` | `SCENE_SPEC_REASONING_EFFORT` | `medium` |
+| `scene_spec_verbosity` | `SCENE_SPEC_VERBOSITY` | `medium` |
+| `scene_spec_max_output_tokens` | `SCENE_SPEC_MAX_OUTPUT_TOKENS` | 64,000 (4,000–128,000) |
+| `scene_spec_agent_max_turns` | `SCENE_SPEC_AGENT_MAX_TURNS` | 30 (4–200) |
+| `scene_spec_max_repair_rounds` | `SCENE_SPEC_MAX_REPAIR_ROUNDS` | 2 (0–6) |
+| `scene_spec_max_parallel_workers` | `SCENE_SPEC_MAX_PARALLEL_WORKERS` | 3 (1–16) |
+| `scene_spec_max_entities` | `SCENE_SPEC_MAX_ENTITIES` | 120 (8–1000) |
 
-- `failure-modes.md` — validation rules and repair messages
-- `schemas.md` — entity and spawn fields
-- `artifacts.md` — per-scene file layout
+To force recomposition, delete the relevant `scene_spec.<scene_id>.json` (or all of them).
+
+### Quest notes
+
+The Quest device clause in the system prompt tells the composer it is planning for a standalone mobile GPU (tighter draw-call and triangle budgets, fewer simultaneous animated characters). The 120-entity budget applies on both targets; `scene_complexity` in `scene_compile` later measures the real cost and picks Quest settings (FFR, multiview, culling, static batching).
+
+### SSE events
+
+`running` → `info` (reuse / recompose reasons, worker count, per-scene start / done / reused, repair rounds, output problems, heartbeat, stale files removed) → `succeeded`.
 
 ## See also
 
-- [`docs/architecture.md`](../../../architecture.md) — data flow diagram
+- [`docs/architecture.md`](../../../architecture.md) — data flow
+- [`docs/world-generation.md`](../../../world-generation.md) — where the environment comes from
+- [`docs/npc-and-ai.md`](../../../npc-and-ai.md) — templates and the encounter director
 - Stage 15 [`15_scene_compile`](../15_scene_compile/README.md) — deterministic merge

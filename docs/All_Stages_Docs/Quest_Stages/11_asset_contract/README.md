@@ -1,135 +1,106 @@
 > **Shared content:** Identical to [PC_VR_Stages/11_asset_contract](../../PC_VR_Stages/11_asset_contract/README.md). Update both copies when this stage changes.
 
-# Stage 11: Asset Contract (Sockets)
+# Stage 11: Asset Contract (Sockets + Model Frame)
 
-> **Pipeline position:** after `asset_normalization` → before `code_generation`  
+> **Pipeline position:** after `socket_generation` → before `world_generation`  
 > **Target:** shared (PC VR and Quest)  
-> **Primary code:** [`apps/orchestrator/ptv_orchestrator/pipeline/stage_asset_contract.py`](../../../../apps/orchestrator/ptv_orchestrator/pipeline/stage_asset_contract.py)  
+> **Primary code:** [`apps/orchestrator/ptv_orchestrator/pipeline/stage_asset_contract.py`](../../../../apps/orchestrator/ptv_orchestrator/pipeline/stage_asset_contract.py), [`pipeline/model_frame.py`](../../../../apps/orchestrator/ptv_orchestrator/pipeline/model_frame.py)  
 > **Primary artifacts:** `projects/<project_id>/asset_contract.json`
 
 ## Main stage summary
 
 ### What this stage is
 
-The **asset contract stage** derives **named sockets** (attachment points like `muzzle` and `grip`) from each asset's geometry using deterministic math — no AI calls. Results are stored in **unit space** (normalized by longest axis) so they survive LOD scaling.
+The **asset contract stage** writes one record per asset with:
+
+- its **named sockets** (`muzzle`, `grip`, …) in unit space — taken from `socket_generation` when that stage covered the asset, or, for projects without an interaction design, derived from geometry by the deterministic `ptv_glb_sockets` tool;
+- for characters and skinned assets, its measured **model frame** (sole height, height, forward direction).
 
 ### Why it exists
 
-The code-generation agent never sees the GLB file. It cannot know where a gun barrel ends. Instead it writes `ctx.sockets->socket_world(self, "muzzle")` — but only if this stage proved a `muzzle` socket exists on that asset.
-
-Running **before codegen** gives agents the contract in context. Running **before optimization** is safe because sockets are in unit space; scene compile multiplies by `target_scale_meters`.
+Code-generation agents never see a mesh; they write `ctx.sockets->socket_world(self, "muzzle")` and need the socket **names** in context. The scene compiler needs exact numbers behind those names, and needs to know how to stand and face every character: Tripo rigs stand on their origin and face +X, Uthana rigs are hips-centred and face +Z, and the engine faces −Z. Measuring once here replaces per-provider guesses that left NPCs floating or walking sideways.
 
 ### Inputs (what enters)
 
 | Input | Location |
 |-------|----------|
-| AssetManifest | `socket_hints` per item (e.g. `["muzzle", "grip"]`) |
-| Normalization | `asset_normalization.json` (valid `glb_path` per asset) |
+| AssetManifest | `asset_manifest.json` — `socket_hints`, `category`, `rigged`, `forward_hint` |
+| Normalization index | `asset_normalization.json` — GLB per asset (`glb_source` or `glb_path`, repo-relative) |
+| Socket generation | `socket_report.json` |
+| InteractionDesign | `interaction_design.json` (if present, assets it gave no sockets get none) |
 
 ### Outputs (what it produces)
 
 | Output | Location |
 |--------|----------|
-| Socket contract | `asset_contract.json` |
+| Asset contract | `asset_contract.json` |
 
-Per asset: socket name → position + orientation in unit space; `unsatisfied_hints` when geometry cannot support a requested socket; `reason` when no sockets were derived on purpose.
+Every manifest asset gets an entry: `status` (`ok`, `failed`, `skipped`, `missing`), `reason`, `space: "unit"`, `sockets`, `socket_confidence`, `socket_hints`, `unsatisfied_hints`, `bounds`, `source_glb`; from socket generation also `hold`, `part_regions`, `cross_section_unit`, `overlay_paths`, `warnings`, `method`; from the geometry tool `principal_axis` and AABB; and `frame` when measured.
 
 ### Where output goes next
 
-- **`code_generation`** — agents read socket names in context
-- **`scene_compile`** — scales sockets to metres; validates `required_sockets` from CodeTasks
+- **`code_generation`** — socket names in each agent's context.
+- **`scene_compile`** — `mesh.sockets` / hold in metres (× `target_scale_meters`), `mesh.model_frame`, `foot_offset_m`, height-based `unit_scale`; validates CodeTask `required_sockets`; fails on a skinned character with no frame.
 
-### Key concepts and terms
+### Models / providers
 
-- **Socket** — A named local transform on an asset ("muzzle points here"). Used for weapon firing, attachments, and equip.
-- **Unit space** — Coordinates divided by longest-axis extent so decimation/LOD does not invalidate offsets.
-- **ptv_glb_sockets** — C++ tool using PCA (Principal Component Analysis) + mass asymmetry to guess muzzle/grip locations from mesh shape.
-- **Socket contract (three-clause)** — Manifest hints → this stage derives → scene compile validates against codegen requirements. See [`docs/architecture.md`](../../../architecture.md).
+None. Deterministic; the only external piece is the `ptv_glb_sockets` C++ tool (principal-axis PCA + mass asymmetry), located under `engine/build` or built once with CMake.
 
-### End-to-end flow (plain language)
+### Failure behavior
 
-1. For each resolvable asset, decide whether it can carry sockets at all (see **Which assets get sockets** below).
-2. For each one that can, run `ptv_glb_sockets` subprocess on the source GLB.
-3. Collect requested hints from the manifest.
-4. Record satisfied sockets, unsatisfied hints, or the reason no sockets were derived.
-5. Save `asset_contract.json`, then **fail the stage** if any socket gameplay depends on could not be derived.
+`asset_contract.json` is always written first; then the stage **fails** (`AssetContractError`), listing every problem, when:
+
+- a GLB `asset_normalization.json` vouched for is not on disk (`status: missing`);
+- an asset with explicit `socket_hints` failed geometric derivation (`status: failed`);
+- a rigged asset's model frame could not be measured (for example arm joints but no foot/toe joint).
+
+Failures on hint-less assets, and unrigged frames that fail, are recorded but tolerated. Not finding or building `ptv_glb_sockets` raises `RuntimeError`.
 
 ---
 
 ## Detailed stage deep dive
 
-### Why before codegen
+### Per-asset decision
 
-Codegen agents never see GLB bytes. They write `ctx.sockets->socket_world(self, "muzzle")`. This stage proves socket **names** exist in unit space before agents run.
+For each asset whose normalization status is `ok` / `warn_no_material` (paths resolved against `settings.repo_root`, never the working directory):
 
-### Execution
+1. **Frame** (`_frame_for`): for `category == character`, or an asset normalization marks `skinned`, `model_frame.try_measure(glb, rigged, forward_hint)`.
+2. **Socket generation covered it** (in `socket_report.json`) → `_from_generated`: sockets, confidences, hold, part regions, cross-section and overlays copied over; `status` `ok` or `failed`.
+3. **Interaction design exists but gave this asset no sockets** → `skipped`, `sockets: {}` (no guessed muzzles on targets and racks).
+4. **Legacy project (no design)**: `_not_socketable` — explicit `socket_hints` always derive; otherwise only `prop` gets the implicit `muzzle` + `grip`. Characters (rig joints / `BodySlots`), UI (body slot + `IInteractive`) and FX (spawned at another asset's socket) are skipped with a written `reason`.
+5. **Derive** (`_derive`): `ptv_glb_sockets --input <glb> --output <json>`; with hints, only hinted sockets are published and the rest are `unsatisfied_hints`; a hint-less prop gets the full derived set; confidences default to `heuristic`.
 
-1. Load manifest + `asset_normalization.json`
-2. `_resolvable_assets()` — status `ok` or `warn_no_material` with valid `glb_path`
-3. **`_ensure_tool()`** — locate `ptv_glb_sockets` binary; if missing, run `configure_and_build` to compile it (also warms engine build tree for later stages)
-4. Per asset: subprocess `ptv_glb_sockets --input <glb> --output <json>`
-5. Filter derived sockets to manifest `socket_hints` only
-6. Record `unsatisfied_hints` when geometry cannot support requested name
-7. Write `asset_contract.json` — positions in **unit space** (longest-axis normalized)
+Assets with no usable GLB get `skipped` with reason "no valid GLB in asset_normalization.json", so the scene compiler can say "no contract" instead of finding nothing.
 
-Scene compile multiplies by `target_scale_meters` to metres.
+### Model frame (`model_frame.measure`)
 
-### Socket contract three-clause model
+From the skinned bind pose (≤20,000 sampled vertices) and joint world positions:
 
-| Clause | Owner |
-|--------|-------|
-| Which names to derive | manifest `socket_hints` |
-| Geometry → unit positions | **this stage** |
-| Codegen requires + compile validates | scene_compile `_check_required_sockets()` |
+- `sole_y`, `top_y`, `height`, `center_xz`, `raw_longest_axis`, `lowest_foot_joint_y`;
+- **forward** = up × the shoulder line (`upper_arm` or `shoulder` joints), confirmed by the foot → toe direction; if they disagree the toes win (mirrored side names) with a warning; with no skeleton, the manifest `forward_hint` (`+x`, `-x`, `+z`, `-z`), else `+z` with a warning; snapped to an axis within 12°;
+- `yaw_offset_rad`, `forward_snapped`, `method` (`shoulders`, `shoulders+toes`, `toes`, `hint`, `default`), `status` (`measured` / `hint` / `default` / `failed`), `biped`, `t_posed`, `warnings`, `units: "glb"`.
 
-### Which assets get sockets
+A rigged mesh with arm joints but no foot/toe joint raises `ModelFrameError` (blocking). A non-biped rig without feet uses the mesh minimum with a warning.
 
-A socket is a point on a **mesh**. Not every asset attaches to anything that way, and deriving sockets nothing reads just fills the artifact with noise, so the implicit `muzzle` + `grip` fallback is limited to **`prop`** assets:
+### Unit space
 
-| Category | Implicit fallback | Why |
-|----------|-------------------|-----|
-| `prop` | `muzzle`, `grip` | Weapons and held items are what sockets are for. |
-| `character` | none | Characters attach via rig joints and the `BodySlots` taxonomy (`hand_r`, `waist`, `wrist_l`). |
-| `ui` | none | A HUD attaches to a body slot and is driven by `IInteractive`. |
-| `fx` | none | FX are spawned *at* another asset's socket; the socket belongs to the emitter. |
+Socket positions are divided by the longest-axis extent of the source GLB, so they survive the LOD chain built later by `asset_optimization`; `scene_compile` multiplies by `target_scale_meters`, as it does for `bounds_radius_m`.
 
-Explicit `socket_hints` **always win**, whatever the category — the manifest is allowed to know something the category does not. When nothing is derived on purpose, the entry records a `reason` so the artifact explains itself instead of showing a bare `{}`.
+### Tool build
 
-### Paths, and why they are resolved against the repo root
+`_ensure_tool` builds target `ptv_glb_sockets` into `engine/build/vs2026-x64` using `cmake_generator`, `cmake_generator_platform`, `cmake_build_config`, `vcpkg_root`. This also warms the engine build tree used later by codegen's compile-verify. It is only needed for legacy derivation.
 
-`asset_normalization.json` records `glb_path` **relative to the repo root**. Resolving those against the process working directory silently produced a non-existent path whenever the orchestrator was started from anywhere but the repo root (`apps/web`, for instance) — every asset came back "GLB missing", every contract was empty, and the run continued to codegen as if that were a normal answer. Two rules follow:
+### Settings
 
-- Resolve every artifact path against `ctx.settings.repo_root`, never `Path.cwd()`. A test walks the whole `pipeline/` package's AST and fails on any `cwd()` / `getcwd()` call.
-- If normalization vouched for a GLB and it is not readable here, that is a **contradiction between two artifacts**, not a missing optional extra.
+No settings of its own; uses the CMake/vcpkg settings above (`CMAKE_GENERATOR`, `CMAKE_GENERATOR_PLATFORM`, `CMAKE_BUILD_CONFIG`, `VCPKG_ROOT`).
 
-### Failure modes
+### Quest notes
 
-Cannot build/find tool → `RuntimeError`.
-
-The stage now **fails loudly** (`AssetContractError`), after writing `asset_contract.json` so the evidence survives, when:
-
-- a GLB `asset_normalization.json` vouched for is not on disk (`status: missing`), or
-- an asset carrying explicit `socket_hints` failed to derive them (`status: failed`).
-
-A derive failure on an asset with no hints is recorded and tolerated: nothing was going to read it.
-
-### SSE
-
-`running` → `info` (building tool) → `log` (cmake output lines) → `succeeded`
-
-### Three-clause socket model
-
-Hints (manifest) → derive (this stage) → validate (scene_compile vs codegen required_sockets). No single stage owns all three.
-
----
-
-## Extend this folder
-
-- `concepts-sockets.md` — PCA and unit space explained
-- `artifacts.md` — contract JSON schema
+Nothing Quest-specific. The frame and sockets are what `quest_runtime_verify` later checks against (feet within 5 cm of the floor, shots from within 2 cm of the muzzle).
 
 ## See also
 
-- [`docs/architecture.md`](../../../architecture.md) — socket contract table
-- Stage 12 [`12_code_generation`](../12_code_generation/README.md)
-- Stage 15 [`15_scene_compile`](../15_scene_compile/README.md) — socket validator
+- [`docs/sockets.md`](../../../sockets.md) — sockets and holds
+- [`docs/architecture.md`](../../../architecture.md) — socket contract
+- [`docs/uthana.md`](../../../uthana.md) — Uthana rig orientation
+- [`docs/npc-and-ai.md`](../../../npc-and-ai.md) — how characters are stood and faced

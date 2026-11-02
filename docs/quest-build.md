@@ -25,7 +25,10 @@ prompt + device toggle
   -> ProjectState.target_device  (source of truth; mirrored into BuildSpec)
   -> shared stages 1-15 (scene.json + generated C++ + LOD GLBs + world.scene.json)
   -> pcvr:  cmake_build (.exe)      -> launch_exe (Quest Link)
-     quest: quest_build (APK)       -> adb install -r + am start NativeActivity
+     quest: quest_build (APK) -> quest_runtime_verify (report-only;
+            memory failure re-runs asset_optimization -> scene_compile
+            -> quest_build, at most quest_memory_max_correction_rounds)
+            -> adb install -r + am start NativeActivity
   -> engine_promotion (both targets)
 ```
 

@@ -264,7 +264,8 @@ orchestrator and a reusable Vulkan + OpenXR engine core.
    problems are fed back into the same agent session up to
    `scene_spec_max_repair_rounds`. Scenes fan out across
    `scene_spec_max_parallel_workers` agents.
-5. Reference images for each object `AssetItem` → Gemini / Imagen.
+5. Reference images for each object `AssetItem` → Gemini
+   (`gemini-3.1-flash-image`).
 6. Reference images → Tripo image-to-3D (textured, PBR). The generation
    `task_id` is recorded as `assets/<id>/tripo_task.json` so rigging can
    reference it instead of re-uploading the mesh.
@@ -276,8 +277,8 @@ orchestrator and a reusable Vulkan + OpenXR engine core.
    animation libraries (it sees the reference image). "Biped humanoid" = two
    legs + two arms, human or not. See `docs/uthana.md`.
 6a'. **Uthana auto-rig** (`uthana_rigging`): uploads `model.glb` with
-   `auto_rig`, `front_facing`, `include_fingers`, `strip_namespace`,
-   `feet_on_floor`; downloads `model_uthana_rigged.glb`; records the
+   `auto_rig`, `auto_rig_front_facing`, `include_fingers`,
+   `auto_rig_strip_namespace`, `auto_rig_feet_on_floor`; downloads `model_uthana_rigged.glb`; records the
    `character_id` in `uthana_rig.json`; centres the origin (Uthana returns the
    FIRST character for a repeated upload, so its flags are never assumed).
    Confidence <= 0.20 falls back to Tripo with a loud warning. Runs before
@@ -320,7 +321,8 @@ orchestrator and a reusable Vulkan + OpenXR engine core.
    presets (`resolve_tripo_motions`), not only the 13 intents.
 6d. **Uthana motion plan** (`uthana_motion_plan`): NOTHING is generated. Code
    measures each rigged GLB's world height; an agent picks each gait's
-   `style_id`; code enforces `strides` 5, `travel_angle` 0, speed
+   `style_id`; code enforces `strides` 1–5 (else `uthana_locomotion_strides`, default 5),
+   `travel_angle` 0, speed
    `0.78 x h` (walk) / `2.2 x h` (run) and the canonical name
    `style-str{N}-ms{speed}-deg{angle}`, and adds the shared library idle
    (`uthana_idle_motion_id`, default `msf9nhQ4yyTJ`) to every character.
@@ -379,22 +381,27 @@ orchestrator and a reusable Vulkan + OpenXR engine core.
    stage now fails loudly when a GLB `asset_normalization.json` vouched for
    is unreadable, or when an asset carrying explicit hints cannot derive
    them.
-8. CodeTasks from MechanicPlan → Claude Opus → C++ files (`.cpp` + optional
-   `.h`/`.hpp` headers) in `engine/generated/{mechanics,ai,dialogue}/`.
-   After all tasks are written, a **compile-verify + repair loop** builds
-   the `ptv_runtime` target and feeds any compiler errors back to the
+8. **World generation** (runs BEFORE code generation, so gameplay code can
+   use the ids the world actually declared): a world-architect agent per
+   scene (OpenAI Agents SDK, `gpt-5.6-sol` @ reasoning `high`,
+   `WebSearchTool`) writes `IWorldBuilder` C++ in
+   `engine/generated/world/<project_id>/`, compiled + run offline in
+   `ptv_worldgen` under a compile-and-repair loop → `world.scene.json`
+   (`world.<scene_id>.scene.json` per scene; a deterministic fallback
+   world replaces only an environment whose budget is exhausted). The
+   builder also declares the walkable space via `nav_region` / `nav_link`,
+   which a deterministic validator checks against itself (links naming real
+   regions, crossing points inside the rooms they join, spawn inside a
+   region, every region reachable) before the world is accepted.
+8b. CodeTasks from MechanicPlan → OpenAI Agents SDK (`gpt-5.6-sol` @ `high`)
+   → C++ files (`.cpp` + optional `.h`/`.hpp` headers) in
+   `engine/generated/{mechanics,ai,dialogue}/`. After all tasks are
+   written, a **compile-verify + repair loop** builds the
+   `ptv_starter_room` executable (plus an NDK clang syntax pass for Quest,
+   `codegen_quest_syntax_check`) and feeds any compiler errors back to the
    owning task's agent to regenerate (up to `codegen_max_repair_rounds`);
    the stage fails loudly if the generated C++ still does not compile
    (`codegen_verify_compile`, default on).
-8b. **World generation**: a single world-architect agent (OpenAI Agents SDK,
-   `gpt-5.6-sol` @ reasoning `high`, `WebSearchTool`) writes `IWorldBuilder` C++
-   in `engine/generated/world/<project_id>/`, compiled + run offline in
-   `ptv_worldgen` under a compile-and-repair loop → `world.scene.json`
-   (deterministic fallback world if the budget is exhausted). The builder
-   also declares the walkable space via `nav_region` / `nav_link`, which a
-   deterministic validator checks against itself (links naming real
-   regions, crossing points inside the rooms they join, spawn inside a
-   region, every region reachable) before the world is accepted.
 8c. **Asset optimization** (`asset_optimization`): derives a device
    `PerformanceProfile` (tier + triangle/draw-call budgets) from
    `target_device` and how much GLB content the project has, allocates a
@@ -494,7 +501,8 @@ orchestrator and a reusable Vulkan + OpenXR engine core.
       The APK is always downloadable (`GET /projects/{id}/apk`) whatever its
       verification or memory status.
 10b. **On-headset verification** (`quest_runtime_verify`, Quest tail ONLY,
- never PC VR, report-only): installs and launches the APK on the connected
+ never PC VR; a failed check fails the stage but the APK stays
+ downloadable): installs and launches the APK on the connected
  headset in verification mode (`debug.ptv.verify`: scripted player walk,
  player cannot die), reads the engine's NPC telemetry and checks only what
  this game's NPC plan asks for -- base checks for every game (including one
@@ -557,7 +565,6 @@ orchestrator and a reusable Vulkan + OpenXR engine core.
     stay on the Responses API: on 5.6, reasoning combined with function
     tools is Responses-only — Chat Completions allows tools at effort
     `none` only.
-- Google GenAI: Python package `google-genai`. Imagen
 - Google GenAI: Python package `google-genai`. Reference images use
   `gemini-3.1-flash-image` with `generate_content` and
   `response_modalities=["IMAGE"]` (Imagen 4 endpoints discontinued

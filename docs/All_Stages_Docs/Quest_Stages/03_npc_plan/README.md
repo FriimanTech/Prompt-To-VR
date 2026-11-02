@@ -2,146 +2,172 @@
 
 # Stage 3: NPC Plan
 
-> **Pipeline position:** after `asset_manifest` → before `mechanic_plan`  
+> **Pipeline position:** after `interaction_design` → before `game_design`  
 > **Target:** shared (PC VR and Quest)  
 > **Primary code:** [`apps/orchestrator/ptv_orchestrator/pipeline/stage_npc_plan.py`](../../../../apps/orchestrator/ptv_orchestrator/pipeline/stage_npc_plan.py)  
-> **Primary artifacts:** `projects/<project_id>/npc_plan.json` (may also update `asset_manifest.json`)
+> **Primary artifacts:** `projects/<project_id>/npc_plan.json` (may also rewrite `asset_manifest.json`)
 
 ## Main stage summary
 
 ### What this stage is
 
-The **NPC plan stage** reads your prompt and decides what every **character asset** is supposed to *do*: role, faction, movement style, combat stats, perception, spawn rules, and which animation intents their AI behaviors need. It outputs `npc_plan.json`.
+The **NPC plan stage** reads the prompt and decides what every non-player
+character type is supposed to *do*: its role (enemy, ally, neutral, critter,
+boss), faction and who it fights, movement style, behaviours, which animation
+intents those behaviours actually use, locomotion / perception / combat
+numbers, and the **population** — how many are placed at load
+(`persistent_count`) and which arrive in **encounter waves**. The result is
+`npc_plan.json`.
 
 ### Why it exists
 
-Placing a rigged GLB in a scene does not make an enemy. Without this stage, the manifest might rig a duck that the prompt says should **slide without animation** (~30 Tripo credits wasted). Mechanic planning and scene composition also need to agree on who fights whom before C++ is generated.
+Placing a goblin GLB in a scene does not make an enemy. Before this stage
+every downstream stage re-derived NPC intent from the same prose and they
+disagreed — the manifest would rig a duck that the codegen agent then wrote
+as a static slider, and the rig was billed for nothing.
 
-This stage runs **before rigging** because animation is expensive and only the prompt can answer "does this thing animate?"
+It runs **before rigging and animation** because "does this thing need
+animation at all?" is the most expensive question in the pipeline (~30 Tripo
+credits per rig, ~20 per clip) and only the prompt can answer it ("the ducks
+should just slide" means `slide_no_animation` and no rig). It runs **before
+`game_design`, `mechanic_plan` and `scene_spec`** because all of them need to
+know who can hurt the player, which factions exist and which waves come.
 
 ### Inputs (what enters)
 
-| Input | Location |
-|-------|----------|
-| User prompt (verbatim) | `projects/<id>/prompt.txt` |
-| BuildSpec | `build_spec.json` |
-| AssetManifest | `asset_manifest.json` (character items only) |
+| Input | Location | Used for |
+|-------|----------|----------|
+| User prompt (verbatim, first 20,000 chars) | `projects/<id>/prompt.txt` | Wording a summary would lose ("just slide") |
+| BuildSpec | `build_spec.json` | `npc_roster` (families, variants, singular vs plural) |
+| AssetManifest | `asset_manifest.json` | Candidate characters (`category: character`, `character_role != player_avatar`) |
+| InteractionDesign (optional) | `interaction_design.json` | Excerpt of weapons with `npc` wielders, so a `ranged_attack` NPC names a weapon that actually fires |
 
 ### Outputs (what it produces)
 
 | Output | Location |
 |--------|----------|
 | NpcPlan | `projects/<id>/npc_plan.json` |
-| Reconciled manifest (optional) | `asset_manifest.json` — `rigged` / `animations` patched |
+| Reconciled manifest (only when it changed) | `projects/<id>/asset_manifest.json` — `rigged` / `animations` rewritten to match the plan |
+| Agent log | `projects/<id>/logs/npc_plan.log` |
 
 ### Where output goes next
 
-- **`mechanic_plan`** — knows combatants and behavior needs
-- **`scene_spec`** — NPC placement, factions, locomotion components
-- **`code_generation`** — AI behavior tasks reference npc_plan
-- **`asset_rigging` / `asset_animation`** — see reconciled rig flags
+- **`game_design`** — hostile attackers imply player health; waves enable `clear_waves` objectives.
+- **`mechanic_plan`** — `reconcile_npc_mechanics` adds `builtin.encounter_director`, `builtin.npc.follow`, `builtin.npc.melee_chase`; `reconcile_npc_ai_items` turns generated AI a built-in fully covers into `builtin+config`; `reconcile_weapon_items` adds `builtin.npc.ranged_attack` for `ranged_attack` NPCs.
+- **`scene_spec`** — placement context (role, faction, health, speeds, spawn counts).
+- **`character_routing` / `uthana_motion_plan`** — which characters need a rig and which motions.
+- **`asset_rigging` / `asset_animation`** — see the reconciled `rigged` / `animations` flags.
+- **`code_generation`**, **`world_generation`**, **`scene_compile`** (per-type stats into the NPC built-ins, encounter plan into the director) and **`quest_runtime_verify`** (which NPC checks to run).
 
-### Key concepts and terms
+### Models / providers
 
-- **NpcSpec** — One NPC definition tied to an `asset_id` from the manifest.
-- **Movement style** — e.g. `animated_locomotion` vs `slide_no_animation`. Slide means no Tripo rig/clip billing.
-- **Reconciliation** — The plan is authoritative: if director says ducks slide, manifest `rigged: false` and empty `animations`.
-- **Graceful degradation** — If the NPC director agent fails, an empty plan is saved and the pipeline continues (pre-stage-3 behavior).
+- OpenAI Agents SDK agent ("NPC director"), model `gpt-5.6-sol`, reasoning effort `high`, verbosity `medium`, **no tools**.
+- Output type `NpcPlan`, non-strict schema (`make_capturing_schema(..., strict=False)`); Pydantic validates and the raw output is kept for diagnosis.
+- No Tripo / Gemini calls. Cost is one agent run, plus at most one schema-retry and one population-revision run.
 
-### End-to-end flow (plain language)
+### Failure behaviour
 
-1. Collect character-category assets from the manifest.
-2. If none → save empty `NpcPlan`, skip LLM, succeed.
-3. Otherwise run **NpcDirector** (OpenAI Agents SDK, `gpt-5.6-sol`) with prompt + BuildSpec + manifest.
-4. Drop entries for unknown asset ids.
-5. Reconcile manifest rig/animation flags to match the plan.
-6. Save `npc_plan.json`.
+This stage **never fails the run** on agent problems:
+
+| Case | Result |
+|------|--------|
+| No candidate characters (none, or only the player avatar) | Empty `NpcPlan`, **no agent call**, succeeds with "only the player's own avatar…" or "no character assets…" |
+| Agent error / unusable output after retries | Empty `NpcPlan`, `warning` event, logged; stage succeeds (pipeline behaves as before this stage existed) |
+| Entry names an asset id not among the candidates | Dropped with a `warning` |
+| Population rule violations | One revision request to the agent, then deterministic repair |
 
 ---
 
 ## Detailed stage deep dive
 
-### Why this stage sits between manifest and mechanic_plan
+### Files and functions
 
-Rigging costs ~30 Tripo credits per asset; each animation ~20. Only the **verbatim prompt** reliably answers whether a character should walk or slide. The manifest LLM might set `rigged: true` on everything; without reconciliation you pay for unused skeletons.
+| File | Role |
+|------|------|
+| `pipeline/stage_npc_plan.py` | `run(ctx)` → `run_with_director(ctx, director=None)` (tests inject a stub `NpcDirector`); `_is_actor_candidate`, `_interaction_lines`, `_read_prompt`, `_drop_unknown_assets`, `_reconcile_manifest` |
+| `pipeline/npc_plan_agent.py` | `NpcDirector` (lazy SDK import, retry loop), `NpcPlanAgentInput`, `build_director_message` |
+| `pipeline/npc_population.py` | `npc_plan_violations`, `repair_npc_plan`, `default_encounters`, `DEFAULT_ANIMATED_BUDGET = 12`; also the mechanic-plan reconciles `reconcile_npc_mechanics` / `reconcile_npc_ai_items` |
+| `pipeline/interaction_rules.py` | `design_excerpt` (the weapons excerpt) |
+| `pipeline/prompts.py` | `NPC_PLAN_SYSTEM` (not device-templated) |
+| `packages/schemas/ptv_schemas/npc_plan.py` | `NpcPlan`, `NpcSpec`, `EncounterPlan`, enums |
 
-### Entry points
+### Execution trace
 
-- Production: `run(ctx)` calls `run_with_director(ctx, director=None)`
-- Tests: inject a stub `NpcDirector` to avoid OpenAI
+1. Emit `running`, `record_stage(running)`; load BuildSpec and AssetManifest.
+2. **Candidates** = manifest items with `category == character` and `character_role != player_avatar`. A role of `none` still counts, so an unset upstream role never silently removes an enemy.
+3. No candidates → save an empty plan and succeed (no API call).
+4. Bridge `OPENAI_API_KEY` from settings into `os.environ` (this is the first Agents-SDK stage of a run, so nothing else has done it yet).
+5. Build `NpcDirector` with `NPC_PLAN_SYSTEM`, `session_id=ptv-npc-plan-<project_id>`, and the settings below.
+6. Message (`build_director_message`): process instructions (find actors → decide movement style first → role/faction/behaviours/intents → numbers within budget), extra instructions (candidate asset ids, "at most one NpcSpec per asset id", the interaction-design weapons excerpt), then the verbatim prompt, BuildSpec JSON and AssetManifest JSON.
+7. `director.run()`: up to `npc_plan_max_retries + 1` attempts. A schema failure (`NpcPlanOutputError`) is retried with the field-level issues listed; other agent errors re-send the brief.
+8. `_drop_unknown_assets` removes entries for ids that are not candidates.
+9. `npc_plan_violations` → if any, **one** revision run with the problems listed (a failed revision is only logged).
+10. `repair_npc_plan` applies deterministic fixes and emits each as `info`.
+11. `save_npc_plan` writes `npc_plan.json`.
+12. `_reconcile_manifest` rewrites the manifest if needed and saves it.
+13. Succeed with "N NPC type(s), A animated, C clip(s) to retarget[; W wave(s) of T type(s)]".
 
-### Exact execution trace
+### Population validator (`npc_plan_violations`)
 
-| Step | Function / action |
-|------|-------------------|
-| 1 | emit `running` + `record_stage(running)` |
-| 2 | Load `build_spec`, `asset_manifest` |
-| 3 | `candidates = manifest items where category == character` |
-| 4 | If no candidates: empty `NpcPlan`, save, succeed — **no API call** |
-| 5 | Build `NpcDirector` with `NPC_PLAN_SYSTEM`, `npc_plan_model`, reasoning effort, `session_id=ptv-npc-plan-<project_id>` |
-| 6 | `NpcPlanAgentInput` + `build_director_message()` — includes prompt (max 20k via `_read_prompt()`), BuildSpec JSON, manifest JSON |
-| 7 | `director.run(message)` returns validated `NpcPlan` |
-| 8 | On `NpcPlanAgentError`: empty plan, emit `warning`, log — **stage still succeeds** |
-| 9 | `_drop_unknown_assets()` removes specs for ids not in manifest; emit `warning` per drop |
-| 10 | `save_npc_plan()` writes `npc_plan.json` |
-| 11 | `_reconcile_manifest()` may rewrite `asset_manifest.json` rig/animation flags |
-| 12 | emit `succeeded` |
+- Every BuildSpec `npc_roster` variant has an `NpcSpec`.
+- Waves name only NPC types that exist, and never a singular (companion) roster entry or an `ally`.
+- NPCs with `spawn.waves = true` (enemy / boss / critter / neutral) require an `encounters` plan.
 
-### `_reconcile_manifest()` (deterministic)
+### Deterministic repair (`repair_npc_plan`)
 
-Matches each character `AssetItem` to an `NpcSpec`:
+- Drops wave groups naming unknown, ally or singular NPCs (an empty wave list clears `encounters`).
+- Singular roster characters and allies that nothing spawns get `persistent_count = 1` (otherwise they would never appear).
+- Wave enemies with no encounter plan get `default_encounters`: variants ordered by physique (`small_fast` → … → `boss`); one type = three growing waves, several types = one wave introducing each type plus a finale of the strongest; `start: delay`, `start_delay_s: 5`, `max_concurrent` ≤ 8.
+- The encounter alive cap is lowered to fit `12 − sum(persistent_count)` (the animated-agent budget).
 
-- `slide_no_animation` → force `rigged=false`, clear `animations[]`
-- Animated styles → align `rigged` and `animations[]` with plan intents
+### Manifest reconcile (`_reconcile_manifest`)
 
-**npc_plan is authoritative** over manifest before stage 8.
+The plan is authoritative over the manifest:
 
-### NpcDirector (`npc_plan_agent.py`)
+- `slide_no_animation`, or no animation intents → `rigged = false`, `animations = []` (emits "skipping rig and animation").
+- Otherwise → `rigged = true`, `animations = animation_intents` (in order).
 
-- OpenAI Agents SDK: `Agent` + `Runner.run_sync`
-- Structured output: `NpcPlan` via `AgentOutputSchema`
-- **No tools**
-- Default model: `gpt-5.6-sol`, reasoning `high`
+Assets the plan does not mention are left untouched.
 
-### Artifact I/O
+### Key schema fields (`NpcSpec`)
 
-| Read | Write |
-|------|-------|
-| `prompt.txt`, `build_spec.json`, `asset_manifest.json` | `npc_plan.json`, optionally updated `asset_manifest.json` |
+| Field | Notes |
+|-------|-------|
+| `asset_id`, `role`, `family`, `variant` | Keyed to a manifest item and a roster variant |
+| `persistent_count` | Placed at load and stay (companion, guards); 0 for wave arrivals |
+| `faction`, `hostile_to` | Same faction never fights |
+| `movement_style` | `animated_locomotion` (default), `slide_no_animation`, `stationary`, `flying` |
+| `behaviors` | `idle`, `patrol`, `chase`, `flee`, `ranged_attack`, `melee_attack`, `contact_damage`, `take_cover`, `reposition`, `follow_leader`, `guard_point`, `react_to_damage` |
+| `animation_intents` (≤5) | Billed per clip; must be empty for `slide_no_animation` |
+| `animation_fallback` | `nearest_preset` (default), `procedural_cpp`, `none` |
+| `locomotion` | walk 1.4 / run 4.0 m/s, turn 540°/s, `leash_radius_m`, `hover_height_m` |
+| `perception`, `combat`, `spawn` | Sight 25 m / FOV 120° / hearing 12 m; health 100, damage 10, range 2 m, cooldown 1.5 s, `projectile_asset_id`; `initial_count`, `max_concurrent`, `waves` |
 
-### SSE
+`NpcPlan` also carries `faction_notes` and optional `encounters` (`mode` waves/continuous/fixed, `start` on_load/delay/player_grabs_tag/signal, caps, intervals, `min_player_distance_m`, 1–50 waves of `{asset_id, count}` groups). At runtime `builtin.encounter_director` runs it; generated code never spawns NPCs.
 
-`running` → `warning` (agent fail / dropped ids) → `info` (reconcile) → `succeeded`
+### Settings (`apps/orchestrator/ptv_orchestrator/settings.py`)
 
-### Failure modes
+Env vars are the upper-cased field names (read from the repo `.env`).
 
-| Case | Result |
-|------|--------|
-| Agent error | Empty plan, success |
-| No characters | Empty plan, no API |
-| Bad asset id in plan | Dropped with warning |
+| Setting | Env var | Default |
+|---------|---------|---------|
+| `npc_plan_model` | `NPC_PLAN_MODEL` | `gpt-5.6-sol` |
+| `npc_plan_reasoning_effort` | `NPC_PLAN_REASONING_EFFORT` | `high` |
+| `npc_plan_verbosity` | `NPC_PLAN_VERBOSITY` | `medium` |
+| `npc_plan_agent_max_turns` | `NPC_PLAN_AGENT_MAX_TURNS` | 30 (4–200) |
+| `npc_plan_max_retries` | `NPC_PLAN_MAX_RETRIES` | 1 (0–4) |
 
-### Settings
+### Quest notes
 
-`npc_plan_model` (gpt-5.6-sol), `npc_plan_reasoning_effort` (high), `npc_plan_verbosity` (medium), `npc_plan_agent_max_turns`, `npc_plan_max_retries`
+The 12-character animated budget (`DEFAULT_ANIMATED_BUDGET`) is sized for what a Quest comfortably skins and ticks; it is applied on both targets. The scene compiler and `asset_optimization` enforce their own runtime caps on top. On Quest, `quest_runtime_verify` picks its NPC checks (floor / no-drift, follower band, spawn and close-and-hit) from this plan.
 
-### NpcSpec downstream usage
+### SSE events
 
-`faction`, `movement_style`, `behaviors[]`, `perception`, and `combat` flow into scene_spec, codegen context, and runtime services (`ctx.combat`, `ctx.nav`, `builtin.character_locomotion`).
-
-### Graceful degradation rationale
-
-Pipeline worked before npc_plan existed; agent failure must not brick projects — empty plan falls back to manifest-only rig flags.
-
----
-
-## Extend this folder
-
-- `artifacts.md` — NpcSpec fields and manifest patches
-- `schemas.md` — movement styles and animation intents
-- `failure-modes.md` — graceful degradation paths
+`running` → `warning` (agent unavailable, dropped ids, plan needs revising) → `info` (repairs, manifest reconcile) → `succeeded`.
 
 ## See also
 
-- [`docs/npc-and-ai.md`](../../../npc-and-ai.md) — runtime NPC systems
-- [`docs/architecture.md`](../../../architecture.md) — combat / perception services
+- [`docs/npc-and-ai.md`](../../../npc-and-ai.md) — runtime NPC systems, encounter director
+- [`docs/uthana.md`](../../../uthana.md) — how rigged characters are animated
+- [`docs/weapons.md`](../../../weapons.md) — NPC ranged attacks
+- [`docs/architecture.md`](../../../architecture.md)

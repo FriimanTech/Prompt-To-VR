@@ -1,213 +1,167 @@
 # Stage 15: Scene Compile
 
-> **Pipeline position:** after `asset_optimization` → before device build (stage 16)  
+> **Pipeline position:** after `asset_optimization` → before `quest_build` (Quest) / `cmake_build` (PC VR); on Quest it is also re-run by the memory-correction loop after `quest_runtime_verify`  
 > **Target:** shared (PC VR and Quest)  
-> **Primary code:** [`apps/orchestrator/ptv_orchestrator/pipeline/stage_scene_compile.py`](../../../../apps/orchestrator/ptv_orchestrator/pipeline/stage_scene_compile.py)  
-> **Primary artifacts:** `projects/<project_id>/scene.json`, `builds/scene/<scene_id>.scene.json`
+> **Primary code:** [`apps/orchestrator/ptv_orchestrator/pipeline/stage_scene_compile.py`](../../../../apps/orchestrator/ptv_orchestrator/pipeline/stage_scene_compile.py) plus [`encounters.py`](../../../../apps/orchestrator/ptv_orchestrator/pipeline/encounters.py), [`game_flow_scene.py`](../../../../apps/orchestrator/ptv_orchestrator/pipeline/game_flow_scene.py), [`weapon_scene.py`](../../../../apps/orchestrator/ptv_orchestrator/pipeline/weapon_scene.py), [`projectile_scale.py`](../../../../apps/orchestrator/ptv_orchestrator/pipeline/projectile_scale.py), [`player_bindings.py`](../../../../apps/orchestrator/ptv_orchestrator/pipeline/player_bindings.py), [`gameplay_relocation.py`](../../../../apps/orchestrator/ptv_orchestrator/pipeline/gameplay_relocation.py), [`binding_resolution.py`](../../../../apps/orchestrator/ptv_orchestrator/pipeline/binding_resolution.py), [`scene_complexity.py`](../../../../apps/orchestrator/ptv_orchestrator/pipeline/scene_complexity.py), [`memory_model.py`](../../../../apps/orchestrator/ptv_orchestrator/pipeline/memory_model.py)  
+> **Primary artifacts:** `projects/<id>/scene.json`, `projects/<id>/scene.<scene_id>.json`, `projects/<id>/builds/scene/<scene_id>.scene.json`, `scene_complexity.json`, `memory_status.json`
 
 ## Main stage summary
 
 ### What this stage is
 
-The **scene compile stage** is the deterministic merge step: it combines the C++ **world** layer (`world.scene.json`), gameplay **SceneSpec** entities, optimized **GLB metadata**, **mechanic bindings**, and **socket contracts** into the final runtime `scene.json` the engine loads.
-
-No AI runs here — pure Python logic with hard validation failures.
+The **scene compile stage** is the deterministic merge that produces what the engine loads. For every scene in the BuildSpec that has a `scene_spec.<scene_id>.json`, it combines the gameplay SceneSpec, the scene's C++-generated environment, the optimized mesh metadata, the asset contract (sockets, holds, model frames), mechanic bindings, the NPC population, the game loop, the weapons and the device performance block into one runtime scene document, then analyses each scene's cost and memory. No LLM runs here.
 
 ### Why it exists
 
-Upstream stages produce partial artifacts optimized for planning or tooling. The runtime needs one coherent JSON document: meshes with LOD paths, animations map, sockets in metres, navigation graph, performance limits, and entity mechanics list.
-
-This stage is also the **socket validator**: it is the only place that sees both codegen `required_sockets` and asset-derived sockets, so mismatches fail loudly with all violations listed.
+Upstream artifacts are partial and planning-shaped. The runtime needs one coherent document per scene: meshes with LOD paths and sizes in metres, clip and socket contracts, navigation, NPC templates, the game director, weapon bindings, a scene index for portals, and performance limits. It is also the only stage that sees all halves of several contracts (sockets, equip slots, bindings vs. what the build registers, game loop vs. world, weapons vs. meshes), so mismatches fail here, loudly and all at once, instead of shipping a game that quietly does nothing.
 
 ### Inputs (what enters)
 
 | Input | Location |
 |-------|----------|
-| BuildSpec | `build_spec.json` |
+| BuildSpec | `build_spec.json` (scene list, entry point, player settings, `interaction_rules`) |
 | AssetManifest | `asset_manifest.json` |
-| MechanicPlan | `mechanic_plan.json` |
+| MechanicPlan | `mechanic_plan.json` (config, controller bindings, CodeTasks with `required_sockets`) |
 | Scene specs | `scene_spec.<scene_id>.json` |
-| Normalization | `asset_normalization.json` (LODs, bounds, skinned) |
-| Asset contract | `asset_contract.json` |
-| World | `world.scene.json` (entry scene) |
+| Normalization report | `asset_normalization.json` (LODs, bounds, `lod0_longest_axis`, `skinned`, animations, `__performance__`) |
+| Asset contract | `asset_contract.json` (sockets, holds, model frames, part regions) |
+| Worlds | `world.<scene_id>.scene.json`, falling back to `world.scene.json` |
+| NPC plan | `npc_plan.json` (optional) |
+| Game design | `game_design.json` (optional) |
+| Interaction design | `interaction_design.json` (optional) |
+| Generated source | `engine/generated/**/<project_id>/` (registered ids; whether code calls `ctx.encounters->start()`) |
+| Headset measurements | `runtime_verification.json` (optional; measured frame cost beats the model) |
+| Memory calibration | `projects/memory_calibration.json` |
 
 ### Outputs (what it produces)
 
 | Output | Location |
 |--------|----------|
-| Per-scene JSON | `builds/scene/<scene_id>.scene.json` |
-| Canonical scene | `scene.json` (entry point) |
-| State pointer | `ProjectState.latest_scene_json` |
+| Runtime scenes | `projects/<id>/scene.<scene_id>.json` — one per compiled scene, each with the full `scene_index` |
+| Entry scene | `projects/<id>/scene.json` — copy of the entry-point scene; `ProjectState.latest_scene_json` points at it |
+| Debug copies | `projects/<id>/builds/scene/<scene_id>.scene.json` (not read by the runtime) |
+| Complexity summary | `projects/<id>/scene_complexity.json` |
+| Memory status | `projects/<id>/memory_status.json` (`estimated_safe_not_device_tested` / `at_risk`; never overwrites a `source: device` status) |
+
+Stale `scene.<id>.json` files from an earlier plan are removed, because the Quest packager ships every one beside `scene.json`.
 
 ### Where output goes next
 
-- **`cmake_build`** — `PTV_SCENE_JSON` points at `scene.json`
-- **`quest_build`** — copies `scene.json` + LOD GLBs into APK assets
-- **Runtime** — `SceneLoader` reads JSON into ECS
+- **`quest_build`** packages `scene.json`, every `scene.<id>.json`, the LOD GLBs, KTX2 textures and shaders into the APK; **`cmake_build`** points `PTV_SCENE_JSON` at `scene.json`.
+- **Runtime** — `SceneLoader` reads the document into the ECS (meshes, `CEquipSlots`, navigation, performance, …).
+- **`quest_runtime_verify`** — checks the game against what this stage bound.
 
-### Key concepts and terms
+### Models, providers and cost
 
-- **Deterministic merge** — Same inputs always produce same output; no LLM.
-- **World + gameplay layers** — `_merge_world_into_scene()` adds environment under gameplay entities.
-- **Asset safety-net** — `_default_entity_for_asset()` spawns manifest assets the SceneSpec agent forgot.
-- **SocketContractError** — Hard fail if a mechanic requires `"muzzle"` but contract lacks it.
-- **EquipSlotContractError** — Hard fail if a `builtin.equip` binding names a slot nothing declares.
-- **SceneAssetMismatchError** — Hard fail if a mesh names an asset absent from the manifest.
-- **Performance block** — `max_animated_agents`, LOD distances, AI tick rates forwarded to runtime.
+None. Pure Python with deterministic validators.
 
-### End-to-end flow (plain language)
+### Failure behavior (hard failures, all violations listed at once)
 
-1. For each scene in BuildSpec, load SceneSpec + world (entry scene only).
-2. `compile_scene_json()` merges entities, mechanics, meshes, sockets, navigation.
-3. Repoint world prop meshes to optimized LOD paths.
-4. Validate required sockets; warn on animated agent budget.
-5. Write `scene.json` files.
+| Error | Raised when |
+|-------|-------------|
+| `SceneAssetMismatchError` | A SceneSpec mesh names an asset absent from the manifest (a SceneSpec composed against an older manifest) |
+| `SocketContractError` | A bound CodeTask's `required_sockets` are missing on the entity's asset, no asset in the scene supplies a socket a mesh-less binding needs, or a hold cannot be solved |
+| `EquipSlotContractError` | A `builtin.equip` binding names a slot nobody declares, or two placed entities declare the same slot (spawn templates exempt) |
+| `ModelFrameContractError` | A skinned asset has no measured model frame in `asset_contract.json` |
+| `GameFlowContractError` | The game design's loop cannot complete in a scene |
+| `WeaponContractError` | A designed weapon cannot work (gun without muzzle, bow without limb tips / grip, melee without strike point, missing template or source, seen projectile without a mesh) |
+| `TextureContractError` | A placed mesh's LOD references a texture file that does not exist |
+| `MissingNpcError` | An NPC the plan requires has no model to place |
+| `UnresolvedBindingError` | A mechanic binding names something the build does not register |
+| `PlayerRoleError` | Two different mechanics for one player role, or a locomotion / turn role the BuildSpec `movement` block does not allow |
+
+Warnings (stage continues): over the animated-agent budget, deferred sockets satisfied by other assets, world copies adjusted, projectile rescales, physics repairs, unparseable world documents, affordances denied by `interaction_rules`, Quest textures without ASTC.
 
 ---
 
 ## Detailed stage deep dive
 
-### Pure deterministic merge — no LLM
-
-`compile_scene_json()` is a testable function merging upstream JSON into runtime scene format.
-
 ### `run()` sequence
 
-1. Load build_spec, manifest, mechanic_plan, normalization, contract, optional `world.scene.json`
-2. Determine entry scene id from BuildSpec
-3. For each scene with `scene_spec.<id>.json`:
-   - **`compile_scene_json()`** — entities, mechanics, mesh refs, bindings
-   - If entry scene: **`_merge_world_into_scene()`** — sky, ground, lights, spawn, navigation block from world
-   - **`_repoint_world_meshes_to_lods()`** — world props use optimized LOD paths
-   - **`check_animated_agent_budget()`** — warn if over `max_animated_agents`
-   - Write `builds/scene/<id>.scene.json`
-4. Copy entry scene → top-level `scene.json`; set `state.latest_scene_json`
+1. Load BuildSpec, manifest, plan, normalization, contract; entry scene = the BuildSpec scene with `entry_point`, else the first.
+2. Load NPC plan, game design, interaction design; `registered_ids()` (what this build registers); whether generated code calls `encounters->start(`.
+3. `projectile_scale_corrections()` sizes projectiles to the measured muzzle bore and arrows longer than the bow's draw (sizes the prompt states are kept); `apply_scales()` gives the weapon pass a corrected manifest. `repair_npc_plan()` applies the npc_plan stage's deterministic repairs.
+4. For each scene with a SceneSpec:
+   1. `compile_scene_json()` — the pure core (below).
+   2. NPC population (`apply_npc_population`) when the scene is the entry scene or places an NPC asset: one hidden template per spawned type, companions beside the player, per-type stats and built-in behaviours, the encounter director. `drop_unhosted_npc_ai()` first removes generated AI the build will not host, so that NPC gets the built-in behaviour instead of standing still.
+   3. `_load_world(scene_id)` (resolving `reuse_environment_from`) → `_merge_world_into_scene()`.
+   4. `place_persistent_npcs()` against the merged world (a matching `npc_anchor` wins; on declared walkable floor; feet on the floor on frame one).
+   5. `finalize_encounter_zones()` — the world's `npc_spawn_zones`, or zones derived from walkable regions.
+   6. `apply_game_flow()` binds one `ptv_game_director` entity (`builtin.ui_panel` + `builtin.game_flow` + `builtin.game_hud`); `game_flow_violations()` fails the stage if any path cannot complete (e.g. a `reach_location` target the world never declared).
+   7. `apply_weapons()` + `weapon_violations()` (see Weapons).
+   8. `sanitize_physics()` on the final entity list (a dynamic / kinematic body must have positive mass — Jolt asserts otherwise, a SIGTRAP on the headset).
+   9. `bind_affordances()` (see World merge).
+   10. `check_animated_agent_budget()` (warning) and `unresolved_bindings()`.
+5. `_check_scene_textures()` → `TextureContractError` on missing files; writes `performance.textures`.
+6. `_apply_scene_complexity()`.
+7. Raise `MissingNpcError` / `UnresolvedBindingError` if collected.
+8. Write the scene index and every scene document (atomic writes), the debug copies and `scene.json`.
 
-### Key merge behaviors
+### `compile_scene_json()` (pure, testable)
 
-| Function | Role |
-|----------|------|
-| `_default_entity_for_asset()` | Safety-net: manifest asset missing from SceneSpec → auto entity by category |
-| `_mesh_render_fields()` | Attach `lod_paths`, `skinned`, `animations`, `animation_speeds` |
-| `_sockets_in_meters()` | Scale unit-space contract by `target_scale_meters` |
-| `_check_required_sockets()` | Read codegen sidecars `required_sockets` vs contract — **SocketContractError** lists ALL violations |
-| `_check_equip_slots()` | Every `builtin.equip` binding names a slot some entity declares — **EquipSlotContractError** |
-| `_equip_slot_json()` | Flatten `EquipSlotSpec` into the `equip_slots[]` the runtime parses into `CEquipSlots` |
-| Materialize bindings | Copy mechanic_plan controller bindings + params into scene entities |
+- Plan items are indexed by both plan id and CodeTask id, so `builtin.<x>` and `generated.<task_id>` bindings resolve. For `builtin` / `builtin+config` items the binding gets `builtin_id`, and a stale `generated.<id>` binding whose item is now a built-in is renamed.
+- `params` = item `config` overlaid by per-entity params; the plan's controller `binding` is materialized as `params.control` / `params.hand` (per-entity values win).
+- Meshes resolve `glb_path` through the normalization report (LOD0) and gain `_mesh_render_fields()`:
+  - `lod_paths`, `lod_triangle_counts`, `lod_errors_rel`, `bounds_radius_m` (unit radius × `target_scale_meters`);
+  - `unit_scale = target_scale_meters / lod0_longest_axis`;
+  - `skinned` + `joint_count`;
+  - `animations` (intent → real clip name) and `animation_speeds` (0.78 × height m/s walk, 2.2 × height run; Uthana `animation_speed_overrides` win);
+  - for framed characters: `scale_basis: "height"`, `unit_scale = height / raw height`, `foot_offset_m = height / 2`, `model_yaw_offset_rad`, `model_frame {sole_y, height, yaw_offset_rad, method}`; a skinned asset without a frame raises `ModelFrameContractError`;
+  - `sockets` converted from unit space to metres, and the `hold` profile.
+- Entities carry transform, mesh, physics, bindings, tags, `health`, `faction`, `attached_to`, `equip_slots` (`_equip_slot_json`).
+- **Asset safety net**: every manifest asset with a GLB on disk that no entity references gets `_default_entity_for_asset()` (environment → static mesh at origin; character → NPC with a role from style-notes heuristics; prop → grabbable or static dressing; fx → impostor; ui → panel), spread on a golden-angle spiral.
+- `bind_player_roles()` — Hands Only removes `player_avatar` entities; each required role gets exactly one binding (`role:body` on the avatar, the rest on `player_rig`, created meshless and tagged `player_system` when absent); duplicates of one mechanic collapse with a warning; conflicts raise `PlayerRoleError`. `player_block_fields()` adds `hands.source`, `default_locomotion_mode`, `default_turn_mode`, `locomotion_menu: false` to the `player` block.
+- `_apply_hold_offsets()` forwards `hold_rotation_offset_deg` into `builtin.grab` params.
+- Socket checks (`_check_required_sockets`) read `required_sockets` from the plan item's CodeTask. A bound entity **with** a mesh must carry every required socket; one **without** a mesh (a hand resolving the held weapon at runtime, guarded by `has_socket`) is deferred to `_check_deferred_socket_needs()`: satisfied by some asset in the scene → warning naming the providers, unsatisfiable → violation. `hold_violations()` adds unsolvable holds (errors) and suspicious ones (warnings).
+- `_check_equip_slots()` — a slot is a place on a WEARER (`hip_holster_r` on the player rig), a socket a point on an ITEM.
+- The returned document: `version`, `prompt_id`, `scene_id`, `title`, `name`, `player` (height, locomotion, comfort, role fields, spawn), `sky_color`, `ambient_intensity`, `lights`, `entities`, and `performance` = the normalization report's `__performance__`.
 
-### Socket validator (hard fail)
+### World merge (`_merge_world_into_scene`)
 
-Only stage seeing both codegen requirements AND asset_contract. Mismatch fails loudly before build.
+Every scene gets its own environment (not just the entry point):
 
-### Animated agent budget
+1. If the world's player spawn differs from the SceneSpec's, `relocate_gameplay_layer()` moves the whole gameplay layer into the world spawn frame (using the SceneSpec's spawn yaw).
+2. `resolve_overlaps()` moves gameplay entities out of world geometry and puts characters on declared walkable floor.
+3. `_repoint_world_meshes_to_lods()` — world props were placed with normalization GLBs (world generation runs before optimization); they are repointed to LOD0 + render fields, sized from the **manifest** so a world copy matches the gameplay one.
+4. `reconcile_world_copies()` — a world copy within 0.5 m of a gameplay entity of the same asset is dropped; a farther copy of an interactive asset inherits its non-player bindings, physics and interaction tags.
+5. World entities are prepended; world `sky` / `sky_color` / `ambient_intensity` / lights / `navigation` / player spawn replace or extend the SceneSpec's; `interactives`, `spawn_points`, `portals`, `npc_spawn_zones` and `npc_anchors` travel with the environment; `environment_builder_id` records the builder.
 
-Warning only — does not fail stage. Over-cap scenes may miss frame rate on Quest.
+`bind_affordances()` then turns each declared interactive into a binding from a fixed table — `door` → `builtin.door`, `switchable` → `builtin.switchable`, `container` → `builtin.container`, `mover` → `builtin.mover`, `breakable` → `builtin.breakable`, `harvestable` → `builtin.harvestable` (`reach_m` 0.5); `movable` is declaration-only. A table rather than an agent, so equivalent objects behave the same in every environment; a BuildSpec `interaction_rules` entry that denies the kind or a tag in that scene sets `interaction_allowed: false` (the binding stays, the runtime refuses the interaction and hides the cue).
 
-### Artifacts
+### Weapons (`weapon_scene.py`, `projectile_scale.py`)
 
-Writes `builds/scene/*.scene.json`, canonical `scene.json` — consumed by cmake_build / quest_build and runtime SceneLoader.
+With an `interaction_design.json`, `apply_weapons()` binds every designed weapon deterministically: `builtin.weapon` / `builtin.bow` / `builtin.melee_weapon` / `builtin.shield` with the design's numbers and socket names (player weapons become `grabbable`); removes `builtin.recoil` and `generated.*` weapon bindings the plan no longer has; removes entities showing an effect mesh the engine draws itself (a beam, a muzzle flash); emits a hidden projectile template per projectile with a mesh, and an arrow template plus a `builtin.item_source` quiver for bows; arms NPCs whose plan has a ranged attack (`builtin.npc.ranged_attack`, the weapon seated in `hand_r` by its grip socket via `attached_to.socket`); writes the scene-level `projectiles` table; and adds an ammo `builtin.game_hud` when a weapon counts ammo. `weapon_violations()` returns errors (→ `WeaponContractError`) and warnings. See [`weapons.md`](../../../weapons.md).
 
-### SSE
+### Scene complexity and memory (`_apply_scene_complexity`)
 
-`warning` (animated budget), `succeeded`
+Per scene, `scene_complexity.analyse()` samples visibility from the walkable regions (p50 / p95 visible triangles and draws), estimates GPU / CPU frame cost, detects rooms closed on all four sides and finds entities that may be static-batched (nothing moves, holds, binds or reads them). For the entry scene a previous `runtime_verification.json` replaces the GPU / CPU estimate with the Quest 3 measurement. `decide_initial_settings()` then sets, for knobs the user did not lock:
 
-### `_check_required_sockets()` algorithm
+- **FFR** (Quest with FDM): level 1, or 2 when estimated GPU p95 > 80 % of the frame budget, capped by the governor's `max_foveation_level`;
+- **multiview**: on only at ≥ 120 estimated p95 draws (it measured ~10 % more GPU on Quest 3 at low draw counts);
+- **room culling**: on with ≥ 2 closed rooms (`perf.rooms` lists them);
+- **static batch cell**: 16 m above 2 500 m² of walkable area, else 8 m.
 
-For each entity with a bound mechanic that has a `code_task`:
+`apply_static_batch_flags()` marks batchable entities when `static_batching` is on. The memory model (`memory_model.estimate(inputs_from_scene(...))`, exact from the built files where possible, calibrated by `projects/memory_calibration.json`) writes `performance.memory_estimate` (steady, peak, always-resident, streamable, load transient, outcome, gap) and `performance.resident_memory_budget_mb`, against the 4 608 MB target / 5 120 MB ceiling / 260 MB baseline. `scene_complexity.json` gets the per-scene analysis; `memory_status.json` gets `at_risk` if any scene is over, else `estimated_safe_not_device_tested` — never "verified" from here.
 
-1. Load `required_sockets[]` from mechanic's `.codetask.json` sidecar (written at codegen)
-2. Load derived socket names from `asset_contract.json` for entity's mesh asset
-3. For each required name not in contract → append violation string
-4. After all entities scanned, if any violations → raise `SocketContractError` with **full list**
+### Scene index
 
-This is the only pipeline point that sees both halves of the socket contract.
+`scene_index = {scene_id: "scene.<scene_id>.json"}` for every compiled scene, written into **every** document (a menu or a generated mechanic may reach a scene no portal points at). Paths are relative to the document so the same layout works on disk and inside the APK.
 
-**Entities with no mesh are checked differently.** A shooting hub is bound to the player's hand, and a hand has no mesh by design — it reads the muzzle off whatever weapon is held *at runtime*, guarded by `ctx.sockets->has_socket(weapon, "muzzle")`. Demanding the socket sit on the bound entity's own asset turned every correctly written hub into a build failure. So:
+### Settings
 
-| Bound entity | Rule |
-|--------------|------|
-| has a mesh | the socket must exist on **that asset**, or hard fail (the original protection, unchanged) |
-| has no mesh | the socket must exist on **some asset referenced by the scene** — satisfied emits a `warning` naming the providers, unsatisfiable is still a hard fail |
+No stage-specific settings. `repo_root` / `projects_dir` locate artifacts and the calibration; everything else is read from the upstream artifacts.
 
-The guarantee "this socket exists somewhere in this game" survives; the false positive does not. `MECHANIC_PLAN_SYSTEM` states the matching rule for planners: `required_sockets` means sockets read on `self`, and a hub that resolves its target at runtime leaves it empty.
+### SSE events
 
-### Weapons (`pipeline/weapon_scene.py`, `pipeline/projectile_scale.py`)
+`running`, `info` (NPC plan repairs, encounter zones, game flow bound, weapons, affordances, complexity / memory per scene, persistent NPC placement, removed stale scenes), `warning` (see above), `failed` (game flow / weapons), `succeeded`.
 
-With an `interaction_design.json`, after the game flow is bound, `apply_weapons` binds every designed weapon deterministically: `builtin.weapon` / `builtin.bow` / `builtin.melee_weapon` / `builtin.shield` with the design's numbers and socket names (player weapons become `grabbable`); strips `builtin.recoil` and `generated.*` bindings the plan no longer has; emits a hidden projectile template per projectile with a mesh, an arrow template plus a `builtin.item_source` quiver entity for bows; arms NPCs whose plan has `ranged_attack` (the NPC weapon attached to `hand_r` by its grip socket via `attached_to.socket`, or `builtin.weapon` on a character modelled holding its gun); writes the scene-level `projectiles` table; and adds an ammo-only `builtin.game_hud` when a weapon counts ammo. Before that, `projectile_scale_corrections` sizes each projectile mesh to the measured muzzle bore (0.6-1.3x, energy bolts 1-3x) and each arrow longer than its bow's draw, reporting every check and never changing a size the prompt states. `weapon_violations` then fails the stage (`WeaponContractError`, all problems listed) on a gun with no muzzle socket, a bow without limb tips / grip, a melee weapon with no strike point, a missing template or source, or a seen projectile with no mesh. See [docs/weapons.md](../../../weapons.md).
-### Equip slots (`_check_equip_slots()`)
+### Quest notes
 
-An equip **slot** is a place *on a wearer* (`hip_holster_r` on the player rig); a **socket** is a point *on an item* (`grip` on the pistol). They are not interchangeable, and the slot never belongs to the holster prop — the holster is set dressing, the slot is on the body.
-
-SceneSpec entities carry `equip_slots[]`, which this stage copies into `scene.json` and `SceneLoader` turns into `CEquipSlots`. Without that, `EquipMechanic::pick_slot_near()` finds no candidate and an authored holster silently accepts nothing. Two hard failures guard it:
-
-- a `builtin.equip` binding whose `params.slots` names a slot no entity in the scene declares
-- two entities declaring the same slot name
-
-### Meshes must name a real asset
-
-A mesh whose `asset_id` is absent from the current `AssetManifest` used to fall through to the SceneSpec's own `glb_path` and emit a dangling path into `scene.json`. That is now a `SceneAssetMismatchError` naming the offending `scene_spec.<scene_id>.json`, because the usual cause is a scene composed against a **previous** manifest.
-
-### Asset safety-net (`_default_entity_for_asset`)
-
-If SceneSpec LLM forgot a manifest asset, compile injects a default entity:
-
-| Category | Default behavior |
-|----------|------------------|
-| environment | Static world mesh at origin |
-| character | NPC capsule; role from style_notes heuristics (enemy/player_avatar/npc) |
-| prop | Grabbable if style_notes match grab keywords, else static dressing |
-| fx | Non-physics impostor near spawn |
-| ui | HUD panel in front of spawn |
-
-Uses golden-angle xz spread (`137.508°`) so multiple forgotten props do not stack at one point.
-
-### `_merge_world_into_scene()` details
-
-Entry-point scene only:
-
-- Prepends world entities (sky, ground, static geometry) from `world.scene.json`
-- Copies `navigation` block `{ regions, links }` for runtime NavGraph
-- Applies `_repoint_world_meshes_to_lods()` so world props use `_lod0.glb` paths from optimization
-- Gameplay entities from SceneSpec remain authoritative for id conflicts on gameplay layer
-
-### Player roles (`pipeline/player_bindings.py`)
-
-`bind_player_roles()` runs after the asset safety net:
-
-- Hands Only removes every `player_avatar` entity.
-- Each required role gets exactly one binding: `role:body` on the
-  `player_avatar` entity (with the BuildSpec's coverage / head visibility /
-  leg animation), everything else on `player_rig` (created meshless and tagged
-  `player_system` when the SceneSpec has none). Plan config and controller
-  bindings carry through.
-- The same mechanic bound twice collapses to one (warning). Two DIFFERENT
-  mechanics for one role, counted across ALL entities, or a locomotion / turn
-  role the BuildSpec `movement` block does not allow, raise
-  `PlayerRoleError` -- hard fail.
-- The `player` block gains `hands.source` (`avatar` only when a body is
-  bound), `default_locomotion_mode`, `default_turn_mode` and
-  `locomotion_menu: false`.
-
-### Sizes, grips and world copies
-
-- `_mesh_render_fields()` writes `unit_scale = target_scale_meters /
-  lod0_longest_axis` for every optimized mesh.
-- `_repoint_world_meshes_to_lods()` takes `target_scale_meters` from the
-  manifest, so a world-placed copy matches the gameplay one.
-- `reconcile_world_copies()` gives a world copy of an interactive asset the
-  gameplay entity's bindings, physics and interaction tags, and drops a copy
-  within 0.5 m of the gameplay entity (the same object placed twice).
-- `_apply_hold_offsets()` forwards the manifest's `hold_rotation_offset_deg`
-  into that asset's `builtin.grab` params.
-
----
-
-## Extend this folder
-
-- `artifacts.md` — scene.json top-level blocks
-- `failure-modes.md` — socket validation messages
+The compiled documents are identical for both targets; Quest differences are in the data: the `performance` block comes from the Quest profile and user locks, FFR / multiview / room culling are decided for the Quest GPU, `_check_scene_textures` warns for every texture without an ASTC KTX2 twin (it would be decoded on the headset), and `memory_status.json` is the provisional status `quest_runtime_verify` later replaces with measurements. A headset memory failure re-runs `asset_optimization` → `scene_compile` → `quest_build` → verify (at most `quest_memory_max_correction_rounds`).
 
 ## See also
 
-- [`docs/architecture.md`](../../../architecture.md) — data flow + socket contract
-- Stage 16 PC [`16_cmake_build`](../16_cmake_build/README.md) / Quest [`16_quest_build`](../../Quest_Stages/16_quest_build/README.md)
+- [`docs/architecture.md`](../../../architecture.md) — data flow and contracts
+- [`docs/weapons.md`](../../../weapons.md), [`docs/game-flow.md`](../../../game-flow.md), [`docs/npc-and-ai.md`](../../../npc-and-ai.md), [`docs/navigation.md`](../../../navigation.md), [`docs/sockets.md`](../../../sockets.md)
+- [`docs/rendering.md`](../../../rendering.md), [`docs/quest-optimization.md`](../../../quest-optimization.md)
+- Next: Quest [`16_quest_build`](../../Quest_Stages/16_quest_build/README.md) / PC VR [`16_cmake_build`](../../PC_VR_Stages/16_cmake_build/README.md)

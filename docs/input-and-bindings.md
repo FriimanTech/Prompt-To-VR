@@ -125,10 +125,10 @@ and grab can be ordinary mechanics rather than engine-core special cases:
 
 | Service | Purpose |
 | ------- | ------- |
-| `ctx.locomotion` | Read/move the player rig, arbitrate the active locomotion mode, read the scene's comfort `tunables()`. |
-| `ctx.physics` | `raycast`, `set_kinematic`, `move_kinematic`, `apply_impulse`. A narrow facade -- generated code never includes `ptv/physics/` or Jolt. |
+| `ctx.locomotion` | Read/move the player rig (`move_horizontal`, `teleport_to`, `jump`, vertical mode), arbitrate the active locomotion / turn mode, read walk/run state (`sprinting()` is read-only for generated code), ride a reference frame, scale the player, read the scene's comfort `tunables()`. |
+| `ctx.physics` | `raycast`, `raycast_excluding`, `raycast_ignoring`, `sphere_cast_ignoring`, `body_center`, `set_kinematic`, `move_kinematic`, `apply_impulse`, `slide_move`. A narrow facade -- generated code never includes `ptv/physics/` or Jolt. |
 | `ctx.draw` | One-frame lines, polylines and markers (the teleport arc uses this). |
-| `ctx.hands` | Publish/read which entity each hand holds. |
+| `ctx.hands` | Publish/read which entity each hand holds; the player's hand entities, `finger_target`, grip `set_hand_anchor`, `support_entity`, `request_hold`, and `player_entity()` -- the ONE player entity. |
 | `ctx.fx` | Short-lived VISUAL transform juice: recoil kick, hit flinch, impact shove. |
 | `ctx.haptics` | Controller vibration. `pulse(hand, duration_s, amplitude)`. |
 | `ctx.sockets` | Named attachment points on an asset's mesh: `socket_world(entity, "muzzle")`. |
@@ -139,8 +139,22 @@ and grab can be ordinary mechanics rather than engine-core special cases:
 | `ctx.combat` | Health, damage, factions. Death is handled by the engine. |
 | `ctx.perception` | Nearest hostile, hostiles in range, field of view, line of sight. |
 | `ctx.nav` | `next_waypoint`, `is_reachable`, `path_distance`, ground projection. |
+| `ctx.equip` | Wear items in a wearer's equip slots: `equip`, `unequip`, `slot_of`, `equipped_items`, removability. |
+| `ctx.interactive` | Declared world-object state (doors, switches, containers): `get_state` / `set_state`, locks, interaction policy, `find_by_kind`. Persistence falls out of it. |
+| `ctx.persistence` | Global and per-scene flags / numbers / text for facts owned by no object. |
+| `ctx.transition` | Request a scene change (`go_to`), `restart_current(fresh)`, nested scenes. Requests only; the swap happens at a frame boundary. |
+| `ctx.ui` | Engine-owned panels: `set_rows`, `poll_click`, `set_title`, open/close. |
+| `ctx.comfort` | Comfort vignette per channel (movement / turning): `offer_vignette`, `request_vignette`. |
+| `ctx.encounters` | Read the NPC waves `builtin.encounter_director` runs; `start` / `pause` / `reset`. |
+| `ctx.game` | The game loop `builtin.game_flow` runs: `gameplay_active()`, lives, timer, score, objectives (`add_progress` / `complete` / `fail`). See [game-flow.md](game-flow.md). |
+| `ctx.app` | Platform, uptime, Leave Game (`request_exit`); fades and player placement are `builtin.game_flow`'s. |
+| `ctx.text` | World-space SDF text for the current frame. |
+| `ctx.vfx` | Muzzle flash, tracer, beam, impact, decal, explosion, light flash, glow, streak. |
+| `ctx.projectiles` | Engine-owned projectiles with travel time: `launch`, `preset`, `hits_since`. |
+| `ctx.weapons` | Read the built-in weapons: `state`, `held_weapon`, `hits_since`. See [weapons.md](weapons.md). |
 
-The last six exist so that characters authored by different CodeTasks share
+`ctx.contacts`, `ctx.spawn`, `ctx.attach`, `ctx.combat`, `ctx.perception`
+and `ctx.nav` exist so that characters authored by different CodeTasks share
 one model of damage, targeting and movement. An enemy from one task has to be
 able to hurt a player set up by another, and two tasks that each invented
 their own health component could not. See [npc-and-ai.md](npc-and-ai.md).

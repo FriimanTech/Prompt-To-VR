@@ -55,6 +55,9 @@ and asks the motion-plan agent for each gait's `style_id`, `strides` (5),
 
 - **Speed:** walk is `0.78 x height` and run is `2.2 x height`, the engine's
   own factors. Speeds are clamped to 0.25-8.0 m/s and rounded to 0.1.
+- **Strides / angle:** an agent stride count outside 1-5 (or a missing
+  answer) becomes `uthana_locomotion_strides` (default 5); `travel_angle` is
+  always forced to 0.
 - **Name:** each motion gets its canonical name.
 - **Idle:** every character also gets the shared library idle.
 

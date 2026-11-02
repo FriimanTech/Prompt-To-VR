@@ -2,7 +2,7 @@
 
 # Stage 10: Asset Normalization
 
-> **Pipeline position:** after `asset_animation` → before `asset_contract`  
+> **Pipeline position:** after `uthana_animation` → before `socket_generation`  
 > **Target:** shared (PC VR and Quest)  
 > **Primary code:** [`apps/orchestrator/ptv_orchestrator/pipeline/stage_asset_normalize.py`](../../../../apps/orchestrator/ptv_orchestrator/pipeline/stage_asset_normalize.py)  
 > **Primary artifacts:** `projects/<project_id>/asset_normalization.json`
@@ -11,19 +11,19 @@
 
 ### What this stage is
 
-The **asset normalization stage** validates every asset's primary GLB file and records metadata: path, scale, collision shape, animation map, validity flags. It does **not** modify geometry.
+The **asset normalization stage** picks each asset's primary GLB, validates it, and writes one index of per-asset metadata: path, scale, collision shape, rig facts, and the animation clip contract. Despite the name it does **not** modify geometry.
 
 ### Why it exists
 
-Downstream stages need a trusted index of which GLB to load, whether it is valid, and what collision/animation metadata applies. Centralizing inspection here avoids each stage re-implementing GLB header checks.
+Several stages write GLBs beside each other (`model.glb`, `model_rigged.glb`, `model_uthana_rigged.glb`, `model_animated.glb`). Later stages need one trusted answer to "which file is this asset, is it valid, is it rigged, and what are its clips" — this index is that answer.
 
 ### Inputs (what enters)
 
 | Input | Location |
 |-------|----------|
-| AssetManifest | `asset_manifest.json` |
-| GLB files | `assets/<id>/` (best available variant) |
-| Animation contract | `asset_animation.json` (optional merge) |
+| AssetManifest | `asset_manifest.json` (`target_scale_meters`, `collision_shape`) |
+| GLB files | `assets/<id>/**/*.glb` |
+| Animation report | `asset_animation.json` (Tripo and Uthana entries) |
 
 ### Outputs (what it produces)
 
@@ -31,89 +31,66 @@ Downstream stages need a trusted index of which GLB to load, whether it is valid
 |--------|----------|
 | Normalization index | `asset_normalization.json` |
 
-Per asset: `glb_path`, `target_scale_meters`, `collision_shape`, `animations`, `status` (`ok`, `warn_no_material`, `invalid`, `missing`).
+Per asset: `status` (`ok`, `warn_no_material`, `invalid`, `missing`), `glb_path` (repo-relative), `target_scale_meters`, `collision_shape`, header/JSON facts (`gltf_version`, `generator`, `num_meshes`, `num_primitives`, `num_materials`, `num_textures`, `has_any_material`, `has_any_texture`, `num_skins`, `joint_count`, `animation_clips`, `byte_length`), and when present `animations`, `animation_speed_overrides`, `animation_provider`, `bind_sole_y`.
 
 ### Where output goes next
 
-- **`asset_contract`** — valid GLB paths for socket derivation
-- **`asset_optimization`** — source meshes for LOD chain
-- **`world_generation`** — object GLB map for prop placement
-- **`scene_compile`** — mesh metadata in final scene
+- **`socket_generation`** and **`asset_contract`** — the GLB to analyse (status `ok` / `warn_no_material` only).
+- **`world_generation`** — object GLB map.
+- **`asset_optimization`** — source meshes for LODs (it later adds `glb_source` and repoints `glb_path` at LOD0).
+- **`scene_compile`** — mesh metadata, clip map, clip speeds.
+- **`quest_runtime_verify`** — reads it too.
 
-### Key concepts and terms
+### Models / providers
 
-- **Primary GLB pick order** — Prefers `*animated*` → `*rigged*` → `*pbr*` → `*model*` so the richest variant is validated.
-- **Validation only** — Parses GLB header + JSON chunk; no mesh rewriting (optimization stage handles decimation later).
-- **Deterministic** — No AI or external API calls.
+None. Pure Python, deterministic, no network.
 
-### End-to-end flow (plain language)
+### Failure behavior
 
-1. For each manifest item, locate best GLB on disk.
-2. `_inspect_glb()` — check magic bytes, JSON chunk, materials.
-3. Merge animation names from `asset_animation.json` if present.
-4. Write per-asset record to `asset_normalization.json`.
+Never fails. Bad or missing GLBs are recorded as `invalid` / `missing`; later stages decide whether that is fatal (for example `asset_contract` fails on a GLB this index vouched for that is not on disk).
 
 ---
 
 ## Detailed stage deep dive
 
-### Deterministic full rewrite every run
+### Primary GLB selection (`pick_primary_glb`)
 
-No LLM, no skip — always re-inspects all assets and overwrites `asset_normalization.json`.
-
-### Primary GLB selection (`_pick_primary_glb`)
-
-Preference order in `assets/<id>/`:
-
-1. `*animated*` (e.g. `model_animated.glb`)
-2. `*rigged*`
-3. `*pbr*`
-4. `*model*`
-
-Ensures downstream sees richest available variant.
+All `*.glb` under `assets/<id>/` (recursively) sorted by: name contains `animated` → `rigged` → `pbr` → `model` → alphabetical. So `model_animated.glb` beats `model_rigged.glb` / `model_uthana_rigged.glb`, which beat `model.glb`. Each stage writes beside its input rather than over it, so the order is what makes skeletons and clips reach the scene. `exclude_lods=True` (used by other stages, not here) skips `*_lod*` outputs of `asset_optimization`.
 
 ### Inspection (`_inspect_glb`)
 
-Pure Python parse (no tinygltf):
+Reads the 12-byte header (magic `glTF`, declared length ≤ file size) and the first chunk, which must be JSON; parses it with `json` (no tinygltf / pygltflib). Valid with materials → `ok`; valid without → `warn_no_material`; anything else → `invalid` with a `reason`.
 
-- Verify 12-byte header magic `glTF`
-- Parse JSON chunk: mesh count, material presence
-- Status: `ok`, `warn_no_material`, `invalid`, `missing` (no file)
+### Animation data (`_animation_clip_names`, `_animation_extras`)
 
-Does **not** modify geometry.
+From `asset_animation.json` entries with `status: animated`:
 
-### Animation map merge
+- `animations` — semantic key → real clip name;
+- `animation_speed_overrides` — `clip_speeds[key].engine_mps` when > 0 (the Uthana path), which `scene_compile` prefers over its height-derived estimate;
+- `animation_provider` — `tripo` (default) or `uthana`.
 
-`_animation_clip_names()` loads `asset_animation.json` if present and attaches intent→clip names to normalization record.
+### Bind sole (`_bind_sole`)
 
-### Per-asset record fields
+For a GLB with a skin, the lowest rest-pose vertex height through the skin (joint matrices × inverse bind, up to 20,000 sampled vertices) is recorded as `bind_sole_y`. Best effort: errors leave it out.
 
-`glb_path`, `target_scale_meters`, `collision_shape` (from manifest), `animations`, `status`, mesh/material metadata.
+### Shared helpers
 
-### Downstream consumers
+`read_glb_json`, `glb_rig_summary` (`num_skins`, `joint_count`, `animation_clips`), `pick_primary_glb` and `is_lod_output` are imported by other stages (notably `asset_optimization`) so every stage answers "is this rigged" the same way.
 
-asset_contract (paths), world_generation (object map), asset_optimization (source meshes), scene_compile (mesh block).
+### Re-runs
 
-### SSE
+No skip logic: every run re-inspects every manifest asset and overwrites `asset_normalization.json`.
 
-`running` → `succeeded` with ok/rejected counts
+### Settings
 
-### Failure modes
+None of its own.
 
-Never fails stage — bad assets recorded as invalid/missing in report.
+### Quest notes
 
-### Pick order rationale
-
-Animated GLB includes mesh+skin+clips — richest variant for validation index. Optimization reads same paths then builds LODs.
-
----
-
-## Extend this folder
-
-- `artifacts.md` — normalization record fields
-- `failure-modes.md` — status enum meanings
+Nothing Quest-specific; the texture and LOD work for Quest happens in `asset_optimization`.
 
 ## See also
 
-- Stage 11 [`11_asset_contract`](../11_asset_contract/README.md)
-- Stage 14 [`14_asset_optimization`](../14_asset_optimization/README.md)
+- [`docs/rendering.md`](../../../rendering.md) — LODs and textures built from these GLBs
+- [`docs/uthana.md`](../../../uthana.md) — Uthana clip speeds
+- [`docs/sockets.md`](../../../sockets.md) — the next two stages

@@ -12,7 +12,8 @@ VR game into a **native C++ executable** (PC VR over Quest Link) or a
   - structured game plans (JSON),
   - reference images (Gemini),
   - 3D models (Tripo, textured + PBR),
-  - rigged/animated character GLBs (Tripo),
+  - rigged/animated character GLBs (Tripo or Uthana),
+  - named sockets on held items (Gemini vision + geometry),
   - bounded C++ gameplay + world modules,
   - deterministic scene JSON.
 
@@ -23,43 +24,57 @@ VR game into a **native C++ executable** (PC VR over Quest Link) or a
 | Web control panel | `apps/web` | Project list, prompt editor, progress, logs, launch |
 | Orchestrator | `apps/orchestrator` | FastAPI service that runs the pipeline |
 | Schemas | `packages/schemas` | Pydantic v2 + JSON Schemas (single source of truth) |
-| Provider clients | `packages/provider-clients` | Anthropic / Google / Tripo wrappers |
+| Provider clients | `packages/provider-clients` | Anthropic / OpenAI / Google / Tripo / Uthana wrappers |
 | Engine runtime | `engine/runtime` | Reusable native Vulkan + OpenXR engine |
 | Worldgen host | `engine/worldgen` | Offline `ptv_worldgen` — runs generated world builders |
 | Generated code | `engine/generated` | LLM-produced C++ (mechanics, ai, dialogue, **world**) |
 | Starter sample | `samples/starter-room` | Hand-authored scene that runs without any LLM call |
 | Stage docs | `docs/All_Stages_Docs/` | Per-stage relearning docs (Summary + deep dive) |
 
-## Pipeline summary (17 runnable stages)
+## Pipeline summary
 
-Shared stages **1–15** are identical for `pcvr` and `quest`. Only **stage 16**
-branches on the device, read from `ProjectState.target_device` (the create-time
-toggle, mirrored into `BuildSpec.target_device`).
+The authoritative order is `_SHARED_STAGES` + `_PCVR_TAIL` / `_QUEST_TAIL` in
+`apps/orchestrator/ptv_orchestrator/pipeline/orchestrator.py`. The shared
+stages (01–15 below) are identical for `pcvr` and `quest`; only the build tail
+(16–17) branches on the device, read from `ProjectState.target_device` (the
+create-time toggle, mirrored into `BuildSpec.target_device`). The numbers
+match the folders under `docs/All_Stages_Docs/{PC_VR_Stages,Quest_Stages}/`.
 
 ```
 prompt
-  →  1. BuildSpec (Claude Opus)
-  →  2. AssetManifest (Claude Sonnet)     # objects only; environment is C++
-  →  3. NPC plan (OpenAI gpt-5.6-sol)     # animate vs slide; factions; reconciles manifest
-  → 3b. Game design (OpenAI gpt-5.6-sol)  # health, lives, respawn, objectives, end screens
-  →  4. MechanicPlan (OpenAI gpt-5.6-sol)  # reuse-first; CodeTask DAG
-  →  5. SceneSpec (OpenAI gpt-5.6-sol, per scene)
-  →  6. Reference images (Gemini)
-  →  7. Tripo image-to-3D (textured + PBR)
-  →  8. Auto-rigging (Tripo rig-check + rig)
-  →  9. Animation retarget (Tripo; semantic intents → clips)
-  → 10. Asset normalization (deterministic GLB validation)
-  → 11. Asset contract (deterministic sockets via ptv_glb_sockets, and each
-        character's model frame: soles, height, forward axis)
-  → 12. C++ code generation (OpenAI Agents + compile-verify)
-  → 13. World generation (OpenAI world architect → world.scene.json)
-  → 14. Asset optimization (LOD decimation + performance profile)
-  → 15. Scene compile (merge world + gameplay → scene.json)
-  → 16. pcvr: cmake_build (.exe)  |  quest: quest_build (APK)
-        quest only: quest_runtime_verify (run on the headset, check the NPCs
-        and walk the game loop; report-only, skipped with no headset)
-  → 17. Engine promotion (registry of reusable generated modules)
+  → 01.  BuildSpec (Claude Opus; OpenAI fallback)
+  → 01b. Optimization preferences (keyword gate + one light LlmClient call)
+  → 02.  AssetManifest (Claude Sonnet)     # objects only; environment is C++
+  → 02b. Interaction design (OpenAI gpt-5.6-sol + WebSearchTool)  # holds, sockets, weapons
+  → 03.  NPC plan (OpenAI gpt-5.6-sol)     # animate vs slide; factions; reconciles manifest
+  → 03b. Game design (OpenAI gpt-5.6-sol)  # health, lives, respawn, objectives, end screens
+  → 04.  MechanicPlan (OpenAI gpt-5.6-sol)  # reuse-first; CodeTask DAG
+  → 05.  SceneSpec (OpenAI gpt-5.6-sol, per scene)
+  → 06.  Reference images (Gemini)
+  → 07.  Tripo image-to-3D (textured + PBR)
+  → 07b. Character routing (Tripo vs Uthana, per character)
+  → 08a. Uthana auto-rig (fingers)
+  → 08.  Auto-rigging (Tripo rig-check + rig)
+  → 09.  Animation retarget (Tripo; semantic intents → clips)
+  → 09b. Uthana motion plan (no generation)
+  → 09c. Uthana animation (resolve / download / merge clips)
+  → 10.  Asset normalization (deterministic GLB validation)
+  → 10b. Socket generation (Gemini vision segmentation + geometry solvers)
+  → 11.  Asset contract (sockets, holds, each character's model frame)
+  → 12.  World generation (OpenAI world architect → world.scene.json)
+  → 13.  C++ code generation (OpenAI Agents + compile-verify)
+  → 14.  Asset optimization (LODs, KTX2 textures, profile, locks, memory fit)
+  → 15.  Scene compile (merge world + gameplay → scene.json, scene complexity)
+  → 16.  pcvr: cmake_build (.exe)  |  quest: quest_build (APK)
+  → 16b. quest only: quest_runtime_verify (on-headset NPC / loop / weapons /
+         textures / memory checks; report-only, skipped with no headset;
+         a memory failure re-runs 14 → 15 → 16 up to
+         `quest_memory_max_correction_rounds` times)
+  → 17.  Engine promotion (registry of reusable generated modules)
 ```
+
+World generation runs **before** code generation, so the codegen agent sees
+the ids of the objects the world actually declared.
 
 The VR **environment** is C++ (`IWorldBuilder`), not a Tripo GLB — see
 [`world-generation.md`](world-generation.md). NPC behaviour and combat use

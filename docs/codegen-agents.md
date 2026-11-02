@@ -1,4 +1,4 @@
-# Multi-agent code generation (Stage 12)
+# Multi-agent code generation (Stage 13)
 
 This document describes how the Code Generation stage of the
 Prompt-To-Native-VR orchestrator produces native C++ mechanics from a
@@ -6,7 +6,7 @@ Prompt-To-Native-VR orchestrator produces native C++ mechanics from a
 ledger, the OpenAI Agents SDK driver, the multi-file write contract,
 and the four-step CodeTask agent process.
 
-Per-stage summary: [`All_Stages_Docs/PC_VR_Stages/12_code_generation/README.md`](All_Stages_Docs/PC_VR_Stages/12_code_generation/README.md).
+Per-stage summary: [`All_Stages_Docs/PC_VR_Stages/13_code_generation/README.md`](All_Stages_Docs/PC_VR_Stages/13_code_generation/README.md).
 
 The stage lives in
 [`apps/orchestrator/ptv_orchestrator/pipeline/stage_code_generation.py`](../apps/orchestrator/ptv_orchestrator/pipeline/stage_code_generation.py)
@@ -201,8 +201,13 @@ orchestrator would need an OS-level file lock here.
 
 * Loads the JSON (corrupt files are rebuilt from the plan).
 * Merges in any new tasks from the plan; refreshes `depends_on` on
-  non-terminal rows; never demotes a `done` / `failed` /
-  `in_progress` row.
+  every row; never demotes a `done` / `failed` / `in_progress` row
+  unless its CodeTask changed (`task_fingerprint` differs) — a changed
+  `done` / `failed` task goes back to `pending`, and its `done`
+  transitive dependents with it.
+* Drops rows for tasks the plan no longer has, deleting files only those
+  rows wrote (a file still listed by, or name-prefixed with, a current
+  task is kept).
 * Calls `refresh_blocked()` so blocked rows whose deps are now done
   jump straight to `pending`.
 
@@ -265,7 +270,9 @@ let it include -- code that compiles, links, ships and silently does nothing:
   hit anything). Use `raycast_ignoring`, or read `ctx.weapons->hits_since`.
 - in a project whose `interaction_design.json` hands weapons to the engine
   (contract v5): firing from a muzzle on the trigger, a private ammo /
-  magazine count, or a private projectile / bullet / tracer type. Weapons
+  magazine count the task itself decrements without ever reading
+  `ctx.weapons` (a display copy is fine), or a private
+  `struct` / `class` named `*Projectile*` / `*Bullet*` / `*Tracer*`. Weapons
   are `builtin.weapon` / `bow` / `melee_weapon` / `shield`; generated code
   reacts through `ctx.weapons`, and abilities that launch something use
   `ctx.projectiles` / `ctx.vfx`. See [weapons.md](weapons.md).
@@ -395,17 +402,22 @@ network call (used by every test in
 1. The orchestrator validates `1 <= len(files) <= 16`.
 2. Collects the set of `.h`/`.hpp` filenames from the result (the
    task's "local headers").
-3. For each `files[*]` entry:
+3. For each `files[*]` entry (nothing is written until every file passes):
    * Normalises the path to
-     `engine/generated/<kind>/<project_id>/<name>`.
-   * Runs `validate_includes(code, local_headers=...)` — if any include
-     is disallowed, the task **fails with a clear error** (fail-loudly;
-     includes are never silently stripped).
+     `engine/generated/<kind>/<project_id>/<name>` (duplicate paths fail).
+   * Runs `assert_path_allowed(abs_path, gen_root)` (boundary check).
+   * Runs `validate_includes(code, local_headers=..., dep_headers=...)`
+     (`dep_headers` = headers written by the task's `depends_on` tasks) —
+     every violation across all files is collected and the task **fails
+     with a clear error** (fail-loudly; includes are never silently
+     stripped).
    * For `.h`/`.hpp` files, runs `validate_header_content` to reject
      registration macros in headers.
    * Runs `filter_cpp_only` → `repair_generated_cpp` (secondary
      safety-net).
-   * Runs `assert_path_allowed(abs_path, gen_root)` (boundary check).
+   * Then runs the engine-contract lint (`codegen_contracts.lint_task_sources`)
+     over all the task's files; a violation raises `CodegenContractError`
+     (one repair round, see above).
 4. Writes all validated files to disk (UTF-8, trailing newline
    normalised). Appends each path to the board row's `files_written`.
 5. Writes a `.codetask.json` sidecar populated with the final
@@ -451,6 +463,21 @@ declarations across the `.cpp` files of a single CodeTask.
 * Headers must not define new `ptv::` engine API types.
 * Cross-project header includes are blocked (no `../other_project/`
   paths).
+
+### Engine-header include allowlist
+
+Besides the standard headers below, `validate_includes` allows the
+prefixes `ptv/ecs/`, `ptv/math/`, `ptv/mechanics/`, `ptv/dialogue/`,
+`ptv/ai/`, `glm/`, `entt/`, `nlohmann/`, and exactly five `ptv/api/`
+headers: `IMechanic.h`, `IBehaviour.h`, `IDialogueHook.h`,
+`InputSnapshot.h`, `MechanicContext.h` (`check_generated_bounds.py`
+mirrors this list). Other `ptv/api/` headers are reachable only
+transitively: `MechanicContext.h` pulls in `Effects.h`, `GameFlow.h`,
+`InteractiveState.h`, `Projectiles.h` and `Weapons.h`. `ptv/api/Facing.h`
+and `ptv/api/BodySlots.h` are neither on the allowlist nor included by any
+allowed header, so a generated `#include "ptv/api/Facing.h"` is currently
+rejected. World builders (`engine/generated/world/`) may include only
+`ptv/api/IWorldBuilder.h`, the standard headers below, and `glm/`.
 
 ### Standard-library include allowlist
 
@@ -513,6 +540,19 @@ Controlled by settings:
 * `codegen_max_repair_rounds` (default `3`) — how many
   build→repair→rebuild cycles to attempt (`0` = verify once, never
   repair).
+* `codegen_quest_syntax_check` (default `True`) — Quest projects only:
+  after the MSVC build passes, also syntax-check the generated C++ with the
+  NDK's clang (the APK's compiler), so clang-only errors are repaired here
+  instead of surfacing in `quest_build`. Skipped with a warning when no NDK
+  is installed.
+
+Per-task robustness (not part of the repair loop):
+
+* `codegen_request_timeout_seconds` (default `1800`) — per-request HTTP
+  timeout for the Agents SDK client (the SDK default of 600 s cut off large
+  tasks at effort `high`).
+* `codegen_max_task_attempts` (default `2`) — in-process retries for a task
+  whose agent call raised (timeout, 500, connection reset).
 
 Flow:
 

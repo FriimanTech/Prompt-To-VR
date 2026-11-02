@@ -1,6 +1,6 @@
 # Stage 17: Engine Promotion
 
-> **Pipeline position:** after device build (`cmake_build` or `quest_build`) → end of pipeline  
+> **Pipeline position:** after `cmake_build` (PC VR) or `quest_runtime_verify` (Quest) → end of pipeline  
 > **Target:** shared (PC VR and Quest)  
 > **Primary code:** [`apps/orchestrator/ptv_orchestrator/pipeline/stage_engine_promotion.py`](../../../../apps/orchestrator/ptv_orchestrator/pipeline/stage_engine_promotion.py)  
 > **Primary artifacts:** `engine/promoted/registry.json`
@@ -9,103 +9,86 @@
 
 ### What this stage is
 
-The **engine promotion stage** indexes successfully compiled generated modules from this project into a **shared registry** so future games' mechanic planner can reuse them as `promoted.*` catalog entries. It does not copy source files — they already live under `engine/generated/` and are linked by CMake.
+The engine promotion stage indexes the generated gameplay modules this project produced into a **repo-wide registry**, so that the mechanic planner of every later project sees them as reusable `promoted.<id>` catalog entries. It writes metadata only. Sources are not copied; they stay in `engine/generated/<kind>/<project_id>/`.
 
 ### Why it exists
 
-Prompt-to-VR is designed so **each game makes the engine more capable**. Without promotion, every new project would regenerate similar shooting hubs or AI patterns. Promotion makes reuse visible to the mechanic-plan agent on the next pipeline run.
+Each game should leave the engine more capable. Without an index, a new project would regenerate a mechanic another game already wrote and compiled. The registry makes that code visible to `mechanic_plan`, and the build can link it into the new game.
 
-### Inputs (what enters)
+### Inputs
 
 | Input | Location |
 |-------|----------|
-| CodeTask sidecars | `engine/generated/{mechanics|ai|dialogue}/<project_id>/*.codetask.json` |
-| Paired C++ | matching `.cpp` files |
-| Prior successful build | implied by pipeline reaching this stage |
+| CodeTask sidecars | `engine/generated/{mechanics,ai,dialogue}/<project_id>/*.codetask.json` |
+| Paired C++ | the `.cpp` with the same base name (`foo.codetask.json` → `foo.cpp`) |
+| Existing registry | `engine/promoted/registry.json` (missing or malformed → starts as `{"version": 1, "items": []}`) |
 
-### Outputs (what it produces)
+`engine/generated/world/` (world builders) is **not** scanned. World builders are not planner mechanics.
+
+### Outputs
 
 | Output | Location |
 |--------|----------|
-| Registry append | `engine/promoted/registry.json` |
+| Registry (rewritten with appended items, 2-space JSON) | `engine/promoted/registry.json` |
 
-Each entry: `promoted.<sanitised_id>`, summary, category, source project, timestamp.
+Each new item has these fields:
+
+| Field | Value |
+|-------|-------|
+| `id` | `promoted.<sanitised CodeTask id>` (non `[a-zA-Z0-9_.-]` → `_`, lowercased, ≤ 96 chars) |
+| `summary` | sidecar `description`, else `summary`, else `Generated <kind> from project <id>` (≤ 600 chars) |
+| `category` | `mechanic` / `ai` / `dialogue` |
+| `kind` | `mechanics` / `ai` / `dialogue` |
+| `source_path` | repo-relative path of the `.cpp` |
+| `code_task_id` | the CodeTask id |
+| `project_id` | the producing project |
+| `promoted_at` | UTC ISO timestamp |
+| `params` | sidecar `params` when it is an object, else `{}` |
 
 ### Where output goes next
 
-**Next project's stage 4 (`mechanic_plan`)** — `engine_catalog.as_planner_text()` includes promoted entries alongside built-ins.
+- **`mechanic_plan` of later projects:** `engine_catalog.as_planner_text()` reads the registry through `promoted_catalog()` and lists promoted entries in the planner's `ENGINE CATALOG`.
+- **Builds of a project whose plan reuses `promoted.*`** (`builtin_id` or `base_builtin_id`): `promoted_sources_for_plan()` resolves every `<code_task_id>*.cpp` beside the registered source and passes them as `PTV_GENERATED_EXTRA_SOURCES`. The CMake build gets them as a cache variable and Quest through the `@PTV_GENERATED_EXTRA_SOURCES@` Gradle token. Entries from the same project are excluded, since they are already compiled.
 
-### Key concepts and terms
+### Failure behavior
 
-- **Reuse-first planner** — Mechanic plan tries `builtin` → `builtin+config` → `code_edit` → `generate`. Promoted modules appear as catalog entries.
-- **Best-effort** — Malformed sidecars skipped with warning; **never fails the pipeline**.
-- **Idempotent** — Re-running same project does not duplicate registry ids.
-- **No file copy** — Registry is discoverability metadata only; sources stay in `engine/generated/<kind>/<project_id>/`.
+The stage is best-effort and idempotent:
 
-### End-to-end flow (plain language)
+- A sidecar without a `.cpp`, with malformed JSON, or without an `id` is **skipped** and counted in the message (`skipped N`). It does not produce a warning event.
+- An id already in the registry is skipped silently, so re-runs never duplicate entries. A changed sidecar does **not** update the existing entry.
+- The stage records `succeeded` in normal operation. Only an unexpected I/O error writing the registry would raise.
 
-1. After build succeeds, scan generated dirs for `.codetask.json` + `.cpp` pairs.
-2. Load existing `registry.json`.
-3. For each new module, append entry if id not present.
-4. Save registry; emit promotion count.
+It only runs if every earlier stage succeeded. On Quest, a skipped `quest_runtime_verify` counts as success, but a failed verification stops the pipeline before promotion.
 
 ---
 
 ## Detailed stage deep dive
 
-### Best-effort final stage
+### Execution trace (`stage_engine_promotion.run`)
 
-**Never fails the pipeline.** Malformed sidecars skipped with warnings.
+1. Emit `running`, `record_stage(running)`.
+2. `promoted_registry_path(repo_root)` → `engine/promoted/registry.json`; `_load_registry()`.
+3. Collect existing ids.
+4. For each kind in `("mechanics", "ai", "dialogue")`, iterate `sorted(gen_dir.glob("*.codetask.json"))`, where `gen_dir = engine/generated/<kind>/<project_id>`. Missing dirs are skipped.
+5. For each valid, new sidecar: append the entry and emit `info: promoted <id>`.
+6. `_write_registry()` always rewrites the file, creating `engine/promoted/` if needed.
+7. Record `succeeded` with message `promoted N (registry now M entries)[; skipped K]`; the artifact is the repo-relative registry path.
 
-### Scan paths
+### Paths and settings
 
-For each kind in `mechanics`, `ai`, `dialogue`:
+All paths resolve from `Settings.repo_root`. This stage has no settings of its own.
 
-```
-engine/generated/<kind>/<project_id>/*.codetask.json
-```
+### Same logic on both targets
 
-Requires paired `.cpp` with same basename.
+The module is identical for PC VR (`_PCVR_TAIL`: `cmake_build` → `engine_promotion`) and Quest (`_QUEST_TAIL`: `quest_build` → `quest_runtime_verify` → `engine_promotion`). Its own module docstring still says it "runs after a successful `cmake_build`", which is only true for PC VR.
 
-### Registry entry
+### Events
 
-Id format: `promoted.<sanitised_task_id>` (lowercase, safe chars, max 96).
-
-Append to `engine/promoted/registry.json`:
-
-- summary from sidecar
-- category/kind
-- source project id
-- timestamp
-
-**Idempotent:** skip if `promoted_id` already in registry.
-
-### Does NOT copy source files
-
-Generated `.cpp` already lives under `engine/generated/` and is glob-linked by engine CMake. Registry only helps **mechanic_plan** discover reuse via `as_planner_text()`.
-
-### When it runs
-
-After successful `cmake_build` OR `quest_build` — same promotion logic both targets.
-
-### SSE
-
-`info` per newly promoted id, `succeeded` with count message
-
-See [`docs/engine-growth.md`](../../../engine-growth.md).
-
-### Catalog consumption
-
-Next run's as_planner_text() reads registry.json and renders promoted.* entries in ENGINE CATALOG section of mechanic planner prompt.
-
----
-
-## Extend this folder
-
-- `artifacts.md` — registry item schema
-- `concepts-reuse-first.md` — planner + catalog interaction
+`running` → `info` (one per newly promoted id) → `succeeded`.
 
 ## See also
 
-- [`docs/engine-growth.md`](../../../engine-growth.md) — authoritative reference
-- Stage 4 [`04_mechanic_plan`](../04_mechanic_plan/README.md)
+- [`docs/engine-growth.md`](../../../engine-growth.md): the reuse model and registry format
+- [`docs/architecture.md`](../../../architecture.md)
+- Previous (Quest): [`16b_quest_runtime_verify`](../../Quest_Stages/16b_quest_runtime_verify/README.md)
+- Stage 4: [`04_mechanic_plan`](../04_mechanic_plan/README.md)

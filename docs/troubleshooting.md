@@ -224,6 +224,45 @@ the stage, which usually points at a runtime / Quest Link issue
 Fill `.env` at the repo root. The orchestrator loads it via
 `pydantic-settings`. Restart `uvicorn` after editing `.env`.
 
+## Every character goes to Tripo / `UTHANA_API_KEY is not set`
+
+`character_routing` routes to Uthana only when `UTHANA_ENABLED` is true and a
+key is found (`.env` or the process environment). `.env.example` does not list
+`UTHANA_API_KEY`, so a `.env` copied from it has none: add
+`UTHANA_API_KEY=...` and restart `uvicorn`. Without it the player avatar gets
+no finger curls. See [`uthana.md`](uthana.md).
+
+## `socket_generation` fails: "could not build ptv_glb_views"
+
+The stage renders each held item with the `ptv_glb_views` tool and builds it on
+demand. Build it once by hand to see the compiler error:
+
+```powershell
+cmake --build build/vs2026-x64 --config Release --target ptv_glb_views
+```
+
+A required socket that neither vision nor the geometry fallback can produce
+also fails the stage; the per-asset detail is in `socket_report.json` and
+`assets/<id>/sockets/`. Without a Google key the geometry fallback runs and
+sockets are marked `heuristic`. See [`sockets.md`](sockets.md).
+
+## `quest_runtime_verify` is `skipped`
+
+Expected when there is nothing to verify on. The reason is in the stage
+message and `runtime_verification.json`: `adb is not installed or not on
+PATH`, no authorized headset, `no APK to install; run quest_build first`,
+`disabled in Settings (quest_runtime_verify)`, or a PC VR project. Set
+`QUEST_VERIFY_DEVICE_SERIAL` when several devices are connected.
+
+## `quest_runtime_verify` fails: "did not start after N launches"
+
+The headset is usually showing a Guardian / boundary prompt. Put it on once to
+clear it, or set `QUEST_VERIFY_STORE_PIN` so the stage can disable Guardian
+for the run. Any failed check marks the stage `failed` with
+`runtime verification failed: <reason>`; the APK is still downloadable, and
+a memory failure first triggers the correction loop described in
+[`run-lifecycle.md`](run-lifecycle.md#the-quest-memory-correction-loop).
+
 ## Tripo calls time out
 
 The Tripo wrapper polls every 3 s with a 600 s timeout by default. You can
@@ -348,8 +387,10 @@ debug renderer), enable the matching vcpkg *features*:
 Open `projects/<id>/logs/cmake.log`. Likely causes:
 
 - A generated module tried to include a non-whitelisted header. The
-  orchestrator should have stripped it; if it didn't, run
+  orchestrator fails the CodeTask loudly instead of stripping it; run
   `py engine\tools\check_generated_bounds.py` to see violations.
+- The compile-verify + repair loop gave up after `CODEGEN_MAX_REPAIR_ROUNDS`
+  (default 3). The last compiler output is in `logs/codegen_verify.log`.
 - The mechanic id registered in `PTV_REGISTER_MECHANIC(...)` doesn't match
   the `mechanic_id` in the scene. Check the generated file and the
   `scene.json`.

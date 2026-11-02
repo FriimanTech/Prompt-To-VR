@@ -1,6 +1,19 @@
 # Provider setup
 
-The three providers used by the pipeline.
+The providers used by the pipeline: Anthropic, OpenAI, Google (Gemini),
+Tripo and Uthana. Every key is read from the repo-root `.env` by
+`apps/orchestrator/ptv_orchestrator/settings.py`.
+
+| Env var | Needed for | Without it |
+|---|---|---|
+| `ANTHROPIC_API_KEY` | BuildSpec, AssetManifest (and the light call in `optimization_preferences`) | `LlmClient` falls back to OpenAI |
+| `OPENAI_API_KEY` | every Agents SDK stage (interaction design, NPC plan, game design, mechanic plan, scene spec, character routing, Uthana motion plan, world, codegen) and the Claude fallback | those stages fail |
+| `GOOGLE_API_KEY` (or `GEMINI_API_KEY`) | reference images, socket vision | no reference images; sockets use the geometry fallback (`heuristic`) |
+| `TRIPO_API_KEY` | image-to-3D, Tripo rig / retarget | no meshes |
+| `UTHANA_API_KEY` | Uthana auto-rig + motions | optional: `character_routing` sends every character to Tripo (the avatar loses finger curls) |
+
+`UTHANA_API_KEY` is read by `settings.py` and `ptv_providers.uthana_client`
+but is **not** listed in `.env.example`; add the line yourself.
 
 ## Anthropic (Claude)
 
@@ -15,7 +28,8 @@ The three providers used by the pipeline.
 
 ## OpenAI / ChatGPT (planning + codegen + fallback)
 
-- **Required** for NPC plan, MechanicPlan, SceneSpec, code generation, and world
+- **Required** for interaction design, NPC plan, game design, MechanicPlan,
+  SceneSpec, character routing, Uthana motion plan, world generation and code
   generation (OpenAI Agents SDK). Also used as an automatic fallback when Claude
   is unavailable (no key, rate-limited, transient API error, etc.).
 - Get an API key at <https://platform.openai.com/api-keys>.
@@ -35,9 +49,13 @@ The three providers used by the pipeline.
     (AssetManifest). `medium` rather than `low` deliberately: this is the
     call that decides which assets get rigged and animated, at roughly 30
     and 20 Tripo credits each.
-- Per-stage agent knobs (`NPC_PLAN_MODEL`, `MECHANIC_PLAN_MODEL`,
+- Per-stage agent knobs: `NPC_PLAN_MODEL`, `MECHANIC_PLAN_MODEL`,
   `SCENE_SPEC_MODEL`, `WORLD_MODEL`, `CODEGEN_MODEL` and their
-  `*_REASONING_EFFORT` partners) are documented in `.env.example`. Codegen
+  `*_REASONING_EFFORT` partners are documented in `.env.example`.
+  `settings.py` also accepts `INTERACTION_DESIGN_MODEL`,
+  `GAME_DESIGN_MODEL`, `CHARACTER_ROUTING_MODEL` (all `high`) and
+  `UTHANA_MOTION_PLAN_MODEL` (`medium`) with the same `*_REASONING_EFFORT`
+  partners; those are not in `.env.example`. Codegen
   has its own rather than borrowing the fallback tier: it always runs on
   OpenAI, so tuning the Claude fallback should not silently retune C++
   generation.
@@ -64,6 +82,9 @@ The three providers used by the pipeline.
   `GEMINI_IMAGE_MODEL=gemini-3.1-flash-image` instead.
 - Python SDK package: `google-genai`. Installed automatically when you
   `pip install -e packages/provider-clients`.
+- Socket vision (`socket_generation`): `SOCKET_VISION_MODEL=gemini-3.8-flash`
+  through the Interactions API. `SOCKET_VISION_ENABLED=false` (or no Google
+  key) uses the geometry fallback only. See [sockets.md](sockets.md).
 
 ## Tripo (image-to-3D)
 
@@ -158,7 +179,7 @@ animation nothing will ever play. See [npc-and-ai.md](npc-and-ai.md).
 Results are recorded in `asset_rig.json` so a Resume never re-bills, and the
 rigged mesh lands as `model_rigged.glb` beside the original so a re-run rigs
 the source rather than an already-rigged mesh. Set
-`PTV_TRIPO_RIGGING_ENABLED=false` to skip the stage entirely; assets then
+`TRIPO_RIGGING_ENABLED=false` to skip the stage entirely; assets then
 render as static geometry and nothing downstream breaks.
 
 ### Animation retarget (`asset_animation`)
@@ -200,8 +221,8 @@ If a batch returns fewer clips than were paid for, that is logged loudly and
 only the clips that exist are exposed; nothing downstream silently references
 a clip that is not there.
 
-Set `PTV_TRIPO_ANIMATION_ENABLED=false` to skip the stage, or
-`PTV_TRIPO_ANIMATION_MAX_PER_ASSET` (default 4) to cap the bill.
+Set `TRIPO_ANIMATION_ENABLED=false` to skip the stage, or
+`TRIPO_ANIMATION_MAX_PER_ASSET` (default 4) to cap the bill.
 
 ## Uthana (humanoid rig with fingers + locomotion)
 
@@ -213,8 +234,12 @@ Set `PTV_TRIPO_ANIMATION_ENABLED=false` to skip the stage, or
   retargeting an existing motion onto another character) are free.
 - `UTHANA_IDLE_MOTION_ID` (default `msf9nhQ4yyTJ`) names the existing idle
   motion every Uthana character is given.
-- `UTHANA_ENABLED=false` routes every character to Tripo (the avatar then
-  has no finger curls).
+- `UTHANA_ENABLED=false` (or no key) routes every character to Tripo (the
+  avatar then has no finger curls).
+- Other knobs in `settings.py`: `UTHANA_AVATAR_MIN_CONFIDENCE` /
+  `UTHANA_NPC_MIN_CONFIDENCE` (default 0.20; at or below it the rig falls back
+  to Tripo), `UTHANA_LOCOMOTION_STRIDES` (5), `UTHANA_MOTION_LIST_LIMIT` (500)
+  and `UTHANA_MAX_GENERATED_SECONDS_PER_RUN` (600).
 
 See [uthana.md](uthana.md) for the full flow: routing, auto-rig, the motion
 naming convention and reuse, the shared idle, and the GLB merge.
@@ -248,8 +273,11 @@ Pills are red with ✗ if a key is missing.
 | Stage | Primary | Fallback (if Claude unavailable) | Structured? |
 |---|---|---|---|
 | BuildSpec | Anthropic `claude-opus-4-7` | OpenAI `gpt-5.6-sol` @ `high` | JSON schema |
+| Optimization preferences | keyword gate, then one light `LlmClient` call (`claude-sonnet-4-6`) + deterministic validator | OpenAI `gpt-5.6-sol` @ `medium` | JSON schema |
 | AssetManifest | Anthropic `claude-sonnet-4-6` | OpenAI `gpt-5.6-sol` @ `medium` | JSON schema |
+| Interaction design | OpenAI Agents SDK `gpt-5.6-sol` @ `high` + `WebSearchTool` + validate-and-repair | `fallback_design` | JSON schema |
 | NPC plan | OpenAI Agents SDK `gpt-5.6-sol` @ `high` (no tools) | — (OpenAI-only) | JSON schema |
+| Game design | OpenAI Agents SDK `gpt-5.6-sol` @ `high` (no tools) + validate-and-repair | — (OpenAI-only) | JSON schema |
 | MechanicPlan | OpenAI Agents SDK `gpt-5.6-sol` @ `high` (no tools) | — (OpenAI-only) | JSON schema |
 | SceneSpec (per scene) | OpenAI Agents SDK `gpt-5.6-sol` @ `medium` (no tools) + validate-and-repair | — (OpenAI-only) | JSON schema |
 | Reference image | Google `gemini-3.1-flash-image` | — | — |
@@ -260,6 +288,7 @@ Pills are red with ✗ if a key is missing.
 | Animation retarget | Tripo retarget | — | — |
 | Uthana motion plan | OpenAI Agents SDK `gpt-5.6-sol` @ `medium` + code validation | deterministic defaults | JSON schema |
 | Uthana animation | Uthana list / create_locomotion / rename / download | — | — |
+| Socket generation | Google `gemini-3.8-flash` (Interactions API) segmentation + verify | geometry fallback (`heuristic`) | JSON schema |
 | C++ modules (code_generation) | OpenAI Agents SDK `codegen_model` (default `gpt-5.6-sol`) @ `high` + `WebSearchTool` | — (OpenAI-only) | free-form, guarded by boundaries |
 | World generation | OpenAI Agents SDK `world_model` (default `gpt-5.6-sol`) @ `high` + `WebSearchTool` | — (OpenAI-only) | C++ source, compile-verify |
 | Engine promotion | — (deterministic index) | — | — |
