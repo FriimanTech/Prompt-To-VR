@@ -220,6 +220,9 @@ bool VulkanContext::create_logical_device(
     VkPhysicalDeviceFeatures feats{};
     feats.fillModeNonSolid = supported.fillModeNonSolid;
     feats.samplerAnisotropy = supported.samplerAnisotropy;
+    feats.textureCompressionASTC_LDR = supported.textureCompressionASTC_LDR;
+    astc_ldr_ = feats.textureCompressionASTC_LDR == VK_TRUE;
+    anisotropy_ = feats.samplerAnisotropy == VK_TRUE;
     // These are required by the Oculus / Meta Quest Link OpenXR runtime's
     // compositor / distortion shaders. Without them the validation layer
     // raises "SPIR-V Capability StorageImageMultisample was declared..."
@@ -236,7 +239,19 @@ bool VulkanContext::create_logical_device(
     feats.shaderSampledImageArrayDynamicIndexing =
         supported.shaderSampledImageArrayDynamicIndexing;
 
+    // Every scene shader is written against GL_EXT_multiview (gl_ViewIndex),
+    // so the device must enable the Vulkan 1.1 multiview feature even when it
+    // never renders a multiview pass.
+    VkPhysicalDeviceMultiviewFeatures mv_q{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MULTIVIEW_FEATURES};
+    VkPhysicalDeviceFeatures2 f2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};
+    f2.pNext = &mv_q;
+    if (vkGetPhysicalDeviceFeatures2) vkGetPhysicalDeviceFeatures2(physical_device_, &f2);
+    VkPhysicalDeviceMultiviewFeatures mv_on{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MULTIVIEW_FEATURES};
+    mv_on.multiview = mv_q.multiview;
+    multiview_ = mv_on.multiview == VK_TRUE;
+
     VkDeviceCreateInfo dci{VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};
+    dci.pNext = &mv_on;
     dci.queueCreateInfoCount = 1;
     dci.pQueueCreateInfos = &qci;
     dci.enabledExtensionCount = static_cast<uint32_t>(exts.size());
@@ -287,6 +302,26 @@ void VulkanContext::shutdown() {
         vkDestroyInstance(instance_, nullptr);
         instance_ = VK_NULL_HANDLE;
     }
+}
+
+std::vector<std::string> VulkanContext::optional_device_extensions(VkPhysicalDevice pd) {
+    std::vector<std::string> out;
+    uint32_t n = 0;
+    if (vkEnumerateDeviceExtensionProperties(pd, nullptr, &n, nullptr) != VK_SUCCESS) return out;
+    std::vector<VkExtensionProperties> props(n);
+    vkEnumerateDeviceExtensionProperties(pd, nullptr, &n, props.data());
+    auto has = [&](const char* name) {
+        for (const auto& p : props) {
+            if (std::strcmp(p.extensionName, name) == 0) return true;
+        }
+        return false;
+    };
+    // Fixed foveated rendering on Quest: the runtime hands out fragment
+    // density maps that the render pass consumes.
+    if (has(VK_EXT_FRAGMENT_DENSITY_MAP_EXTENSION_NAME)) {
+        out.emplace_back(VK_EXT_FRAGMENT_DENSITY_MAP_EXTENSION_NAME);
+    }
+    return out;
 }
 
 // ---------------------------------------------------------------------------
@@ -448,15 +483,42 @@ bool VulkanContext::initialize_for_openxr(const Config& cfg,
     qci.queueCount = 1;
     qci.pQueuePriorities = &prio;
 
+    std::vector<std::string> ext_storage = cfg.required_device_extensions;
+    for (const auto& e : optional_device_extensions(physical_device_)) {
+        if (std::find(ext_storage.begin(), ext_storage.end(), e) == ext_storage.end()) {
+            ext_storage.push_back(e);
+        }
+    }
     std::vector<const char*> dev_exts;
-    for (auto& s : cfg.required_device_extensions) dev_exts.push_back(s.c_str());
+    for (auto& s : ext_storage) dev_exts.push_back(s.c_str());
+    const bool want_fdm =
+        std::find(ext_storage.begin(), ext_storage.end(),
+                  std::string(VK_EXT_FRAGMENT_DENSITY_MAP_EXTENSION_NAME)) != ext_storage.end();
 
     VkPhysicalDeviceFeatures supported{};
     vkGetPhysicalDeviceFeatures(physical_device_, &supported);
 
+    // Vulkan 1.1 features (multiview) and the fragment density map, queried
+    // through the features2 chain; each is enabled only when supported.
+    VkPhysicalDeviceFragmentDensityMapFeaturesEXT fdm_q{
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FRAGMENT_DENSITY_MAP_FEATURES_EXT};
+    VkPhysicalDeviceMultiviewFeatures mv_q{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MULTIVIEW_FEATURES};
+    if (want_fdm) mv_q.pNext = &fdm_q;
+    VkPhysicalDeviceFeatures2 f2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};
+    f2.pNext = &mv_q;
+    if (vkGetPhysicalDeviceFeatures2) vkGetPhysicalDeviceFeatures2(physical_device_, &f2);
+
+    VkPhysicalDeviceFragmentDensityMapFeaturesEXT fdm_on{
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FRAGMENT_DENSITY_MAP_FEATURES_EXT};
+    fdm_on.fragmentDensityMap = fdm_q.fragmentDensityMap;
+    VkPhysicalDeviceMultiviewFeatures mv_on{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MULTIVIEW_FEATURES};
+    mv_on.multiview = mv_q.multiview;
+    if (want_fdm && fdm_q.fragmentDensityMap) mv_on.pNext = &fdm_on;
+
     VkPhysicalDeviceFeatures feats{};
     feats.fillModeNonSolid = supported.fillModeNonSolid;
     feats.samplerAnisotropy = supported.samplerAnisotropy;
+    feats.textureCompressionASTC_LDR = supported.textureCompressionASTC_LDR;
     feats.shaderStorageImageMultisample = supported.shaderStorageImageMultisample;
     feats.shaderStorageImageReadWithoutFormat =
         supported.shaderStorageImageReadWithoutFormat;
@@ -470,11 +532,18 @@ bool VulkanContext::initialize_for_openxr(const Config& cfg,
         supported.shaderSampledImageArrayDynamicIndexing;
 
     VkDeviceCreateInfo dci{VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};
+    dci.pNext = &mv_on;
     dci.queueCreateInfoCount = 1;
     dci.pQueueCreateInfos = &qci;
     dci.enabledExtensionCount = static_cast<uint32_t>(dev_exts.size());
     dci.ppEnabledExtensionNames = dev_exts.empty() ? nullptr : dev_exts.data();
     dci.pEnabledFeatures = &feats;
+    astc_ldr_ = feats.textureCompressionASTC_LDR == VK_TRUE;
+    anisotropy_ = feats.samplerAnisotropy == VK_TRUE;
+    multiview_ = mv_on.multiview == VK_TRUE;
+    fdm_ = want_fdm && fdm_q.fragmentDensityMap == VK_TRUE;
+    PTV_INFO("VK: features astc_ldr={} anisotropy={} multiview={} fragment_density_map={}",
+             astc_ldr_, anisotropy_, multiview_, fdm_);
 
     XrVulkanDeviceCreateInfoKHR xr_dci{XR_TYPE_VULKAN_DEVICE_CREATE_INFO_KHR};
     xr_dci.systemId = xr_system;

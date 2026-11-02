@@ -42,6 +42,7 @@ from __future__ import annotations
 import datetime as _dt
 import json
 import math
+import os
 import re
 import shutil
 import subprocess
@@ -63,6 +64,10 @@ from ptv_schemas import (
 
 from ..quest_ids import quest_package_name
 from .context import PipelineContext, StageResult
+from .quest_metrics import (low_memory_kills, parse_dumpsys_meminfo, parse_gpumeminfo,
+                            parse_mem_lines)
+from .texture_gallery import (judge, load_rgb, parse_gallery_lines, reference_stats,
+                              screenshot_object_stats)
 
 ARTIFACT = "runtime_verification.json"
 #: Median distance between the DRAWN feet (lowest animated foot joint, less
@@ -690,6 +695,376 @@ def evaluate_hands(text: str, scene: dict) -> list[VerificationCheck]:
                    evidence=(good or [l.strip() for l in lines])[:3])]
 
 
+#: TextureGallery.h timing (settle, per asset) plus launch slack.
+GALLERY_SETTLE_S = 6.0
+GALLERY_SLOT_S = 4.0
+GALLERY_SLACK_S = 30.0
+
+
+def texture_gallery_wanted(scene: dict) -> bool:
+    """Run the gallery pass when the scene places textured meshes."""
+    perf = scene.get("performance") or {}
+    return int((perf.get("textures") or {}).get("textured_mesh_entities") or 0) > 0
+
+
+def gallery_capture_seconds(scene: dict) -> float:
+    meshes = {((e.get("mesh") or {}).get("lod_paths") or [None])[0]
+              or (e.get("mesh") or {}).get("glb_path")
+              for e in scene.get("entities") or [] if isinstance(e.get("mesh"), dict)}
+    meshes.discard(None)
+    # Engine hands are textured too and are part of the gallery.
+    return GALLERY_SETTLE_S + GALLERY_SLOT_S * (len(meshes) + 2) * 1.6 + GALLERY_SLACK_S
+
+
+def evaluate_texture_gallery(ctx: PipelineContext, shots: list[dict[str, Any]],
+                             scene: dict) -> list[VerificationCheck]:
+    """One check per shown asset: visible, no magenta, still colourful, not
+    turned white -- against an offline render of the same LOD."""
+    import subprocess
+    import tempfile
+
+    cat = "textures"
+    bg = next((s for s in shots if s.get("name") == "background"), None)
+    assets = [s for s in shots if s.get("entry")]
+    if not assets:
+        return [_check("texture gallery screenshots", cat, False,
+                       "no asset was shown or captured (is the Quest screenshot service "
+                       "available, and did the engine log 'texgallery: show'?)")]
+    bg_img = load_rgb(bg["file"]) if bg and bg.get("file") else None
+    if bg_img is None:
+        return [_check("texture gallery screenshots", cat, False,
+                       "no background screenshot to separate the assets from")]
+    views_tool = None
+    root = ctx.settings.engine_dir / "build"
+    exe = "ptv_glb_views.exe" if os.name == "nt" else "ptv_glb_views"
+    found = sorted(root.rglob(exe), key=lambda p: p.stat().st_mtime) if root.exists() else []
+    if found:
+        views_tool = found[-1]
+    checks: list[VerificationCheck] = []
+    for shot in assets:
+        entry = shot["entry"]
+        name = Path(entry.get("path", "?")).stem
+        img = load_rgb(shot["file"]) if shot.get("file") else None
+        if img is None:
+            checks.append(_check("texture shows on the headset", cat, False,
+                                 "screenshot missing", subject=name))
+            continue
+        stats = screenshot_object_stats(img, bg_img)
+        ref: dict[str, float] = {}
+        glb = ctx.settings.repo_root / entry.get("path", "")
+        if views_tool is not None and glb.is_file():
+            with tempfile.TemporaryDirectory() as tmp:
+                proc = subprocess.run([str(views_tool), "--input", str(glb), "--out-dir", tmp,
+                                       "--size", "256"], capture_output=True, text=True)
+                if proc.returncode == 0:
+                    ref = reference_stats(Path(tmp) / "view_6.png", Path(tmp) / "view_6.ids", 256)
+        ok, notes = judge(stats, ref, int(entry.get("textured") or 0),
+                          int(entry.get("missing") or 0))
+        detail = (f"object {stats.get('share', 0):.1%} of view, chroma {stats.get('chroma', 0):.1f}"
+                  f" (reference {ref.get('chroma', 0):.1f}), white {stats.get('white', 0):.0%}"
+                  f" (reference {ref.get('white', 0):.0%}), magenta {stats.get('magenta', 0):.1%}"
+                  f"; textured submeshes {entry.get('textured', 0)}"
+                  + (f"; {'; '.join(notes)}" if notes else ""))
+        rel = str(shot["file"].relative_to(ctx.settings.repo_root)).replace("\\", "/")
+        checks.append(_check("texture shows on the headset", cat, ok, detail, subject=name,
+                             evidence=[rel]))
+    return checks
+
+
+#: Leak and soak limits (MB).
+LEAK_MB_PER_CYCLE = 50.0
+SOAK_MB_PER_MIN = 5.0
+SOAK_WARMUP_S = 60.0
+
+
+def evaluate_memory(*, samples: list[dict[str, Any]], gpu: dict[str, float], base_text: str,
+                    flow_text: str, soak: list[tuple[float, float]], pressure_text: str,
+                    pressure_alive: Optional[bool], kills: list[str], scene: dict,
+                    compromises: Optional[list[str]] = None):
+    """Quest 3 memory checks against the engine targets (4.5 GiB steady,
+    5.0 GiB peak) and Meta's 5.75 GiB limit, from measured data only."""
+    from ptv_schemas import MemoryReport, MemoryStatus
+
+    perf = scene.get("performance") or {}
+    target = float(perf.get("memory_target_mb") or 4608.0)
+    ceiling = float(perf.get("memory_ceiling_mb") or 5120.0)
+    limit = float(perf.get("memory_limit_mb") or 5888.0)
+    est = perf.get("memory_estimate") or {}
+    cat = "memory"
+    checks: list[VerificationCheck] = []
+    dumpsys = [s["total_pss_kb"] / 1024.0 for s in samples if s.get("total_pss_kb")]
+    engine = parse_mem_lines(base_text) + parse_mem_lines(flow_text)
+    measured_all = dumpsys + [float(x) for x in engine] + [p for _, p in soak]
+    report = MemoryReport(status=MemoryStatus.failed_on_device, limit_mb=limit,
+                          ceiling_mb=ceiling, target_mb=target,
+                          estimated_steady_mb=est.get("steady_mb"),
+                          estimated_peak_mb=est.get("peak_mb"),
+                          compromises=list(compromises or []),
+                          low_memory_kills=kills[:10])
+    if not measured_all:
+        checks.append(_check("memory measured on the headset", cat, False,
+                             "no dumpsys meminfo sample and no engine 'mem:' line"))
+        report.reasons.append("no memory measurement")
+        return checks, report
+    peak = max(measured_all)
+    tail = dumpsys[len(dumpsys) // 2:] or [float(x) for x in engine[len(engine) // 2:]]
+    steady = sorted(tail)[len(tail) // 2] if tail else peak
+    report.measured_peak_mb = round(peak, 1)
+    report.measured_steady_mb = round(steady, 1)
+    if samples:
+        last = samples[-1]
+        for k, label in (("native_heap_kb", "native_heap"), ("graphics_kb", "graphics"),
+                         ("gl_mtrack_kb", "gl_mtrack"), ("total_pss_kb", "total_pss")):
+            if last.get(k):
+                report.measured[label] = round(last[k] / 1024.0, 1)
+    for k, v in gpu.items():
+        report.measured[f"gpu_{k}"] = v
+    checks.append(_check("peak PSS under the 5.0 GiB ceiling", cat, peak <= ceiling,
+                         f"peak {peak:.0f} MB (ceiling {ceiling:.0f}, Meta limit {limit:.0f})"))
+    checks.append(_check("steady PSS under the 4.5 GiB target", cat, steady <= target,
+                         f"steady {steady:.0f} MB (target {target:.0f})"
+                         + (f"; estimated {est.get('steady_mb'):.0f} MB" if est.get("steady_mb")
+                            else "")))
+    checks.append(_check("no low-memory kill", cat, not kills,
+                         f"{len(kills)} lowmemorykiller line(s) name the game" if kills else
+                         "no lowmemorykiller / lmkd line names the game",
+                         evidence=kills[:5]))
+    # Leaks across Try Again / Play Again: PSS a few seconds into each start.
+    starts: list[float] = []
+    pss_now: Optional[float] = None
+    pending = False
+    for line in flow_text.splitlines():
+        m = re.search(r"mem:\s*pss\s*(\d+)", line)
+        if m:
+            pss_now = float(m.group(1))
+            if pending:
+                starts.append(pss_now)
+                pending = False
+        elif "flow:" in line and "state=playing" in line:
+            pending = True
+    if len(starts) >= 2:
+        per_cycle = (starts[-1] - starts[0]) / (len(starts) - 1)
+        report.leak_mb_per_cycle = round(per_cycle, 1)
+        checks.append(_check("no leak across restarts", cat, per_cycle <= LEAK_MB_PER_CYCLE,
+                             f"{per_cycle:+.1f} MB per cycle over {len(starts) - 1} restart(s) "
+                             f"(limit {LEAK_MB_PER_CYCLE:.0f})"))
+    else:
+        checks.append(_check("no leak across restarts", cat, None,
+                             "fewer than two game starts in the game-loop pass"))
+    if soak:
+        warm = [(t, p) for t, p in soak if t >= SOAK_WARMUP_S]
+        if len(warm) >= 3:
+            n = len(warm)
+            mt = sum(t for t, _ in warm) / n
+            mp = sum(p for _, p in warm) / n
+            den = sum((t - mt) ** 2 for t, _ in warm) or 1.0
+            slope = sum((t - mt) * (p - mp) for t, p in warm) / den * 60.0
+            checks.append(_check("no growth during the soak", cat, slope <= SOAK_MB_PER_MIN,
+                                 f"{slope:+.2f} MB/min after warm-up over "
+                                 f"{warm[-1][0] - warm[0][0]:.0f} s (limit {SOAK_MB_PER_MIN:.0f})"))
+    if pressure_text:
+        reached_red = bool(re.search(r"mem: level (red|critical)", pressure_text))
+        recovered = bool(re.search(r"mem: level \w+ -> (green|yellow)", pressure_text))
+        ok = reached_red and bool(pressure_alive)
+        checks.append(_check("memory pressure handled", cat, ok,
+                             f"reached red: {reached_red}; still running: {pressure_alive}; "
+                             f"stepped back down: {recovered}"))
+    failed = [c for c in checks if c.outcome == CheckOutcome.failed]
+    if failed:
+        report.status = MemoryStatus.failed_on_device
+        report.reasons = [c.name + ": " + c.detail for c in failed]
+    else:
+        report.status = MemoryStatus.verified_safe
+        report.reasons = [f"measured on a Quest 3: peak {peak:.0f} MB, steady {steady:.0f} MB"]
+    return checks, report
+
+
+def _estimated_memory(ctx: PipelineContext):
+    """No headset ran the game: the build-time estimate, never 'verified'."""
+    from ptv_schemas import MemoryReport, MemoryStatus
+
+    try:
+        scene = json.loads((ctx.project_dir / "scene.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    perf = scene.get("performance") or {}
+    est = perf.get("memory_estimate") or {}
+    if not est:
+        return None
+    over = est.get("outcome") == "over"
+    return MemoryReport(
+        status=MemoryStatus.at_risk if over else MemoryStatus.estimated_safe_not_device_tested,
+        reasons=[("estimate over the target after corrections; " if over else "")
+                 + f"not tested on a Quest 3 (estimate {float(est.get('steady_mb') or 0) / 1024:.1f}"
+                 f" of {float(perf.get('memory_target_mb') or 4608) / 1024:.1f} GiB)"],
+        target_mb=float(perf.get("memory_target_mb") or 4608.0),
+        ceiling_mb=float(perf.get("memory_ceiling_mb") or 5120.0),
+        limit_mb=float(perf.get("memory_limit_mb") or 5888.0),
+        estimated_steady_mb=est.get("steady_mb"), estimated_peak_mb=est.get("peak_mb"))
+
+
+def _record_memory(ctx: PipelineContext, memory) -> None:
+    """Device-measured memory status for the project page, calibration from
+    estimate versus measurement, and the feedback a correction round reads."""
+    from . import memory_model as mm
+
+    status_path = ctx.project_dir / "memory_status.json"
+    status_path.write_text(json.dumps({
+        "status": memory.status.value, "source": "device", "reasons": memory.reasons,
+        "measured_peak_mb": memory.measured_peak_mb,
+        "measured_steady_mb": memory.measured_steady_mb,
+        "estimated_peak_mb": memory.estimated_peak_mb,
+        "compromises": memory.compromises,
+    }, indent=2), encoding="utf-8")
+    if memory.estimated_peak_mb and memory.measured_peak_mb:
+        mm.update_calibration(ctx.settings.projects_dir / "memory_calibration.json",
+                              ctx.project_id, float(memory.estimated_peak_mb),
+                              float(memory.measured_peak_mb))
+    fb = ctx.project_dir / "memory_feedback.json"
+    # Only failures smaller budgets can fix start a correction round; a leak
+    # or a pressure-handling failure is reported, not rebuilt around.
+    correctable = any(r.startswith(("peak PSS", "steady PSS", "no low-memory kill"))
+                      for r in memory.reasons)
+    if memory.status.value == "failed_on_device" and correctable:
+        prev = {}
+        if fb.exists():
+            try:
+                prev = json.loads(fb.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                prev = {}
+        ratio = None
+        if memory.estimated_peak_mb and memory.measured_peak_mb:
+            ratio = round(float(memory.measured_peak_mb) / float(memory.estimated_peak_mb), 3)
+        fb.write_text(json.dumps({
+            "round": int(prev.get("round") or 0) + 1, "reasons": memory.reasons,
+            "measured": memory.measured, "measured_peak_mb": memory.measured_peak_mb,
+            "estimated_peak_mb": memory.estimated_peak_mb, "ratio": ratio,
+        }, indent=2), encoding="utf-8")
+    elif fb.exists():
+        fb.unlink()
+
+
+def evaluate_render_health(text: str) -> list[VerificationCheck]:
+    """The optimized render path works as built: FFR's density map reached the
+    render pass (otherwise nothing draws), merged static batches stayed intact
+    (a moved member dissolves its batch -- correct, but the compiler misjudged
+    it), and no GPU allocation had to be recovered."""
+    cat = "render"
+    out: list[VerificationCheck] = []
+    fdm = [l.strip() for l in text.splitlines() if "no fragment density map image" in l]
+    out.append(_check("FFR density map reaches the render pass", cat, not fdm,
+                      f"{len(fdm)} frame(s) had no density map" if fdm else "",
+                      evidence=fdm[:3]))
+    dissolved = [l.strip() for l in text.splitlines() if "static batch" in l and "dissolved" in l]
+    if dissolved:
+        out.append(VerificationCheck(
+            name="static batches stayed intact", category=cat, outcome=CheckOutcome.warning,
+            detail="a member the compiler marked static moved; its batch now draws "
+                   "per entity", evidence=dissolved[:3]))
+    oom = [l.strip() for l in text.splitlines() if "GPU allocation failed" in l]
+    if oom:
+        out.append(VerificationCheck(
+            name="no GPU allocation failure", category=cat, outcome=CheckOutcome.warning,
+            detail=f"{len(oom)} allocation(s) needed out-of-memory recovery",
+            evidence=oom[:3]))
+    return out
+
+
+def evaluate_locks(text: str, scene: dict) -> list[VerificationCheck]:
+    """The user's locked optimization settings held on the headset.
+
+    From every ``perf:`` line: "FFR off" means ffr 0 throughout, "fixed"
+    exactly that level, "max" never above it; resolution "off"/"high" means
+    the render scale never left 1.0. A frame-rate miss while the governor was
+    blocked by the user's own locks is a WARNING, never a failure."""
+    from .quest_metrics import parse_perf_lines
+
+    locks = (scene.get("performance") or {}).get("locks") or {}
+    active = {k: v for k, v in locks.items()
+              if isinstance(v, dict) and v.get("value", "auto") != "auto"}
+    if not active:
+        return []
+    rows = parse_perf_lines(text)
+    cat = "optimization"
+    out: list[VerificationCheck] = []
+    ffr_vals = [int(r["ffr"]) for r in rows if "ffr" in r]
+    scale_vals = [r["scale"] for r in rows if "scale" in r]
+    ffr = active.get("ffr")
+    if ffr:
+        v, lvl = ffr.get("value"), ffr.get("level")
+        if v == "off":
+            ok = bool(ffr_vals) and all(x == 0 for x in ffr_vals)
+            want = "level 0 throughout"
+        elif v == "fixed":
+            ok = bool(ffr_vals) and all(x == int(lvl or 2) for x in ffr_vals)
+            want = f"level {int(lvl or 2)} throughout"
+        else:
+            ok = bool(ffr_vals) and all(x <= int(lvl if lvl is not None else 1) for x in ffr_vals)
+            want = f"never above level {int(lvl if lvl is not None else 1)}"
+        out.append(_check(f"user lock held: FFR {v}", cat, ok,
+                          f"wanted {want}; observed levels {sorted(set(ffr_vals)) or 'none'}",
+                          evidence=[f"quote: {ffr.get('quote', '')}"]))
+    res = active.get("resolution")
+    if res:
+        ok = bool(scale_vals) and all(abs(s - 1.0) < 1e-3 for s in scale_vals)
+        out.append(_check(f"user lock held: resolution {res.get('value')}", cat, ok,
+                          f"render scale observed {sorted(set(round(s, 2) for s in scale_vals)) or 'none'}",
+                          evidence=[f"quote: {res.get('quote', '')}"]))
+    blocked = [l.strip() for l in text.splitlines() if "blocked by user settings" in l]
+    if blocked:
+        out.append(VerificationCheck(
+            name="frame rate below target because of user-chosen settings", category=cat,
+            outcome=CheckOutcome.warning,
+            detail="the governor had no unlocked quality step left; the user's locked "
+                   "settings are kept as requested",
+            evidence=blocked[:3]))
+    return out
+
+
+def evaluate_textures(text: str, scene: dict) -> list[VerificationCheck]:
+    """Every base-colour texture the game references loaded on the headset.
+
+    From the engine's 1 Hz ``tex:`` line (resident / missing counts, how many
+    came from ASTC KTX2 versus a PNG/JPEG decoded on device) and its
+    ``textures: MISSING`` errors, which name the asset, material and file. A
+    scene whose placed meshes reference textures must end with at least one
+    resident and none missing."""
+    perf = scene.get("performance") or {}
+    textured = int((perf.get("textures") or {}).get("textured_mesh_entities") or 0)
+    rows = []
+    for line in text.splitlines():
+        if "tex:" not in line:
+            continue
+        body = line.split("tex:", 1)[1]
+        kv: dict[str, str] = {}
+        for part in body.split("|"):
+            bits = part.strip().split()
+            if len(bits) >= 2:
+                kv[bits[0]] = bits[1]
+        rows.append(kv)
+    missing_lines = [l.strip() for l in text.splitlines() if "textures: MISSING" in l]
+    if not rows:
+        return [_check("textures load on the headset", "base", textured == 0,
+                       "no 'tex:' telemetry" + ("" if textured == 0 else
+                                                f" although {textured} placed mesh(es) "
+                                                "reference textures"))]
+    last = rows[-1]
+    missing = int(_f(last.get("missing")))
+    resident = int(_f(last.get("resident")))
+    ktx2 = int(_f(last.get("ktx2")))
+    decoded = int(_f(last.get("decoded")))
+    ok = missing == 0 and not missing_lines and (textured == 0 or resident > 0)
+    detail = (f"{resident} texture(s) resident ({ktx2} ASTC KTX2, {decoded} decoded on "
+              f"device), {missing} missing; {textured} placed mesh(es) are textured")
+    checks = [_check("textures load on the headset", "base", ok, detail,
+                     evidence=(missing_lines or [str(last)])[:4])]
+    if textured > 0:
+        checks.append(_check("textures use the headset's ASTC format", "base",
+                             decoded == 0 or ktx2 > 0,
+                             f"{ktx2} KTX2, {decoded} PNG/JPEG decoded on the headset"))
+    return checks
+
+
 # ---------------------------------------------------------------------------
 # Weapons pass (debug.ptv.verify_weapons): a scripted hand holds and fires
 # every player weapon -- see engine/runtime/src/core/WeaponVerifier.h.
@@ -879,6 +1254,8 @@ def run_with_adb(ctx: PipelineContext, runner: Optional[AdbRunner] = None,
     started = _now()
 
     def finish_skipped(reason: str, **extra: Any) -> StageResult:
+        if "memory" not in extra:
+            extra["memory"] = _estimated_memory(ctx)
         result = RuntimeVerification(project_id=ctx.project_id,
                                      status=VerificationStatus.skipped,
                                      reason=reason, started_at=started,
@@ -950,6 +1327,18 @@ def run_with_adb(ctx: PipelineContext, runner: Optional[AdbRunner] = None,
     player_weapons = scene_weapons(scene)
     weapons_log_file = log_file.with_name(log_file.stem + "_weapons.log")
     weapons_text = ""
+    textures_log_file = log_file.with_name(log_file.stem + "_textures.log")
+    textures_text = ""
+    gallery_shots: list[dict[str, Any]] = []
+    # Memory pass (Quest 3 PSS).
+    mem_samples: list[dict[str, Any]] = []
+    gpu_mem: dict[str, float] = {}
+    lmk_hits: list[str] = []
+    soak_samples: list[tuple[float, float]] = []
+    soak_log_file = log_file.with_name(log_file.stem + "_soak.log")
+    pressure_log_file = log_file.with_name(log_file.stem + "_pressure.log")
+    pressure_text = ""
+    pressure_alive: Optional[bool] = None
     pin = getattr(ctx.settings, "quest_verify_store_pin", None)
 
     def scriptable(enable: bool) -> None:
@@ -1008,6 +1397,18 @@ def run_with_adb(ctx: PipelineContext, runner: Optional[AdbRunner] = None,
             sleep(2.0)
             return not running()
 
+        def sample_memory(into: Optional[list] = None) -> None:
+            rc_m, out_m = adb_s(["shell", "dumpsys", "meminfo", package], 30)
+            row = parse_dumpsys_meminfo(out_m) if rc_m == 0 else {}
+            if row:
+                (mem_samples if into is None else into).append(row)
+
+        def scan_kills() -> None:
+            _, all_log = adb_s(["logcat", "-d", "-b", "all"], 90)
+            for hit in low_memory_kills(all_log, package):
+                if hit not in lmk_hits:
+                    lmk_hits.append(hit)
+
         def start_game() -> bool:
             sleep(LAUNCH_SETTLE_S)
             for attempt in range(LAUNCH_ATTEMPTS):
@@ -1047,7 +1448,15 @@ def run_with_adb(ctx: PipelineContext, runner: Optional[AdbRunner] = None,
             waited += step
             if not still_there():
                 raise DeviceGone("the headset disconnected while the game was running")
+            sample_memory()
+            if not gpu_mem and waited >= capture / 2:
+                rc_pid, pid = adb_s(["shell", "pidof", package])
+                if rc_pid == 0 and pid.strip():
+                    gpu_mem.update(parse_gpumeminfo(adb_s(
+                        ["shell", "gpumeminfo", "-p", pid.strip().split()[0], "-m", "-o"],
+                        30)[1]))
         alive = running()
+        scan_kills()
         if stop_stream is not None:
             log_text = stop_stream()
             stop_stream = None
@@ -1085,6 +1494,7 @@ def run_with_adb(ctx: PipelineContext, runner: Optional[AdbRunner] = None,
                 stop_stream = None
             else:
                 _, flow_text = adb_s(["logcat", "-d", "-v", "time", "-s", "ptv:*"], 60)
+            scan_kills()
             adb_s(["shell", "setprop", "debug.ptv.verify_flow", "0"])
             if flow_exited:
                 adb_s(["shell", "setprop", "debug.ptv.verify", "0"])
@@ -1127,7 +1537,147 @@ def run_with_adb(ctx: PipelineContext, runner: Optional[AdbRunner] = None,
                 stop_stream = None
             else:
                 _, weapons_text = adb_s(["logcat", "-d", "-v", "time", "-s", "ptv:*"], 60)
+            scan_kills()
             adb_s(["shell", "setprop", "debug.ptv.verify_weapons", "0"])
+            adb_s(["shell", "am", "force-stop", package])
+
+        # --- Fourth pass: the texture gallery -------------------------
+        # The engine shows each textured asset in front of the player in
+        # turn; a Quest screenshot of each (plus one of the empty background)
+        # is compared with an offline render of the shipped LOD.
+        if texture_gallery_wanted(scene):
+            shot_dir = log_dir / f"textures_{log_file.stem}"
+            shot_dir.mkdir(parents=True, exist_ok=True)
+            adb_s(["shell", "am", "force-stop", package])
+            adb_s(["shell", "setprop", "debug.ptv.verify", "1"])
+            adb_s(["shell", "setprop", "debug.ptv.verify_flow", "0"])
+            adb_s(["shell", "setprop", "debug.ptv.verify_weapons", "0"])
+            adb_s(["shell", "setprop", "debug.ptv.verify_textures", "1"])
+            adb_s(["logcat", "-c"])
+            if streamer is not None:
+                stop_stream = streamer(["-s", serial, "logcat", "-v", "time", "-s", "ptv:*"],
+                                       textures_log_file)
+
+            def take_shot(name: str) -> Optional[Path]:
+                before = set(adb_s(["shell", "ls", "/sdcard/Oculus/Screenshots/"])[1].split())
+                adb_s(["shell", "am", "startservice", "-n",
+                       "com.oculus.metacam/.capture.CaptureService", "-a", "TAKE_SCREENSHOT"])
+                for _ in range(12):
+                    sleep(0.75)
+                    after = adb_s(["shell", "ls", "/sdcard/Oculus/Screenshots/"])[1].split()
+                    fresh = [f for f in after if f not in before and package in f]
+                    if fresh:
+                        local = shot_dir / f"{name}.jpg"
+                        adb_s(["pull", f"/sdcard/Oculus/Screenshots/{sorted(fresh)[-1]}",
+                               str(local)], 60)
+                        return local if local.exists() else None
+                return None
+
+            if start_game():
+                budget = gallery_capture_seconds(scene)
+                ctx.emit(stage, "info", f"texture gallery pass: up to {budget:.0f} s")
+                waited, bg_taken, seen = 0.0, False, set()
+                while waited < budget:
+                    ctx.raise_if_cancelled()
+                    sleep(1.0)
+                    waited += 1.0
+                    try:
+                        text = textures_log_file.read_text(encoding="utf-8", errors="replace")
+                    except OSError:
+                        text = ""
+                    if not bg_taken and "texgallery: begin" in text:
+                        sleep(2.0)
+                        waited += 2.0
+                        # The system shows an indicator once a screenshot has
+                        # been taken; the second background includes it, so
+                        # it is not mistaken for part of an asset.
+                        first = take_shot("background_first")
+                        sleep(2.0)  # back-to-back captures are dropped
+                        waited += 2.0
+                        bg = take_shot("background") or first
+                        gallery_shots.append({"name": "background", "file": bg})
+                        bg_taken = True
+                    for entry in parse_gallery_lines(text):
+                        if entry["index"] in seen:
+                            continue
+                        seen.add(entry["index"])
+                        sleep(1.0)
+                        waited += 1.0
+                        f = take_shot(f"asset_{entry['index']:02d}")
+                        gallery_shots.append({"name": f"asset_{entry['index']:02d}",
+                                              "file": f, "entry": entry})
+                    if "texgallery: done" in text:
+                        break
+                    if not still_there():
+                        raise DeviceGone("the headset disconnected during the texture pass")
+            if stop_stream is not None:
+                textures_text = stop_stream()
+                stop_stream = None
+            else:
+                _, textures_text = adb_s(["logcat", "-d", "-v", "time", "-s", "ptv:*"], 60)
+            scan_kills()
+            adb_s(["shell", "setprop", "debug.ptv.verify_textures", "0"])
+            adb_s(["shell", "am", "force-stop", package])
+
+        # --- Memory soak: the scripted walk for minutes, PSS every 15 s --
+        soak_s = float(getattr(ctx.settings, "quest_memory_soak_seconds", 0.0) or 0.0)
+        if soak_s > 0:
+            adb_s(["shell", "am", "force-stop", package])
+            adb_s(["shell", "setprop", "debug.ptv.verify", "1"])
+            adb_s(["logcat", "-c"])
+            if streamer is not None:
+                stop_stream = streamer(["-s", serial, "logcat", "-v", "time", "-s", "ptv:*"],
+                                       soak_log_file)
+            ctx.emit(stage, "info", f"memory soak: {soak_s:.0f} s")
+            if start_game():
+                waited = 0.0
+                while waited < soak_s:
+                    ctx.raise_if_cancelled()
+                    sleep(15.0)
+                    waited += 15.0
+                    rows: list[dict[str, Any]] = []
+                    sample_memory(rows)
+                    if rows and rows[0].get("total_pss_kb"):
+                        soak_samples.append((waited, rows[0]["total_pss_kb"] / 1024.0))
+                    if not still_there():
+                        raise DeviceGone("the headset disconnected during the memory soak")
+                    if not running():
+                        break
+            if stop_stream is not None:
+                stop_stream()
+                stop_stream = None
+            scan_kills()
+            adb_s(["shell", "am", "force-stop", package])
+
+        # --- Memory pressure: MemoryGuard's thresholds lowered mid-game ---
+        if getattr(ctx.settings, "quest_memory_pressure_test", True):
+            adb_s(["shell", "am", "force-stop", package])
+            adb_s(["shell", "setprop", "debug.ptv.verify", "1"])
+            adb_s(["shell", "setprop", "debug.ptv.simulate_memory_pressure", "1"])
+            adb_s(["logcat", "-c"])
+            if streamer is not None:
+                stop_stream = streamer(["-s", serial, "logcat", "-v", "time", "-s", "ptv:*"],
+                                       pressure_log_file)
+            # Thresholds scaled so red sits at half of what this game measured,
+            # whatever its size (a fixed 5% left a 200 MB game green).
+            pss_now = max([s.get("total_pss_kb", 0) / 1024.0 for s in mem_samples] or [200.0])
+            scale = min(0.5, max(0.001, 0.5 * pss_now / 4608.0))
+            ctx.emit(stage, "info", f"memory pressure pass: thresholds to {scale:.1%} "
+                                    f"(red at ~{4608 * scale:.0f} MB) for 20 s")
+            if start_game():
+                sleep(12.0)
+                adb_s(["shell", "setprop", "debug.ptv.simulate_memory_pressure", f"{scale:.4f}"])
+                sleep(20.0)
+                adb_s(["shell", "setprop", "debug.ptv.simulate_memory_pressure", "1"])
+                sleep(20.0)
+                pressure_alive = running()
+            if stop_stream is not None:
+                pressure_text = stop_stream()
+                stop_stream = None
+            else:
+                _, pressure_text = adb_s(["logcat", "-d", "-v", "time", "-s", "ptv:*"], 60)
+            adb_s(["shell", "setprop", "debug.ptv.simulate_memory_pressure", "1"])
+            scan_kills()
             adb_s(["shell", "am", "force-stop", package])
     except DeviceGone as exc:
         return finish_skipped(str(exc), device_serial=serial, package=package)
@@ -1142,6 +1692,8 @@ def run_with_adb(ctx: PipelineContext, runner: Optional[AdbRunner] = None,
                      ["shell", "setprop", "debug.ptv.verify", "0"],
                      ["shell", "setprop", "debug.ptv.verify_flow", "0"],
                      ["shell", "setprop", "debug.ptv.verify_weapons", "0"],
+                     ["shell", "setprop", "debug.ptv.verify_textures", "0"],
+                     ["shell", "setprop", "debug.ptv.simulate_memory_pressure", "1"],
                      ["shell", "setprop", "debug.oculus.guardian_pause", prev_guardian],
                      ["shell", "am", "broadcast", "-a",
                       "com.oculus.vrpowermanager.automation_disable"]):
@@ -1161,6 +1713,10 @@ def run_with_adb(ctx: PipelineContext, runner: Optional[AdbRunner] = None,
     checks, npc_summary = evaluate(tel, npc_plan, scene, process_alive=alive,
                                    crash_text=crash_text)
     checks.extend(evaluate_hands(log_text, scene))
+    checks.extend(evaluate_textures(log_text, scene))
+    checks.extend(evaluate_locks(log_text, scene))
+    if "Renderer ready" in log_text:
+        checks.extend(evaluate_render_health(log_text))
     if design is not None:
         if flow_text and not (flow_log_file.exists() and flow_log_file.stat().st_size):
             flow_log_file.write_text(flow_text, encoding="utf-8")
@@ -1170,17 +1726,40 @@ def run_with_adb(ctx: PipelineContext, runner: Optional[AdbRunner] = None,
         if weapons_text and not (weapons_log_file.exists() and weapons_log_file.stat().st_size):
             weapons_log_file.write_text(weapons_text, encoding="utf-8")
         checks.extend(evaluate_weapons(parse_weapons(weapons_text), scene))
+    if texture_gallery_wanted(scene):
+        if textures_text and not (textures_log_file.exists() and textures_log_file.stat().st_size):
+            textures_log_file.write_text(textures_text, encoding="utf-8")
+        checks.extend(evaluate_texture_gallery(ctx, gallery_shots, scene))
+    if pressure_text and not (pressure_log_file.exists() and pressure_log_file.stat().st_size):
+        pressure_log_file.write_text(pressure_text, encoding="utf-8")
+    compromises = []
+    try:
+        nrep = json.loads((ctx.project_dir / "asset_normalization.json").read_text(encoding="utf-8"))
+        compromises = list((nrep.get("__memory__") or {}).get("compromises") or [])
+    except (OSError, ValueError):
+        pass
+    mem_checks, memory = evaluate_memory(
+        samples=mem_samples, gpu=gpu_mem, base_text=log_text, flow_text=flow_text,
+        soak=soak_samples, pressure_text=pressure_text, pressure_alive=pressure_alive,
+        kills=lmk_hits, scene=scene, compromises=compromises)
+    checks.extend(mem_checks)
+    _record_memory(ctx, memory)
     failed = [c for c in checks if c.outcome == CheckOutcome.failed]
+    # Memory first: a memory failure is the reason the run failed.
+    failed.sort(key=lambda c: 0 if c.category == "memory" else 1)
     status = VerificationStatus.failed if failed else VerificationStatus.passed
     reason = (f"{len(failed)} of {len(checks)} check(s) failed: "
               + "; ".join(f"{c.subject + ': ' if c.subject else ''}{c.name}"
                           for c in failed)[:1500]
               if failed else f"all {sum(1 for c in checks if c.outcome == CheckOutcome.passed)} applicable checks passed")
+    from .quest_metrics import parse_perf_lines, summarize_perf
+
     result = RuntimeVerification(
         project_id=ctx.project_id, status=status, reason=reason,
         device_serial=serial, package=package, capture_seconds=capture,
         npc_summary=npc_summary, checks=checks, log_path=log_rel,
-        started_at=started, finished_at=_now())
+        started_at=started, finished_at=_now(),
+        performance=summarize_perf(parse_perf_lines(log_text)), memory=memory)
     rel = _write(ctx, result)
     for c in checks:
         if c.outcome != CheckOutcome.not_applicable:

@@ -67,6 +67,10 @@ struct MeshRef {
     std::vector<std::string> lod_paths;
     /** Triangle count of each entry in ``lod_paths`` (telemetry + budgeting). */
     std::vector<std::uint32_t> lod_triangle_counts;
+    /** Simplification error of each LOD relative to the mesh's extent
+     *  (meshoptimizer), for projected-error LOD selection. Empty = unknown:
+     *  the renderer switches by distance instead. */
+    std::vector<float> lod_errors_rel;
     /** World-space bounding-sphere radius (metres) of the scaled mesh. Used
      * for frustum + distance culling. 0 means "unknown": the renderer then
      * falls back to a conservative radius so nothing is wrongly culled. */
@@ -265,6 +269,9 @@ struct EntitySpec {
      *  offers ``builtin.equip`` no candidate slot at all, so this is what
      *  makes an authored holster work. */
     std::vector<EquipSlotSpec> equip_slots;
+    /** The compiler found nothing that moves, is held or is read per frame:
+     *  the renderer may merge it with its neighbours into one draw. */
+    bool static_batch{false};
 };
 
 struct LightSpec {
@@ -365,6 +372,55 @@ struct ScenePerformance {
     int governor_max_foveation_level{3};
     int governor_escalate_after_bad_frames{30};
     int governor_relax_after_good_frames{180};
+
+    // --- LOD and culling by projected size ---
+    /** Switch to a coarser LOD once its simplification error projects to
+     *  fewer pixels than this (per eye, at the eye buffer's resolution). */
+    float lod_screen_error_px{1.0f};
+    /** Fraction the error must clear before switching back to finer detail. */
+    float lod_hysteresis{0.2f};
+    /** Rendering-only cull for objects smaller than this on screen. */
+    float small_object_cull_px{1.5f};
+
+    // --- Resolution and refresh ---
+    /** Fraction of the runtime-recommended eye resolution the swapchain is
+     *  allocated at (1.0 = 1680x1760 on Quest 3; up to 1.25 on request). */
+    float render_scale_ceiling{1.0f};
+    /** Lowest fraction dynamic resolution may submit (imageRect). */
+    float render_scale_floor{0.85f};
+    int refresh_hz{72};
+
+    // --- Internal toggles (engineering switches, not user settings) ---
+    bool multiview{true};
+    bool ffr_fdm{true};
+    int frames_in_flight{2};
+    bool static_batching{true};
+    bool instancing{true};
+    /** Room/portal culling from the world's nav regions and links. */
+    bool room_culling{false};
+    /** Nav regions the compiler found closed by walls on all four sides;
+     *  only their contents may be hidden from a player elsewhere. */
+    std::vector<std::string> rooms;
+    /** Grid cell edge for merging static geometry into one draw. */
+    float static_batch_cell_m{8.0f};
+
+    // --- Memory (Phase 13; Meta's Quest 3 limit is 5.75 GiB PSS) ---
+    float memory_target_mb{4608.0f};
+    float memory_ceiling_mb{5120.0f};
+    float memory_limit_mb{5888.0f};
+    float texture_memory_budget_mb{320.0f};
+    /** Streamable meshes + textures resident at once (the memory model's
+     *  target minus the always-resident set and transients). */
+    float resident_memory_budget_mb{2048.0f};
+
+    // --- User locks ("Custom Quest Optimizations"). The governor never
+    //     moves a locked knob; "auto" means unlocked. ---
+    std::string lock_ffr{"auto"};        // auto | off | fixed | max
+    int lock_ffr_level{-1};              // fixed / max level (1..3)
+    std::string lock_resolution{"auto"}; // auto | off | high
+    std::string lock_lod{"auto"};        // auto | detail | performance
+    std::string lock_draw_distance{"auto"}; // auto | far | performance
+    std::string lock_room_culling{"auto"};  // auto | off
 };
 
 /** One designed projectile (``scene.json`` ``projectiles``), so code can

@@ -43,7 +43,10 @@ A concrete example prompt lives in the `NewProjectPage` sample text.
 | Codegen ledger | `codegen_board.json` | Orchestrator (`code_generation`) |
 | World scene | `world.scene.json` | Offline `ptv_worldgen` (world architect agent) |
 | Compiled scene | `scene.json` | Orchestrator (`scene_compile`, deterministic) |
-| `PerformanceProfile` | `performance` block in `scene.json` (+ `__performance__` in `asset_normalization.json`) | Orchestrator (`asset_optimization`, deterministic) |
+| `OptimizationPreferences` | `optimization_preferences.json` | `optimization_preferences` stage: keyword gate + one light `LlmClient` call + deterministic validator; see [quest-optimization.md](quest-optimization.md) |
+| `PerformanceProfile` | `performance` block in `scene.json` (+ `__performance__` in `asset_normalization.json`); includes `locks` from OptimizationPreferences | Orchestrator (`asset_optimization`, deterministic) |
+| Scene complexity + memory estimate | `scene_complexity.json`, `performance.complexity` / `performance.memory_estimate` in `scene.json`, `memory_status.json` | Orchestrator (`scene_compile`, deterministic) |
+| `RuntimeVerification` (+ `MemoryReport`) | `runtime_verification.json` (`memory` section, `performance` medians) | `quest_runtime_verify` |
 | `ProjectState` | `project_state.json` | Orchestrator (bookkeeping) |
 | `ArtifactMetadata` | returned from `/api/projects/<id>/artifacts` | Orchestrator |
 | `AcceptanceTestPlan` | `acceptance_test_plan.json` | (optional) Claude Sonnet |

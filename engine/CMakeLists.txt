@@ -38,6 +38,15 @@ find_package(Stb REQUIRED)
 # Offline mesh simplification for the asset_optimization pipeline stage
 # (engine/tools/glb_optimize.cpp). Host-only: not linked into the runtime.
 find_package(meshoptimizer CONFIG REQUIRED)
+# Offline ASTC texture compression (libktx bundles ARM's astcenc) for the
+# asset_optimization stage (engine/tools/texture_compress.cpp). Host-only:
+# the runtime reads the resulting KTX2 files with its own small parser.
+find_package(Ktx CONFIG QUIET)
+if(NOT Ktx_FOUND)
+  message(WARNING "KTX-Software (vcpkg port 'ktx') not found: ptv_texture_compress "
+                  "will not be built, and Quest builds fall back to decoding "
+                  "PNG/JPEG textures on the headset.")
+endif()
 
 # Some vcpkg portfile versions expose tinygltf as an INTERFACE target or via
 # a different package name; handle both cases gracefully.

@@ -54,7 +54,26 @@ export type ProjectState = {
   latest_build_dir: string | null;
   latest_scene_json: string | null;
   latest_build_apk: string | null;
+  /** The New Project page's "Custom Quest Optimizations" text ("" = automatic). */
+  custom_quest_optimizations?: string;
 };
+
+/** What the optimization_preferences stage makes of the user's wording. */
+export type OptimizationPreview = {
+  preferences: Record<string, unknown> | null;
+  /** Human-readable overrides, unsupported requests and clamps. */
+  lines: string[];
+  differs_from_auto: boolean;
+  /** The non-blocking warning text ("" when everything is automatic). */
+  warning: string;
+  error?: string;
+};
+
+export type MemoryStatus =
+  | "verified_safe"
+  | "estimated_safe_not_device_tested"
+  | "at_risk"
+  | "failed_on_device";
 
 export type Artifact = {
   id: string;
@@ -87,6 +106,7 @@ export const api = {
     prompt: string,
     target_device: TargetDevice = "pcvr",
     player_experience: PlayerExperience = "full_avatar",
+    custom_quest_optimizations = "",
   ) =>
     req<{
       project_id: string;
@@ -94,8 +114,29 @@ export const api = {
       player_experience: PlayerExperience;
     }>("/projects", {
       method: "POST",
-      body: JSON.stringify({ title, prompt, target_device, player_experience }),
+      body: JSON.stringify({
+        title,
+        prompt,
+        target_device,
+        player_experience,
+        custom_quest_optimizations,
+      }),
     }),
+  previewOptimizations: (prompt: string, custom_quest_optimizations: string) =>
+    req<OptimizationPreview>("/optimization-preferences/preview", {
+      method: "POST",
+      body: JSON.stringify({ prompt, custom_quest_optimizations }),
+    }),
+  /** Always downloadable after a Quest build, whatever its memory status. */
+  apkUrl: (id: string) => `${BASE}/projects/${id}/apk`,
+  /** A project-relative JSON artifact, or null when it does not exist yet. */
+  projectJson: async <T = Record<string, unknown>>(id: string, path: string) => {
+    const res = await fetch(
+      `${BASE}/projects/${id}/file?path=${encodeURIComponent(path)}`,
+    );
+    if (!res.ok) return null;
+    return (await res.json()) as T;
+  },
   listArtifacts: (id: string) => req<Artifact[]>(`/projects/${id}/artifacts`),
   listLogs: (id: string) => req<string[]>(`/projects/${id}/logs`),
   getLog: async (id: string, name: string) => {

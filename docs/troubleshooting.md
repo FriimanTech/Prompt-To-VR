@@ -276,6 +276,19 @@ cmake --preset vs2026-x64
 cmake --build build/vs2026-x64 --config Release --target ptv_glb_optimize
 ```
 
+## Textures ship as PNG/JPEG: "ptv_texture_compress unavailable"
+
+ASTC compression uses the vcpkg port **`ktx`** (Khronos KTX-Software: libktx
+with the ASTC encoder), declared in `engine/vcpkg.json`. `engine/CMakeLists.txt`
+finds it with `find_package(Ktx CONFIG QUIET)` and builds `ptv_texture_compress`
+only when it is present; without it the asset_optimization stage warns and the
+textures ship as their original PNG/JPEG, decoded on the headset (slower to
+load, about 4x the GPU memory). Build the tool once by hand:
+
+```powershell
+cmake --build build/vs2026-x64 --config Release --target ptv_texture_compress
+```
+
 ## The game runs but distant objects look blocky / pop in
 
 Expected, and tunable. Assets are decimated into LOD chains against the device

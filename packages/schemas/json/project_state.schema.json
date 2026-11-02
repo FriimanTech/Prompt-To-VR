@@ -13,6 +13,7 @@
       "enum": [
         "created",
         "build_spec",
+        "optimization_preferences",
         "asset_manifest",
         "interaction_design",
         "npc_plan",
@@ -133,6 +134,12 @@
     "current_stage": {
       "$ref": "#/$defs/ProjectStage",
       "default": "created"
+    },
+    "custom_quest_optimizations": {
+      "default": "",
+      "maxLength": 4000,
+      "title": "Custom Quest Optimizations",
+      "type": "string"
     },
     "env_snapshot": {
       "additionalProperties": {

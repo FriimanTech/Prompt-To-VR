@@ -40,11 +40,14 @@
 #include "../src/mechanics/builtin/avatar_body/NeckDrift.h"
 #include "../src/mechanics/builtin/avatar_body/HeightCalibration.h"
 #include "../src/core/NpcRuntime.h"
+#include "../src/core/TextureGallery.h"
 #include "ptv/api/BodySlots.h"
 #include "ptv/api/Facing.h"
 #include "ptv/api/IBehaviour.h"
 #include "ptv/api/IMechanic.h"
 #include "ptv/core/Logger.h"
+#include "ptv/core/MemoryGuard.h"
+#include "ptv/core/QualityGovernor.h"
 #include "ptv/ecs/Clone.h"
 #include "ptv/ecs/Skeleton.h"
 #include "ptv/ecs/World.h"
@@ -53,6 +56,7 @@
 #include "ptv/physics/PhysicsWorld.h"
 #include "ptv/render/GltfMeshLoad.h"
 #include "ptv/render/GltfSkinnedLoad.h"
+#include "ptv/render/Ktx2.h"
 #include "ptv/render/Renderer.h"
 #include "ptv/render/VulkanContext.h"
 #include "ptv/save/SaveSystem.h"
@@ -5513,6 +5517,259 @@ static int case_game_flow() {
               "Again, Leave Game, and a reader that cannot die but can pause");
 }
 
+// --- Quest optimization + memory -------------------------------------------
+
+// The governor climbs the GPU ladder (FFR first) for a GPU-bound frame and the
+// CPU ladder (cull distance first) for a CPU-bound one, waits out a cooldown
+// after each step, skips a knob whose step bought nothing, and never moves a
+// knob the user locked -- however long the frames stay bad.
+static int case_governor_ladders() {
+    ptv::ScenePerformance perf{};
+    perf.refresh_hz = 72;
+    perf.foveation_level = 1;
+    perf.governor_max_foveation_level = 3;
+    perf.cull_distance_m = 200.0f;
+    perf.governor_min_cull_distance_m = 25.0f;
+    perf.governor_escalate_after_bad_frames = 10;
+    perf.governor_relax_after_good_frames = 30;
+
+    ptv::QualityGovernor gpu;
+    gpu.configure(perf);
+    int frames = 0;
+    // GPU-bound and improving with each step: FFR goes up first.
+    while (gpu.state().foveation_level == 1 && frames < 500) {
+        gpu.update(0.020f, 20.0f, 2.0f);
+        ++frames;
+    }
+    if (gpu.state().foveation_level != 2) return fail("GPU-bound: FFR was not the first step");
+    if (gpu.state().cull_distance_m != 200.0f) return fail("GPU-bound: cull moved before FFR");
+    // Cooldown: the very next bad frames do not step again.
+    const auto after_first = gpu.state();
+    for (int i = 0; i < 5; ++i) gpu.update(0.020f, 20.0f, 2.0f);
+    if (gpu.state().render_scale != after_first.render_scale ||
+        gpu.state().foveation_level != after_first.foveation_level) {
+        return fail("stepped again inside the cooldown");
+    }
+
+    ptv::QualityGovernor cpu;
+    cpu.configure(perf);
+    frames = 0;
+    while (cpu.state().cull_distance_m == 200.0f && frames < 500) {
+        cpu.update(0.020f, 4.0f, 20.0f);
+        ++frames;
+    }
+    if (cpu.state().cull_distance_m >= 200.0f) return fail("CPU-bound: cull was not shrunk");
+    if (cpu.state().foveation_level != 1) return fail("CPU-bound: FFR moved");
+
+    // A step that buys nothing (GPU time unchanged) is skipped from then on.
+    ptv::QualityGovernor probe;
+    probe.configure(perf);
+    for (int i = 0; i < 400; ++i) probe.update(0.020f, 20.0f, 2.0f);
+    if (probe.state().render_scale >= 1.0f) return fail("ineffective FFR did not move on to scale");
+
+    // Locks: FFR off and resolution off stay put through 10,000 bad frames.
+    ptv::ScenePerformance locked = perf;
+    locked.foveation_level = 0;
+    locked.lock_ffr = "off";
+    locked.lock_resolution = "off";
+    locked.lock_lod = "detail";
+    locked.governor_max_lod_bias = 0.0f;
+    ptv::QualityGovernor gov;
+    gov.configure(locked);
+    for (int i = 0; i < 10000; ++i) gov.update(0.030f, 30.0f, 2.0f);
+    if (gov.state().foveation_level != 0) return fail("a locked FFR level moved");
+    if (gov.state().render_scale != 1.0f) return fail("a locked resolution moved");
+    if (gov.state().lod_bias != 0.0f) return fail("a locked LOD bias moved");
+    // Only the unlocked knob (draw distance) was allowed to move.
+    if (gov.state().cull_distance_m >= 200.0f) return fail("the unlocked knob never moved");
+    return ok("governor: GPU ladder FFR first, CPU ladder cull first, cooldown, "
+              "ineffective step skipped, locks never move");
+}
+
+// MemoryGuard levels from the engine's own accounting (no sampler running):
+// projected usage, including queued loads, decides the level; it steps down
+// only with a margin.
+static int case_memory_guard_levels() {
+    ptv::ScenePerformance perf{};
+    ptv::MemoryGuard g;
+    g.configure(perf);
+    ptv::MemoryGuard::Accounting a{};
+    a.texture_mb = 1000.0;
+    g.update(a);
+    if (g.level() != ptv::MemoryGuard::Level::Green) return fail("1 GB is not green");
+    a.texture_mb = 4200.0;
+    a.reserved_mb = 300.0;  // queued loads push the projection over 4.25 GiB
+    g.update(a);
+    if (g.level() != ptv::MemoryGuard::Level::Yellow) return fail("reservations did not raise yellow");
+    a.reserved_mb = 0.0;
+    a.texture_mb = 4700.0;
+    g.update(a);
+    if (g.level() != ptv::MemoryGuard::Level::Red) return fail("4.7 GB is not red");
+    a.texture_mb = 5000.0;
+    g.update(a);
+    if (g.level() != ptv::MemoryGuard::Level::Critical) return fail("5.0 GB is not critical");
+    a.texture_mb = 4850.0;  // under 4.8 GiB but inside the hysteresis band
+    g.update(a);
+    if (g.level() != ptv::MemoryGuard::Level::Critical) return fail("left critical without margin");
+    a.texture_mb = 3000.0;
+    for (int i = 0; i < 4; ++i) g.update(a);
+    if (g.level() != ptv::MemoryGuard::Level::Green) return fail("did not recover to green");
+    // Simulated pressure (verification) trips red on a small game.
+    g.set_simulated_pressure(0.05f);
+    a.texture_mb = 300.0;
+    g.update(a);
+    g.update(a);
+    if (g.level() < ptv::MemoryGuard::Level::Red) return fail("simulated pressure did not reach red");
+    if (g.telemetry_line().find("mem: pss") != 0) return fail("telemetry line format");
+    return ok("memory guard: levels, projection from reservations, hysteresis, pressure");
+}
+
+// Locks, rooms, static batching and LOD errors parse from scene.json -- and a
+// null where the compiler wrote an optional field is not a crash.
+static int case_scene_perf_locks() {
+    const char* json = R"({
+      "version": 1, "scene_id": "s",
+      "performance": {
+        "multiview": true, "ffr_fdm": false, "frames_in_flight": 2,
+        "render_scale_floor": 0.9, "refresh_hz": 90, "room_culling": true,
+        "rooms": ["hall", "office"], "static_batch_cell_m": 16,
+        "resident_memory_budget_mb": 1500,
+        "locks": {"ffr": {"value": "off", "level": null, "source": "custom_box", "quote": "no FFR"},
+                  "resolution": {"value": "high", "level": null},
+                  "lod": {"value": "auto", "level": null}}
+      },
+      "entities": [
+        {"id": "wall", "transform": {"position": [0,0,0]}, "static_batch": true,
+         "primitive": {"kind": "box", "size": [1,1,1]}},
+        {"id": "crate", "transform": {"position": [1,0,0]},
+         "mesh": {"glb_path": "a.glb", "lod_paths": ["a.glb", "b.glb"],
+                  "lod_errors_rel": [0.0, 0.02]}}
+      ]})";
+    const auto path = std::filesystem::temp_directory_path() / "ptv_smoke_locks.json";
+    { std::ofstream f(path); f << json; }
+    ptv::SceneDoc doc = ptv::LoadSceneJson(path.string());
+    const auto& p = doc.performance;
+    if (p.lock_ffr != "off" || p.lock_resolution != "high" || p.lock_lod != "auto")
+        return fail("locks did not parse");
+    if (p.lock_ffr_level != -1) return fail("a null level was not treated as unset");
+    if (p.ffr_fdm || p.refresh_hz != 90 || p.render_scale_floor != 0.9f)
+        return fail("toggles / resolution did not parse");
+    if (p.rooms.size() != 2 || !p.room_culling || p.static_batch_cell_m != 16.0f)
+        return fail("rooms / batching did not parse");
+    if (p.resident_memory_budget_mb != 1500.0f) return fail("residency budget did not parse");
+    ptv::World world;
+    ptv::ApplySceneToWorld(doc, world);
+    int batched = 0;
+    for (auto e : world.registry().view<ptv::CStaticBatch>()) {
+        (void)e;
+        ++batched;
+    }
+    if (batched != 1) return fail("static_batch did not become CStaticBatch");
+    bool errors = false;
+    for (auto e : world.registry().view<ptv::CMesh>()) {
+        errors = world.registry().get<ptv::CMesh>(e).lod_errors_rel.size() == 2;
+    }
+    if (!errors) return fail("lod_errors_rel did not reach CMesh");
+    return ok("scene: locks (null-safe), rooms, batching, residency budget, LOD errors");
+}
+
+// Clones of an NPC type (and its animator) share one clip array.
+static int case_clip_sharing() {
+    namespace gml = ptv::gltf_mesh_load;
+    std::vector<gml::AnimationClip> clips(2);
+    clips[0].name = "idle";
+    clips[1].name = "walk";
+    gml::ClipList shared(std::move(clips));
+    gml::ClipList clone = shared;
+    if (!clone.shares_with(shared)) return fail("a copy did not share");
+    ptv::CAnimator anim{};
+    anim.clips = shared;
+    ptv::CAnimator anim_copy = anim;
+    if (!anim_copy.clips.shares_with(shared) || shared.use_count() != 4)
+        return fail("animator copies did not share");
+    if (anim_copy.clips[1].name != "walk") return fail("read through a shared list");
+    gml::AnimationClip extra;
+    extra.name = "die";
+    clone.push_back(extra);
+    if (clone.shares_with(shared) || shared.size() != 2 || clone.size() != 3)
+        return fail("a write did not detach");
+    return ok("clips: copies share one array, a write detaches");
+}
+
+// The texture gallery frames a rigged asset at the centre its bind-pose
+// palette puts the raw vertices; that must be where the skinned mesh really
+// is, at its real size.
+static int case_gallery_skinned_framing(const char* glb) {
+    namespace gml = ptv::gltf_mesh_load;
+    for (const std::string& path : {std::string(glb), other_hand_path(glb)}) {
+        std::string err;
+        std::vector<gml::SkinnedVertex> verts;
+        std::vector<std::uint32_t> indices;
+        gml::SkeletonData skel;
+        if (!gml::load_glb_skinned(path, 0.27f, verts, indices, skel, err)) {
+            std::fprintf(stderr, "[fail] load_glb_skinned %s: %s\n", path.c_str(), err.c_str());
+            return 1;
+        }
+        std::vector<ptv::Mat4> pal;
+        gml::build_joint_palette(skel, skel.bind_pose, pal);
+        ptv::Vec3 rlo(1e9f), rhi(-1e9f), slo(1e9f), shi(-1e9f);
+        for (const auto& v : verts) {
+            const ptv::Vec3 p(v.pos[0], v.pos[1], v.pos[2]);
+            rlo = glm::min(rlo, p);
+            rhi = glm::max(rhi, p);
+            ptv::Mat4 m(0.0f);
+            for (int k = 0; k < 4; ++k) {
+                if (v.weights[k] == 0) continue;
+                m += pal[v.joints[k]] * (static_cast<float>(v.weights[k]) / 255.0f);
+            }
+            const ptv::Vec3 s(m * ptv::Vec4(p, 1.0f));
+            slo = glm::min(slo, s);
+            shi = glm::max(shi, s);
+        }
+        const ptv::Vec3 skin_c = 0.5f * (slo + shi);
+        const float raw_r = 0.5f * glm::length(rhi - rlo);
+        const float skin_r = 0.5f * glm::length(shi - slo);
+        ptv::Vec3 centre(0.0f);
+        float radius = 0.0f;
+        if (!ptv::skinned_bounds(verts, pal, centre, radius)) return fail("no skinned bounds");
+        std::printf("  %s: raw r %.4f m | skinned centre (%.3f %.3f %.3f) r %.3f m | gallery "
+                    "(%.3f %.3f %.3f) r %.3f m\n", path.c_str(), raw_r, skin_c.x, skin_c.y,
+                    skin_c.z, skin_r, centre.x, centre.y, centre.z, radius);
+        // Framed from the skinned pose: a 0.27 m hand is ~0.15 m in radius,
+        // whatever scale its raw vertices are in.
+        if (glm::length(centre - skin_c) > 1e-3f || std::abs(radius - skin_r) > 1e-3f)
+            return fail("gallery bounds differ from the skinned bind pose");
+        if (radius < 0.05f || radius > 0.5f) return fail("skinned hand is not hand-sized");
+    }
+    return ok("gallery: rigged assets framed at their skinned bind-pose centre");
+}
+
+// KTX2 written and parsed back; ASTC level sizes.
+static int case_ktx2_roundtrip() {
+    constexpr std::uint32_t kAstc6x6Srgb = 166;  // VK_FORMAT_ASTC_6x6_SRGB_BLOCK
+    std::vector<std::vector<std::uint8_t>> levels;
+    for (std::uint32_t s = 64; s >= 1; s /= 2) {
+        levels.emplace_back(ptv::ktx2::astc_level_bytes(s, s, 6, 6), std::uint8_t(s));
+        if (s == 1) break;
+    }
+    const auto bytes = ptv::ktx2::write(kAstc6x6Srgb, 64, 64, levels);
+    ptv::ktx2::Info info;
+    std::string err;
+    if (!ptv::ktx2::parse(bytes.data(), bytes.size(), info, err)) return fail(err.c_str());
+    if (info.width != 64 || info.levels.size() != levels.size() || info.vk_format != kAstc6x6Srgb)
+        return fail("header mismatch");
+    if (info.levels[0].size != ptv::ktx2::astc_level_bytes(64, 64, 6, 6) ||
+        bytes[info.levels[1].offset] != 32) {
+        return fail("level data mismatch");
+    }
+    std::uint32_t bw = 0, bh = 0;
+    ptv::ktx2::astc_block_size(kAstc6x6Srgb, bw, bh);
+    if (bw != 6 || bh != 6) return fail("block size");
+    if (ptv::ktx2::astc_level_bytes(7, 7, 6, 6) != 4 * 16) return fail("partial blocks round up");
+    if (ptv::ktx2::parse(bytes.data(), 40, info, err)) return fail("a truncated file parsed");
+    return ok("ktx2: write/parse round trip, level offsets, ASTC block math");
+}
+
 int main(int argc, char** argv) {
     if (argc < 2) {
         std::fprintf(
@@ -5551,6 +5808,14 @@ int main(int argc, char** argv) {
     if (what == "facing_math") return case_facing_math();
     if (what == "text_atlas") return case_text_atlas();
     if (what == "game_flow") return case_game_flow();
+    if (what == "governor_ladders") return case_governor_ladders();
+    if (what == "memory_guard_levels") return case_memory_guard_levels();
+    if (what == "scene_perf_locks") return case_scene_perf_locks();
+    if (what == "clip_sharing") return case_clip_sharing();
+    if (what == "ktx2_roundtrip") return case_ktx2_roundtrip();
+    if (what == "gallery_skinned_framing" && argc >= 3) {
+        return case_gallery_skinned_framing(argv[2]);
+    }
     if (what == "facing_directions") return case_facing_directions();
     if (what == "ground_motor") return case_ground_motor();
     if (what == "foot_planting") return case_foot_planting();

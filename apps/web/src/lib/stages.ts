@@ -101,8 +101,17 @@ const STAGES: StageMeta[] = [
     blurb: "The prompt becomes a strict spec: scenes, mechanics, assets.",
   },
   {
-    id: "asset_manifest",
+    id: "optimization_preferences",
     step: 2,
+    label: "Quest optimization choices",
+    group: "plan",
+    cost: "llm",
+    blurb:
+      "Your Custom Quest Optimizations (and the same wording in the prompt) become locked settings. No model call when there are none; everything else stays automatic.",
+  },
+  {
+    id: "asset_manifest",
+    step: 3,
     label: "AssetManifest",
     group: "plan",
     cost: "llm",
@@ -110,7 +119,7 @@ const STAGES: StageMeta[] = [
   },
   {
     id: "interaction_design",
-    step: 3,
+    step: 4,
     label: "Interaction design",
     group: "plan",
     cost: "llm",
@@ -119,7 +128,7 @@ const STAGES: StageMeta[] = [
   },
   {
     id: "npc_plan",
-    step: 4,
+    step: 5,
     label: "NPC plan",
     group: "plan",
     cost: "llm",
@@ -128,7 +137,7 @@ const STAGES: StageMeta[] = [
   },
   {
     id: "game_design",
-    step: 5,
+    step: 6,
     label: "Game design",
     group: "plan",
     cost: "llm",
@@ -137,7 +146,7 @@ const STAGES: StageMeta[] = [
   },
   {
     id: "mechanic_plan",
-    step: 6,
+    step: 7,
     label: "MechanicPlan",
     group: "plan",
     cost: "llm",
@@ -146,7 +155,7 @@ const STAGES: StageMeta[] = [
   },
   {
     id: "scene_spec",
-    step: 7,
+    step: 8,
     label: "SceneSpec",
     group: "plan",
     cost: "llm",
@@ -154,7 +163,7 @@ const STAGES: StageMeta[] = [
   },
   {
     id: "reference_images",
-    step: 8,
+    step: 9,
     label: "Reference images",
     group: "assets",
     cost: "credits",
@@ -162,7 +171,7 @@ const STAGES: StageMeta[] = [
   },
   {
     id: "tripo_models",
-    step: 9,
+    step: 10,
     label: "Tripo 3D models",
     group: "assets",
     cost: "credits",
@@ -170,7 +179,7 @@ const STAGES: StageMeta[] = [
   },
   {
     id: "character_routing",
-    step: 10,
+    step: 11,
     label: "Character routing",
     group: "assets",
     cost: "llm",
@@ -179,7 +188,7 @@ const STAGES: StageMeta[] = [
   },
   {
     id: "uthana_rigging",
-    step: 11,
+    step: 12,
     label: "Uthana auto-rig",
     group: "assets",
     cost: "credits",
@@ -188,7 +197,7 @@ const STAGES: StageMeta[] = [
   },
   {
     id: "asset_rigging",
-    step: 12,
+    step: 13,
     label: "Auto-rigging",
     group: "assets",
     cost: "credits",
@@ -197,7 +206,7 @@ const STAGES: StageMeta[] = [
   },
   {
     id: "asset_animation",
-    step: 13,
+    step: 14,
     label: "Animation retarget",
     group: "assets",
     cost: "credits",
@@ -205,7 +214,7 @@ const STAGES: StageMeta[] = [
   },
   {
     id: "uthana_motion_plan",
-    step: 14,
+    step: 15,
     label: "Uthana motion plan",
     group: "assets",
     cost: "llm",
@@ -214,7 +223,7 @@ const STAGES: StageMeta[] = [
   },
   {
     id: "uthana_animation",
-    step: 15,
+    step: 16,
     label: "Uthana animation",
     group: "assets",
     cost: "credits",
@@ -223,7 +232,7 @@ const STAGES: StageMeta[] = [
   },
   {
     id: "asset_normalization",
-    step: 16,
+    step: 17,
     label: "Asset normalization",
     group: "assets",
     cost: "free",
@@ -232,7 +241,7 @@ const STAGES: StageMeta[] = [
   },
   {
     id: "socket_generation",
-    step: 17,
+    step: 18,
     label: "Socket generation",
     group: "assets",
     cost: "credits",
@@ -241,7 +250,7 @@ const STAGES: StageMeta[] = [
   },
   {
     id: "asset_contract",
-    step: 18,
+    step: 19,
     label: "Asset contract",
     group: "assets",
     cost: "free",
@@ -250,7 +259,7 @@ const STAGES: StageMeta[] = [
   },
   {
     id: "world_generation",
-    step: 19,
+    step: 20,
     label: "VR environments",
     group: "build",
     cost: "llm",
@@ -259,7 +268,7 @@ const STAGES: StageMeta[] = [
   },
   {
     id: "code_generation",
-    step: 20,
+    step: 21,
     label: "Gameplay C++",
     group: "build",
     cost: "llm",
@@ -268,7 +277,7 @@ const STAGES: StageMeta[] = [
   },
   {
     id: "asset_optimization",
-    step: 21,
+    step: 22,
     label: "Decimation and LODs",
     group: "compile",
     cost: "free",
@@ -277,7 +286,7 @@ const STAGES: StageMeta[] = [
   },
   {
     id: "scene_compile",
-    step: 22,
+    step: 23,
     label: "Scene compile",
     group: "compile",
     cost: "free",
@@ -286,7 +295,7 @@ const STAGES: StageMeta[] = [
   },
   {
     id: "cmake_build",
-    step: 23,
+    step: 24,
     label: "CMake build (.exe)",
     group: "ship",
     cost: "free",
@@ -295,7 +304,7 @@ const STAGES: StageMeta[] = [
   },
   {
     id: "quest_build",
-    step: 23,
+    step: 24,
     label: "Quest APK build",
     group: "ship",
     cost: "free",
@@ -304,7 +313,7 @@ const STAGES: StageMeta[] = [
   },
   {
     id: "quest_runtime_verify",
-    step: 24,
+    step: 25,
     label: "Verify on headset",
     group: "ship",
     cost: "free",
@@ -316,7 +325,7 @@ const STAGES: StageMeta[] = [
   // the step number is what the timeline shows.
   {
     id: "engine_promotion",
-    step: 24,
+    step: 25,
     label: "Engine promotion",
     group: "ship",
     cost: "free",
@@ -325,7 +334,7 @@ const STAGES: StageMeta[] = [
   },
   {
     id: "engine_promotion",
-    step: 25,
+    step: 26,
     label: "Engine promotion",
     group: "ship",
     cost: "free",

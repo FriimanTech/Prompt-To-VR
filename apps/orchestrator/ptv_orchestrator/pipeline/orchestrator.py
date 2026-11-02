@@ -39,6 +39,7 @@ from . import (
     stage_game_design,
     stage_interaction_design,
     stage_mechanic_plan,
+    stage_optimization_preferences,
     stage_quest_build,
     stage_quest_verify,
     stage_reference_images,
@@ -64,6 +65,9 @@ StageFn = Callable[[PipelineContext], StageResult]
 # C++ + GLBs. Only the build stage differs by target_device.
 _SHARED_STAGES: list[tuple[ProjectStage, StageFn]] = [
     (ProjectStage.build_spec, stage_build_spec.run),
+    # The user's optimization overrides; asset_optimization turns them into
+    # locks. Never shapes gameplay.
+    (ProjectStage.optimization_preferences, stage_optimization_preferences.run),
     (ProjectStage.asset_manifest, stage_asset_manifest.run),
     # How each item is held / fired. Directly after the manifest because it
     # appends projectile meshes before any image or Tripo money is spent,
@@ -144,12 +148,42 @@ _PCVR_TAIL: list[tuple[ProjectStage, StageFn]] = [
     (ProjectStage.engine_promotion, stage_engine_promotion.run),
 ]
 
+def _verify_with_memory_corrections(ctx: PipelineContext) -> StageResult:
+    """quest_runtime_verify, plus the memory correction loop.
+
+    A memory failure measured on the headset writes ``memory_feedback.json``
+    and records the measured / estimated ratio in the calibration, which
+    widens the next estimate. Only the non-gameplay stages re-run
+    (asset_optimization -> scene_compile -> quest_build -> verify), at most
+    ``quest_memory_max_correction_rounds`` times; the APK of every round stays
+    downloadable whatever the outcome."""
+    max_rounds = int(getattr(ctx.settings, "quest_memory_max_correction_rounds", 2) or 0)
+    feedback = ctx.project_dir / "memory_feedback.json"
+    if feedback.exists():
+        feedback.unlink()  # a previous run's; this run starts its own count
+    rounds = 0
+    while True:
+        try:
+            return stage_quest_verify.run(ctx)
+        except RuntimeError:
+            if not feedback.exists() or rounds >= max_rounds:
+                raise
+            rounds += 1
+            ctx.emit(ProjectStage.quest_runtime_verify, "warning",
+                     f"memory failed on the headset; correction round {rounds} of "
+                     f"{max_rounds}: re-running asset_optimization, scene_compile and "
+                     "quest_build with the measured memory")
+            stage_asset_optimize.run(ctx)
+            stage_scene_compile.run(ctx)
+            stage_quest_build.run(ctx)
+
+
 # Quest: build a standalone Android APK with Gradle + the NDK, then (report-
 # only, skipped when no headset is connected) run it on the headset and check
 # the game does what it asked for. Quest only: never in the PC VR tail.
 _QUEST_TAIL: list[tuple[ProjectStage, StageFn]] = [
     (ProjectStage.quest_build, stage_quest_build.run),
-    (ProjectStage.quest_runtime_verify, stage_quest_verify.run),
+    (ProjectStage.quest_runtime_verify, _verify_with_memory_corrections),
     (ProjectStage.engine_promotion, stage_engine_promotion.run),
 ]
 

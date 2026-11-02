@@ -8,6 +8,7 @@
 #include <unordered_set>
 #include <vector>
 
+#include "ptv/core/MemoryGuard.h"
 #include "ptv/core/QualityGovernor.h"
 #include "ptv/ecs/World.h"
 #include "ptv/math/Math.h"
@@ -32,6 +33,7 @@ class EffectsSystem;
 class ProjectileSystem;
 class WeaponBoard;
 class WeaponVerifier;
+class TextureGallery;
 
 /** Top-level application class.
  *
@@ -715,6 +717,11 @@ private:
     // Adaptive quality: trades LOD / cull distance / foveation for frame rate
     // when the measured frame time misses the headset's target.
     QualityGovernor governor_{};
+    // Memory protection (Quest 3 PSS), separate from the frame-rate governor
+    // and always on.
+    MemoryGuard memory_guard_{};
+    int logged_evictions_{0};
+    float applied_pressure_scale_{1.0f};
     // Telemetry accumulators; flushed to the log about once a second so
     // ``adb logcat -s ptv`` shows real on-device performance.
     float telemetry_accum_s_{0.0f};
@@ -723,6 +730,9 @@ private:
     float telemetry_work_accum_s_{0.0f};
     int telemetry_frames_{0};
     float telemetry_worst_frame_ms_{0.0f};
+    float telemetry_cpu_accum_ms_{0.0f};
+    float telemetry_gpu_accum_ms_{0.0f};
+    float telemetry_gpu_worst_ms_{0.0f};
 
     // --- NPC telemetry + on-device verification --------------------------
     // One ``npc_manifest`` line per NPC at scene load and one ``npc`` status
@@ -745,6 +755,9 @@ private:
     // still and a scripted hand holds and fires every weapon in turn.
     bool verify_weapons_{false};
     std::unique_ptr<WeaponVerifier> weapon_verifier_;
+    // debug.ptv.verify_textures: the on-headset texture gallery.
+    bool verify_textures_{false};
+    std::unique_ptr<TextureGallery> texture_gallery_;
     // Verification only: an enemy that landed a hit on the (protected)
     // player is defeated shortly after, so the waves keep advancing and every
     // NPC type in the plan actually appears during one unattended run.

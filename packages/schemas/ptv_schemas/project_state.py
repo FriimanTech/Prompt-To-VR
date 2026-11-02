@@ -15,6 +15,10 @@ from .build_spec import PlayerExperience, TargetDevice
 class ProjectStage(str, Enum):
     created = "created"
     build_spec = "build_spec"
+    # The user's "Custom Quest Optimizations" (and the same wording in the
+    # main prompt) mapped onto the settings a user may lock. Never shapes
+    # gameplay; no model call when no optimization wording appears.
+    optimization_preferences = "optimization_preferences"
     asset_manifest = "asset_manifest"
     # How every object is used: hold profile, the sockets to find on it, and
     # for weapons how they fire and what they fire (appending projectile
@@ -125,6 +129,11 @@ class ProjectState(StrictModel):
     # target_device and mirrored into BuildSpec.player_experience. Defaults to
     # full_avatar so existing projects keep the body they were planned with.
     player_experience: PlayerExperience = PlayerExperience.full_avatar
+
+    # Free text from the New Project page's collapsed "Custom Quest
+    # Optimizations" box. Empty by default (everything automatic); parsed by
+    # the optimization_preferences stage.
+    custom_quest_optimizations: str = Field(default="", max_length=4000)
 
     stages: List[StageRecord] = Field(default_factory=list)
     env_snapshot: Dict[str, str] = Field(default_factory=dict)

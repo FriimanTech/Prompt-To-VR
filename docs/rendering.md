@@ -11,18 +11,39 @@ Everything here lives in the engine (`engine/runtime/src/render/Renderer.cpp`,
 generated C++ — the world already carries everything the renderer needs in
 `world.scene.json`.
 
-## Frame flow (per eye)
+## Frame flow (both eyes in one pass on Quest)
 
 ```
-begin render pass (MSAA color + depth, cleared to the horizon color)
-  → sky pass      : fullscreen triangle, gradient + sun, depth test/write off
-  → geometry pass : UBO-lit, per-primitive mesh, fog + contact-AO + tonemap
-  → fx pass       : weapon effects -- additive (flashes, tracers, beams, sparks)
-                    then alpha (smoke, decals); camera-facing quads, depth-tested
-  → text pass     : SDF glyph quads (alpha-blended, depth-tested, no depth write)
+xrWaitFrame → locate both eye views once (culling and rendering share them)
+build the draw list: exact two-eye frustum, room, distance, small-object cull,
+  projected-error LOD, merged static batches
+begin render pass (multiview: one 2-layer swapchain image, viewMask 0b11;
+  MSAA color + depth are lazily allocated transient attachments; the runtime's
+  fragment density map is attached for FFR)
+  → geometry pass : sorted by pipeline / material / mesh, identical draws
+                    instanced (per-draw data in an instance SSBO indexed by
+                    gl_InstanceIndex), base-colour texture x factor x COLOR_0
+  → sky pass      : after opaque geometry, at the far plane with LESS_OR_EQUAL,
+                    so it only shades pixels nothing covered
+  → fx pass       : weapon effects -- additive then alpha quads
+  → text pass     : SDF glyph quads
   → vignette      : comfort tunnel or gameplay fade to black
 end render pass  → MSAA resolve into the swapchain image
+submit (two frames in flight on Quest: the CPU records frame N+1 while the
+  GPU renders frame N)
 ```
+
+Every shader selects its eye with `gl_ViewIndex + view_base`, so the same
+SPIR-V serves multiview (`view_base` 0) and the one-pass-per-eye fallback
+(desktop, or a device without multiview). The frame UBO carries both eyes'
+matrices; the push constant block is 48 bytes.
+
+Per-frame resources (command buffer, fence, frame UBO, joint palettes,
+instances, FX and text vertices, a timestamp pair) exist once per frame in
+flight. Desktop builds keep one frame in flight: Quest Link has shown white
+frames when a swapchain image was released with its work still queued.
+Meshes evicted while a frame may still draw them are retired and freed once
+every such frame has passed its fence.
 
 ## Weapon effects (`FxRenderer`, `fx.vert` / `fx.frag`)
 
@@ -125,8 +146,37 @@ and a Narkowicz **ACES** tonemap. Material IDs are preserved:
 - `3` unlit emissive marker (teleport reticle)
 
 `scene.vert` computes the normal matrix as `transpose(inverse(mat3(model)))` so
-non-uniformly scaled primitives light correctly — done in-shader to avoid growing
-the push-constant block (kept at 160 bytes).
+non-uniformly scaled primitives light correctly.
+
+## Textures (base colour)
+
+Every Tripo asset keeps its base-colour texture from the source GLB to the
+headset:
+
+- **Decimation** (`ptv_glb_optimize`) keeps per-material submeshes, welds
+  vertices per material, weights UVs in the simplifier and protects seams, so
+  no LOD smears a texture across a seam. The textures are written once per
+  content hash to `assets/ptv_textures/` (no leading underscore: Android's aapt
+  drops asset folders named `_*`).
+- **Compression** (`ptv_texture_compress`, vcpkg port `ktx`): KTX2 with ASTC
+  6x6 (4x4 for UI; 4x4 with the `high` texture override), sRGB, full mip chain
+  built in linear space, sized by `texture_policy.py` from how close the player
+  can get (a held pistol, a crate by the path, a skyline nobody reaches), never
+  above the source and inside `texture_memory_budget_mb`. The GLB's material
+  points at the KTX2 through the `PTV_texture_astc` extension and keeps the PNG /
+  JPEG as a fallback (desktop).
+- **Runtime** (`TextureCache`): KTX2 levels are uploaded as is (memory-mapped
+  from the APK on Quest), PNG/JPEG decode through stb with GPU-blitted mips.
+  Textures are shared by content hash and reference counted; images of 4 MB or
+  more get dedicated allocations; uploads go through one 32 MB staging buffer.
+- **Shading:** `scene.frag` samples base colour x `baseColorFactor` x `COLOR_0`
+  x the draw's tint; `alphaMode` MASK is honoured (BLEND draws as MASK 0.5 with a
+  warning).
+- **Diagnostics:** a texture that should exist but failed draws as a magenta
+  checker in verification and debug builds; the 1 Hz `tex:` line reports
+  resident / ASTC / decoded / missing counts. Verification adds a texture
+  gallery pass that screenshots every textured asset on the headset (see
+  `docs/quest-build.md`).
 
 ## Skinned geometry (`scene_skinned.vert`)
 
@@ -314,12 +364,20 @@ counts.
 ## Level of detail
 
 Each optimized asset ships an LOD chain (`_lod0` .. `_lod3`, roughly 100% /
-40% / 15% / 5% of the LOD0 budget). The renderer selects a level from camera
-distance against the scene's `lod_switch_distances_m`, with:
+40% / 15% / 5% of the LOD0 budget) and the simplification error of every level
+(`mesh.lod_errors_rel`, meshoptimizer's error relative to the mesh extent). The
+renderer picks the **coarsest level whose error projects to fewer than
+`lod_screen_error_px` pixels** (1 px by default) at the object's distance, so
+detail follows what the eye can actually resolve rather than fixed distances:
 
-- **hysteresis** — at most one level change per frame and a 15% margin before
-  moving back up, so an object sitting on a switch boundary cannot flicker;
-- a global **`lod_bias`** the adaptive governor raises under load.
+- **hysteresis** — at most one level coarser per frame, and back to a finer
+  level only once the current one is `lod_hysteresis` (20%) over the limit;
+- a global **`lod_bias`** the adaptive governor raises under load scales the
+  pixel limit;
+- **speed-aware prefetch** — the level the player will need 1.5 s ahead (from
+  the smoothed camera motion) is requested early; off under memory pressure;
+- assets compiled before LOD errors existed fall back to the scene's
+  `lod_switch_distances_m`.
 
 **Rigged assets keep an identical skeleton at every level.** `ptv_glb_optimize`
 copies the joint hierarchy, bind pose, inverse bind matrices **and animation
@@ -349,16 +407,37 @@ Two consequences worth knowing:
 
 Built each frame in `Renderer::build_items_from_world`:
 
-- **Frustum culling** against a single conservative frustum that covers both
-  eyes (HMD centre pose, FOV padded to 140°). Culling once is cheaper than per
-  eye and, being conservative, can only ever draw a few extra edge objects —
-  never wrongly remove a visible one.
-- **Distance culling** beyond `cull_distance_m`. Deliberately set effectively
-  infinite for `compact`/`standard`, so a small game still renders its whole
-  world. This is a budget, not a global rule.
+- **Frustum culling** against both eye frusta (12 planes, OR'd), from the
+  views located at `xrWaitFrame` time — the same poses the frame renders with.
+  The padded 140° single frustum remains only as a fallback when no views are
+  available.
+- **Distance culling** beyond `cull_distance_m`. Effectively infinite for
+  `compact`/`standard`, so a small game still renders its whole world; the
+  governor may shorten it under CPU load.
+- **Small-object culling** (rendering only): objects whose bounding sphere
+  projects to fewer than `small_object_cull_px` (1.5 px) are skipped. Never
+  characters, highlighted (interactive) objects or the player's body.
+- **Room culling**: `scene_compile` marks nav regions that walls close on all
+  four sides (each side at least half covered, leaving room for doorways).
+  Static geometry inside such a room draws only while the player stands in a
+  region within two links of it (doorways can line up through a room). Off for
+  open worlds and single rooms, and whenever the player is outside every region.
 
-Both use a bounding sphere: the pipeline-computed `bounds_radius_m` when
+All use a bounding sphere: the pipeline-computed `bounds_radius_m` when
 available, otherwise a conservative estimate.
+
+## Static batching and instancing
+
+Identical (mesh, material) draws collapse into one instanced draw. On top of
+that, entities `scene_compile` marks `static_batch` — world geometry nothing
+moves, holds, binds or reads per frame — are merged at scene load into one mesh
+per grid cell (`static_batch_cell_m`, 8 or 16 m), room and material, with world
+positions and colours baked in. Colliders stay per entity, so physics, AI and
+navigation are unchanged. A member that ever moves dissolves its batch (logged
+once) and its entities draw individually again. Measured: where the merged
+geometry is primitives that instancing had already collapsed, batching splits
+them into per-cell draws (Glock Laser Deck 11 → 34 draw calls, inside budget,
+no GPU / CPU change); it pays off for many distinct inline meshes.
 
 ## Draw-time transform offsets
 
@@ -393,10 +472,16 @@ loaded all 13 assets synchronously (~5.5 s), which starved the
 watchdog. Meshes now pop in over a frame or two, and an entity draws a coarser
 already-resident LOD while its preferred one streams in.
 
-When a scene exceeds the resident triangle budget (only enabled in `massive`),
-least-recently-used meshes are evicted one per frame. This is safe because
-`draw_frame` waits on its fence before returning, so no command buffer is still
-referencing the freed buffers.
+**Residency** is on for every tier and acts only when it must: when resident
+meshes + textures exceed `resident_memory_budget_mb` (set by the memory model,
+see `docs/quest-optimization.md`), when a `massive` scene exceeds its triangle
+budget, or when `MemoryGuard` raises its level. Every asset's **lowest LOD is
+queued at scene load and never evicted** (the always-resident floor), and LODs
+share their textures by content hash, so a late load shows a coarser version —
+never nothing and never a white surface. Victims are the least recently drawn
+streamable meshes; they are retired and freed once no frame in flight can draw
+them. Only GPU buffers are evicted: entities, colliders, AI and game state are
+never touched.
 
 **Rigged meshes are the exception, and are uploaded up front.** The streaming
 worker only knows how to build 40-byte static vertices; letting it touch a
@@ -409,34 +494,75 @@ is rigged comes from `mesh.skinned` in `scene.json`, so the common all-static
 scene never opens a GLB to find out. The player's two hand entities take the
 same synchronous path, for the same reason.
 
-## Fixed foveated rendering
+## Fixed foveated rendering (FFR)
 
-When the runtime exposes `XR_FB_foveation` + `XR_FB_foveation_configuration` +
-`XR_FB_swapchain_update_state` (Quest does; PC VR generally does not), the
-swapchains are created foveation-capable and the level is applied through
-`xrUpdateSwapchainFB`. The periphery renders at lower resolution — one of the
-cheapest large GPU savings on mobile. The level starts from the scene tier and
-can change per frame.
+Fixed, not eye-tracked (the Quest 3 has no eye tracking): the full-detail
+region stays at the centre of each eye's display and only its strength changes.
+The engine enables `XR_FB_foveation`, `XR_FB_foveation_configuration`,
+`XR_FB_foveation_vulkan`, `XR_FB_swapchain_update_state` and
+`VK_EXT_fragment_density_map`, creates the multiview swapchain with
+`XR_SWAPCHAIN_CREATE_FOVEATION_FRAGMENT_DENSITY_MAP_BIT_FB`, fetches each
+image's density map through `XrSwapchainImageFoveationVulkanFB` and attaches
+it to the render pass. Without the density map a Vulkan app's foveation level
+does nothing — the engine's earlier path set levels with no measurable effect.
+
+The level (none / low / medium / high) is set by the engine's governor through
+`xrUpdateSwapchainFB`; the runtime's own dynamic flag is off, so two
+controllers never fight. Measured on Quest 3 (Glock Laser Deck, GPU time):
+level 0 10.2 ms, 1 5.95 ms, 2 5.4 ms, 3 4.6 ms. The density map costs about
+1 ms at level 0, so automatic FFR starts at level 1 (2 when the scene estimate
+is heavy); a user's "FFR off" drops the density map entirely.
+
+## Dynamic resolution and refresh rate
+
+The swapchain is allocated at `render_scale_ceiling` x the recommended eye
+resolution (1.0 by default, up to 1.25 with the `high` override, within
+`maxImageRect`). The governor may submit a centred sub-rectangle down to
+`render_scale_floor` (0.85) through `imageRect`; centred so the density map's
+centre stays on the lens centre. `XR_FB_display_refresh_rate` requests
+`refresh_hz` (72 by default; 90 / 120 on request) and the frame budget follows.
 
 ## Adaptive quality governor
 
 Build-time budgets are only an estimate; `QualityGovernor` closes the loop on
-the real device. It watches measured frame time and, with hysteresis to avoid
-oscillation, walks an escalation ladder (cheapest perceptual cost first):
+the real device. It classifies each window as GPU- or CPU-bound from the
+measured GPU timestamp and CPU time, and climbs the matching ladder, least
+visible first:
 
-1. raise `lod_bias`, 2. shrink the cull distance, 3. raise the foveation level
+- **GPU-bound:** FFR +1 up to medium → render scale −0.05 down to the floor →
+  FFR up to the maximum → `lod_bias` +0.5 → cull distance x0.8.
+- **CPU-bound:** cull distance x0.8 → `lod_bias` +0.5.
 
-...then relaxes back in reverse once there is headroom. Bounds come from the
-scene's tier, so the governor can never destroy image quality outright. This is
-what lets an arbitrarily large prompted game self-tune instead of the pipeline
-refusing content.
+After every step it waits out a cooldown (half a second of frames) and probes
+the next window: a step that bought less than 3% of the bottleneck's time is
+marked ineffective for the scene and skipped from then on. Relaxation walks
+back in reverse, more slowly. A knob the user locked ("Custom Quest
+Optimizations") is never moved; when only locked knobs remain it logs
+`governor: over budget, blocked by user settings`, which verification reports
+as a warning, not a failure. Memory is not the governor's job — see
+`MemoryGuard` in `docs/quest-optimization.md`.
 
 ## On-device telemetry
 
-About once a second the runtime logs FPS, average/worst frame ms, drawn vs
-considered entities, frustum/distance culled counts, visible triangles,
-resident meshes and triangles, pending streams, and the current
-`lod_bias`/cull distance/foveation level. Watch it with:
+About once a second the runtime logs three lines:
+
+- `perf:` FPS, frame work ms, CPU ms, GPU ms (timestamps; the start stamp is
+  written at bottom-of-pipe so a queued second frame does not inflate it), draw
+  calls / pipeline / descriptor binds, drawn vs considered entities with
+  frustum / distance / small / room culled counts and merged batches, visible
+  triangles, residency, rigs, and the current `lod_bias`, cull distance, FFR
+  level and render scale;
+- `tex:` resident textures and MB, ASTC vs decoded, missing, mesh and target MB;
+- `mem:` total PSS (smaps + unmapped GPU memory), the projection MemoryGuard
+  acts on, per-category engine accounting, system `MemAvailable`, level and
+  evictions.
+
+`debug.ptv.perf_override` (an engineering property, never set by the pipeline)
+switches multiview, the density map, frames in flight, a fixed FFR level, the
+governor or batching for on-device A/B measurements, e.g.
+`adb shell setprop debug.ptv.perf_override "mv=0,fdm=0,fif=1"`.
+
+Watch it with:
 
 ```
 adb logcat -s ptv

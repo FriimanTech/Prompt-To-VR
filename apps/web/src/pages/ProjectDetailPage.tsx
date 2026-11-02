@@ -13,6 +13,113 @@ import {
   stagesFor,
 } from "../lib/stages";
 
+type MemoryStatusFile = {
+  status?: string;
+  source?: string;
+  reasons?: string[];
+  compromises?: string[];
+  measured_peak_mb?: number | null;
+  estimated_peak_mb?: number | null;
+  estimates?: Record<string, { steady_mb: number; peak_mb: number }>;
+};
+
+const MEMORY_LABEL: Record<string, string> = {
+  verified_safe: "Memory: verified on a Quest 3",
+  estimated_safe_not_device_tested: "Memory: not tested on a Quest 3",
+  at_risk: "Memory: at risk (estimate over target)",
+  failed_on_device: "Memory: failed on the Quest 3",
+};
+
+/** Download APK (always, once built), the memory badge, and the user's
+ *  optimization overrides with their scene-specific risk. */
+function QuestStatusPanel({ id, hasApk }: { id: string; hasApk: boolean }) {
+  const memory = useQuery({
+    queryKey: ["memory_status", id],
+    queryFn: () => api.projectJson<MemoryStatusFile>(id, "memory_status.json"),
+    refetchInterval: 10_000,
+  });
+  const prefs = useQuery({
+    queryKey: ["optimization_preferences", id],
+    queryFn: () =>
+      api.projectJson<Record<string, unknown>>(id, "optimization_preferences.json"),
+  });
+  const complexity = useQuery({
+    queryKey: ["scene_complexity", id],
+    queryFn: () =>
+      api.projectJson<{
+        scenes?: Record<string, { complexity?: { estimate?: { gpu_ms_p95?: number } } }>;
+      }>(id, "scene_complexity.json"),
+  });
+  const verify = useQuery({
+    queryKey: ["runtime_verification", id],
+    queryFn: () =>
+      api.projectJson<{ performance?: { gpu?: number; fps?: number } }>(
+        id,
+        "runtime_verification.json",
+      ),
+  });
+  const m = memory.data;
+  const status = m?.status ?? (hasApk ? "estimated_safe_not_device_tested" : "");
+  const tone =
+    status === "verified_safe"
+      ? "border-ok/40 bg-ok/10 text-ok"
+      : status === "failed_on_device" || status === "at_risk"
+        ? "border-err/40 bg-err/10 text-err"
+        : "border-warn/40 bg-warn/10 text-warn";
+  const overrides = Object.entries(prefs.data ?? {}).filter(
+    ([k, v]) =>
+      v && typeof v === "object" && !Array.isArray(v) && "value" in (v as object) && k,
+  ) as [string, { value: string; source: string; quote: string }][];
+  const scenes = Object.values(complexity.data?.scenes ?? {});
+  const gpuEst = scenes[0]?.complexity?.estimate?.gpu_ms_p95;
+  const measured = verify.data?.performance;
+  return (
+    <div className="ptv-card space-y-2 p-3 text-sm" data-testid="quest-status">
+      <div className="flex flex-wrap items-center gap-2">
+        <a
+          className={hasApk ? "ptv-button" : "ptv-button cursor-not-allowed opacity-40"}
+          href={hasApk ? api.apkUrl(id) : undefined}
+          aria-disabled={!hasApk}
+          download
+        >
+          Download APK
+        </a>
+        {status && (
+          <span className={"ptv-pill " + tone} title={(m?.reasons ?? []).join("\n")}>
+            {MEMORY_LABEL[status] ?? status}
+          </span>
+        )}
+        {(m?.reasons ?? []).slice(0, 2).map((r) => (
+          <span key={r} className="text-xs text-muted">
+            {r}
+          </span>
+        ))}
+      </div>
+      {(m?.compromises ?? []).length > 0 && (
+        <div className="text-xs text-muted">
+          Memory compromises: {(m?.compromises ?? []).join("; ")}
+        </div>
+      )}
+      {overrides.length > 0 && (
+        <div className="text-xs">
+          <div className="text-warn">
+            Custom Quest optimizations:{" "}
+            {overrides.map(([k, v]) => `${k.replace("_", " ")} ${v.value}`).join(", ")}
+          </div>
+          {gpuEst !== undefined && (
+            <div className="text-muted">
+              Estimated p95 GPU {gpuEst.toFixed(1)} ms of the 13.9 ms budget
+              {measured?.gpu !== undefined
+                ? `; measured ${measured.gpu.toFixed(1)} ms at ${measured.fps ?? "?"} fps`
+                : ""}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 /** Pick a stage: either resume from it (it and everything after re-runs) or
  *  run only it.
  *
@@ -407,6 +514,7 @@ export default function ProjectDetailPage() {
           {notice}
         </div>
       )}
+      {isQuest && <QuestStatusPanel id={id} hasApk={Boolean(p.latest_build_apk)} />}
       <ProviderHealth />
 
       <div className="flex gap-1 border-b border-white/5">

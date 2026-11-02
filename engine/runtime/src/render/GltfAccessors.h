@@ -65,6 +65,36 @@ inline bool noop_image_loader(tinygltf::Image* image,
     return true;
 }
 
+// Keeps the ENCODED bytes (PNG / JPEG / KTX2 as stored) in ``image->image``
+// instead of decoding them; width/height stay 0 so nobody mistakes the bytes
+// for pixels. tinygltf calls this for bufferView images and data uris alike.
+// External uris never reach it: the implementation TU defines
+// TINYGLTF_NO_EXTERNAL_IMAGE, so those keep their uri and are resolved by
+// the engine through the asset source (APK or filesystem).
+inline bool capture_encoded_image_loader(tinygltf::Image* image,
+                                         const int /*image_idx*/,
+                                         std::string* /*err*/,
+                                         std::string* /*warn*/,
+                                         int /*req_width*/,
+                                         int /*req_height*/,
+                                         const unsigned char* bytes,
+                                         int size,
+                                         void* /*user_data*/) {
+    if (image) {
+        image->width = 0;
+        image->height = 0;
+        image->component = 0;
+        image->bits = 8;
+        image->pixel_type = TINYGLTF_COMPONENT_TYPE_UNSIGNED_BYTE;
+        if (bytes && size > 0) {
+            image->image.assign(bytes, bytes + size);
+        } else {
+            image->image.clear();
+        }
+    }
+    return true;
+}
+
 inline size_t component_size(int component_type) {
     switch (component_type) {
         case TINYGLTF_COMPONENT_TYPE_BYTE:

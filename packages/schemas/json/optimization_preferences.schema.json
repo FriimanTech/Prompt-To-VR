@@ -1,0 +1,234 @@
+{
+  "$defs": {
+    "ClampedRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "applied": {
+          "title": "Applied",
+          "type": "string"
+        },
+        "reason": {
+          "title": "Reason",
+          "type": "string"
+        },
+        "requested": {
+          "title": "Requested",
+          "type": "string"
+        },
+        "setting": {
+          "title": "Setting",
+          "type": "string"
+        }
+      },
+      "required": [
+        "setting",
+        "requested",
+        "applied",
+        "reason"
+      ],
+      "title": "ClampedRequest",
+      "type": "object"
+    },
+    "PrefSetting": {
+      "additionalProperties": false,
+      "description": "One overridden setting, with where it came from.",
+      "properties": {
+        "differs_from_auto": {
+          "default": true,
+          "title": "Differs From Auto",
+          "type": "boolean"
+        },
+        "level": {
+          "anyOf": [
+            {
+              "maximum": 3,
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "FFR fixed/max level: 1 low, 2 medium, 3 high",
+          "title": "Level"
+        },
+        "quote": {
+          "description": "Verbatim words from the source text.",
+          "title": "Quote",
+          "type": "string"
+        },
+        "source": {
+          "enum": [
+            "custom_box",
+            "main_prompt"
+          ],
+          "title": "Source",
+          "type": "string"
+        },
+        "value": {
+          "title": "Value",
+          "type": "string"
+        }
+      },
+      "required": [
+        "value",
+        "source",
+        "quote"
+      ],
+      "title": "PrefSetting",
+      "type": "object"
+    },
+    "UnsupportedRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "closest": {
+          "default": "",
+          "description": "The closest supported setting, if any.",
+          "title": "Closest",
+          "type": "string"
+        },
+        "quote": {
+          "default": "",
+          "title": "Quote",
+          "type": "string"
+        },
+        "reason": {
+          "title": "Reason",
+          "type": "string"
+        },
+        "request": {
+          "title": "Request",
+          "type": "string"
+        },
+        "source": {
+          "default": "custom_box",
+          "enum": [
+            "custom_box",
+            "main_prompt"
+          ],
+          "title": "Source",
+          "type": "string"
+        }
+      },
+      "required": [
+        "request",
+        "reason"
+      ],
+      "title": "UnsupportedRequest",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "anti_aliasing": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/PrefSetting"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "clamped": {
+      "items": {
+        "$ref": "#/$defs/ClampedRequest"
+      },
+      "title": "Clamped",
+      "type": "array"
+    },
+    "draw_distance": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/PrefSetting"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "ffr": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/PrefSetting"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "frame_rate": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/PrefSetting"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "lod": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/PrefSetting"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "model_called": {
+      "default": false,
+      "title": "Model Called",
+      "type": "boolean"
+    },
+    "resolution": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/PrefSetting"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "room_culling": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/PrefSetting"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "texture_quality": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/PrefSetting"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "unsupported": {
+      "items": {
+        "$ref": "#/$defs/UnsupportedRequest"
+      },
+      "title": "Unsupported",
+      "type": "array"
+    }
+  },
+  "title": "OptimizationPreferences",
+  "type": "object"
+}

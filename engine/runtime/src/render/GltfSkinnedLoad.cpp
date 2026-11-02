@@ -34,6 +34,7 @@
 #include <nlohmann/json.hpp>
 
 #include "GltfAccessors.h"
+#include "GltfMaterials.h"
 #include "ptv/core/Logger.h"
 #include "ptv/platform/AssetSource.h"
 
@@ -46,19 +47,21 @@ constexpr std::uint32_t kGlbMagic = 0x46546C67u;  // "glTF"
 constexpr std::uint32_t kChunkJson = 0x4E4F534Au;  // "JSON"
 
 bool parse_glb(const std::string& path, tinygltf::Model& model,
-               std::string& err) {
-    auto bytes = asset_source().read_bytes(path);
+               std::string& err, bool want_image_bytes = false) {
+    auto bytes = asset_source().map(path);
     if (!bytes) {
         err = "asset source could not read GLB: " + path;
         return false;
     }
     tinygltf::TinyGLTF loader;
-    loader.SetImageLoader(noop_image_loader, nullptr);
+    loader.SetImageLoader(want_image_bytes ? capture_encoded_image_loader
+                                           : noop_image_loader,
+                          nullptr);
     std::string warn;
     const std::string base_dir =
         std::filesystem::path(path).parent_path().string();
-    if (!loader.LoadBinaryFromMemory(&model, &err, &warn, bytes->data(),
-                                     static_cast<unsigned int>(bytes->size()),
+    if (!loader.LoadBinaryFromMemory(&model, &err, &warn, bytes->data,
+                                     static_cast<unsigned int>(bytes->size),
                                      base_dir)) {
         if (!warn.empty()) PTV_WARN("tinygltf warn: {}", warn);
         return false;
@@ -564,25 +567,26 @@ bool glb_probe_skin(const std::string& path, bool* out_has_skin,
     if (out_has_skin) *out_has_skin = false;
     if (out_joint_count) *out_joint_count = 0;
 
-    auto bytes = asset_source().read_bytes(path);
-    if (!bytes) {
+    auto view = asset_source().map(path);
+    if (!view) {
         err = "asset source could not read GLB: " + path;
         return false;
     }
-    const auto& data = *bytes;
-    if (data.size() < 20) {
+    const std::uint8_t* data = view->data;
+    const std::size_t size = view->size;
+    if (size < 20) {
         err = "GLB shorter than its own header";
         return false;
     }
     std::uint32_t magic = 0, chunk_len = 0, chunk_type = 0;
-    std::memcpy(&magic, data.data(), 4);
+    std::memcpy(&magic, data, 4);
     if (magic != kGlbMagic) {
         err = "not a binary glTF (bad magic)";
         return false;
     }
-    std::memcpy(&chunk_len, data.data() + 12, 4);
-    std::memcpy(&chunk_type, data.data() + 16, 4);
-    if (chunk_type != kChunkJson || 20u + chunk_len > data.size()) {
+    std::memcpy(&chunk_len, data + 12, 4);
+    std::memcpy(&chunk_type, data + 16, 4);
+    if (chunk_type != kChunkJson || 20u + chunk_len > size) {
         err = "first GLB chunk is not a well-formed JSON chunk";
         return false;
     }
@@ -591,8 +595,7 @@ bool glb_probe_skin(const std::string& path, bool* out_has_skin,
     // chunk (tens of MB for a Tripo asset) just to answer a yes/no question
     // the scene loader asks once per mesh.
     try {
-        const auto doc = nlohmann::json::parse(
-            data.begin() + 20, data.begin() + 20 + chunk_len);
+        const auto doc = nlohmann::json::parse(data + 20, data + 20 + chunk_len);
         const auto skins = doc.find("skins");
         if (skins == doc.end() || !skins->is_array() || skins->empty()) {
             return true;  // valid, simply not skinned
@@ -671,13 +674,20 @@ bool load_glb_skinned(const std::string& path, float target_scale_meters,
                       std::vector<SkinnedVertex>& out_verts,
                       std::vector<std::uint32_t>& out_indices,
                       SkeletonData& out_skeleton, std::string& err,
-                      const ModelFrame* frame) {
+                      const ModelFrame* frame, MeshMaterials* out_materials,
+                      const LoadOptions& options) {
     out_verts.clear();
     out_indices.clear();
     out_skeleton = SkeletonData{};
 
     tinygltf::Model model;
-    if (!parse_glb(path, model, err)) return false;
+    if (!parse_glb(path, model, err, options.want_image_bytes)) return false;
+
+    MeshMaterials local_mats;
+    MeshMaterials& mats = out_materials ? *out_materials : local_mats;
+    mats = MeshMaterials{};
+    std::vector<gltf_materials::UvTransform> uv_xforms;
+    gltf_materials::parse_materials(model, options.want_image_bytes, mats, uv_xforms);
 
     const SkinSelection sel = select_skin(model);
     if (sel.skin < 0 || model.skins.empty()) {
@@ -754,7 +764,27 @@ bool load_glb_skinned(const std::string& path, float target_scale_meters,
                                           &color_comps, &cerr)) {
                     vert_colors.clear();
                     color_comps = 0;
+                } else {
+                    mats.had_vertex_colors = true;
                 }
+            }
+
+            const int mat_slot = gltf_materials::material_slot(mats, prim.material);
+            const MaterialInfo& mat = mats.materials[static_cast<size_t>(mat_slot)];
+            const auto& uv_xform = uv_xforms[static_cast<size_t>(mat_slot)];
+            std::vector<float> uvs;
+            auto uv_it = prim.attributes.find(
+                "TEXCOORD_" + std::to_string(std::max(0, mat.base_color_texcoord)));
+            if (uv_it != prim.attributes.end()) {
+                size_t uc = 0;
+                std::string uerr;
+                if (!read_accessor_floats(model, uv_it->second, uvs, &uc, &uerr) ||
+                    uc != 2) {
+                    uvs.clear();
+                }
+            }
+            if (mat.base_color_image >= 0 && uvs.size() < vcount * 2) {
+                mats.missing_uvs = true;
             }
 
             std::vector<std::uint32_t> joints;
@@ -778,11 +808,14 @@ bool load_glb_skinned(const std::string& path, float target_scale_meters,
                 return false;
             }
 
-            const std::array<float, 4> mat_color =
-                material_base_color(model, prim.material);
+            std::array<float, 4> mat_color{1.0f, 1.0f, 1.0f, 1.0f};
+            if (options.bake_base_color_factor) {
+                mat_color = material_base_color(model, prim.material);
+            }
 
             const std::uint32_t base =
                 static_cast<std::uint32_t>(out_verts.size());
+            const size_t first_index = out_indices.size();
             for (size_t i = 0; i < vcount; ++i) {
                 SkinnedVertex sv{};
                 sv.pos[0] = positions[i * 3 + 0];
@@ -796,6 +829,13 @@ bool load_glb_skinned(const std::string& path, float target_scale_meters,
                     sv.normal[0] = 0.0f;
                     sv.normal[1] = 1.0f;
                     sv.normal[2] = 0.0f;
+                }
+                if (i * 2 + 1 < uvs.size()) {
+                    float u = uvs[i * 2 + 0];
+                    float v = uvs[i * 2 + 1];
+                    uv_xform.apply(u, v);
+                    sv.uv[0] = u;
+                    sv.uv[1] = v;
                 }
                 for (int k = 0; k < 4; ++k) {
                     float cv = 1.0f;
@@ -843,6 +883,20 @@ bool load_glb_skinned(const std::string& path, float target_scale_meters,
                     out_indices.push_back(base + static_cast<std::uint32_t>(i));
                     out_indices.push_back(base + static_cast<std::uint32_t>(i + 1));
                     out_indices.push_back(base + static_cast<std::uint32_t>(i + 2));
+                }
+            }
+            const auto added =
+                static_cast<std::uint32_t>(out_indices.size() - first_index);
+            if (added > 0) {
+                if (!mats.submeshes.empty() &&
+                    mats.submeshes.back().material == mat_slot &&
+                    mats.submeshes.back().first_index +
+                            mats.submeshes.back().index_count ==
+                        first_index) {
+                    mats.submeshes.back().index_count += added;
+                } else {
+                    mats.submeshes.push_back(SubMesh{
+                        static_cast<std::uint32_t>(first_index), added, mat_slot});
                 }
             }
         }
@@ -923,11 +977,16 @@ bool load_glb_skinned(const std::string& path, float target_scale_meters,
         lo[1] * scale -
         (framed ? (frame->sole_y + 0.5f * frame->height) * scale : 0.0f);
 
+    int textured = 0;
+    for (const auto& sm : mats.submeshes) {
+        if (mats.materials[static_cast<size_t>(sm.material)].base_color_image >= 0) ++textured;
+    }
     PTV_INFO(
         "skinned GLB loaded: {} verts, {} tris, {} joints, {} clip(s), "
-        "scale {:.3f} (target {:.2f} m){}",
+        "{} submesh(es), {} textured, scale {:.3f} (target {:.2f} m){}",
         out_verts.size(), out_indices.size() / 3, joint_count,
-        out_skeleton.clips.size(), scale, target_scale_meters,
+        out_skeleton.clips.size(), mats.submeshes.size(), textured, scale,
+        target_scale_meters,
         framed ? fmt::format(", model frame yaw {:.1f} deg, sole {:.3f}",
                              glm::degrees(frame->yaw_offset_rad), frame->sole_y)
                : std::string(", NO model frame (longest-axis scale)"));

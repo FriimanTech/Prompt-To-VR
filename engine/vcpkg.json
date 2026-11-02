@@ -17,6 +17,7 @@
     "spdlog",
     "nlohmann-json",
     "stb",
+    "ktx",
     {
       "name": "imgui",
       "features": ["vulkan-binding", "glfw-binding"]

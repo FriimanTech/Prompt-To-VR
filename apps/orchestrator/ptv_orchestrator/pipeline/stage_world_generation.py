@@ -965,7 +965,32 @@ def _validate_world_scene(path: Path) -> tuple[bool, str]:
     nav_note = f", {len(regions)} nav regions" if regions else ""
     n_interactive = len(doc.get("interactives") or [])
     int_note = f", {n_interactive} interactives" if n_interactive else ""
-    return True, f"{len(entities)} entities{nav_note}{int_note}"
+    grey = default_color_primitives(doc)
+    grey_note = (f", WARNING {grey} primitive(s) left at the default grey colour "
+                 "(the author gave them no colour)" if grey else "")
+    return True, f"{len(entities)} entities{nav_note}{int_note}{grey_note}"
+
+
+#: PrimitiveDesc / MeshDesc default colour in IWorldBuilder.h.
+_DEFAULT_PRIMITIVE_COLOR = (0.8, 0.8, 0.82)
+
+
+def default_color_primitives(doc: dict) -> int:
+    """Procedural shapes still at IWorldBuilder's default grey.
+
+    Not an error (a grey concrete wall is a valid choice), but a world where
+    most shapes kept the default usually means the author forgot to colour
+    them, which reads as a white-ish untextured level in the headset."""
+    count = 0
+    for e in doc.get("entities") or []:
+        if not isinstance(e, dict):
+            continue
+        prim = e.get("primitive") or e.get("mesh_inline") or {}
+        col = prim.get("color") if isinstance(prim, dict) else None
+        if isinstance(col, (list, tuple)) and len(col) >= 3 and all(
+                abs(float(c) - d) < 1e-3 for c, d in zip(col[:3], _DEFAULT_PRIMITIVE_COLOR)):
+            count += 1
+    return count
 
 
 # Every affordance kind the engine can bind. Kept as a literal rather than

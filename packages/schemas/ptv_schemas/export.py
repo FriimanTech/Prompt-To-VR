@@ -26,6 +26,7 @@ from . import (
     GameDesign,
     MechanicPlan,
     NpcPlan,
+    OptimizationPreferences,
     PerformanceProfile,
     ProjectState,
     RuntimeVerification,
@@ -50,6 +51,7 @@ _EXPORTS: dict[str, Type[BaseModel]] = {
     "artifact_metadata": ArtifactMetadata,
     "acceptance_test_plan": AcceptanceTestPlan,
     "performance_profile": PerformanceProfile,
+    "optimization_preferences": OptimizationPreferences,
     "runtime_verification": RuntimeVerification,
 }
 

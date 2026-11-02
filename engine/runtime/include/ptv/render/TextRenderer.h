@@ -7,6 +7,7 @@
 #include <volk.h>
 #include <vk_mem_alloc.h>
 
+#include <array>
 #include <string>
 #include <vector>
 
@@ -42,7 +43,11 @@ public:
      *  recording, after the previous frame's fence. */
     void prepare(const std::vector<TextItem>& items);
     /** Draw the prepared strings for one eye. */
-    void record(VkCommandBuffer cmd, const Mat4& view_proj);
+    /** Both eyes' view-projections: a multiview pass picks one per view, a
+     *  per-eye pass passes the same matrix twice. */
+    void record(VkCommandBuffer cmd, const std::array<Mat4, 2>& view_proj);
+    /** Select the vertex buffer of one frame in flight (call before prepare). */
+    void set_frame_slot(int slot);
 
 private:
     struct Vertex {
@@ -72,6 +77,15 @@ private:
     void* vb_mapped_{nullptr};
     std::size_t vb_capacity_{0};  // vertices
     std::uint32_t vertex_count_{0};
+    static constexpr int kSlots = 2;
+    struct SlotBuffer {
+        VkBuffer vb{VK_NULL_HANDLE};
+        VmaAllocation alloc{nullptr};
+        void* mapped{nullptr};
+        std::size_t capacity{0};
+    };
+    std::array<SlotBuffer, kSlots> slots_{};
+    int slot_{0};
     std::vector<Vertex> scratch_;
     std::vector<TextQuad> quads_;
 };

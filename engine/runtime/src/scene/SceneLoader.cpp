@@ -216,12 +216,70 @@ SceneDoc LoadSceneJson(const std::string& path) {
             sp.governor_relax_after_good_frames = g.value(
                 "relax_after_good_frames", sp.governor_relax_after_good_frames);
         }
+        // Null-safe: the compiler writes optional fields as null.
+        auto num = [](const Json& o, const char* key, auto fallback) {
+            using T = decltype(fallback);
+            if (!o.contains(key) || !o[key].is_number()) return fallback;
+            return o[key].get<T>();
+        };
+        auto flag = [](const Json& o, const char* key, bool fallback) {
+            return o.contains(key) && o[key].is_boolean() ? o[key].get<bool>() : fallback;
+        };
+        sp.lod_screen_error_px = num(pf, "lod_screen_error_px", sp.lod_screen_error_px);
+        sp.lod_hysteresis = num(pf, "lod_hysteresis", sp.lod_hysteresis);
+        sp.small_object_cull_px = num(pf, "small_object_cull_px", sp.small_object_cull_px);
+        sp.render_scale_ceiling = num(pf, "render_scale_ceiling", sp.render_scale_ceiling);
+        sp.render_scale_floor = num(pf, "render_scale_floor", sp.render_scale_floor);
+        sp.refresh_hz = num(pf, "refresh_hz", sp.refresh_hz);
+        sp.multiview = flag(pf, "multiview", sp.multiview);
+        sp.ffr_fdm = flag(pf, "ffr_fdm", sp.ffr_fdm);
+        sp.frames_in_flight = num(pf, "frames_in_flight", sp.frames_in_flight);
+        sp.static_batching = flag(pf, "static_batching", sp.static_batching);
+        sp.instancing = flag(pf, "instancing", sp.instancing);
+        sp.room_culling = flag(pf, "room_culling", sp.room_culling);
+        sp.static_batch_cell_m = num(pf, "static_batch_cell_m", sp.static_batch_cell_m);
+        if (pf.contains("rooms") && pf["rooms"].is_array()) {
+            for (const auto& r : pf["rooms"]) {
+                if (r.is_string()) sp.rooms.push_back(r.get<std::string>());
+            }
+        }
+        sp.memory_target_mb = num(pf, "memory_target_mb", sp.memory_target_mb);
+        sp.memory_ceiling_mb = num(pf, "memory_ceiling_mb", sp.memory_ceiling_mb);
+        sp.memory_limit_mb = num(pf, "memory_limit_mb", sp.memory_limit_mb);
+        sp.texture_memory_budget_mb =
+            num(pf, "texture_memory_budget_mb", sp.texture_memory_budget_mb);
+        sp.resident_memory_budget_mb =
+            num(pf, "resident_memory_budget_mb", sp.resident_memory_budget_mb);
+        if (pf.contains("locks") && pf["locks"].is_object()) {
+            const auto& lk = pf["locks"];
+            auto mode = [&lk](const char* key, std::string& out) {
+                if (lk.contains(key) && lk[key].is_object()) {
+                    const auto& v = lk[key];
+                    if (v.contains("value") && v["value"].is_string()) {
+                        out = v["value"].get<std::string>();
+                    }
+                } else if (lk.contains(key) && lk[key].is_string()) {
+                    out = lk[key].get<std::string>();
+                }
+            };
+            mode("ffr", sp.lock_ffr);
+            if (lk.contains("ffr") && lk["ffr"].is_object()) {
+                sp.lock_ffr_level = num(lk["ffr"], "level", sp.lock_ffr_level);
+            }
+            mode("resolution", sp.lock_resolution);
+            mode("lod", sp.lock_lod);
+            mode("draw_distance", sp.lock_draw_distance);
+            mode("room_culling", sp.lock_room_culling);
+        }
         PTV_INFO(
             "Scene performance: tier={} budget={} tris/frame msaa={}x ffr={} "
-            "cull={:.0f}m governor={}",
+            "cull={:.0f}m governor={} refresh={}Hz scale {:.2f}..{:.2f} "
+            "locks ffr={} res={} lod={} dist={} rooms={}",
             sp.tier, sp.frame_triangle_budget, sp.msaa_samples,
             sp.foveation_level, sp.cull_distance_m,
-            sp.governor_enabled ? "on" : "off");
+            sp.governor_enabled ? "on" : "off", sp.refresh_hz, sp.render_scale_floor,
+            sp.render_scale_ceiling, sp.lock_ffr, sp.lock_resolution, sp.lock_lod,
+            sp.lock_draw_distance, sp.lock_room_culling);
     }
 
     for (const auto& pj : j.value("projectiles", Json::array())) {
@@ -399,6 +457,9 @@ SceneDoc LoadSceneJson(const std::string& path) {
                         tc.get<std::uint32_t>());
                 }
             }
+            for (const auto& er : e["mesh"].value("lod_errors_rel", Json::array())) {
+                if (er.is_number()) m.lod_errors_rel.push_back(er.get<float>());
+            }
             m.bounds_radius_m = e["mesh"].value("bounds_radius_m", 0.0f);
             m.skinned = e["mesh"].value("skinned", false);
             m.joint_count = e["mesh"].value("joint_count", 0);
@@ -550,6 +611,8 @@ SceneDoc LoadSceneJson(const std::string& path) {
             }
             es.equip_slots.push_back(std::move(slot));
         }
+        es.static_batch = e.contains("static_batch") && e["static_batch"].is_boolean() &&
+                          e["static_batch"].get<bool>();
         d.entities.push_back(std::move(es));
     }
 
@@ -600,7 +663,7 @@ void ApplySceneToWorld(const SceneDoc& doc, World& world,
                          es.mesh->animation_speeds, es.mesh->unit_scale,
                          es.mesh->foot_offset_m, es.mesh->has_model_frame,
                          es.mesh->model_yaw_offset_rad, es.mesh->model_sole_y,
-                         es.mesh->model_height});
+                         es.mesh->model_height, es.mesh->lod_errors_rel});
             if (!es.mesh->socket_info.empty()) {
                 CSocketInfo info{};
                 for (const auto& [name, si] : es.mesh->socket_info) {
@@ -675,6 +738,7 @@ void ApplySceneToWorld(const SceneDoc& doc, World& world,
         if (!es.tags.empty()) {
             world.registry().emplace<CTag>(e, CTag{es.tags});
         }
+        if (es.static_batch) world.registry().emplace<CStaticBatch>(e);
         // Without this, builtin.equip finds no candidate slot on any wearer
         // (EquipMechanic::pick_slot_near returns {} when CEquipSlots is
         // absent) and an authored holster silently never accepts anything.

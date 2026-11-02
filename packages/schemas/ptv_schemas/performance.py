@@ -83,6 +83,32 @@ class GovernorBounds(StrictModel):
     relax_after_good_frames: int = Field(default=180, ge=1, le=3000)
 
 
+class LockValue(StrictModel):
+    """One user override ("Custom Quest Optimizations" or the main prompt).
+
+    ``value`` "auto" means the engine decides. Anything else is a LOCK: the
+    runtime governor never moves that knob, whatever the frame rate does."""
+
+    value: str = "auto"
+    level: Optional[int] = Field(default=None, ge=0, le=4)
+    source: str = Field(default="", description="custom_box | main_prompt")
+    quote: str = ""
+
+
+class PerformanceLocks(StrictModel):
+    ffr: LockValue = Field(default_factory=LockValue)
+    resolution: LockValue = Field(default_factory=LockValue)
+    lod: LockValue = Field(default_factory=LockValue)
+    texture_quality: LockValue = Field(default_factory=LockValue)
+    draw_distance: LockValue = Field(default_factory=LockValue)
+    room_culling: LockValue = Field(default_factory=LockValue)
+    anti_aliasing: LockValue = Field(default_factory=LockValue)
+    frame_rate: LockValue = Field(default_factory=LockValue)
+
+    def active(self) -> dict[str, LockValue]:
+        return {k: v for k, v in self if isinstance(v, LockValue) and v.value != "auto"}
+
+
 class PerformanceProfile(StrictModel):
     """Resolved per-project rendering budget, emitted into ``scene.json``.
 
@@ -186,6 +212,71 @@ class PerformanceProfile(StrictModel):
         default=300, ge=32, le=20000,
         description="LOD0 triangle cap for a projectile mesh (rocket, arrow).")
 
+    # --- Textures ----------------------------------------------------------
+    #
+    # Base-colour textures are ASTC-compressed with mips for Quest (Meta:
+    # ASTC, 6x6 as the default block, 4x4 for UI / text, mipmaps on every 3D
+    # texture) and sized by the detail the player can actually see -- see
+    # ``pipeline/texture_policy.py``. The budget covers every texture the game
+    # can have resident at once; going over shrinks the least visible ones
+    # first and reports each reduction, it never drops a texture.
+    texture_memory_budget_mb: float = Field(
+        default=320.0, gt=0.0, le=4096.0,
+        description="GPU memory for all base-colour textures (ASTC + mips).")
+    texture_max_size: dict[str, int] = Field(
+        default_factory=lambda: {"held": 2048, "hero": 2048, "standard": 1024,
+                                 "background": 512, "projectile": 256, "ui": 1024},
+        description="Texture edge ceiling per importance class (pixels).")
+    texture_astc_block: str = Field(
+        default="6x6", description="ASTC block for 3D textures (UI uses 4x4).")
+
+    # --- LOD and culling by projected size --------------------------------
+    lod_screen_error_px: float = Field(
+        default=1.0, gt=0.0, le=16.0,
+        description="Switch to a coarser LOD once its simplification error "
+                    "projects to fewer pixels than this.")
+    lod_hysteresis: float = Field(default=0.2, ge=0.0, le=1.0)
+    small_object_cull_px: float = Field(
+        default=1.5, ge=0.0, le=16.0,
+        description="Rendering-only cull for objects smaller than this on screen.")
+
+    # --- Resolution and refresh -------------------------------------------
+    render_scale_ceiling: float = Field(
+        default=1.0, ge=0.5, le=1.25,
+        description="Swapchain size as a fraction of the runtime-recommended "
+                    "eye resolution (Quest 3: 1680x1760 at 1.0).")
+    render_scale_floor: float = Field(
+        default=0.85, ge=0.5, le=1.25,
+        description="Lowest fraction dynamic resolution may submit.")
+    refresh_hz: int = Field(default=72, ge=60, le=120)
+
+    # --- Internal toggles (engineering switches, not user settings) -------
+    multiview: bool = True
+    ffr_fdm: bool = True
+    frames_in_flight: int = Field(default=2, ge=1, le=2)
+    static_batching: bool = True
+    instancing: bool = True
+    room_culling: bool = Field(
+        default=False,
+        description="Room/portal culling from nav regions; decided per scene "
+                    "by scene_complexity (indoor, multi-room worlds).")
+
+    # --- Memory (Quest 3 PSS: Meta's limit 5.75 GiB) ----------------------
+    memory_limit_mb: float = Field(
+        default=5888.0, description="Meta's documented per-app PSS limit.")
+    memory_ceiling_mb: float = Field(
+        default=5120.0, description="Engine: never planned past (load spikes included).")
+    memory_target_mb: float = Field(
+        default=4608.0, description="Engine: steady-state residency target.")
+    engine_baseline_pss_mb: float = Field(
+        default=260.0, description="Measured empty-scene PSS (code, driver, runtime).")
+    resident_memory_budget_mb: float = Field(
+        default=2048.0, gt=0.0,
+        description="Streamable meshes + textures resident at once; set by the memory "
+                    "model (target minus always-resident set and transients).")
+
+    locks: PerformanceLocks = Field(default_factory=PerformanceLocks)
+
     min_triangles_per_asset: int = Field(default=1500, gt=0)
     max_triangles_per_asset: int = Field(default=60000, gt=0)
     lod_ratios: List[float] = Field(
@@ -224,6 +315,7 @@ _QUEST_TIERS: dict[PerformanceTier, dict] = {
         min_triangles_per_asset=3000,
         max_triangles_per_asset=60000,
         evict_when_over_budget=False,
+        texture_memory_budget_mb=256.0,
     ),
     PerformanceTier.standard: dict(
         frame_triangle_budget=1_100_000,
@@ -239,6 +331,7 @@ _QUEST_TIERS: dict[PerformanceTier, dict] = {
         min_triangles_per_asset=2000,
         max_triangles_per_asset=35000,
         evict_when_over_budget=False,
+        texture_memory_budget_mb=320.0,
     ),
     PerformanceTier.large: dict(
         frame_triangle_budget=1_200_000,
@@ -254,6 +347,7 @@ _QUEST_TIERS: dict[PerformanceTier, dict] = {
         min_triangles_per_asset=1500,
         max_triangles_per_asset=18000,
         evict_when_over_budget=False,
+        texture_memory_budget_mb=384.0,
     ),
     PerformanceTier.massive: dict(
         frame_triangle_budget=1_200_000,
@@ -269,6 +363,7 @@ _QUEST_TIERS: dict[PerformanceTier, dict] = {
         min_triangles_per_asset=1500,
         max_triangles_per_asset=10000,
         evict_when_over_budget=True,
+        texture_memory_budget_mb=448.0,
     ),
 }
 
@@ -327,6 +422,7 @@ def derive_profile(
         base["msaa_samples"] = 4
         base["foveation_level"] = 0
         base["evict_when_over_budget"] = False
+        base["texture_memory_budget_mb"] = base["texture_memory_budget_mb"] * 2.0
         # A PC has CPU headroom the headset does not, and skinning plus AI is
         # CPU work, so more characters can be alive and updated further out.
         base["max_animated_agents"] = int(base["max_animated_agents"] * 3)
@@ -344,13 +440,111 @@ def derive_profile(
         enabled=True,
     )
 
+    if target_device == TargetDevice.pcvr:
+        # Desktop memory is not the Quest's PSS budget.
+        base["memory_target_mb"] = 12288.0
+        base["memory_ceiling_mb"] = 14336.0
+        base["memory_limit_mb"] = 16384.0
+        base["ffr_fdm"] = False
     return PerformanceProfile(
         tier=tier,
         target_device=target_device,
         target_fps=target_fps,
+        refresh_hz=target_fps,
         governor=governor,
         **base,
     )
+
+
+_TEXTURE_STEPS = [256, 512, 1024, 2048]
+
+
+def _step(size: int, delta: int) -> int:
+    if size not in _TEXTURE_STEPS:
+        return size
+    i = max(0, min(len(_TEXTURE_STEPS) - 1, _TEXTURE_STEPS.index(size) + delta))
+    return _TEXTURE_STEPS[i]
+
+
+def apply_overrides(profile: PerformanceProfile, locks: PerformanceLocks) -> tuple[
+        PerformanceProfile, list[str]]:
+    """Apply user overrides on top of the automatic profile.
+
+    Each override both CHANGES the starting value and LOCKS the knob, so the
+    runtime governor never moves it back. Anything the user did not mention
+    stays automatic. Returns the new profile and human-readable notes of what
+    was applied (and clamped -- memory safety is never overridable; see the
+    Phase 13 memory model, which may clamp further)."""
+    p = profile.model_copy(deep=True)
+    p.locks = locks
+    notes: list[str] = []
+    g = p.governor
+    ffr = locks.ffr
+    if ffr.value == "off":
+        p.foveation_level = 0
+        g.max_foveation_level = 0
+        p.ffr_fdm = False
+        notes.append("FFR off: no foveation at any time")
+    elif ffr.value == "fixed":
+        lvl = max(1, min(3, ffr.level or 2))
+        p.foveation_level = lvl
+        g.max_foveation_level = lvl
+        notes.append(f"FFR fixed at level {lvl}")
+    elif ffr.value == "max":
+        lvl = max(0, min(3, ffr.level if ffr.level is not None else 1))
+        g.max_foveation_level = lvl
+        p.foveation_level = min(p.foveation_level, lvl)
+        notes.append(f"FFR dynamic, never above level {lvl}")
+    res = locks.resolution
+    if res.value == "off":
+        p.render_scale_floor = 1.0
+        p.render_scale_ceiling = 1.0
+        notes.append("dynamic resolution off: always the native eye resolution")
+    elif res.value == "high":
+        p.render_scale_ceiling = 1.25
+        p.render_scale_floor = 1.25
+        notes.append("resolution high: 1.25x the recommended eye resolution, never reduced")
+    lod = locks.lod
+    if lod.value == "detail":
+        p.lod_screen_error_px = 0.5
+        g.max_lod_bias = 0.0
+        p.max_triangles_per_asset = int(p.max_triangles_per_asset * 1.5)
+        notes.append("model detail prioritised: finer LOD threshold, governor may not coarsen LODs")
+    elif lod.value == "performance":
+        p.lod_screen_error_px = 2.0
+        g.max_lod_bias = max(g.max_lod_bias, 3.0)
+        notes.append("model detail: performance (coarser LODs sooner)")
+    tex = locks.texture_quality
+    if tex.value == "high":
+        p.texture_max_size = {k: _step(v, +1) for k, v in p.texture_max_size.items()}
+        p.texture_memory_budget_mb = p.texture_memory_budget_mb * 2.0
+        p.texture_astc_block = "4x4"
+        notes.append("texture quality high: one size step up, ASTC 4x4")
+    elif tex.value == "memory_saver":
+        p.texture_max_size = {k: _step(v, -1) for k, v in p.texture_max_size.items()}
+        p.texture_memory_budget_mb = p.texture_memory_budget_mb * 0.6
+        notes.append("texture quality: memory saver (one size step down)")
+    dist = locks.draw_distance
+    if dist.value == "far":
+        g.min_cull_distance_m = max(g.min_cull_distance_m, p.cull_distance_m)
+        p.small_object_cull_px = 0.5
+        notes.append("draw distance far: the governor never shortens it")
+    elif dist.value == "performance":
+        p.cull_distance_m = min(p.cull_distance_m, 120.0)
+        g.min_cull_distance_m = 20.0
+        notes.append("draw distance: performance (may be shortened more)")
+    if locks.room_culling.value == "off":
+        p.room_culling = False
+        notes.append("room/portal culling off")
+    if locks.anti_aliasing.value == "high":
+        p.msaa_samples = 4
+        notes.append("anti-aliasing high: 4x MSAA always")
+    fr = locks.frame_rate
+    if fr.value in ("90", "120"):
+        p.target_fps = int(fr.value)
+        p.refresh_hz = int(fr.value)
+        notes.append(f"frame rate {fr.value} Hz (frame budget {1000.0 / int(fr.value):.1f} ms)")
+    return p, notes
 
 
 class AssetBudgetRequest(StrictModel):

@@ -12,7 +12,17 @@ add_executable(ptv_glb_optimize glb_optimize.cpp)
 target_link_libraries(ptv_glb_optimize PRIVATE
   ptv_runtime
   meshoptimizer::meshoptimizer)
+target_include_directories(ptv_glb_optimize PRIVATE "${Stb_INCLUDE_DIR}")
 set_target_properties(ptv_glb_optimize PROPERTIES FOLDER "ptv/tools")
+
+# texture_compress: resize + linear-space mip chain + ASTC KTX2 (and a resized
+# PNG/JPEG for PC VR, whose GPUs lack ASTC) for the asset_optimization stage.
+if(Ktx_FOUND)
+  add_executable(ptv_texture_compress texture_compress.cpp)
+  target_link_libraries(ptv_texture_compress PRIVATE ptv_runtime KTX::ktx)
+  target_include_directories(ptv_texture_compress PRIVATE "${Stb_INCLUDE_DIR}")
+  set_target_properties(ptv_texture_compress PROPERTIES FOLDER "ptv/tools")
+endif()
 
 # glb_sockets: deterministic socket (muzzle / grip) derivation for the
 # pipeline's asset_contract stage. Reuses the runtime's GLB merge so the

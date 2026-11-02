@@ -63,6 +63,9 @@ struct Options {
     std::string input;
     std::string out_dir;
     std::string overlay;
+    // Render a second GLB (a decimated LOD) with the INPUT's cameras and
+    // report how its colours compare (see compare_mode).
+    std::string compare;
     int size = 768;
     // Optional world "up" for the views (mesh space): verification renders
     // pass the item's solved up so a pistol is photographed upright.
@@ -94,6 +97,8 @@ bool parse_args(int argc, char** argv, Options& o) {
             if (!next(o.out_dir)) return false;
         } else if (a == "--overlay") {
             if (!next(o.overlay)) return false;
+        } else if (a == "--compare") {
+            if (!next(o.compare)) return false;
         } else if (a == "--size") {
             if (!next(v)) return false;
             o.size = std::clamp(std::stoi(v), 128, 2048);
@@ -473,6 +478,242 @@ bool write_raw(const fs::path& path, const void* data, size_t bytes) {
     return static_cast<bool>(out);
 }
 
+// --- Colour comparison (--compare) -------------------------------------------
+
+/** A loaded mesh ready to rasterise: decoded textures + usable normals. */
+struct Renderable {
+    TexturedMesh mesh;
+    std::vector<Image> images;
+    std::vector<glm::vec3> normals;
+};
+
+bool load_renderable(const std::string& path, Renderable& r, std::string& err) {
+    if (!ptv::gltf_mesh_load::load_glb_textured(path, r.mesh, err)) return false;
+    r.images.assign(r.mesh.images.size(), Image{});
+    for (size_t i = 0; i < r.mesh.images.size(); ++i) {
+        int w = 0, h = 0, n = 0;
+        unsigned char* px = stbi_load_from_memory(
+            r.mesh.images[i].bytes.data(), static_cast<int>(r.mesh.images[i].bytes.size()),
+            &w, &h, &n, 4);
+        if (px != nullptr) {
+            r.images[i].w = w;
+            r.images[i].h = h;
+            r.images[i].rgba.assign(px, px + static_cast<size_t>(w) * h * 4);
+            stbi_image_free(px);
+        }
+    }
+    r.normals.assign(r.mesh.verts.size(), glm::vec3(0.0f));
+    bool need = false;
+    for (size_t i = 0; i < r.mesh.verts.size(); ++i) {
+        const auto& v = r.mesh.verts[i];
+        r.normals[i] = glm::vec3(v.normal[0], v.normal[1], v.normal[2]);
+        if (glm::dot(r.normals[i], r.normals[i]) < 1e-8f) need = true;
+    }
+    if (need) {
+        std::fill(r.normals.begin(), r.normals.end(), glm::vec3(0.0f));
+        for (size_t t = 0; t + 2 < r.mesh.indices.size(); t += 3) {
+            const auto& a = r.mesh.verts[r.mesh.indices[t]].pos;
+            const auto& b = r.mesh.verts[r.mesh.indices[t + 1]].pos;
+            const auto& c = r.mesh.verts[r.mesh.indices[t + 2]].pos;
+            const glm::vec3 n = glm::cross(glm::vec3(b[0] - a[0], b[1] - a[1], b[2] - a[2]),
+                                           glm::vec3(c[0] - a[0], c[1] - a[1], c[2] - a[2]));
+            for (int k = 0; k < 3; ++k) r.normals[r.mesh.indices[t + k]] += n;
+        }
+    }
+    return true;
+}
+
+Target render_view(const Renderable& r, const View& view, int size, float scale,
+                   const glm::vec3& offset) {
+    Target target(size);
+    const glm::mat4 vp = view.proj * view.view;
+    const size_t tri_count = r.mesh.indices.size() / 3;
+    for (size_t t = 0; t < tri_count; ++t) {
+        ClipVert cv[3];
+        for (int i = 0; i < 3; ++i) {
+            const auto& tv = r.mesh.verts[r.mesh.indices[t * 3 + i]];
+            const glm::vec3 p = glm::vec3(tv.pos[0], tv.pos[1], tv.pos[2]) * scale + offset;
+            cv[i] = make_vert(vp, p, r.normals[r.mesh.indices[t * 3 + i]],
+                              glm::vec2(tv.uv[0], tv.uv[1]),
+                              glm::vec4(tv.color[0], tv.color[1], tv.color[2], tv.color[3]));
+        }
+        const int img = t < r.mesh.tri_image.size() ? r.mesh.tri_image[t] : -1;
+        const Image* tex =
+            (img >= 0 && static_cast<size_t>(img) < r.images.size() && r.images[img].w > 0)
+                ? &r.images[img]
+                : nullptr;
+        raster_triangle(target, view, cv, tex, static_cast<uint32_t>(t + 1), true, nullptr);
+    }
+    return target;
+}
+
+glm::vec3 srgb8_to_lab(const unsigned char* p) {
+    auto lin = [](float c) {
+        c /= 255.0f;
+        return c <= 0.04045f ? c / 12.92f : std::pow((c + 0.055f) / 1.055f, 2.4f);
+    };
+    const float r = lin(p[0]), g = lin(p[1]), b = lin(p[2]);
+    const float x = (0.4124f * r + 0.3576f * g + 0.1805f * b) / 0.95047f;
+    const float y = (0.2126f * r + 0.7152f * g + 0.0722f * b);
+    const float z = (0.0193f * r + 0.1192f * g + 0.9505f * b) / 1.08883f;
+    auto f = [](float t) { return t > 0.008856f ? std::cbrt(t) : 7.787f * t + 16.0f / 116.0f; };
+    const float fx = f(x), fy = f(y), fz = f(z);
+    return glm::vec3(116.0f * fy - 16.0f, 500.0f * (fx - fy), 200.0f * (fy - fz));
+}
+
+struct ColorStats {
+    glm::vec3 mean_lab{0.0f};
+    std::vector<float> hist;  // 8x8x8 RGB, normalised
+    float white_fraction{0.0f};
+    float magenta_fraction{0.0f};
+    size_t pixels{0};
+};
+
+ColorStats color_stats(const Target& t) {
+    ColorStats s;
+    s.hist.assign(512, 0.0f);
+    glm::dvec3 acc(0.0);
+    size_t white = 0, magenta = 0;
+    for (int i = 0; i < t.size * t.size; ++i) {
+        if (t.ids[static_cast<size_t>(i)] == 0) continue;
+        const unsigned char* p = &t.rgb[static_cast<size_t>(i) * 3];
+        const glm::vec3 lab = srgb8_to_lab(p);
+        acc += glm::dvec3(lab);
+        const float chroma = std::sqrt(lab.y * lab.y + lab.z * lab.z);
+        if (lab.x > 92.0f && chroma < 6.0f) ++white;
+        if (p[0] > 200 && p[1] < 60 && p[2] > 200) ++magenta;
+        s.hist[(p[0] >> 5) * 64 + (p[1] >> 5) * 8 + (p[2] >> 5)] += 1.0f;
+        ++s.pixels;
+    }
+    if (s.pixels > 0) {
+        s.mean_lab = glm::vec3(acc / static_cast<double>(s.pixels));
+        for (auto& h : s.hist) h /= static_cast<float>(s.pixels);
+        s.white_fraction = static_cast<float>(white) / static_cast<float>(s.pixels);
+        s.magenta_fraction = static_cast<float>(magenta) / static_cast<float>(s.pixels);
+    }
+    return s;
+}
+
+/** Source vs LOD from the source's own cameras: mean colour difference
+ *  (CIE76 delta E over object pixels), RGB histogram distance (half L1, 0
+ *  identical .. 1 disjoint), the change in near-white surface, magenta
+ *  (missing-texture) pixels and silhouette IoU. Lighting is the tool's own
+ *  for both, so only the asset differs. */
+int compare_mode(const Options& opt) {
+    Renderable src, lod;
+    std::string err;
+    if (!load_renderable(opt.input, src, err)) {
+        std::fprintf(stderr, "load failed (%s): %s\n", opt.input.c_str(), err.c_str());
+        return 1;
+    }
+    if (!load_renderable(opt.compare, lod, err)) {
+        std::fprintf(stderr, "load failed (%s): %s\n", opt.compare.c_str(), err.c_str());
+        return 1;
+    }
+    auto bounds = [](const TexturedMesh& m, glm::vec3& lo, glm::vec3& hi) {
+        lo = glm::vec3(std::numeric_limits<float>::max());
+        hi = glm::vec3(std::numeric_limits<float>::lowest());
+        for (const auto& v : m.verts) {
+            const glm::vec3 p(v.pos[0], v.pos[1], v.pos[2]);
+            lo = glm::min(lo, p);
+            hi = glm::max(hi, p);
+        }
+    };
+    glm::vec3 slo, shi, llo, lhi;
+    bounds(src.mesh, slo, shi);
+    bounds(lod.mesh, llo, lhi);
+    const glm::vec3 center = (slo + shi) * 0.5f;
+    float radius = 0.0f;
+    for (const auto& v : src.mesh.verts) {
+        radius = std::max(radius, glm::length(glm::vec3(v.pos[0], v.pos[1], v.pos[2]) - center));
+    }
+    // A LOD written at source scale lines up already; one that was renormalised
+    // is mapped onto the source's box by its longest axis.
+    const float s_long = std::max({shi.x - slo.x, shi.y - slo.y, shi.z - slo.z});
+    const float l_long = std::max({lhi.x - llo.x, lhi.y - llo.y, lhi.z - llo.z});
+    const float scale = (l_long > 1e-8f) ? s_long / l_long : 1.0f;
+    const glm::vec3 offset = center - (llo + lhi) * 0.5f * scale;
+    const glm::vec3 axes[3] = {glm::vec3(1, 0, 0), glm::vec3(0, 1, 0), glm::vec3(0, 0, 1)};
+    const std::vector<View> views = make_views(center, radius, axes);
+    fs::create_directories(opt.out_dir);
+    nlohmann::json per = nlohmann::json::array();
+    float max_de = 0.0f, max_hist = 0.0f, max_white_gain = 0.0f, max_magenta = 0.0f;
+    float min_iou = 1.0f, sum_de = 0.0f;
+    int counted = 0;
+    for (size_t k = 0; k < views.size(); ++k) {
+        const Target a = render_view(src, views[k], opt.size, 1.0f, glm::vec3(0.0f));
+        const Target b = render_view(lod, views[k], opt.size, scale, offset);
+        const ColorStats sa = color_stats(a);
+        const ColorStats sb = color_stats(b);
+        size_t inter = 0, uni = 0;
+        for (int i = 0; i < opt.size * opt.size; ++i) {
+            const bool ia = a.ids[static_cast<size_t>(i)] != 0;
+            const bool ib = b.ids[static_cast<size_t>(i)] != 0;
+            inter += (ia && ib);
+            uni += (ia || ib);
+        }
+        const float iou = uni > 0 ? static_cast<float>(inter) / static_cast<float>(uni) : 1.0f;
+        float hist = 0.0f;
+        for (size_t i = 0; i < sa.hist.size(); ++i) hist += std::fabs(sa.hist[i] - sb.hist[i]);
+        hist *= 0.5f;
+        const float de = glm::length(sa.mean_lab - sb.mean_lab);
+        if (sa.pixels > 100 && sb.pixels > 100) {
+            max_de = std::max(max_de, de);
+            sum_de += de;
+            ++counted;
+            max_hist = std::max(max_hist, hist);
+            max_white_gain = std::max(max_white_gain, sb.white_fraction - sa.white_fraction);
+            max_magenta = std::max(max_magenta, sb.magenta_fraction);
+            min_iou = std::min(min_iou, iou);
+        }
+        // Side by side: source | LOD.
+        std::vector<unsigned char> pair(static_cast<size_t>(opt.size) * opt.size * 2 * 3);
+        for (int y = 0; y < opt.size; ++y) {
+            std::memcpy(&pair[(static_cast<size_t>(y) * opt.size * 2) * 3],
+                        &a.rgb[static_cast<size_t>(y) * opt.size * 3],
+                        static_cast<size_t>(opt.size) * 3);
+            std::memcpy(&pair[(static_cast<size_t>(y) * opt.size * 2 + opt.size) * 3],
+                        &b.rgb[static_cast<size_t>(y) * opt.size * 3],
+                        static_cast<size_t>(opt.size) * 3);
+        }
+        const fs::path png = fs::path(opt.out_dir) / ("compare_" + std::to_string(k) + ".png");
+        stbi_write_png(png.string().c_str(), opt.size * 2, opt.size, 3, pair.data(),
+                       opt.size * 2 * 3);
+        per.push_back({{"view", views[k].name},
+                       {"delta_e", de},
+                       {"hist_distance", hist},
+                       {"white_source", sa.white_fraction},
+                       {"white_lod", sb.white_fraction},
+                       {"magenta_lod", sb.magenta_fraction},
+                       {"iou", iou},
+                       {"source_lab", vec_json(sa.mean_lab)},
+                       {"lod_lab", vec_json(sb.mean_lab)},
+                       {"image", png.filename().string()}});
+    }
+    nlohmann::json doc;
+    doc["source"] = opt.input;
+    doc["lod"] = opt.compare;
+    doc["source_triangles"] = src.mesh.indices.size() / 3;
+    doc["lod_triangles"] = lod.mesh.indices.size() / 3;
+    doc["source_textured"] = !src.mesh.images.empty();
+    doc["lod_textured"] = !lod.mesh.images.empty();
+    doc["max_delta_e"] = max_de;
+    doc["mean_delta_e"] = counted ? sum_de / static_cast<float>(counted) : 0.0f;
+    doc["max_hist_distance"] = max_hist;
+    doc["max_white_gain"] = max_white_gain;
+    doc["max_magenta"] = max_magenta;
+    doc["min_iou"] = min_iou;
+    doc["views"] = per;
+    std::ofstream cj(fs::path(opt.out_dir) / "compare.json");
+    cj << doc.dump(2) << "\n";
+    std::printf("compare %s vs %s: max dE %.2f, mean dE %.2f, hist %.3f, white +%.3f, "
+                "IoU %.3f\n",
+                opt.input.c_str(), opt.compare.c_str(), max_de,
+                counted ? sum_de / static_cast<float>(counted) : 0.0f, max_hist,
+                max_white_gain, min_iou);
+    return 0;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -480,9 +721,10 @@ int main(int argc, char** argv) {
     if (!parse_args(argc, argv, opt)) {
         std::fprintf(stderr,
                      "usage: ptv_glb_views --input <in.glb> --out-dir <dir> "
-                     "[--size 768] [--overlay markers.json]\n");
+                     "[--size 768] [--overlay markers.json] [--compare <lod.glb>]\n");
         return 2;
     }
+    if (!opt.compare.empty()) return compare_mode(opt);
     TexturedMesh mesh;
     std::string err;
     if (!ptv::gltf_mesh_load::load_glb_textured(opt.input, mesh, err)) {

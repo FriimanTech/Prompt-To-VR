@@ -14,6 +14,7 @@
 #include <volk.h>
 #include <vk_mem_alloc.h>
 
+#include <array>
 #include <cstdint>
 #include <vector>
 
@@ -69,10 +70,23 @@ public:
     void prepare(const std::vector<FxQuad>& quads, const Vec3& camera,
                  std::size_t max_quads);
     /** Draw the prepared quads for one eye. */
-    void record(VkCommandBuffer cmd, const Mat4& view_proj);
+    /** Both eyes' view-projections (see TextRenderer::record). */
+    void record(VkCommandBuffer cmd, const std::array<Mat4, 2>& view_proj);
     std::uint32_t quad_count() const { return (alpha_vertices_ + add_vertices_) / 6; }
+    /** Select the vertex buffer of one frame in flight (call before prepare). */
+    void set_frame_slot(int slot);
 
 private:
+    static constexpr int kSlots = 2;
+    struct SlotBuffer {
+        VkBuffer vb{VK_NULL_HANDLE};
+        VmaAllocation alloc{nullptr};
+        void* mapped{nullptr};
+        std::size_t capacity{0};
+    };
+    std::array<SlotBuffer, kSlots> slots_{};
+    int slot_{0};
+
     struct Vertex {
         float pos[3];
         float uv[2];

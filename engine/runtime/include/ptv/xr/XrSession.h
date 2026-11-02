@@ -214,11 +214,50 @@ public:
     // Per-eye swapchain resources exposed to the renderer.
     struct EyeImage {
         VkImage image{VK_NULL_HANDLE};
+        /** Multiview: both eyes share one 2-layer image (layers 0 and 1). */
+        uint32_t array_layer{0};
+        /** The rectangle rendered and submitted this frame (dynamic
+         *  resolution renders a centred sub-rectangle of the image). */
+        int32_t offset_x{0};
+        int32_t offset_y{0};
         uint32_t width{0};
         uint32_t height{0};
         XrFovf fov{};
         XrPosef pose{};
+        /** Fragment density map of this swapchain image (FFR), or null. */
+        VkImage density_map{VK_NULL_HANDLE};
+        uint32_t density_width{0};
+        uint32_t density_height{0};
     };
+
+    /** How the eye swapchains are built. Set before
+     *  ``init_session_and_swapchains``; features the device or runtime lacks
+     *  fall back silently (and are logged). */
+    struct SwapchainOptions {
+        bool multiview{true};
+        bool fragment_density_map{true};
+        /** Allocated size as a fraction of the recommended eye resolution. */
+        float render_scale_ceiling{1.0f};
+        /** Requested display refresh rate (Hz), 0 = runtime default. */
+        float refresh_hz{0.0f};
+    };
+    void set_swapchain_options(const SwapchainOptions& o) { swap_opts_ = o; }
+    bool multiview() const { return multiview_; }
+    bool fragment_density_map() const { return fdm_; }
+    uint32_t swapchain_width() const { return swap_width_; }
+    uint32_t swapchain_height() const { return swap_height_; }
+    /** Fraction of the swapchain rendered and submitted from the next frame
+     *  on (dynamic resolution), clamped to [0.5, 1]. */
+    void set_render_scale(float s);
+    float render_scale() const { return render_scale_; }
+    /** Display refresh rate (XR_FB_display_refresh_rate); 0 if unknown. */
+    float refresh_rate() const { return refresh_hz_; }
+    const std::vector<float>& supported_refresh_rates() const { return refresh_rates_; }
+    bool request_refresh_rate(float hz);
+    /** Both eye views at this frame's predicted display time, located once
+     *  in ``begin_xr_frame`` (so culling and rendering use the same poses).
+     *  False when no frame is pending or the poses are not valid. */
+    bool pending_views(std::array<XrView, 2>& out) const;
     // Full render-and-submit cycle. ``render`` is invoked between acquire
     // and release, with the two eye images filled in. Returns false when
     // the frame should be skipped (session not running, shouldRender=false).
@@ -299,7 +338,21 @@ private:
 
     std::vector<XrSwapchain> color_swapchains_;
     std::vector<std::vector<XrSwapchainImageVulkan2KHR>> color_images_;
+    // Fragment density maps, parallel to color_images_ (FFR via FDM only).
+    std::vector<std::vector<XrSwapchainImageFoveationVulkanFB>> density_images_;
     VkFormat color_format_{VK_FORMAT_R8G8B8A8_SRGB};
+    SwapchainOptions swap_opts_{};
+    bool multiview_{false};
+    bool fdm_{false};
+    bool foveation_vulkan_supported_{false};
+    bool refresh_rate_supported_{false};
+    uint32_t swap_width_{0};
+    uint32_t swap_height_{0};
+    float render_scale_{1.0f};
+    float refresh_hz_{0.0f};
+    std::vector<float> refresh_rates_;
+    std::array<XrView, 2> pending_views_{{{XR_TYPE_VIEW}, {XR_TYPE_VIEW}}};
+    bool pending_views_valid_{false};
 
     XrSessionState session_state_{XR_SESSION_STATE_UNKNOWN};
     XrViewConfigurationType view_config_{XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO};

@@ -2,6 +2,7 @@ import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import {
   api,
+  type OptimizationPreview,
   type PlayerExperience,
   type TargetDevice,
 } from "../api/client";
@@ -35,6 +36,24 @@ export default function NewProjectPage() {
     useState<PlayerExperience>("full_avatar");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  // "Custom Quest Optimizations": collapsed and empty by default, so every
+  // optimization stays automatic unless the user writes something.
+  const [optOpen, setOptOpen] = useState(false);
+  const [customOpt, setCustomOpt] = useState("");
+  const [preview, setPreview] = useState<OptimizationPreview | null>(null);
+
+  async function refreshPreview(nextPrompt = prompt, nextBox = customOpt) {
+    if (device !== "quest") {
+      setPreview(null);
+      return;
+    }
+    try {
+      setPreview(await api.previewOptimizations(nextPrompt, nextBox));
+    } catch {
+      // A preview never blocks creating the project.
+      setPreview(null);
+    }
+  }
 
   async function submit(runNow: boolean) {
     setBusy(true);
@@ -45,6 +64,7 @@ export default function NewProjectPage() {
         prompt,
         device,
         experience,
+        device === "quest" ? customOpt : "",
       );
       if (runNow) {
         await api.run(project_id).catch((e) => {
@@ -137,10 +157,53 @@ export default function NewProjectPage() {
             className="ptv-textarea mono text-sm"
             value={prompt}
             onChange={(e) => setPrompt(e.target.value)}
+            onBlur={() => refreshPreview()}
             rows={22}
             maxLength={16_000}
           />
         </label>
+        {device === "quest" && (
+          <div className="block" data-testid="custom-quest-optimizations">
+            <button
+              type="button"
+              className="text-sm text-muted underline"
+              aria-expanded={optOpen}
+              onClick={() => setOptOpen((o) => !o)}
+            >
+              {optOpen ? "▾" : "▸"} Custom Quest Optimizations (optional)
+            </button>
+            {optOpen && (
+              <div className="mt-2 space-y-1">
+                <textarea
+                  className="ptv-textarea mono text-sm"
+                  value={customOpt}
+                  onChange={(e) => setCustomOpt(e.target.value)}
+                  onBlur={() => refreshPreview(prompt, customOpt)}
+                  rows={4}
+                  maxLength={4000}
+                  placeholder="Leave empty to keep every optimization automatic. Example: no FFR, no resolution reduction, high textures, detailed models far away."
+                />
+                <div className="text-xs text-muted">
+                  Overrides only the settings you name (foveated rendering,
+                  resolution, model detail, textures, draw distance, room
+                  culling, anti-aliasing, frame rate). This box wins over the
+                  same wording in the prompt. Memory safety is never
+                  overridable.
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+        {device === "quest" && preview && preview.differs_from_auto && (
+          <div className="ptv-card p-3 text-sm border border-warn" role="alert">
+            <ul className="list-disc ml-5 mb-2">
+              {preview.lines.map((l) => (
+                <li key={l}>{l}</li>
+              ))}
+            </ul>
+            <div className="text-warn">{preview.warning}</div>
+          </div>
+        )}
         {err && (
           <div className="text-err text-sm whitespace-pre-wrap">{err}</div>
         )}

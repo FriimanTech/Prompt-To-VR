@@ -32,11 +32,21 @@ from .performance import (
     AssetImportance,
     AssetBudgetRequest,
     GovernorBounds,
+    LockValue,
+    PerformanceLocks,
+    apply_overrides,
     classify_tier,
     derive_profile,
     allocate_asset_budgets,
     asset_triangle_ceiling,
     importance_weight,
+)
+from .optimization_preferences import (
+    ALLOWED_VALUES as OPTIMIZATION_ALLOWED_VALUES,
+    ClampedRequest,
+    OptimizationPreferences,
+    PrefSetting,
+    UnsupportedRequest,
 )
 from .asset_manifest import (
     AnimationIntent,
@@ -119,6 +129,8 @@ from .artifact import ArtifactMetadata, ArtifactKind
 from .acceptance import AcceptanceTestPlan, AcceptanceCheck
 from .runtime_verification import (
     CheckOutcome,
+    MemoryReport,
+    MemoryStatus,
     RuntimeVerification,
     VerificationCheck,
     VerificationStatus,
@@ -185,6 +197,16 @@ from .asset_contract import (
 from .scene_spec import HoldRef, SocketRef
 
 __all__ = [
+    "MemoryReport",
+    "MemoryStatus",
+    "OPTIMIZATION_ALLOWED_VALUES",
+    "ClampedRequest",
+    "LockValue",
+    "OptimizationPreferences",
+    "PerformanceLocks",
+    "PrefSetting",
+    "UnsupportedRequest",
+    "apply_overrides",
     "HAND_SOCKET_KINDS",
     "AmmoSpec",
     "BeamSpec",

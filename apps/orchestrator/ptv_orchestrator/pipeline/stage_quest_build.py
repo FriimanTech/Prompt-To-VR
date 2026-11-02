@@ -32,6 +32,7 @@ from ..quest_ids import quest_package_name
 from .context import PipelineContext, StageResult
 from .stage_code_generation import generated_sources_cache
 from .proc import proc_hooks
+from .texture_refs import glb_texture_refs
 
 _SHADER_EXTS = (".vert", ".frag", ".comp")
 # Files in the template that carry @PTV_*@ tokens.
@@ -192,6 +193,66 @@ def _package_engine_assets(engine_dir: Path, assets_dir: Path) -> list[str]:
             f"default hand preparation failed: "
             f"{(exc.stderr or exc.stdout)[:200]}"
         )
+        return notes
+    notes.extend(_embedded_texture_twins(engine_dir, out_dir))
+    return notes
+
+
+def _newest_tool(engine_dir: Path, name: str) -> Path | None:
+    import sys
+
+    exe = f"{name}.exe" if sys.platform == "win32" else name
+    root = engine_dir / "build"
+    found = sorted(root.rglob(exe), key=lambda p: p.stat().st_mtime) if root.exists() else []
+    return found[-1] if found else None
+
+
+def _embedded_texture_twins(engine_dir: Path, out_dir: Path) -> list[str]:
+    """ASTC twins for the base-colour images EMBEDDED in engine GLBs (the
+    default hands ship their PNGs inside the GLB).
+
+    Written as ``<glb dir>/ptv_textures/<content hash>.ktx2``, which the
+    runtime's TextureCache looks for before decoding an embedded PNG on the
+    headset. Optional: without the tools the hands still render, decoded on
+    load. (No leading underscore: aapt leaves "_*" directories out of APKs.)
+    """
+    import json
+    import subprocess
+    import tempfile
+
+    notes: list[str] = []
+    optimize = _newest_tool(engine_dir, "ptv_glb_optimize")
+    compress = _newest_tool(engine_dir, "ptv_texture_compress")
+    if optimize is None or compress is None:
+        notes.append("hand textures: tools not built; the headset decodes the PNG on load")
+        return notes
+    tex_dir = out_dir / "ptv_textures"
+    tex_dir.mkdir(parents=True, exist_ok=True)
+    made = 0
+    with tempfile.TemporaryDirectory() as tmp:
+        for glb in sorted(out_dir.glob("*.glb")):
+            proc = subprocess.run([str(optimize), "--input", str(glb), "--list-images",
+                                   "--extract-images", tmp],
+                                  capture_output=True, text=True)
+            if proc.returncode != 0:
+                notes.append(f"hand textures: listing {glb.name} failed")
+                continue
+            start = proc.stdout.find("{")
+            try:
+                listing = json.loads(proc.stdout[start:])
+            except ValueError:
+                continue
+            for img in listing.get("images") or []:
+                h, src = img.get("hash"), img.get("file")
+                dest = tex_dir / f"{h}.ktx2"
+                if not h or not src or dest.exists():
+                    continue
+                rc = subprocess.run([str(compress), "--input", src, "--max-size", "1024",
+                                     "--block", "6x6", "--out-ktx2", str(dest)],
+                                    capture_output=True, text=True).returncode
+                if rc == 0:
+                    made += 1
+    notes.append(f"hand textures: {made} ASTC twin(s) for embedded images")
     return notes
 
 
@@ -260,9 +321,61 @@ def _package_assets(ctx: PipelineContext, build_dir: Path) -> list[str]:
         notes.append(
             f"skipped {skipped_sources} un-decimated source GLB(s) superseded by LODs"
         )
+    notes.extend(_package_textures(ctx, proj_assets, assets_dir))
 
     notes.extend(_compile_shaders(ctx.settings.engine_dir, assets_dir))
     notes.extend(_package_engine_assets(ctx.settings.engine_dir, assets_dir))
+    return notes
+
+
+def _package_textures(ctx: PipelineContext, proj_assets: Path, assets_dir: Path) -> list[str]:
+    """Copy the shared texture files the packaged GLBs reference.
+
+    Quest samples ASTC natively, so only the KTX2 is shipped; the resized
+    PNG/JPEG goes in only for a texture that has no KTX2 (the compressor was
+    unavailable), with a note, because the headset then decodes it on load.
+    A reference to a file that does not exist fails the build: shipping it
+    would put a magenta / factor-coloured surface in the game.
+    """
+    notes: list[str] = []
+    copied: set[Path] = set()
+    missing: list[str] = []
+    decoded_on_device = 0
+    for glb in sorted((assets_dir / "assets").rglob("*.glb")):
+        rel_glb = glb.relative_to(assets_dir / "assets")
+        src_glb = proj_assets / rel_glb
+        for ref in glb_texture_refs(glb):
+            if ref.get("embedded"):
+                continue
+            wanted = ref.get("ktx2") or ref.get("uri")
+            if not wanted:
+                continue
+            if not ref.get("ktx2"):
+                decoded_on_device += 1
+            src = (src_glb.parent / wanted).resolve()
+            if not src.is_file():
+                missing.append(f"{rel_glb}: {wanted}")
+                continue
+            try:
+                rel = src.relative_to(proj_assets.resolve())
+            except ValueError:
+                missing.append(f"{rel_glb}: {wanted} (outside the project assets)")
+                continue
+            if src in copied:
+                continue
+            dest = assets_dir / "assets" / rel
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src, dest)
+            copied.add(src)
+    if missing:
+        raise RuntimeError(
+            "texture files referenced by packaged GLBs are missing (stage: quest_build; "
+            "re-run asset_optimization): " + "; ".join(missing[:10]))
+    total = sum(p.stat().st_size for p in copied)
+    notes.append(f"packaged {len(copied)} texture file(s), {total / 1048576.0:.1f} MB")
+    if decoded_on_device:
+        notes.append(f"{decoded_on_device} texture reference(s) have no ASTC KTX2 and will "
+                     "be decoded on the headset (slower load, ~4x GPU memory)")
     return notes
 
 

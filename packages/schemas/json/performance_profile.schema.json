@@ -50,6 +50,75 @@
       "title": "GovernorBounds",
       "type": "object"
     },
+    "LockValue": {
+      "additionalProperties": false,
+      "description": "One user override (\"Custom Quest Optimizations\" or the main prompt).\n\n``value`` \"auto\" means the engine decides. Anything else is a LOCK: the\nruntime governor never moves that knob, whatever the frame rate does.",
+      "properties": {
+        "level": {
+          "anyOf": [
+            {
+              "maximum": 4,
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Level"
+        },
+        "quote": {
+          "default": "",
+          "title": "Quote",
+          "type": "string"
+        },
+        "source": {
+          "default": "",
+          "description": "custom_box | main_prompt",
+          "title": "Source",
+          "type": "string"
+        },
+        "value": {
+          "default": "auto",
+          "title": "Value",
+          "type": "string"
+        }
+      },
+      "title": "LockValue",
+      "type": "object"
+    },
+    "PerformanceLocks": {
+      "additionalProperties": false,
+      "properties": {
+        "anti_aliasing": {
+          "$ref": "#/$defs/LockValue"
+        },
+        "draw_distance": {
+          "$ref": "#/$defs/LockValue"
+        },
+        "ffr": {
+          "$ref": "#/$defs/LockValue"
+        },
+        "frame_rate": {
+          "$ref": "#/$defs/LockValue"
+        },
+        "lod": {
+          "$ref": "#/$defs/LockValue"
+        },
+        "resolution": {
+          "$ref": "#/$defs/LockValue"
+        },
+        "room_culling": {
+          "$ref": "#/$defs/LockValue"
+        },
+        "texture_quality": {
+          "$ref": "#/$defs/LockValue"
+        }
+      },
+      "title": "PerformanceLocks",
+      "type": "object"
+    },
     "PerformanceTier": {
       "description": "How heavy the generated content is, relative to the device.\n\nDerived deterministically from the target device plus the amount of GLB\ncontent in the project (see :func:`derive_profile`). The tier only changes\nDEFAULTS -- it never forbids content.",
       "enum": [
@@ -101,10 +170,21 @@
       "title": "Draw Call Budget",
       "type": "integer"
     },
+    "engine_baseline_pss_mb": {
+      "default": 260.0,
+      "description": "Measured empty-scene PSS (code, driver, runtime).",
+      "title": "Engine Baseline Pss Mb",
+      "type": "number"
+    },
     "evict_when_over_budget": {
       "default": false,
       "description": "Enable LRU mesh eviction once resident budget is hit.",
       "title": "Evict When Over Budget",
+      "type": "boolean"
+    },
+    "ffr_fdm": {
+      "default": true,
+      "title": "Ffr Fdm",
       "type": "boolean"
     },
     "foveation_level": {
@@ -121,8 +201,30 @@
       "title": "Frame Triangle Budget",
       "type": "integer"
     },
+    "frames_in_flight": {
+      "default": 2,
+      "maximum": 2,
+      "minimum": 1,
+      "title": "Frames In Flight",
+      "type": "integer"
+    },
     "governor": {
       "$ref": "#/$defs/GovernorBounds"
+    },
+    "instancing": {
+      "default": true,
+      "title": "Instancing",
+      "type": "boolean"
+    },
+    "locks": {
+      "$ref": "#/$defs/PerformanceLocks"
+    },
+    "lod_hysteresis": {
+      "default": 0.2,
+      "maximum": 1.0,
+      "minimum": 0.0,
+      "title": "Lod Hysteresis",
+      "type": "number"
     },
     "lod_ratios": {
       "description": "Triangle ratio of each LOD relative to the LOD0 budget.",
@@ -131,6 +233,14 @@
       },
       "title": "Lod Ratios",
       "type": "array"
+    },
+    "lod_screen_error_px": {
+      "default": 1.0,
+      "description": "Switch to a coarser LOD once its simplification error projects to fewer pixels than this.",
+      "exclusiveMinimum": 0.0,
+      "maximum": 16.0,
+      "title": "Lod Screen Error Px",
+      "type": "number"
     },
     "lod_switch_distances_m": {
       "description": "Distance (metres) at which LOD1, LOD2, LOD3 take over. Length is one less than the LOD chain length.",
@@ -200,6 +310,24 @@
       "title": "Max Triangles Per Asset",
       "type": "integer"
     },
+    "memory_ceiling_mb": {
+      "default": 5120.0,
+      "description": "Engine: never planned past (load spikes included).",
+      "title": "Memory Ceiling Mb",
+      "type": "number"
+    },
+    "memory_limit_mb": {
+      "default": 5888.0,
+      "description": "Meta's documented per-app PSS limit.",
+      "title": "Memory Limit Mb",
+      "type": "number"
+    },
+    "memory_target_mb": {
+      "default": 4608.0,
+      "description": "Engine: steady-state residency target.",
+      "title": "Memory Target Mb",
+      "type": "number"
+    },
     "min_triangles_per_asset": {
       "default": 1500,
       "exclusiveMinimum": 0,
@@ -213,6 +341,11 @@
       "title": "Msaa Samples",
       "type": "integer"
     },
+    "multiview": {
+      "default": true,
+      "title": "Multiview",
+      "type": "boolean"
+    },
     "projectile_max_triangles": {
       "default": 300,
       "description": "LOD0 triangle cap for a projectile mesh (rocket, arrow).",
@@ -221,11 +354,60 @@
       "title": "Projectile Max Triangles",
       "type": "integer"
     },
+    "refresh_hz": {
+      "default": 72,
+      "maximum": 120,
+      "minimum": 60,
+      "title": "Refresh Hz",
+      "type": "integer"
+    },
+    "render_scale_ceiling": {
+      "default": 1.0,
+      "description": "Swapchain size as a fraction of the runtime-recommended eye resolution (Quest 3: 1680x1760 at 1.0).",
+      "maximum": 1.25,
+      "minimum": 0.5,
+      "title": "Render Scale Ceiling",
+      "type": "number"
+    },
+    "render_scale_floor": {
+      "default": 0.85,
+      "description": "Lowest fraction dynamic resolution may submit.",
+      "maximum": 1.25,
+      "minimum": 0.5,
+      "title": "Render Scale Floor",
+      "type": "number"
+    },
+    "resident_memory_budget_mb": {
+      "default": 2048.0,
+      "description": "Streamable meshes + textures resident at once; set by the memory model (target minus always-resident set and transients).",
+      "exclusiveMinimum": 0.0,
+      "title": "Resident Memory Budget Mb",
+      "type": "number"
+    },
     "resident_triangle_budget": {
       "description": "Triangles allowed to be LOADED (GPU-resident) at once.",
       "exclusiveMinimum": 0,
       "title": "Resident Triangle Budget",
       "type": "integer"
+    },
+    "room_culling": {
+      "default": false,
+      "description": "Room/portal culling from nav regions; decided per scene by scene_complexity (indoor, multi-room worlds).",
+      "title": "Room Culling",
+      "type": "boolean"
+    },
+    "small_object_cull_px": {
+      "default": 1.5,
+      "description": "Rendering-only cull for objects smaller than this on screen.",
+      "maximum": 16.0,
+      "minimum": 0.0,
+      "title": "Small Object Cull Px",
+      "type": "number"
+    },
+    "static_batching": {
+      "default": true,
+      "title": "Static Batching",
+      "type": "boolean"
     },
     "target_device": {
       "$ref": "#/$defs/TargetDevice"
@@ -236,6 +418,28 @@
       "minimum": 60,
       "title": "Target Fps",
       "type": "integer"
+    },
+    "texture_astc_block": {
+      "default": "6x6",
+      "description": "ASTC block for 3D textures (UI uses 4x4).",
+      "title": "Texture Astc Block",
+      "type": "string"
+    },
+    "texture_max_size": {
+      "additionalProperties": {
+        "type": "integer"
+      },
+      "description": "Texture edge ceiling per importance class (pixels).",
+      "title": "Texture Max Size",
+      "type": "object"
+    },
+    "texture_memory_budget_mb": {
+      "default": 320.0,
+      "description": "GPU memory for all base-colour textures (ASTC + mips).",
+      "exclusiveMinimum": 0.0,
+      "maximum": 4096.0,
+      "title": "Texture Memory Budget Mb",
+      "type": "number"
     },
     "tier": {
       "$ref": "#/$defs/PerformanceTier"

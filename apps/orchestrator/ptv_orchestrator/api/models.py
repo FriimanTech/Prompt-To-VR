@@ -14,6 +14,14 @@ class CreateProjectRequest(BaseModel):
     # What the player is: "hands_only" (the engine's default rigged hands, no
     # body) or "full_avatar" (a generated full-body GLB viewed first person).
     player_experience: str = Field(default="full_avatar")
+    # The collapsed "Custom Quest Optimizations" box. Empty = everything
+    # automatic.
+    custom_quest_optimizations: str = Field(default="", max_length=4000)
+
+
+class OptimizationPreviewRequest(BaseModel):
+    prompt: str = Field(default="", max_length=16_000)
+    custom_quest_optimizations: str = Field(default="", max_length=4000)
 
 
 class RunStageRequest(BaseModel):

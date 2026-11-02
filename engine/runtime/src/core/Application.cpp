@@ -6,6 +6,7 @@
 #include <cctype>
 #include <cstdio>
 #include <cstdlib>
+#include <sstream>
 #include <deque>
 #include <filesystem>
 #include <stdexcept>
@@ -61,6 +62,7 @@
 #include "gameplay/EffectsSystem.h"
 #include "gameplay/ProjectileSystem.h"
 #include "gameplay/WeaponBoard.h"
+#include "TextureGallery.h"
 #include "WeaponVerifier.h"
 #include "mechanics/builtin/HandRig.h"
 #include "ptv/api/BodySlots.h"
@@ -4624,7 +4626,11 @@ bool Application::load_scene_at(const std::string& path,
     if (renderer_ready_) {
         renderer_.set_performance(scene_.performance);
         governor_.configure(scene_.performance);
+        renderer_.build_static_batches(world_, scene_.nav_regions, scene_.nav_links);
     }
+    memory_guard_.configure(scene_.performance);
+    // The old scene's CPU-side data is gone; give the freed pages back.
+    MemoryGuard::purge_heap();
     configure_weapon_systems();
     // The new scene's mechanics declare what they offer as they attach; the
     // player's chosen mode survives the trip if the new scene offers it too.
@@ -5088,6 +5094,24 @@ void Application::read_verify_mode() {
         weapons = v[0] == '1' || v[0] == 't' || v[0] == 'y';
     }
 #endif
+    bool textures = false;
+#if defined(__ANDROID__)
+    char textures_value[PROP_VALUE_MAX] = {0};
+    if (__system_property_get("debug.ptv.verify_textures", textures_value) > 0) {
+        textures = textures_value[0] == '1' || textures_value[0] == 't' ||
+                   textures_value[0] == 'y';
+    }
+#else
+    if (const char* v = std::getenv("PTV_VERIFY_TEXTURES")) {
+        textures = v[0] == '1' || v[0] == 't' || v[0] == 'y';
+    }
+#endif
+    verify_textures_ = textures && !flow && !weapons;
+    texture_gallery_ = verify_textures_ ? std::make_unique<TextureGallery>() : nullptr;
+    if (verify_textures_) {
+        PTV_INFO("verify: TEXTURES mode on (each textured asset is shown in front of "
+                 "the player in turn for a Quest screenshot)");
+    }
     verify_weapons_ = weapons && !flow;
     weapon_verifier_ = verify_weapons_ ? std::make_unique<WeaponVerifier>() : nullptr;
     if (verify_weapons_) {
@@ -5096,7 +5120,7 @@ void Application::read_verify_mode() {
     }
     // The flow pass is a verification run too (scripted walk, telemetry).
     verify_flow_ = flow;
-    verify_mode_ = on || flow || verify_weapons_;
+    verify_mode_ = on || flow || verify_weapons_ || verify_textures_;
     verify_time_s_ = 0.0f;
     verify_origin_set_ = false;
     if (flow) {
@@ -5406,6 +5430,7 @@ void Application::destroy_entity_runtime(std::uint32_t entity) {
 
 void Application::attach_skeletons() {
     int rigged = 0;
+    std::unordered_map<std::string, gltf_mesh_load::ClipList> shared_clips;
     auto view = world_.registry().view<CMesh>();
     for (auto entity : view) {
         const auto& cm = view.get<CMesh>(entity);
@@ -5472,6 +5497,20 @@ void Application::attach_skeletons() {
             gltf_mesh_load::SkeletonData ignored;
             renderer_.load_glb_skinned(cm.lod_paths[i], cm.target_scale_meters,
                                        ignored, frame_ptr);
+        }
+
+        // One clip array per rigged asset AND load: the loader bakes the
+        // scale and model-frame pivot into the root joint's channels, so only
+        // entities loaded identically may share (runtime clones copy their
+        // source's skeleton, so they share through the copy).
+        const std::string clip_key = fmt::format(
+            "{}|{:.6f}|{:d}|{:.6f}|{:.6f}|{:.6f}|{:.8f}", cm.glb_path, cm.target_scale_meters,
+            frame.valid ? 1 : 0, frame.yaw_offset_rad, frame.sole_y, frame.height,
+            frame.unit_scale);
+        if (auto shared = shared_clips.find(clip_key); shared != shared_clips.end()) {
+            skel.clips = shared->second;
+        } else {
+            shared_clips.emplace(clip_key, skel.clips);
         }
 
         CSkeleton cs{};
@@ -6102,6 +6141,32 @@ int Application::run(const Config& cfg) {
                 view_info.view_proj = cull_proj * glm::inverse(world_from_head);
                 view_info.valid = true;
             }
+            // Exact culling: the two eye frusta at this frame's predicted
+            // display time -- the same poses the frame is rendered with.
+            {
+                std::array<XrView, 2> pv{};
+                if (xr_.pending_views(pv)) {
+                    const float near_z = 0.05f * rig_.scale;
+                    const float far_z = 1000.0f * rig_.scale;
+                    Vec3 mid(0.0f);
+                    for (int e = 0; e < 2; ++e) {
+                        const Mat4 world_from_eye =
+                            rig_render * xr_pose_to_matrix(pv[static_cast<size_t>(e)].pose);
+                        view_info.eye_view_proj[static_cast<size_t>(e)] =
+                            xr_fov_to_projection(pv[static_cast<size_t>(e)].fov, near_z, far_z) *
+                            glm::inverse(world_from_eye);
+                        mid += mat_translation(world_from_eye) * 0.5f;
+                    }
+                    view_info.eyes_valid = true;
+                    view_info.valid = true;
+                    view_info.camera_pos = mid;
+                    view_info.fov_y = pv[0].fov.angleUp - pv[0].fov.angleDown;
+                    view_info.viewport_height_px =
+                        static_cast<float>(xr_.swapchain_height() ? xr_.swapchain_height()
+                                                                  : xr_.eye_height()) *
+                        xr_.render_scale();
+                }
+            }
             renderer_.build_items_from_world(world_, items, view_info);
 
             // Hand visuals. When the rigged hand meshes loaded, the hands are
@@ -6135,16 +6200,27 @@ int Application::run(const Config& cfg) {
             items.insert(items.end(), mech_draw_items_.begin(),
                          mech_draw_items_.end());
 
+            if (texture_gallery_) {
+                if (!texture_gallery_->started()) texture_gallery_->start(world_, renderer_);
+                texture_gallery_->update(dt);
+                texture_gallery_->build_items(items, renderer_, last_head_world_pos_,
+                                              last_head_forward_xz_);
+            }
+
             xr_.render_frame(
                 [&](const std::array<XrRuntime::EyeImage, 2>& eyes,
                     XrTime /*t*/) {
                     std::array<Renderer::EyeTarget, 2> targets{};
                     for (int e = 0; e < 2; ++e) {
                         targets[e].image = eyes[e].image;
-                        targets[e].offset_x = 0;
-                        targets[e].offset_y = 0;
+                        targets[e].array_layer = eyes[e].array_layer;
+                        targets[e].offset_x = eyes[e].offset_x;
+                        targets[e].offset_y = eyes[e].offset_y;
                         targets[e].width = eyes[e].width;
                         targets[e].height = eyes[e].height;
+                        targets[e].density_map = eyes[e].density_map;
+                        targets[e].density_width = eyes[e].density_width;
+                        targets[e].density_height = eyes[e].density_height;
                         Mat4 world_from_head =
                             rig_render * xr_pose_to_matrix(eyes[e].pose);
                         targets[e].view = glm::inverse(world_from_head);
@@ -6208,11 +6284,34 @@ int Application::run(const Config& cfg) {
                 std::chrono::duration<float>(clock::now() - frame_work_start)
                     .count();
 
-            if (governor_.update(work_s)) {
+            const float frame_gpu_ms = renderer_.last_gpu_ms();
+            const float frame_cpu_ms =
+                std::max(0.0f, work_s * 1000.0f - renderer_.last_fence_wait_ms());
+            if (governor_.update(work_s, frame_gpu_ms, frame_cpu_ms)) {
                 const auto& q = governor_.state();
                 renderer_.set_lod_bias(q.lod_bias);
                 renderer_.set_cull_distance(q.cull_distance_m);
                 xr_.set_foveation_level(q.foveation_level);
+                xr_.set_render_scale(q.render_scale);
+            }
+            {
+                // Memory: the engine's exact accounting plus queued loads,
+                // against the sampled PSS. Frame time never feeds this.
+                constexpr double kMb = 1.0 / (1024.0 * 1024.0);
+                const auto mem = renderer_.memory_stats();
+                MemoryGuard::Accounting acc{};
+                acc.texture_mb = static_cast<double>(mem.texture_bytes) * kMb;
+                acc.mesh_mb = static_cast<double>(mem.mesh_bytes) * kMb;
+                acc.targets_mb = static_cast<double>(mem.target_bytes) * kMb;
+                acc.frame_mb = static_cast<double>(mem.frame_bytes) * kMb;
+                acc.reserved_mb = static_cast<double>(renderer_.pending_stream_bytes()) * kMb;
+                if (memory_guard_.update(acc)) {
+                    const int lvl = static_cast<int>(memory_guard_.level());
+                    renderer_.set_memory_pressure(lvl);
+                    if (lvl >= static_cast<int>(MemoryGuard::Level::Red)) {
+                        MemoryGuard::purge_heap();
+                    }
+                }
             }
 
             telemetry_accum_s_ += dt;
@@ -6220,6 +6319,13 @@ int Application::run(const Config& cfg) {
             ++telemetry_frames_;
             telemetry_worst_frame_ms_ =
                 std::max(telemetry_worst_frame_ms_, work_s * 1000.0f);
+            // CPU = the frame's wall time minus the time spent blocked on the
+            // GPU fence; GPU = timestamp delta of the last completed frame.
+            const float gpu_ms = renderer_.last_gpu_ms();
+            telemetry_cpu_accum_ms_ += std::max(
+                0.0f, work_s * 1000.0f - renderer_.last_fence_wait_ms());
+            telemetry_gpu_accum_ms_ += gpu_ms;
+            telemetry_gpu_worst_ms_ = std::max(telemetry_gpu_worst_ms_, gpu_ms);
             if (telemetry_accum_s_ >= 1.0f && telemetry_frames_ > 0) {
                 const auto& st = renderer_.frame_stats();
                 const float frames = static_cast<float>(telemetry_frames_);
@@ -6243,20 +6349,28 @@ int Application::run(const Config& cfg) {
                 }
                 PTV_INFO(
                     "perf: {:.1f} fps | work {:.1f} ms avg, {:.1f} ms worst | "
-                    "draw {} of {} (cull frustum {} dist {}) | tris {} | "
+                    "cpu {:.1f} ms | gpu {:.1f} ms avg, {:.1f} ms worst | "
+                    "calls {} pipes {} sets {} | "
+                    "draw {} of {} (cull frustum {} dist {} small {} room {}, batches {}) | "
+                    "tris {} | "
                     "meshes {} resident ({} tris), {} streaming | "
                     "rigs {} ({} animating, budget {}) | "
-                    "lod_bias {:.1f} cull {:.0f}m ffr {}",
+                    "lod_bias {:.1f} cull {:.0f}m ffr {} scale {:.2f}",
                     frames / telemetry_accum_s_,
                     (telemetry_work_accum_s_ * 1000.0f) / frames,
-                    telemetry_worst_frame_ms_, st.drawn,
+                    telemetry_worst_frame_ms_,
+                    telemetry_cpu_accum_ms_ / frames,
+                    telemetry_gpu_accum_ms_ / frames, telemetry_gpu_worst_ms_,
+                    st.draw_calls, st.pipeline_binds, st.descriptor_binds,
+                    st.drawn,
                     st.entities_considered, st.culled_frustum,
-                    st.culled_distance, st.visible_triangles,
+                    st.culled_distance, st.culled_small, st.culled_room, st.batches_drawn,
+                    st.visible_triangles,
                     st.resident_meshes, st.resident_triangles,
                     st.streaming_pending, skeletons, posed,
                     scene_.performance.max_animated_agents,
                     renderer_.lod_bias(),
-                    renderer_.cull_distance(), xr_.foveation_level());
+                    renderer_.cull_distance(), xr_.foveation_level(), xr_.render_scale());
                 // Weapons: live projectiles, effect quads drawn and casts.
                 PTV_INFO("perf_fx: projectiles {} (cap {}) | fx_quads {} (cap {}) | "
                          "casts {}",
@@ -6264,11 +6378,45 @@ int Application::run(const Config& cfg) {
                          scene_.performance.max_live_projectiles,
                          renderer_.fx_quads_drawn(), scene_.performance.max_fx_quads,
                          projectiles_ ? projectiles_->casts_last_tick() : 0);
+                {
+                    const auto& ts = renderer_.textures().stats();
+                    const auto mem = renderer_.memory_stats();
+                    constexpr double kMb = 1.0 / (1024.0 * 1024.0);
+                    PTV_INFO("tex: resident {} | {:.1f} MB | ktx2 {} | decoded {} | "
+                             "missing {} | missing_draws {} | astc {} | mesh {:.1f} MB | "
+                             "targets {:.1f} MB | instances {}",
+                             ts.resident, static_cast<double>(ts.bytes) * kMb, ts.ktx2,
+                             ts.decoded, ts.missing, st.missing_texture_draws,
+                             renderer_.textures().astc_supported() ? "yes" : "no",
+                             static_cast<double>(mem.mesh_bytes) * kMb,
+                             static_cast<double>(mem.target_bytes) * kMb, st.instances);
+                }
+                memory_guard_.add_evictions(renderer_.evictions() - logged_evictions_);
+                logged_evictions_ = renderer_.evictions();
+                PTV_INFO("{}", memory_guard_.telemetry_line());
+#if defined(__ANDROID__)
+                if (verify_mode_) {
+                    // The verify pressure launch changes this mid-game.
+                    char pv[PROP_VALUE_MAX] = {0};
+                    float scale = 1.0f;
+                    if (__system_property_get("debug.ptv.simulate_memory_pressure", pv) > 0) {
+                        const float s = std::strtof(pv, nullptr);
+                        if (s > 0.0f && s <= 1.0f) scale = s;
+                    }
+                    if (std::abs(scale - applied_pressure_scale_) > 1e-4f) {
+                        applied_pressure_scale_ = scale;
+                        memory_guard_.set_simulated_pressure(scale);
+                    }
+                }
+#endif
                 log_hands_telemetry(hand_valid);
                 telemetry_accum_s_ = 0.0f;
                 telemetry_work_accum_s_ = 0.0f;
                 telemetry_frames_ = 0;
                 telemetry_worst_frame_ms_ = 0.0f;
+                telemetry_cpu_accum_ms_ = 0.0f;
+                telemetry_gpu_accum_ms_ = 0.0f;
+                telemetry_gpu_worst_ms_ = 0.0f;
             }
         }
 
@@ -6330,8 +6478,49 @@ bool Application::initialize(const Config& cfg) {
         if (!vk_.initialize(vcfg)) return false;
     }
 
+    // Engineering A/B switch for on-device measurement only (never set by the
+    // pipeline): debug.ptv.perf_override = "mv=0,fdm=0,fif=1,ffr=3,gov=0".
+    {
+        std::string ov;
+#if defined(__ANDROID__)
+        char v[PROP_VALUE_MAX] = {0};
+        if (__system_property_get("debug.ptv.perf_override", v) > 0) ov = v;
+#else
+        if (const char* e = std::getenv("PTV_PERF_OVERRIDE")) ov = e;
+#endif
+        if (!ov.empty() && ov != "0") {
+            auto& p = scene_.performance;
+            std::stringstream ss(ov);
+            std::string kv;
+            while (std::getline(ss, kv, ',')) {
+                const auto eq = kv.find('=');
+                if (eq == std::string::npos) continue;
+                const std::string k = kv.substr(0, eq);
+                const float val = std::strtof(kv.c_str() + eq + 1, nullptr);
+                if (k == "mv") p.multiview = val != 0.0f;
+                else if (k == "fdm") p.ffr_fdm = val != 0.0f;
+                else if (k == "fif") p.frames_in_flight = static_cast<int>(val);
+                else if (k == "ffr") {
+                    p.foveation_level = static_cast<int>(val);
+                    p.governor_max_foveation_level = static_cast<int>(val);
+                } else if (k == "gov") p.governor_enabled = val != 0.0f;
+                else if (k == "batch") p.static_batching = val != 0.0f;
+                else if (k == "scale") p.render_scale_ceiling = val;
+            }
+            PTV_WARN("perf_override '{}': multiview={} fdm={} frames_in_flight={} ffr={} "
+                     "governor={} batching={}", ov, p.multiview, p.ffr_fdm, p.frames_in_flight,
+                     p.foveation_level, p.governor_enabled, p.static_batching);
+        }
+    }
+
     if (xr_ready) {
         PTV_INFO("App: OpenXR phase 2 (session + swapchains)...");
+        XrRuntime::SwapchainOptions so{};
+        so.multiview = scene_.performance.multiview;
+        so.fragment_density_map = scene_.performance.ffr_fdm;
+        so.render_scale_ceiling = scene_.performance.render_scale_ceiling;
+        so.refresh_hz = static_cast<float>(scene_.performance.refresh_hz);
+        xr_.set_swapchain_options(so);
         if (!xr_.init_session_and_swapchains(vk_)) {
             PTV_WARN("OpenXR session init failed. Mirror window will still run.");
         }
@@ -6451,17 +6640,59 @@ bool Application::initialize(const Config& cfg) {
         // advertises (4x MSAA is a large, and often unnecessary, mobile cost).
         renderer_.set_performance(scene_.performance);
         governor_.configure(scene_.performance);
-        renderer_ready_ = renderer_.initialize(vk_, xr_.color_format(),
-                                               xr_.eye_width(),
-                                               xr_.eye_height());
+        renderer_.set_frames_in_flight(scene_.performance.frames_in_flight);
+        Renderer::TargetInfo target{};
+        target.color_format = xr_.color_format();
+        target.width = xr_.swapchain_width() ? xr_.swapchain_width() : xr_.eye_width();
+        target.height = xr_.swapchain_height() ? xr_.swapchain_height() : xr_.eye_height();
+        target.multiview = xr_.multiview();
+        target.fragment_density_map = xr_.fragment_density_map();
+        renderer_ready_ = renderer_.initialize(vk_, target);
+        PTV_INFO("render: {}x{} per eye, multiview={} ffr_fdm={} frames_in_flight={} "
+                 "refresh={:.0f}Hz",
+                 target.width, target.height, target.multiview ? "on" : "off",
+                 target.fragment_density_map ? "on" : "off", renderer_.frames_in_flight(),
+                 xr_.refresh_rate());
+        // A texture that should exist but failed to load draws as a magenta
+        // checker in verification runs and debug builds, so it cannot pass
+        // for an intentionally untextured surface; release builds fall back
+        // to the material's own colour (the failure is logged either way).
+#if defined(NDEBUG)
+        renderer_.set_texture_diagnostics(verify_mode_);
+#else
+        renderer_.set_texture_diagnostics(true);
+#endif
         // Baseline foveation for this scene's tier. No-op on runtimes without
         // the XR_FB_foveation extensions (e.g. PC VR over Quest Link).
         xr_.set_foveation_level(scene_.performance.foveation_level);
         if (!renderer_ready_) {
             PTV_WARN("Renderer init failed; headset will not display content.");
         }
-        if (renderer_ready_) attach_skeletons();
+        if (renderer_ready_) {
+            attach_skeletons();
+            renderer_.build_static_batches(world_, scene_.nav_regions, scene_.nav_links);
+        }
     }
+    memory_guard_.configure(scene_.performance);
+    {
+        // Verification only: lower every threshold mid-game so the guard's
+        // red level and recovery can be exercised on a small game.
+        float scale = 1.0f;
+#if defined(__ANDROID__)
+        char v[PROP_VALUE_MAX] = {0};
+        if (__system_property_get("debug.ptv.simulate_memory_pressure", v) > 0) {
+            scale = std::strtof(v, nullptr);
+        }
+#else
+        if (const char* e = std::getenv("PTV_SIMULATE_MEMORY_PRESSURE")) scale = std::strtof(e, nullptr);
+#endif
+        if (scale > 0.0f && scale < 1.0f) {
+            memory_guard_.set_simulated_pressure(scale);
+            applied_pressure_scale_ = scale;
+        }
+    }
+    memory_guard_.start();
+    MemoryGuard::purge_heap();
     // The hands belong to the player, not the scene, so they are created even
     // when no scene loaded -- that is exactly the case where you want to see
     // whether tracking works.

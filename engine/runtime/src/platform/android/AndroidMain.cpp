@@ -24,6 +24,7 @@
 #include "AndroidPlatform.h"
 #include "ptv/core/Application.h"
 #include "ptv/core/Logger.h"
+#include "ptv/core/MemoryGuard.h"
 #include "ptv/platform/AssetSource.h"
 
 namespace {
@@ -55,6 +56,10 @@ void handle_app_cmd(android_app* app, int32_t cmd) {
             break;
         case APP_CMD_DESTROY:
             PTV_INFO("android: APP_CMD_DESTROY (activity tearing down)");
+            break;
+        case APP_CMD_LOW_MEMORY:
+            // A late, extra signal: MemoryGuard normally acts well before it.
+            ptv::MemoryGuard::notify_low_memory();
             break;
         default:
             break;

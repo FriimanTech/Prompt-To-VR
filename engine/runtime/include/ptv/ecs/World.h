@@ -235,6 +235,18 @@ struct CMesh {
     float model_yaw_offset_rad{0.0f};
     float model_sole_y{0.0f};
     float model_height{0.0f};
+    /** Per-LOD simplification error relative to the mesh extent (see
+     *  MeshRef::lod_errors_rel). Empty = switch by distance. */
+    std::vector<float> lod_errors_rel;
+};
+
+/** Rendering-only: this entity was marked static by the scene compiler.
+ *  ``batch`` is the merged draw it belongs to (-1 = drawn on its own; set
+ *  back to -1 if the entity ever moves), ``room`` the closed room it stands
+ *  in (-1 = none), for room culling. */
+struct CStaticBatch {
+    int batch{-1};
+    int room{-1};
 };
 
 /** Skeleton for a rigged ``CMesh``, plus the palette the renderer uploads.
@@ -564,7 +576,8 @@ struct CMirrorSurface {
  * clip for that frame, which is what lets a character play an idle animation
  * while code aims its head or its trigger finger. */
 struct CAnimator {
-    std::vector<gltf_mesh_load::AnimationClip> clips;
+    /** Shared with the skeleton and every clone of the same rig. */
+    gltf_mesh_load::ClipList clips;
     /** Index into ``clips``, or -1 for no clip (pure procedural posing). */
     int active_clip{-1};
     float time_s{0.0f};

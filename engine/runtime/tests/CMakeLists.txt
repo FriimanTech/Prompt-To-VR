@@ -116,6 +116,8 @@ if(Python3_Interpreter_FOUND)
              COMMAND ptv_smoke hand_pose "${PTV_HAND_GLB}")
     add_test(NAME ptv_smoke_default_hands
              COMMAND ptv_smoke default_hands "${PTV_HAND_GLB}")
+    add_test(NAME ptv_smoke_gallery_skinned_framing
+             COMMAND ptv_smoke gallery_skinned_framing "${PTV_HAND_GLB}")
   endif()
 else()
   message(WARNING
@@ -171,3 +173,8 @@ add_test(NAME ptv_smoke_ground_motor COMMAND ptv_smoke ground_motor)
 add_test(NAME ptv_smoke_foot_planting COMMAND ptv_smoke foot_planting)
 add_test(NAME ptv_smoke_text_atlas COMMAND ptv_smoke text_atlas)
 add_test(NAME ptv_smoke_game_flow COMMAND ptv_smoke game_flow)
+add_test(NAME ptv_smoke_governor_ladders COMMAND ptv_smoke governor_ladders)
+add_test(NAME ptv_smoke_memory_guard_levels COMMAND ptv_smoke memory_guard_levels)
+add_test(NAME ptv_smoke_scene_perf_locks COMMAND ptv_smoke scene_perf_locks)
+add_test(NAME ptv_smoke_clip_sharing COMMAND ptv_smoke clip_sharing)
+add_test(NAME ptv_smoke_ktx2_roundtrip COMMAND ptv_smoke ktx2_roundtrip)

@@ -19,6 +19,7 @@
 #include "ptv/render/GltfSkinnedLoad.h"
 #include "ptv/render/FxRenderer.h"
 #include "ptv/render/TextRenderer.h"
+#include "ptv/render/TextureCache.h"
 #include "ptv/scene/Scene.h"
 
 namespace ptv {
@@ -28,20 +29,22 @@ class World;
 class XrRuntime;
 
 /**
- * Minimal forward renderer for the VR stage.
+ * Forward renderer for the VR stage.
  *
  * The renderer owns:
- *   * a color + depth render pass,
- *   * a graphics pipeline (push-constant driven),
- *   * a unit cube vertex / index buffer,
- *   * a per-eye depth image,
- *   * a framebuffer cache keyed by VkImage (we build a framebuffer the first
- *     time we see an XR swapchain image).
+ *   * a color + depth render pass (multiview when the swapchain is an array),
+ *   * the scene pipelines (static / skinned x mirrored x alpha-test x
+ *     double-sided), built lazily and cached,
+ *   * per-frame resources: the frame uniform block (both eyes' matrices +
+ *     environment), the instance buffer every draw indexes, the joint
+ *     palettes,
+ *   * the mesh cache (static + skinned, with per-material submeshes) and the
+ *     material TextureCache,
+ *   * framebuffers keyed by swapchain VkImage.
  *
  * It does not own the swapchains themselves; those are owned by
  * :class:`XrRuntime`. The main loop calls :meth:`draw_frame` once per XR
- * frame, passing in the two eye views and the acquired swapchain image
- * indices.
+ * frame, passing in the two eye views and the acquired swapchain images.
  */
 class Renderer {
 public:
@@ -53,6 +56,7 @@ public:
         //   1 = floor (adds a procedural grid / checker in the fragment
         //       shader; the X/Z world coordinates drive the pattern)
         //   2 = hand / grab highlight (slightly emissive rim)
+        //   3 = unlit marker
         float material_id{0.0f};
         // -1 = draw the built-in unit cube (legacy procedural entities).
         // >=0 = index into this renderer's uploaded GLB mesh cache.
@@ -71,12 +75,18 @@ public:
 
     struct EyeTarget {
         VkImage image{VK_NULL_HANDLE};
+        /** Swapchain array layer of this eye (multiview: 0 and 1 of one image). */
+        uint32_t array_layer{0};
         int32_t offset_x{0};
         int32_t offset_y{0};
         uint32_t width{0};
         uint32_t height{0};
         Mat4 view{1.0f};
         Mat4 projection{1.0f};
+        /** Fragment density map image for this swapchain image (FFR), or null. */
+        VkImage density_map{VK_NULL_HANDLE};
+        uint32_t density_width{0};
+        uint32_t density_height{0};
     };
 
     /** A single point light forwarded to the fragment shader (max 8). */
@@ -113,6 +123,18 @@ public:
         std::vector<PointLight> points;
     };
 
+    /** Swapchain shape the renderer is created for. */
+    struct TargetInfo {
+        VkFormat color_format{VK_FORMAT_UNDEFINED};
+        uint32_t width{0};
+        uint32_t height{0};
+        /** One array swapchain with both eyes as layers, drawn in a single
+         *  multiview pass (VK_KHR_multiview); false = one pass per eye. */
+        bool multiview{false};
+        /** The swapchain images carry fragment density maps (FFR). */
+        bool fragment_density_map{false};
+    };
+
     Renderer() = default;
     ~Renderer();
 
@@ -123,15 +145,15 @@ public:
                     VkFormat color_format,
                     uint32_t eye_width,
                     uint32_t eye_height);
+    bool initialize(VulkanContext& vk, const TargetInfo& target);
     void shutdown();
 
     /** Render the two eyes. The caller has already acquired+waited each
-     *  swapchain image; the renderer will submit the command buffer and
-     *  wait for the GPU on the main thread (simple, low-throughput).
+     *  swapchain image.
      *
-     *  ``env`` carries the scene's sky + lighting; it is uploaded to a uniform
-     *  buffer once per frame and drives both the gradient sky pass and the
-     *  forward-lit geometry pass. */
+     *  ``env`` carries the scene's sky + lighting; it is uploaded to the
+     *  frame uniform block once per frame and drives both the gradient sky
+     *  pass and the forward-lit geometry pass. */
     void draw_frame(const std::array<EyeTarget, 2>& eyes,
                     const std::vector<DrawItem>& items,
                     const RenderEnv& env);
@@ -140,11 +162,18 @@ public:
      *
      *  ``view_proj`` is a single frustum that covers BOTH eyes (built from the
      *  HMD centre view with a widened FOV), so visibility is decided once per
-     *  frame rather than per eye. */
+     *  frame rather than per eye. When ``eye_view_proj`` is valid, culling
+     *  uses the exact union of the two eye frustums instead. */
     struct ViewInfo {
         Vec3 camera_pos{0.0f, 0.0f, 0.0f};
         Mat4 view_proj{1.0f};
         bool valid{false};
+        std::array<Mat4, 2> eye_view_proj{Mat4(1.0f), Mat4(1.0f)};
+        bool eyes_valid{false};
+        /** Vertical field of view of one eye (radians) and its height in
+         *  pixels, for projected-size LOD. */
+        float fov_y{1.6f};
+        float viewport_height_px{1760.0f};
     };
 
     /** Per-frame rendering statistics, for telemetry + the adaptive governor. */
@@ -153,6 +182,7 @@ public:
         std::uint32_t drawn{0};
         std::uint32_t culled_frustum{0};
         std::uint32_t culled_distance{0};
+        std::uint32_t culled_small{0};
         std::uint32_t visible_triangles{0};
         std::uint32_t resident_meshes{0};
         std::uint32_t resident_triangles{0};
@@ -161,7 +191,50 @@ public:
          *  a mirror cannot silently eat the frame budget: this is the classic
          *  mobile-VR trap, and the number has to be measured, not assumed. */
         std::uint32_t mirror_reflections{0};
+        /** Recorded for the last submitted frame, all views together. */
+        std::uint32_t draw_calls{0};
+        std::uint32_t pipeline_binds{0};
+        std::uint32_t descriptor_binds{0};
+        std::uint32_t instances{0};
+        /** Submeshes drawn with the missing-texture material this frame. */
+        std::uint32_t missing_texture_draws{0};
+        /** Entities hidden because they stand in a closed room the player is
+         *  not in or next to. */
+        std::uint32_t culled_room{0};
+        /** Merged static batches drawn (each replaces many entities). */
+        std::uint32_t batches_drawn{0};
     };
+
+    /** Merge the scene's static geometry (entities the compiler marked
+     *  ``static_batch``: primitives and inline meshes) into one mesh per grid
+     *  cell, room and material, and assign every static entity its closed
+     *  room. Call after a scene is applied to the world. A member that later
+     *  moves dissolves its batch (logged) and draws on its own again. */
+    void build_static_batches(World& world, const std::vector<NavRegionSpec>& regions,
+                              const std::vector<NavLinkSpec>& links);
+    std::size_t static_batch_count() const { return batches_.size(); }
+
+    /** MemoryGuard's level (0 green .. 3 critical). Yellow stops speculative
+     *  prefetch and evicts long-unused streamable meshes; red evicts every
+     *  invisible one above the always-resident floor and defers new
+     *  high-detail loads; critical also draws visible meshes at their
+     *  coarsest resident LOD. */
+    void set_memory_pressure(int level) { memory_pressure_ = level; }
+    int memory_pressure() const { return memory_pressure_; }
+    /** Estimated bytes of meshes queued to load (MemoryGuard reservations). */
+    std::uint64_t pending_stream_bytes();
+    /** Meshes evicted since start (telemetry). */
+    int evictions() const { return evictions_; }
+    /** Queue every placed mesh's lowest LOD as an always-resident floor. */
+    void request_floor_lods(World& world);
+
+    /** GPU time of the most recently completed frame, from timestamp
+     *  queries (0 when the queue cannot time), and how long the CPU sat in
+     *  fence waits during that ``draw_frame`` -- subtracting it from the
+     *  frame's wall time gives the CPU's own share. */
+    float last_gpu_ms() const { return last_gpu_ms_; }
+    float last_fence_wait_ms() const { return last_fence_wait_ms_; }
+    bool gpu_timing_supported() const { return timestamp_pool_ != VK_NULL_HANDLE; }
 
     /** Install the scene's device budget (LOD distances, cull distance,
      *  resident budget, eviction policy). Safe to call before initialize. */
@@ -179,14 +252,19 @@ public:
 
     const FrameStats& frame_stats() const { return stats_; }
 
-    /** Comfort vignette for the next frame(s).
-     *
-     *  ``opacity`` 0 disables it. ``clear_half_angle_deg`` is the radius of
-     *  the unobstructed view around each eye's forward axis and
-     *  ``feather_deg`` the width of the soft edge beyond it -- angles, not
-     *  screen fractions, so every headset occludes the same visual field. */
+    /** Draw materials whose texture failed to load with a magenta checker
+     *  (verification and debug builds) instead of their factor colour. */
+    void set_texture_diagnostics(bool magenta) { texture_diagnostics_ = magenta; }
+    const TextureCache& textures() const { return textures_; }
+
     /** World-space strings for the next frame (consumed by draw_frame). */
     void submit_text(TextItem item) { text_items_.push_back(std::move(item)); }
+    /** Drop this frame's text and effect quads (the texture gallery shows
+     *  one asset on the bare sky, so a HUD panel cannot pass for it). */
+    void drop_overlays() {
+        text_items_.clear();
+        fx_items_.clear();
+    }
     /** Effect quads for the next frame (consumed by draw_frame), at most
      *  ``set_fx_budget`` of them. */
     void submit_fx(const FxQuad& q) { fx_items_.push_back(q); }
@@ -201,6 +279,12 @@ public:
         return text_.ready() ? &text_.atlas() : nullptr;
     }
 
+    /** Comfort vignette for the next frame(s).
+     *
+     *  ``opacity`` 0 disables it. ``clear_half_angle_deg`` is the radius of
+     *  the unobstructed view around each eye's forward axis and
+     *  ``feather_deg`` the width of the soft edge beyond it -- angles, not
+     *  screen fractions, so every headset occludes the same visual field. */
     void set_vignette(float opacity, float clear_half_angle_deg,
                       float feather_deg) {
         vignette_opacity_ = opacity;
@@ -249,8 +333,22 @@ public:
                          gltf_mesh_load::SkeletonData& out_skeleton,
                          const gltf_mesh_load::ModelFrame* frame = nullptr);
 
-    /** True when ``slot`` holds skinned geometry (48-byte vertices). */
+    /** True when ``slot`` holds skinned geometry. */
     bool mesh_slot_is_skinned(int slot) const;
+
+    /** What one resident mesh slot holds (the texture verification gallery
+     *  and telemetry). */
+    struct SlotInfo {
+        bool valid{false};
+        bool skinned{false};
+        float radius{0.0f};
+        Vec3 center{0.0f};
+        std::uint32_t triangles{0};
+        int submeshes{0};
+        int textured{0};
+        int missing{0};
+    };
+    SlotInfo mesh_slot_info(int slot) const;
 
     // --- Per-frame joint palettes -------------------------------------------
     //
@@ -268,13 +366,33 @@ public:
 
     VkFormat color_format() const { return color_format_; }
     VkRenderPass render_pass() const { return render_pass_; }
+    bool multiview() const { return multiview_; }
+
+    /** GPU memory the renderer itself holds (bytes): meshes, textures,
+     *  render targets and per-frame buffers. */
+    struct MemoryStats {
+        std::uint64_t mesh_bytes{0};
+        std::uint64_t texture_bytes{0};
+        std::uint64_t target_bytes{0};
+        std::uint64_t frame_bytes{0};
+    };
+    MemoryStats memory_stats() const;
 
 private:
+    /** Pipeline variant bits. */
+    enum PipelineBits : std::uint32_t {
+        kPipeSkinned = 1u,
+        kPipeMirrored = 2u,
+        kPipeAlphaTest = 4u,
+        kPipeCullNone = 8u,
+        kPipeVariants = 16u,
+    };
+
     VkSampleCountFlagBits pick_sample_count();
     bool create_render_pass();
     bool create_descriptors();
-    bool create_pipeline();
-    bool create_skinned_pipeline();
+    bool create_pipeline_layout();
+    VkPipeline scene_pipeline(std::uint32_t bits);
     bool create_sky_pipeline();
     bool create_vignette_pipeline();
     /** Append reflected copies of the avatar (and anything tagged) for the
@@ -282,14 +400,24 @@ private:
     void append_mirror_reflections(World& world, std::vector<DrawItem>& out,
                                    const ViewInfo& view);
     bool ensure_joint_buffer(std::uint32_t matrix_capacity);
-    bool create_cube_mesh();
+    bool ensure_instance_buffer(std::uint32_t instance_capacity);
     bool create_primitive_meshes();
     bool create_command_resources();
     bool create_depth_image();
     bool create_msaa_color_image();
 
     VkImageView get_or_create_color_view(VkImage img);
-    VkFramebuffer get_or_create_framebuffer(VkImage img);
+    VkFramebuffer get_or_create_framebuffer(const EyeTarget& eye);
+
+    /** One material range of a mesh slot. */
+    struct GpuSubmesh {
+        uint32_t first_index{0};
+        uint32_t index_count{0};
+        int texture{-1};             // TextureCache id, -1 = untextured
+        bool missing_texture{false}; // wanted a texture that failed to load
+        float alpha_cutoff{0.0f};    // > 0 = alpha test (MASK, or BLEND as MASK)
+        bool cull_none{false};
+    };
 
     struct GltfGpuMesh {
         VkBuffer vb{VK_NULL_HANDLE};
@@ -300,20 +428,29 @@ private:
         // Bookkeeping for culling, telemetry and LRU eviction.
         uint32_t triangle_count{0};
         float local_radius{0.0f};   // bounding-sphere radius in mesh space
+        Vec3 local_center{0.0f};    // its centre (AABB centre)
         uint64_t last_used_frame{0};
         bool evictable{false};      // false for built-in primitives / icons
-        // 48-byte SkinnedVertex geometry; must be drawn with the skinned
+        /** An asset's lowest LOD: always resident, never evicted, so a late
+         *  load shows a coarser version and never nothing. */
+        bool floor{false};
+        // 32-byte packed skinned geometry; must be drawn with the skinned
         // pipeline, and drawing it with the static one would misread every
         // attribute past the position.
         bool skinned{false};
         std::string path;           // cache key, empty for procedural meshes
+        /** UV dequantisation: uv = xform.xy + unorm16 * xform.zw. */
+        Vec4 uv_xform{0.0f, 0.0f, 1.0f, 1.0f};
+        std::vector<GpuSubmesh> submeshes;
+        uint64_t gpu_bytes{0};
     };
 
     // --- Asynchronous mesh streaming ---------------------------------------
     // A worker thread does the expensive part (asset read + glTF parse + CPU
-    // vertex build); the main thread only performs the Vulkan upload, capped
-    // per frame. This is what keeps a 13-asset scene from stalling the very
-    // first frame for ~5 s and tripping Android's ANR watchdog.
+    // vertex build + texture decode); the main thread only performs the
+    // Vulkan upload, capped per frame. This is what keeps a 13-asset scene
+    // from stalling the very first frame for ~5 s and tripping Android's ANR
+    // watchdog.
     struct StreamRequest {
         std::string path;
         /** Cache key: the path AND the scale it is loaded at. */
@@ -322,10 +459,19 @@ private:
         float unit_scale{0.0f};
         float priority{0.0f};  // distance in metres; smaller = sooner
     };
+    struct DecodedTexture {
+        std::string key;
+        TextureData data;
+        bool ok{false};
+        std::string error;
+    };
     struct StreamResult {
         std::string key;
+        std::string path;
         std::vector<gltf_mesh_load::LitVertex> verts;
         std::vector<std::uint32_t> indices;
+        gltf_mesh_load::MeshMaterials materials;
+        std::vector<DecodedTexture> textures;
         bool ok{false};
     };
 
@@ -346,26 +492,45 @@ private:
     int resident_slot(const std::string& key);
     /** Queue ``path`` for background loading (no-op if resident/in flight). */
     void request_stream(const std::string& path, float target_scale_meters,
-                        float unit_scale, float priority);
+                        float unit_scale, float priority, bool floor = false);
     /** Free least-recently-used meshes until back under the resident budget. */
     void evict_to_budget();
     void destroy_mesh_slot(GltfGpuMesh& gm);
+
+    /** The TextureRequest for one material's base-colour image. */
+    TextureRequest texture_request(const std::string& glb_path,
+                                   const gltf_mesh_load::MeshMaterials& mats,
+                                   int image_index, const std::string& label) const;
+    /** Decode (worker thread) every image ``mats`` needs that is not yet
+     *  resident. */
+    void decode_textures(const std::string& glb_path,
+                         const gltf_mesh_load::MeshMaterials& mats,
+                         std::vector<DecodedTexture>& out) const;
+    /** Resolve each submesh's material to a GPU texture (upload decoded
+     *  data, reuse a resident one, or decode synchronously). */
+    void bind_materials(GltfGpuMesh& gm, const std::string& glb_path,
+                        const gltf_mesh_load::MeshMaterials* mats,
+                        std::vector<DecodedTexture>* decoded);
+
     /** Upload a finished lit-vertex mesh into the shared mesh cache and return
      *  its slot (or -1). Used by the GLB path, the inline-mesh path, and the
-     *  built-in unit primitive meshes so buffer creation lives in one place. */
+     *  built-in unit primitive meshes so buffer creation lives in one place.
+     *  ``mats`` (optional) splits it into per-material submeshes. */
     int create_mesh_slot(const std::vector<gltf_mesh_load::LitVertex>& verts,
-                         const std::vector<std::uint32_t>& indices);
-    /** Same, for 48-byte skinned vertices. Marks the slot ``skinned``. */
+                         const std::vector<std::uint32_t>& indices,
+                         const gltf_mesh_load::MeshMaterials* mats = nullptr,
+                         const std::string& glb_path = std::string(),
+                         std::vector<DecodedTexture>* decoded = nullptr);
+    /** Same, for skinned vertices. Marks the slot ``skinned``. */
     int create_mesh_slot_skinned(
         const std::vector<gltf_mesh_load::SkinnedVertex>& verts,
-        const std::vector<std::uint32_t>& indices);
-    /** Shared body of the two above. Type-erased over the vertex struct,
-     *  which is safe because LitVertex and SkinnedVertex both begin with
-     *  ``float pos[3]`` -- the only field this needs for bounds. */
-    int create_mesh_slot_impl(const void* verts, std::size_t vert_count,
-                              std::size_t vert_stride,
-                              const std::uint32_t* indices,
-                              std::size_t index_count, bool skinned);
+        const std::vector<std::uint32_t>& indices,
+        const gltf_mesh_load::MeshMaterials* mats = nullptr,
+        const std::string& glb_path = std::string());
+    int store_mesh_slot(GltfGpuMesh&& gm);
+    bool upload_mesh_buffers(const void* vdata, std::size_t vbytes,
+                             const std::uint32_t* indices, std::size_t index_count,
+                             GltfGpuMesh& gm);
     /** Return cache slot for ``resolved_path`` (absolute on disk), or -1. */
     int ensure_gltf_mesh(const std::string& resolved_path,
                          float target_scale_meters);
@@ -386,30 +551,27 @@ private:
     VkFormat depth_format_{VK_FORMAT_D32_SFLOAT};
     uint32_t eye_width_{0};
     uint32_t eye_height_{0};
+    bool multiview_{false};
+    bool fdm_{false};
     // Anti-aliasing sample count, clamped to what the device supports.
     VkSampleCountFlagBits samples_{VK_SAMPLE_COUNT_1_BIT};
 
     VkRenderPass render_pass_{VK_NULL_HANDLE};
-    // Shared by the static and skinned geometry pipelines: same descriptor
-    // set, same push-constant block, only the vertex input and vertex shader
-    // differ.
+    // Set 0 = frame (UBO, joint palettes, instances), set 1 = material.
+    // Shared by every scene pipeline and by the sky / vignette passes.
     VkPipelineLayout pipeline_layout_{VK_NULL_HANDLE};
-    VkPipeline pipeline_{VK_NULL_HANDLE};
-    VkPipeline skinned_pipeline_{VK_NULL_HANDLE};
-    // Front-face-culling twins used for mirror reflections, which are
-    // improper transforms and therefore arrive wound the other way.
-    VkPipeline pipeline_mirror_{VK_NULL_HANDLE};
-    VkPipeline skinned_pipeline_mirror_{VK_NULL_HANDLE};
+    std::array<VkPipeline, kPipeVariants> pipelines_{};
+    VkShaderModule vs_{VK_NULL_HANDLE};
+    VkShaderModule fs_{VK_NULL_HANDLE};
+    VkShaderModule skinned_vs_{VK_NULL_HANDLE};
 
     // Fullscreen gradient-sky pass (drawn before geometry each eye).
-    VkPipelineLayout sky_pipeline_layout_{VK_NULL_HANDLE};
     VkPipeline sky_pipeline_{VK_NULL_HANDLE};
     VkShaderModule sky_vs_{VK_NULL_HANDLE};
     VkShaderModule sky_fs_{VK_NULL_HANDLE};
 
     // Comfort vignette: fullscreen pass drawn after geometry each eye,
     // reusing sky_vs_ for the fullscreen triangle.
-    VkPipelineLayout vignette_pipeline_layout_{VK_NULL_HANDLE};
     VkPipeline vignette_pipeline_{VK_NULL_HANDLE};
     VkShaderModule vignette_fs_{VK_NULL_HANDLE};
     float vignette_opacity_{0.0f};
@@ -423,43 +585,37 @@ private:
     std::vector<FxQuad> fx_items_;
     std::size_t fx_budget_{1024};
 
-    VkShaderModule vs_{VK_NULL_HANDLE};
-    VkShaderModule fs_{VK_NULL_HANDLE};
-    VkShaderModule skinned_vs_{VK_NULL_HANDLE};
+    TextureCache textures_{};
+    bool texture_diagnostics_{false};
 
-    // Environment/lighting uniform buffer (set 0, binding 0), persistently
-    // mapped and refreshed once per frame from the RenderEnv.
-    VkDescriptorSetLayout env_set_layout_{VK_NULL_HANDLE};
+    // Frame resources (set 0). The frame UBO and the instance buffer are
+    // persistently mapped and rewritten each frame after the fence wait.
+    VkDescriptorSetLayout frame_set_layout_{VK_NULL_HANDLE};
     VkDescriptorPool desc_pool_{VK_NULL_HANDLE};
-    VkDescriptorSet env_set_{VK_NULL_HANDLE};
-    VkBuffer env_ubo_{VK_NULL_HANDLE};
-    VmaAllocation env_ubo_alloc_{nullptr};
-    void* env_ubo_mapped_{nullptr};
+    VkDescriptorSet frame_set_{VK_NULL_HANDLE};
+    VkBuffer frame_ubo_{VK_NULL_HANDLE};
+    VmaAllocation frame_ubo_alloc_{nullptr};
+    void* frame_ubo_mapped_{nullptr};
 
-    // Joint matrix palettes for every skinned draw this frame (set 0,
-    // binding 1). Host-visible and persistently mapped like the env UBO, and
-    // refreshed in draw_frame after the fence wait so the previous frame has
-    // finished reading it.
     VkBuffer joint_ssbo_{VK_NULL_HANDLE};
     VmaAllocation joint_ssbo_alloc_{nullptr};
     void* joint_ssbo_mapped_{nullptr};
     std::uint32_t joint_ssbo_capacity_{0};  // in matrices
     std::vector<Mat4> joint_palettes_;
 
-    VkBuffer cube_vb_{VK_NULL_HANDLE};
-    VmaAllocation cube_vb_alloc_{nullptr};
-    VkBuffer cube_ib_{VK_NULL_HANDLE};
-    VmaAllocation cube_ib_alloc_{nullptr};
-    uint32_t cube_index_count_{0};
+    VkBuffer instance_ssbo_{VK_NULL_HANDLE};
+    VmaAllocation instance_ssbo_alloc_{nullptr};
+    void* instance_ssbo_mapped_{nullptr};
+    std::uint32_t instance_capacity_{0};
 
-    // Built-in unit meshes for world-gen primitive kinds (box uses the cube
-    // path via mesh_slot = -1). Values are slots into ``gltf_meshes_``.
+    // Built-in unit meshes. Values are slots into ``gltf_meshes_``.
+    int prim_slot_cube_{-1};
     int prim_slot_sphere_{-1};
     int prim_slot_cylinder_{-1};
     int prim_slot_plane_{-1};
     int prim_slot_ramp_{-1};
 
-    // Single-sampled depth used when MSAA is unavailable; otherwise multisampled.
+    // Depth (multisampled when MSAA is on), one layer per view.
     VkImage depth_image_{VK_NULL_HANDLE};
     VmaAllocation depth_alloc_{nullptr};
     VkImageView depth_view_{VK_NULL_HANDLE};
@@ -469,13 +625,100 @@ private:
     VkImage msaa_color_image_{VK_NULL_HANDLE};
     VmaAllocation msaa_color_alloc_{nullptr};
     VkImageView msaa_color_view_{VK_NULL_HANDLE};
+    std::uint64_t target_bytes_{0};
 
     VkCommandPool cmd_pool_{VK_NULL_HANDLE};
     VkCommandBuffer cmd_{VK_NULL_HANDLE};
     VkFence frame_fence_{VK_NULL_HANDLE};
 
-    std::unordered_map<VkImage, VkImageView> color_views_;
-    std::unordered_map<VkImage, VkFramebuffer> framebuffers_;
+    // --- Frames in flight ----------------------------------------------------
+    // Everything the CPU rewrites each frame exists once per frame in flight.
+    // The members above (cmd_, frame_fence_, frame_set_, frame_ubo_*,
+    // joint_ssbo_*, instance_ssbo_*) always name the ACTIVE slot;
+    // select_frame_slot swaps them, so recording code never indexes.
+    static constexpr int kMaxFramesInFlight = 2;
+    struct FrameSlot {
+        VkCommandBuffer cmd{VK_NULL_HANDLE};
+        VkFence fence{VK_NULL_HANDLE};
+        VkDescriptorSet set{VK_NULL_HANDLE};
+        VkBuffer ubo{VK_NULL_HANDLE};
+        VmaAllocation ubo_alloc{nullptr};
+        void* ubo_mapped{nullptr};
+        VkBuffer joints{VK_NULL_HANDLE};
+        VmaAllocation joints_alloc{nullptr};
+        void* joints_mapped{nullptr};
+        std::uint32_t joints_capacity{0};
+        VkBuffer instances{VK_NULL_HANDLE};
+        VmaAllocation instances_alloc{nullptr};
+        void* instances_mapped{nullptr};
+        std::uint32_t instances_capacity{0};
+        bool timestamps_written{false};
+    };
+    std::array<FrameSlot, kMaxFramesInFlight> frame_slots_{};
+    int frame_slot_{0};
+    int frames_in_flight_{1};
+    void select_frame_slot(int slot);
+    // Evicted meshes wait here until no frame in flight can still read them.
+    struct RetiredMesh {
+        GltfGpuMesh mesh;
+        std::uint64_t frame{0};
+    };
+    std::vector<RetiredMesh> retired_meshes_;
+
+    // --- Static batching + room culling --------------------------------------
+    struct StaticBatch {
+        int slot{-1};
+        Vec3 center{0.0f};
+        float radius{0.0f};
+        int room{-1};
+        float material_id{0.0f};
+        bool valid{true};
+        std::uint32_t triangles{0};
+        std::vector<std::pair<std::uint32_t, Transform>> members;
+    };
+    std::vector<StaticBatch> batches_;
+    struct RegionBox {
+        Vec3 min{0.0f};
+        Vec3 max{0.0f};
+        float floor_y{0.0f};
+        bool closed{false};
+    };
+    std::vector<RegionBox> regions_;
+    std::vector<std::vector<int>> region_links_;
+    std::vector<char> room_visible_;
+    int memory_pressure_{0};
+    int evictions_{0};
+    std::unordered_set<std::string> floor_keys_;
+    Vec3 prev_cam_{0.0f};
+    Vec3 cam_velocity_{0.0f};
+    bool have_prev_cam_{false};
+    bool dissolve_warned_{false};
+    int region_of(const Vec3& p) const;
+    void check_static_batches(World& world);
+    /** Out-of-memory recovery: free retired and invisible streamable meshes
+     *  (never the floor) and purge the heap. True when anything was freed,
+     *  so the caller retries its allocation once. */
+    bool recover_from_allocation_failure();
+
+public:
+    /** Frames the CPU may record ahead of the GPU (1 or 2). Desktop builds
+     *  stay at 1: Quest Link has shown white frames when a swapchain image is
+     *  released with its rendering still queued. */
+    void set_frames_in_flight(int n);
+    int frames_in_flight() const { return frames_in_flight_; }
+
+private:
+
+    // Two timestamps per frame (start, end of the command buffer).
+    VkQueryPool timestamp_pool_{VK_NULL_HANDLE};
+    float timestamp_period_ns_{0.0f};
+    std::uint64_t timestamp_mask_{~0ull};
+    float last_gpu_ms_{0.0f};
+    float last_fence_wait_ms_{0.0f};
+
+    std::unordered_map<std::uint64_t, VkImageView> color_views_;
+    std::unordered_map<std::uint64_t, VkImageView> density_views_;
+    std::unordered_map<std::uint64_t, VkFramebuffer> framebuffers_;
 
     std::vector<GltfGpuMesh> gltf_meshes_;
     std::unordered_map<std::string, int> gltf_path_to_slot_;

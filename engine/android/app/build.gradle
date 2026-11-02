@@ -108,6 +108,15 @@ android {
         sourceCompatibility JavaVersion.VERSION_17
         targetCompatibility JavaVersion.VERSION_17
     }
+
+    // Store meshes, textures and shaders uncompressed in the APK. They are
+    // already compact (decimated GLBs, ASTC KTX2), so zip saves little, and
+    // an uncompressed asset can be memory-mapped by AAsset_getBuffer instead
+    // of being inflated into a heap copy -- clean, reclaimable pages rather
+    // than private memory that counts fully against the app's PSS.
+    androidResources {
+        noCompress 'glb', 'ktx2', 'spv'
+    }
 }
 
 dependencies {

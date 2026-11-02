@@ -2709,6 +2709,12 @@ is; the guide's "Rendering & lighting contract" is ground truth):
   Keep visible surfaces' colors in ~0.1..0.85; near-black albedo (< ~0.05)
   renders BLACK no matter how bright the lights are. Never fake brightness with
   a near-black albedo + a huge light.
+- Give EVERY primitive and mesh an explicit ``color`` that matches what it is
+  in the prompt (grass green, bark brown, sand tan, rock grey, neon trim, ...).
+  The default (0.8, 0.8, 0.82) is a placeholder grey; a world that leaves
+  most shapes at it reads as an untextured white-box level, and the
+  validator flags it. Imported Tripo props carry their own textures -- never
+  recolour them; only the procedural geometry you author needs colours.
 - The sun only lights surfaces it faces; a near-vertical ``sun_direction`` barely
   lights walls. Use ``ambient`` and ``point`` lights (with a sensible ``range``,
   placed NEAR the surfaces you want lit) so the main play surfaces read. Prefer a
@@ -2739,8 +2745,17 @@ builder_id, plan, notes). No markdown fences inside file contents.
 # ---------------------------------------------------------------------------
 
 
+_IGNORE_OPTIMIZATION_WORDING = """
+
+Rendering / optimization instructions in the prompt (foveated rendering, render
+resolution, LOD or model detail at distance, texture quality, draw distance,
+frame rate, anti-aliasing, "max quality", "performance mode") are NOT gameplay.
+A separate stage turns them into engine settings. Do not let them change any
+part of the BuildSpec: not the scenes, assets, mechanics, NPCs or their count."""
+
+
 def build_spec_system(target_device: TargetDevice) -> str:
-    return _with_device(_BUILD_SPEC_TMPL, target_device)
+    return _with_device(_BUILD_SPEC_TMPL, target_device) + _IGNORE_OPTIMIZATION_WORDING
 
 
 def mechanic_plan_system(target_device: TargetDevice) -> str:

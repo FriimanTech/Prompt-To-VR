@@ -417,6 +417,15 @@ class Settings(BaseSettings):
     # Guardian, system dialogs and auto-sleep for the run and restores them
     # afterwards -- the reliable way to launch on a headset nobody is wearing.
     quest_verify_store_pin: str | None = None
+    # Memory pass (Quest 3 PSS): the soak walks the scripted player across the
+    # level and checks PSS growth after warm-up; the pressure launch lowers
+    # MemoryGuard's thresholds mid-game. 0 disables the soak.
+    quest_memory_soak_seconds: float = 600.0
+    quest_memory_pressure_test: bool = True
+    # Memory failures re-run asset_optimization -> scene_compile ->
+    # quest_build -> quest_runtime_verify with budgets scaled by the measured
+    # ratio, at most this many times.
+    quest_memory_max_correction_rounds: int = 2
 
     # --- Validation ------------------------------------------------------
     # Reasoning effort and verbosity are plain strings so they can come from

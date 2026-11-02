@@ -8,6 +8,15 @@
 
 namespace ptv {
 
+/** A read-only view of a whole asset. ``keepalive`` owns whatever backs
+ *  ``data`` (a memory-mapped APK region on Quest, a heap copy elsewhere);
+ *  the bytes stay valid while any copy of the view lives. */
+struct AssetView {
+    const std::uint8_t* data{nullptr};
+    std::size_t size{0};
+    std::shared_ptr<const void> keepalive;
+};
+
 /**
  * Abstraction over "where do engine assets come from".
  *
@@ -36,6 +45,21 @@ public:
 
     /** True when ``path`` resolves to a readable asset. */
     virtual bool exists(const std::string& path) const = 0;
+
+    /** The asset's bytes without a heap copy where the platform allows it.
+     *  On Quest, uncompressed APK entries (glb / ktx2 / spv are stored with
+     *  noCompress) are memory-mapped: clean pages the OS can reclaim, instead
+     *  of an inflated heap copy counted in the app's PSS. Default: a copy. */
+    virtual std::optional<AssetView> map(const std::string& path) const {
+        auto bytes = read_bytes(path);
+        if (!bytes) return std::nullopt;
+        auto owned = std::make_shared<std::vector<std::uint8_t>>(std::move(*bytes));
+        AssetView v;
+        v.data = owned->data();
+        v.size = owned->size();
+        v.keepalive = owned;
+        return v;
+    }
 
     /** Convenience: read an asset as UTF-8 text. */
     std::optional<std::string> read_text(const std::string& path) const {

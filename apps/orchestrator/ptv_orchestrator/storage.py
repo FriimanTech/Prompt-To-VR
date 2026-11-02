@@ -172,6 +172,7 @@ class ProjectStore:
         prompt: str,
         target_device: TargetDevice = TargetDevice.pcvr,
         player_experience: PlayerExperience = PlayerExperience.full_avatar,
+        custom_quest_optimizations: str = "",
     ) -> ProjectState:
         pid = self.new_id(title)
         proj_dir = self.dir_for(pid)
@@ -184,6 +185,7 @@ class ProjectStore:
             prompt=prompt,
             target_device=target_device,
             player_experience=player_experience,
+            custom_quest_optimizations=(custom_quest_optimizations or "").strip(),
         )
         self.save_state(state)
         return state

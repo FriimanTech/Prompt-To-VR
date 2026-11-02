@@ -189,6 +189,47 @@ only when the game calls for it:
   `ctx.combat`, a beam ticks continuously, the projectile pool stays inside
   `max_live_projectiles`, and p95 frame time holds the frame budget (13.9 ms
   at 72 Hz). See [weapons.md](weapons.md).
+- **Textures (scenes with textured meshes):** the base pass's `tex:` line
+  must show every texture resident, none missing, and ASTC KTX2 rather than
+  PNG/JPEG decoded on the headset. Then a FOURTH launch with
+  `debug.ptv.verify_textures 1`: the engine's `TextureGallery` hides the scene
+  (and every text / effect overlay) and shows each unique textured LOD0 (the
+  default hands included) 1.1 m in front of the player, three-quarter view,
+  one every 4 s -- a rigged asset framed by its skinned bind pose, measured on
+  the CPU, because a rig's raw vertices can be in another scale (the default
+  hands' span 2 mm before skinning) -- logging
+  `texgallery: show i/n <path> textured= missing=`. The stage takes a Quest
+  screenshot of the empty background and of each asset (`metacam`
+  `TAKE_SCREENSHOT`, pulled from `/sdcard/Oculus/Screenshots/` into
+  `logs/runtime/textures_<ts>/`) and compares each with an offline
+  `ptv_glb_views` render of the same LOD: the asset must cover enough of the
+  view, show no magenta (missing-texture) pixels, keep at least 30% of the
+  reference's colourfulness and gain no more than 30% near-white surface.
+- **Render health (every Quest game):** FFR's density map reached the render
+  pass on every frame (without it nothing draws); a merged static batch that
+  dissolved because a "static" member moved, or a GPU allocation that needed
+  out-of-memory recovery, is reported as a warning.
+- **User locks (projects with Custom Quest Optimizations):** every `perf:`
+  line must honour them -- "FFR off" means `ffr 0` throughout, `fixed`
+  exactly that level, `max` never above it, resolution `off` / `high` a render
+  scale of 1.0 throughout. A frame-rate miss while the governor was blocked by
+  the user's own locks is a **warning**, not a failure.
+- **Memory (every Quest game):** `dumpsys meminfo` every 5 s and one
+  `gpumeminfo` sample during the base pass, the engine's `mem:` line, and a
+  `logcat -b all` scan after every launch for `lowmemorykiller` / `lmkd` /
+  "Low Memory Kill" naming the package. Then a soak launch
+  (`quest_memory_soak_seconds`, 600 s by default: the scripted walk, PSS every
+  15 s) and a pressure launch (`debug.ptv.simulate_memory_pressure` dropped to
+  5% of the thresholds for 20 s, then restored). Checks: peak PSS at or under
+  the 5.0 GiB ceiling, steady state at or under the 4.5 GiB target (Meta's
+  limit is 5.75 GiB), no low-memory kill, PSS growth across the game-loop
+  pass's restarts at most 50 MB per cycle, soak growth after a 60 s warm-up at
+  most 5 MB/min, and under pressure MemoryGuard reaches red and the game stays
+  alive. The `memory` section of `runtime_verification.json` carries
+  `memory_status` (see [quest-optimization.md](quest-optimization.md)); a
+  memory failure writes `memory_feedback.json` and the orchestrator re-runs
+  asset_optimization → scene_compile → quest_build → verify with the measured
+  calibration, at most `quest_memory_max_correction_rounds` (2) times.
 
 The APK also carries the engine's UI font: `quest_build` copies
 `engine/runtime/assets/fonts/` (Atkinson Hyperlegible Bold + its OFL
@@ -197,16 +238,36 @@ the game runs, but no label, title or HUD number is drawn.
 
 Output: `runtime_verification.json` (`RuntimeVerification` in
 `packages/schemas`) with `passed` / `failed` / `skipped`, every check with
-pass / fail / not applicable and its evidence, plus
-`logs/runtime/verify_<timestamp>.log`. A failed check fails the stage with
-the exact list.
+pass / fail / not applicable / warning and its evidence, the measured
+`performance` medians, the `memory` section, plus
+`logs/runtime/verify_<timestamp>.log` (and `_flow`, `_weapons`, `_textures`,
+`_soak`, `_pressure`). A failed check fails the stage with the exact list,
+memory failures first. A skipped run (no headset) still records the memory
+estimate as `estimated_safe_not_device_tested` or `at_risk` -- never as
+verified. The APK stays downloadable in every case
+(`GET /projects/{id}/apk`, the Download APK button on the project page).
+
+## Packaging notes
+
+- `app/build.gradle` stores `glb`, `ktx2` and `spv` uncompressed
+  (`noCompress`), so the engine maps them straight out of the APK with
+  `AAsset_getBuffer` (`IAssetSource::map`): clean, reclaimable pages instead
+  of an inflated heap copy counted in the app's PSS.
+- Textures live in `assets/ptv_textures/` (aapt drops asset folders whose
+  name starts with `_`). Quest ships the KTX2; a texture without one ships its
+  PNG/JPEG; a referenced file that is missing fails the build.
+- The default hands' embedded textures get KTX2 twins under
+  `engine/ptv_textures/<hash>.ktx2`.
 
 ## Validation ladder (on-device)
 
 1. Build the starter-room scene as an APK (no LLM), `adb install -r`, confirm
   it boots on the Quest 3.
 2. Run a generated project end-to-end to an APK on device.
-3. Optimize: multiview single-pass stereo, `XR_FB_foveation`, ASTC textures.
+3. Optimize: multiview single-pass stereo, FFR through the fragment density
+   map, ASTC textures, two frames in flight (done; see
+   [rendering.md](rendering.md) and
+   [quest-optimization.md](quest-optimization.md)).
 
 
 

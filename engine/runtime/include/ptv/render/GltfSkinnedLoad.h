@@ -1,11 +1,13 @@
 #pragma once
 
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <unordered_map>
 #include <vector>
 
 #include "ptv/math/Math.h"
+#include "ptv/render/GltfMeshLoad.h"
 
 namespace ptv::gltf_mesh_load {
 
@@ -17,25 +19,25 @@ namespace ptv::gltf_mesh_load {
  * fail loudly instead of wrapping around and skinning to the wrong bone. */
 inline constexpr int kMaxJointsPerSkin = 256;
 
-/** Vertex layout for skinned geometry: 48 bytes.
+/** CPU-side skinned vertex: 56 bytes.
  *
- * The first 40 bytes are byte-identical to ``LitVertex`` so both pipelines
- * can share ``scene.frag`` and the same attribute locations 0-2. Joints and
- * weights are packed to one byte each rather than widened to shorts/floats
- * because Quest 3 is memory-bandwidth bound and static meshes -- the vast
- * majority of any scene -- keep their 40-byte layout entirely. */
+ * The first 48 bytes are byte-identical to ``LitVertex`` (position, normal,
+ * base-colour UV, colour), so tools and loaders treat both alike. Joints and
+ * weights are one byte each. The GPU layout is packed separately (32 bytes,
+ * see Renderer), because Quest 3 is memory-bandwidth bound. */
 struct SkinnedVertex {
     float pos[3];
     float normal[3];
+    float uv[2];
     float color[4];
     /** Joint indices into the skin's joint array. */
     std::uint8_t joints[4];
     /** Influence weights, quantized so the four sum to exactly 255. */
     std::uint8_t weights[4];
 };
-static_assert(sizeof(SkinnedVertex) == 48,
-              "SkinnedVertex must stay tightly packed at 48 bytes; the Vulkan "
-              "vertex input description depends on this layout");
+static_assert(sizeof(SkinnedVertex) == 56,
+              "SkinnedVertex must stay tightly packed at 56 bytes; the "
+              "decimator welds whole vertices by their bytes");
 
 /** One joint's local transform. Scale is a full vec3 rather than the uniform
  *  float in ``ptv::Transform`` because glTF permits non-uniform joint scale. */
@@ -73,6 +75,46 @@ struct AnimationClip {
     std::vector<AnimChannel> channels;
 };
 
+/** A character's clips, shared copy-on-write.
+ *
+ * Clip keyframes are the largest CPU-side data a rigged character carries,
+ * and every clone of an NPC type (and the animator of each) used to hold its
+ * own copy. Copies of a ClipList share one array; the first write through a
+ * copy detaches it. Reads look exactly like a ``std::vector``. */
+class ClipList {
+public:
+    ClipList() = default;
+    ClipList(std::vector<AnimationClip> v)  // NOLINT: implicit by design
+        : p_(std::make_shared<std::vector<AnimationClip>>(std::move(v))) {}
+
+    std::size_t size() const { return p_ ? p_->size() : 0; }
+    bool empty() const { return size() == 0; }
+    // Indexing only reads, so a hot loop over a non-const animator never
+    // detaches a shared list.
+    const AnimationClip& operator[](std::size_t i) const { return (*p_)[i]; }
+    const AnimationClip* begin() const { return p_ ? p_->data() : nullptr; }
+    const AnimationClip* end() const { return p_ ? p_->data() + p_->size() : nullptr; }
+    /** Mutable iteration (load time): detaches first if shared. */
+    AnimationClip* begin() { return empty() ? nullptr : mut().data(); }
+    AnimationClip* end() { return empty() ? nullptr : mut().data() + p_->size(); }
+    void push_back(AnimationClip c) { mut().push_back(std::move(c)); }
+    void clear() { p_.reset(); }
+    /** True when ``other`` shares this list's storage (no copy). */
+    bool shares_with(const ClipList& other) const { return p_ && p_ == other.p_; }
+    long use_count() const { return p_ ? p_.use_count() : 0; }
+
+private:
+    std::vector<AnimationClip>& mut() {
+        if (!p_) {
+            p_ = std::make_shared<std::vector<AnimationClip>>();
+        } else if (p_.use_count() > 1) {
+            p_ = std::make_shared<std::vector<AnimationClip>>(*p_);
+        }
+        return *p_;
+    }
+    std::shared_ptr<std::vector<AnimationClip>> p_;
+};
+
 /** Everything needed to pose a skin, independent of its geometry.
  *
  * Joint indices match the glTF skin's ``joints`` array exactly, because
@@ -95,7 +137,7 @@ struct SkeletonData {
      *  joint matrix by this so skinning stays consistent with the scaled
      *  vertex positions. */
     float unit_scale{1.0f};
-    std::vector<AnimationClip> clips;
+    ClipList clips;
     /** Lowest bind-pose vertex, in metres in the entity's own space (after
      *  any model frame). Filled by ``load_glb_skinned`` only; lets the
      *  runtime stand a character that arrived with no measured foot offset
@@ -190,6 +232,8 @@ bool load_glb_skinned(const std::string& path,
                       std::vector<std::uint32_t>& out_indices,
                       SkeletonData& out_skeleton,
                       std::string& err,
-                      const ModelFrame* frame = nullptr);
+                      const ModelFrame* frame = nullptr,
+                      MeshMaterials* out_materials = nullptr,
+                      const LoadOptions& options = {});
 
 }  // namespace ptv::gltf_mesh_load

@@ -22,7 +22,12 @@ from ..pipeline import (
 from ..settings import get_settings
 from ..storage import ProjectStore
 from .launch import find_starter_exe, launch_exe
-from .models import CreateProjectRequest, LaunchRequest, RunStageRequest
+from .models import (
+    CreateProjectRequest,
+    LaunchRequest,
+    OptimizationPreviewRequest,
+    RunStageRequest,
+)
 
 router = APIRouter(prefix="/api", tags=["projects"])
 
@@ -97,12 +102,66 @@ def create_project(req: CreateProjectRequest):
     state = _store().create(
         req.title, req.prompt, target_device=device,
         player_experience=experience,
+        custom_quest_optimizations=req.custom_quest_optimizations,
     )
     return {
         "project_id": state.project_id,
         "target_device": device.value,
         "player_experience": experience.value,
     }
+
+
+@router.post("/optimization-preferences/preview")
+def preview_optimization_preferences(req: OptimizationPreviewRequest):
+    """What the optimization_preferences stage would make of these texts.
+
+    Same function and cache as the stage, so the warning the user sees on the
+    New Project page is exactly what the build will apply. Never blocks
+    project creation."""
+    from ..pipeline.llm import make_llm
+    from ..pipeline.stage_optimization_preferences import (
+        keyword_gate,
+        parse_preferences,
+        preview_payload,
+    )
+
+    s = get_settings()
+    client = (make_llm(s) if keyword_gate(req.prompt, req.custom_quest_optimizations)
+              else None)
+    try:
+        prefs = parse_preferences(req.prompt, req.custom_quest_optimizations, client=client,
+                                  model=s.claude_light_model)
+    except Exception as exc:  # noqa: BLE001 - a preview must never fail the page
+        return {"preferences": None, "lines": [], "differs_from_auto": False,
+                "warning": "", "error": str(exc)}
+    return preview_payload(prefs)
+
+
+@router.get("/projects/{project_id}/apk")
+def download_apk(project_id: str):
+    """The project's latest Quest APK, whatever its verification or memory
+    status (the status travels in headers and on the project page)."""
+    store = _store()
+    try:
+        state = store.load_state(project_id)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="project not found")
+    apk = Path(state.latest_build_apk) if state.latest_build_apk else None
+    if apk is not None and not apk.is_absolute():
+        apk = get_settings().repo_root / apk
+    if apk is None or not apk.is_file():
+        raise HTTPException(status_code=404, detail="no APK has been built for this project")
+    status = "unknown"
+    verify = store.dir_for(project_id) / "runtime_verification.json"
+    if verify.exists():
+        try:
+            status = (json.loads(verify.read_text(encoding="utf-8")).get("memory") or {}).get(
+                "status", "unknown")
+        except (OSError, ValueError):
+            pass
+    return FileResponse(apk, media_type="application/vnd.android.package-archive",
+                        filename=f"{project_id}.apk",
+                        headers={"X-PTV-Memory-Status": status})
 
 
 @router.get("/projects/{project_id}")

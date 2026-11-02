@@ -13,7 +13,7 @@ repairs anything.
 from __future__ import annotations
 
 from enum import Enum
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from pydantic import Field
 
@@ -33,6 +33,9 @@ class CheckOutcome(str, Enum):
     failed = "fail"
     #: The game does not call for this check (no NPCs, no waves, ...).
     not_applicable = "not_applicable"
+    #: Reported, never failing: e.g. a frame-rate miss the user's own locked
+    #: optimization settings caused.
+    warning = "warning"
 
 
 class VerificationCheck(StrictModel):
@@ -46,6 +49,39 @@ class VerificationCheck(StrictModel):
     detail: str = Field(default="", max_length=2000)
     #: Log lines and measured values that justify the outcome.
     evidence: List[str] = Field(default_factory=list, max_length=20)
+
+
+class MemoryStatus(str, Enum):
+    #: Measured on a connected Quest 3 and every memory check passed.
+    verified_safe = "verified_safe"
+    #: The build-time estimate fits, but no headset ran it. Never shown as
+    #: verified.
+    estimated_safe_not_device_tested = "estimated_safe_not_device_tested"
+    #: Still over the engine target after automatic corrections, no headset.
+    at_risk = "at_risk"
+    #: A measured failure (ceiling, leak or a low-memory kill) remains.
+    failed_on_device = "failed_on_device"
+
+
+class MemoryReport(StrictModel):
+    """Quest 3 memory: Meta's 5.75 GiB PSS limit versus the engine's own
+    4.5 GiB steady-state target and 5.0 GiB peak ceiling."""
+
+    status: MemoryStatus
+    reasons: List[str] = Field(default_factory=list)
+    limit_mb: float = 5888.0
+    ceiling_mb: float = 5120.0
+    target_mb: float = 4608.0
+    estimated_steady_mb: Optional[float] = None
+    estimated_peak_mb: Optional[float] = None
+    measured_peak_mb: Optional[float] = None
+    measured_steady_mb: Optional[float] = None
+    #: Category -> measured MB (dumpsys meminfo / gpumeminfo / engine mem:).
+    measured: Dict[str, float] = Field(default_factory=dict)
+    leak_mb_per_cycle: Optional[float] = None
+    low_memory_kills: List[str] = Field(default_factory=list)
+    #: Automatic corrections the build needed to fit (quality compromises).
+    compromises: List[str] = Field(default_factory=list)
 
 
 class RuntimeVerification(StrictModel):
@@ -62,3 +98,6 @@ class RuntimeVerification(StrictModel):
     log_path: Optional[str] = None
     started_at: Optional[str] = None
     finished_at: Optional[str] = None
+    #: Measured frame cost (medians of the base pass's ``perf:`` lines).
+    performance: Dict[str, float] = Field(default_factory=dict)
+    memory: Optional[MemoryReport] = None

@@ -4,9 +4,137 @@
       "enum": [
         "pass",
         "fail",
-        "not_applicable"
+        "not_applicable",
+        "warning"
       ],
       "title": "CheckOutcome",
+      "type": "string"
+    },
+    "MemoryReport": {
+      "additionalProperties": false,
+      "description": "Quest 3 memory: Meta's 5.75 GiB PSS limit versus the engine's own\n4.5 GiB steady-state target and 5.0 GiB peak ceiling.",
+      "properties": {
+        "ceiling_mb": {
+          "default": 5120.0,
+          "title": "Ceiling Mb",
+          "type": "number"
+        },
+        "compromises": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Compromises",
+          "type": "array"
+        },
+        "estimated_peak_mb": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Estimated Peak Mb"
+        },
+        "estimated_steady_mb": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Estimated Steady Mb"
+        },
+        "leak_mb_per_cycle": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Leak Mb Per Cycle"
+        },
+        "limit_mb": {
+          "default": 5888.0,
+          "title": "Limit Mb",
+          "type": "number"
+        },
+        "low_memory_kills": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Low Memory Kills",
+          "type": "array"
+        },
+        "measured": {
+          "additionalProperties": {
+            "type": "number"
+          },
+          "title": "Measured",
+          "type": "object"
+        },
+        "measured_peak_mb": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Measured Peak Mb"
+        },
+        "measured_steady_mb": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Measured Steady Mb"
+        },
+        "reasons": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Reasons",
+          "type": "array"
+        },
+        "status": {
+          "$ref": "#/$defs/MemoryStatus"
+        },
+        "target_mb": {
+          "default": 4608.0,
+          "title": "Target Mb",
+          "type": "number"
+        }
+      },
+      "required": [
+        "status"
+      ],
+      "title": "MemoryReport",
+      "type": "object"
+    },
+    "MemoryStatus": {
+      "enum": [
+        "verified_safe",
+        "estimated_safe_not_device_tested",
+        "at_risk",
+        "failed_on_device"
+      ],
+      "title": "MemoryStatus",
       "type": "string"
     },
     "VerificationCheck": {
@@ -114,6 +242,17 @@
       "default": null,
       "title": "Log Path"
     },
+    "memory": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/MemoryReport"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
     "npc_summary": {
       "default": "",
       "maxLength": 500,
@@ -131,6 +270,13 @@
       ],
       "default": null,
       "title": "Package"
+    },
+    "performance": {
+      "additionalProperties": {
+        "type": "number"
+      },
+      "title": "Performance",
+      "type": "object"
     },
     "project_id": {
       "title": "Project Id",

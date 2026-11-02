@@ -134,13 +134,69 @@ bool XrRuntime::init_session_and_swapchains(VulkanContext& vk) {
     if (!create_action_set()) return false;
     PTV_INFO("XR: action set ok");
 
-    PTV_INFO("XR: creating swapchains...");
+    // Multiview needs the Vulkan feature; FFR through a fragment density map
+    // needs both the Vulkan extension and XR_FB_foveation_vulkan.
+    multiview_ = swap_opts_.multiview && vk.multiview_enabled();
+    fdm_ = swap_opts_.fragment_density_map && foveation_supported_ &&
+           foveation_vulkan_supported_ && vk.fragment_density_map_enabled();
+    PTV_INFO("XR: creating swapchains (multiview={} fdm={} scale {:.2f})...", multiview_,
+             fdm_, swap_opts_.render_scale_ceiling);
     if (!create_swapchains()) return false;
     PTV_INFO("XR: swapchains ok");
 
-    PTV_INFO("OpenXR runtime ready ({}x{} per eye)",
+    if (refresh_rate_supported_) {
+        PFN_xrEnumerateDisplayRefreshRatesFB enum_rates = nullptr;
+        PFN_xrGetDisplayRefreshRateFB get_rate = nullptr;
+        xrGetInstanceProcAddr(xr_instance_, "xrEnumerateDisplayRefreshRatesFB",
+                              reinterpret_cast<PFN_xrVoidFunction*>(&enum_rates));
+        xrGetInstanceProcAddr(xr_instance_, "xrGetDisplayRefreshRateFB",
+                              reinterpret_cast<PFN_xrVoidFunction*>(&get_rate));
+        uint32_t n = 0;
+        if (enum_rates && XR_SUCCEEDED(enum_rates(xr_session_, 0, &n, nullptr)) && n > 0) {
+            refresh_rates_.resize(n);
+            enum_rates(xr_session_, n, &n, refresh_rates_.data());
+        }
+        if (get_rate) get_rate(xr_session_, &refresh_hz_);
+        std::string rates;
+        for (float r : refresh_rates_) rates += std::to_string(static_cast<int>(r + 0.5f)) + " ";
+        PTV_INFO("XR: display refresh {:.0f} Hz (supported: {})", refresh_hz_, rates);
+        if (swap_opts_.refresh_hz > 0.0f) request_refresh_rate(swap_opts_.refresh_hz);
+    }
+
+    PTV_INFO("OpenXR runtime ready ({}x{} per eye, swapchain {}x{})",
              view_config_views_[0].recommendedImageRectWidth,
-             view_config_views_[0].recommendedImageRectHeight);
+             view_config_views_[0].recommendedImageRectHeight, swap_width_, swap_height_);
+    return true;
+}
+
+bool XrRuntime::request_refresh_rate(float hz) {
+    if (!refresh_rate_supported_ || xr_session_ == XR_NULL_HANDLE || hz <= 0.0f) return false;
+    // Pick the closest supported rate not above the request (72 is always
+    // available on Quest).
+    float best = 0.0f;
+    for (float r : refresh_rates_) {
+        if (r <= hz + 0.5f && r > best) best = r;
+    }
+    if (best <= 0.0f) return false;
+    PFN_xrRequestDisplayRefreshRateFB req = nullptr;
+    xrGetInstanceProcAddr(xr_instance_, "xrRequestDisplayRefreshRateFB",
+                          reinterpret_cast<PFN_xrVoidFunction*>(&req));
+    if (!req || !XR_SUCCEEDED(req(xr_session_, best))) {
+        PTV_WARN("XR: could not request {:.0f} Hz", best);
+        return false;
+    }
+    refresh_hz_ = best;
+    PTV_INFO("XR: display refresh -> {:.0f} Hz", best);
+    return true;
+}
+
+void XrRuntime::set_render_scale(float s) {
+    render_scale_ = std::clamp(s, 0.5f, 1.0f);
+}
+
+bool XrRuntime::pending_views(std::array<XrView, 2>& out) const {
+    if (!frame_started_ || !pending_views_valid_) return false;
+    out = pending_views_;
     return true;
 }
 
@@ -217,7 +273,13 @@ bool XrRuntime::create_instance(const std::string& app_name) {
         exts.push_back(XR_FB_FOVEATION_EXTENSION_NAME);
         exts.push_back(XR_FB_FOVEATION_CONFIGURATION_EXTENSION_NAME);
         PTV_INFO("XR: fixed foveated rendering extensions available");
+        // Vulkan apps get FFR through a fragment density map the runtime
+        // writes per swapchain image; without it the level changes nothing.
+        foveation_vulkan_supported_ = has_extension(XR_FB_FOVEATION_VULKAN_EXTENSION_NAME);
+        if (foveation_vulkan_supported_) exts.push_back(XR_FB_FOVEATION_VULKAN_EXTENSION_NAME);
     }
+    refresh_rate_supported_ = has_extension(XR_FB_DISPLAY_REFRESH_RATE_EXTENSION_NAME);
+    if (refresh_rate_supported_) exts.push_back(XR_FB_DISPLAY_REFRESH_RATE_EXTENSION_NAME);
     XrInstanceCreateInfo ici{XR_TYPE_INSTANCE_CREATE_INFO};
 #if defined(XR_USE_PLATFORM_ANDROID)
     XrInstanceCreateInfoAndroidKHR android_ci{
@@ -498,38 +560,78 @@ bool XrRuntime::create_swapchains() {
     }
     color_format_ = static_cast<VkFormat>(chosen);
 
-    color_swapchains_.resize(2);
-    color_images_.resize(2);
-    for (int eye = 0; eye < 2; ++eye) {
+    // Allocated size: the recommended eye resolution times the ceiling the
+    // scene asked for, within what the runtime allows. Dynamic resolution
+    // then renders a centred sub-rectangle of this (set_render_scale).
+    const float ceiling = std::clamp(swap_opts_.render_scale_ceiling, 0.5f, 1.25f);
+    swap_width_ = std::min(
+        view_config_views_[0].maxImageRectWidth,
+        static_cast<uint32_t>(std::lround(
+            static_cast<float>(view_config_views_[0].recommendedImageRectWidth) * ceiling)));
+    swap_height_ = std::min(
+        view_config_views_[0].maxImageRectHeight,
+        static_cast<uint32_t>(std::lround(
+            static_cast<float>(view_config_views_[0].recommendedImageRectHeight) * ceiling)));
+    // Keep FFR tiles aligned.
+    swap_width_ &= ~31u;
+    swap_height_ &= ~31u;
+
+    // Multiview: ONE swapchain whose images have two layers (left, right).
+    const int chains = multiview_ ? 1 : 2;
+    color_swapchains_.assign(static_cast<size_t>(chains), XR_NULL_HANDLE);
+    color_images_.assign(static_cast<size_t>(chains), {});
+    density_images_.assign(static_cast<size_t>(chains), {});
+    for (int c = 0; c < chains; ++c) {
         XrSwapchainCreateInfo sci{XR_TYPE_SWAPCHAIN_CREATE_INFO};
         sci.usageFlags = XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT |
                          XR_SWAPCHAIN_USAGE_SAMPLED_BIT;
         sci.format = chosen;
         sci.sampleCount = 1;
-        sci.width = view_config_views_[eye].recommendedImageRectWidth;
-        sci.height = view_config_views_[eye].recommendedImageRectHeight;
+        sci.width = swap_width_;
+        sci.height = swap_height_;
         sci.faceCount = 1;
-        sci.arraySize = 1;
+        sci.arraySize = multiview_ ? 2u : 1u;
         sci.mipCount = 1;
         // Opt this swapchain in to foveation. Must be chained at CREATE time;
         // the level itself is set later (and can change per frame) through
-        // xrUpdateSwapchainFB.
+        // xrUpdateSwapchainFB. With the FDM flag the runtime also gives each
+        // image a fragment density map for our render pass.
         XrSwapchainCreateInfoFoveationFB foveation_ci{
             XR_TYPE_SWAPCHAIN_CREATE_INFO_FOVEATION_FB};
+        foveation_ci.flags = fdm_ ? XR_SWAPCHAIN_CREATE_FOVEATION_FRAGMENT_DENSITY_MAP_BIT_FB : 0;
         if (foveation_supported_) {
             sci.next = &foveation_ci;
         }
-        if (!xr_ok(xrCreateSwapchain(xr_session_, &sci, &color_swapchains_[eye]),
+        if (!xr_ok(xrCreateSwapchain(xr_session_, &sci, &color_swapchains_[c]),
                    "xrCreateSwapchain")) return false;
 
         uint32_t img_count = 0;
-        xr_ok(xrEnumerateSwapchainImages(color_swapchains_[eye], 0, &img_count, nullptr),
+        xr_ok(xrEnumerateSwapchainImages(color_swapchains_[c], 0, &img_count, nullptr),
               "xrEnumerateSwapchainImages");
-        color_images_[eye].resize(img_count, {XR_TYPE_SWAPCHAIN_IMAGE_VULKAN2_KHR});
+        color_images_[c].resize(img_count, {XR_TYPE_SWAPCHAIN_IMAGE_VULKAN2_KHR});
+        if (fdm_) {
+            density_images_[c].resize(img_count, {XR_TYPE_SWAPCHAIN_IMAGE_FOVEATION_VULKAN_FB});
+            for (uint32_t i = 0; i < img_count; ++i) {
+                color_images_[c][i].next = &density_images_[c][i];
+            }
+        }
         xr_ok(xrEnumerateSwapchainImages(
-                  color_swapchains_[eye], img_count, &img_count,
-                  reinterpret_cast<XrSwapchainImageBaseHeader*>(color_images_[eye].data())),
+                  color_swapchains_[c], img_count, &img_count,
+                  reinterpret_cast<XrSwapchainImageBaseHeader*>(color_images_[c].data())),
               "xrEnumerateSwapchainImages#2");
+        if (fdm_) {
+            for (uint32_t i = 0; i < img_count; ++i) {
+                color_images_[c][i].next = nullptr;
+                if (density_images_[c][i].image == VK_NULL_HANDLE) {
+                    PTV_WARN("XR: swapchain image {} has no density map; FFR via FDM off", i);
+                    fdm_ = false;
+                }
+            }
+            if (fdm_ && img_count > 0) {
+                PTV_INFO("XR: fragment density maps {}x{} per image",
+                         density_images_[c][0].width, density_images_[c][0].height);
+            }
+        }
     }
     return true;
 }
@@ -573,10 +675,9 @@ void XrRuntime::set_foveation_level(int level) {
         XR_TYPE_FOVEATION_LEVEL_PROFILE_CREATE_INFO_FB};
     level_profile.level = xr_level;
     level_profile.verticalOffset = 0.0f;
-    // Dynamic lets the runtime ease the level with GPU load; at level 4 we ask
-    // for the strongest static setting instead.
-    level_profile.dynamic = (level >= 4) ? XR_FOVEATION_DYNAMIC_DISABLED_FB
-                                         : XR_FOVEATION_DYNAMIC_LEVEL_ENABLED_FB;
+    // The engine's governor owns the level (and honours user locks); the
+    // runtime's own dynamic easing would move it underneath both.
+    level_profile.dynamic = XR_FOVEATION_DYNAMIC_DISABLED_FB;
 
     XrFoveationProfileCreateInfoFB profile_ci{
         XR_TYPE_FOVEATION_PROFILE_CREATE_INFO_FB};
@@ -709,6 +810,26 @@ bool XrRuntime::begin_xr_frame() {
 
     last_predicted_display_time_ = pending_frame_state_.predictedDisplayTime;
     frame_started_ = true;
+    pending_views_valid_ = false;
+
+    if (pending_frame_state_.shouldRender) {
+        // Locate both eyes once, now: culling (before the draw list is built)
+        // and rendering then use exactly the same poses.
+        XrViewLocateInfo vli{XR_TYPE_VIEW_LOCATE_INFO};
+        vli.viewConfigurationType = view_config_;
+        vli.displayTime = pending_frame_state_.predictedDisplayTime;
+        vli.space = stage_space_;
+        XrViewState vs{XR_TYPE_VIEW_STATE};
+        uint32_t got = 0;
+        pending_views_ = {{{XR_TYPE_VIEW}, {XR_TYPE_VIEW}}};
+        if (XR_SUCCEEDED(xrLocateViews(xr_session_, &vli, &vs, 2, &got,
+                                       pending_views_.data())) &&
+            got == 2) {
+            pending_views_valid_ =
+                (vs.viewStateFlags & XR_VIEW_STATE_POSITION_VALID_BIT) &&
+                (vs.viewStateFlags & XR_VIEW_STATE_ORIENTATION_VALID_BIT);
+        }
+    }
 
     if (!pending_frame_state_.shouldRender) {
         // Submit empty frame immediately so the runtime keeps the session
@@ -747,6 +868,7 @@ bool XrRuntime::render_frame(const RenderCallback& render) {
     // predicted display time), reuse the pending FrameState.
     // Otherwise fall back to the legacy single-call flow.
     XrFrameState fs{XR_TYPE_FRAME_STATE};
+    const bool reuse_views = frame_started_ && pending_views_valid_;
     if (frame_started_) {
         fs = pending_frame_state_;
         frame_started_ = false;
@@ -774,47 +896,81 @@ bool XrRuntime::render_frame(const RenderCallback& render) {
     }
 
     // ---- Locate stereo views ------------------------------------------
-    XrViewLocateInfo vli{XR_TYPE_VIEW_LOCATE_INFO};
-    vli.viewConfigurationType = view_config_;
-    vli.displayTime = fs.predictedDisplayTime;
-    vli.space = stage_space_;
+    // Normally already located in begin_xr_frame (the same poses culling
+    // used); located here only on the legacy single-call path.
     XrView xr_views[2] = {{XR_TYPE_VIEW}, {XR_TYPE_VIEW}};
-    XrViewState vs{XR_TYPE_VIEW_STATE};
-    uint32_t got = 0;
-    xr_ok(xrLocateViews(xr_session_, &vli, &vs, 2, &got, xr_views),
-          "xrLocateViews");
+    bool pose_valid = false;
+    if (reuse_views) {
+        xr_views[0] = pending_views_[0];
+        xr_views[1] = pending_views_[1];
+        pose_valid = true;
+    } else {
+        XrViewLocateInfo vli{XR_TYPE_VIEW_LOCATE_INFO};
+        vli.viewConfigurationType = view_config_;
+        vli.displayTime = fs.predictedDisplayTime;
+        vli.space = stage_space_;
+        XrViewState vs{XR_TYPE_VIEW_STATE};
+        uint32_t got = 0;
+        xr_ok(xrLocateViews(xr_session_, &vli, &vs, 2, &got, xr_views),
+              "xrLocateViews");
+        pose_valid = (vs.viewStateFlags & XR_VIEW_STATE_POSITION_VALID_BIT) &&
+                     (vs.viewStateFlags & XR_VIEW_STATE_ORIENTATION_VALID_BIT);
+    }
+    pending_views_valid_ = false;
 
-    const bool pose_valid =
-        (vs.viewStateFlags & XR_VIEW_STATE_POSITION_VALID_BIT) &&
-        (vs.viewStateFlags & XR_VIEW_STATE_ORIENTATION_VALID_BIT);
+    // Dynamic resolution: a centred sub-rectangle, so the density map's
+    // centre stays on the lens centre.
+    const uint32_t rect_w = std::max<uint32_t>(
+        64u, static_cast<uint32_t>(std::lround(static_cast<float>(swap_width_) * render_scale_)) &
+                 ~7u);
+    const uint32_t rect_h = std::max<uint32_t>(
+        64u, static_cast<uint32_t>(std::lround(static_cast<float>(swap_height_) * render_scale_)) &
+                 ~7u);
+    const int32_t rect_x = static_cast<int32_t>((swap_width_ - rect_w) / 2u);
+    const int32_t rect_y = static_cast<int32_t>((swap_height_ - rect_h) / 2u);
 
     // ---- Acquire swapchain images + invoke caller ---------------------
+    const int chains = static_cast<int>(color_swapchains_.size());
     std::array<EyeImage, 2> eyes{};
     std::array<uint32_t, 2> acquired_indices{};
     bool acquired[2] = {false, false};
-    for (int eye = 0; eye < 2; ++eye) {
+    for (int c = 0; c < chains; ++c) {
         uint32_t idx = 0;
         XrSwapchainImageAcquireInfo ai{XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO};
-        if (!xr_ok(xrAcquireSwapchainImage(color_swapchains_[eye], &ai, &idx),
+        if (!xr_ok(xrAcquireSwapchainImage(color_swapchains_[c], &ai, &idx),
                    "xrAcquireSwapchainImage")) {
             continue;
         }
         XrSwapchainImageWaitInfo wi{XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO};
         wi.timeout = XR_INFINITE_DURATION;
-        if (!xr_ok(xrWaitSwapchainImage(color_swapchains_[eye], &wi),
+        if (!xr_ok(xrWaitSwapchainImage(color_swapchains_[c], &wi),
                    "xrWaitSwapchainImage")) {
             // Release to keep counts balanced.
             XrSwapchainImageReleaseInfo ri{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
-            xrReleaseSwapchainImage(color_swapchains_[eye], &ri);
+            xrReleaseSwapchainImage(color_swapchains_[c], &ri);
             continue;
         }
-        acquired_indices[eye] = idx;
-        acquired[eye] = true;
-        eyes[eye].image = color_images_[eye][idx].image;
-        eyes[eye].width = view_config_views_[eye].recommendedImageRectWidth;
-        eyes[eye].height = view_config_views_[eye].recommendedImageRectHeight;
+        acquired_indices[c] = idx;
+        acquired[c] = true;
+    }
+    if (chains == 1) acquired[1] = acquired[0];
+    for (int eye = 0; eye < 2; ++eye) {
+        const int c = chains == 1 ? 0 : eye;
+        if (!acquired[eye]) continue;
+        const uint32_t idx = acquired_indices[c];
+        eyes[eye].image = color_images_[c][idx].image;
+        eyes[eye].array_layer = chains == 1 ? static_cast<uint32_t>(eye) : 0u;
+        eyes[eye].offset_x = rect_x;
+        eyes[eye].offset_y = rect_y;
+        eyes[eye].width = rect_w;
+        eyes[eye].height = rect_h;
         eyes[eye].fov = xr_views[eye].fov;
         eyes[eye].pose = xr_views[eye].pose;
+        if (fdm_ && idx < density_images_[c].size()) {
+            eyes[eye].density_map = density_images_[c][idx].image;
+            eyes[eye].density_width = density_images_[c][idx].width;
+            eyes[eye].density_height = density_images_[c][idx].height;
+        }
     }
 
     if (pose_valid && acquired[0] && acquired[1] && render) {
@@ -822,10 +978,10 @@ bool XrRuntime::render_frame(const RenderCallback& render) {
     }
 
     // ---- Release swapchain images -------------------------------------
-    for (int eye = 0; eye < 2; ++eye) {
-        if (!acquired[eye]) continue;
+    for (int c = 0; c < chains; ++c) {
+        if (!acquired[c]) continue;
         XrSwapchainImageReleaseInfo ri{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
-        xrReleaseSwapchainImage(color_swapchains_[eye], &ri);
+        xrReleaseSwapchainImage(color_swapchains_[c], &ri);
     }
 
     // ---- Build composition layer + xrEndFrame -------------------------
@@ -835,15 +991,11 @@ bool XrRuntime::render_frame(const RenderCallback& render) {
             XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW};
         proj_views[eye].pose = xr_views[eye].pose;
         proj_views[eye].fov = xr_views[eye].fov;
-        proj_views[eye].subImage.swapchain = color_swapchains_[eye];
-        proj_views[eye].subImage.imageArrayIndex = 0;
-        proj_views[eye].subImage.imageRect.offset = {0, 0};
-        proj_views[eye].subImage.imageRect.extent = {
-            static_cast<int32_t>(
-                view_config_views_[eye].recommendedImageRectWidth),
-            static_cast<int32_t>(
-                view_config_views_[eye].recommendedImageRectHeight),
-        };
+        proj_views[eye].subImage.swapchain = color_swapchains_[chains == 1 ? 0 : eye];
+        proj_views[eye].subImage.imageArrayIndex = chains == 1 ? static_cast<uint32_t>(eye) : 0u;
+        proj_views[eye].subImage.imageRect.offset = {rect_x, rect_y};
+        proj_views[eye].subImage.imageRect.extent = {static_cast<int32_t>(rect_w),
+                                                     static_cast<int32_t>(rect_h)};
     }
 
     XrCompositionLayerProjection layer{XR_TYPE_COMPOSITION_LAYER_PROJECTION};

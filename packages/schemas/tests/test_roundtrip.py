@@ -156,6 +156,7 @@ def test_export_all_writes_files(tmp_path: Path):
         "artifact_metadata",
         "acceptance_test_plan",
         "performance_profile",
+        "optimization_preferences",
         "runtime_verification",
     }
     schema = json.loads(written["build_spec"].read_text(encoding="utf-8"))

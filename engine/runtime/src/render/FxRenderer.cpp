@@ -143,7 +143,7 @@ bool FxRenderer::create_pipelines(VkRenderPass pass, VkSampleCountFlagBits sampl
     vs_ = load_shader(dev, base + "/fx.vert.spv");
     fs_ = load_shader(dev, base + "/fx.frag.spv");
     if (!vs_ || !fs_) return false;
-    VkPushConstantRange pc{VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(Mat4)};
+    VkPushConstantRange pc{VK_SHADER_STAGE_VERTEX_BIT, 0, 2 * sizeof(Mat4)};
     VkPipelineLayoutCreateInfo plci{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
     plci.pushConstantRangeCount = 1;
     plci.pPushConstantRanges = &pc;
@@ -239,22 +239,34 @@ void FxRenderer::prepare(const std::vector<FxQuad>& quads, const Vec3& camera,
     add_vertices_ = static_cast<std::uint32_t>(scratch_add_.size());
 }
 
-void FxRenderer::record(VkCommandBuffer cmd, const Mat4& view_proj) {
+void FxRenderer::record(VkCommandBuffer cmd, const std::array<Mat4, 2>& view_proj) {
     if (!ready() || (alpha_vertices_ + add_vertices_) == 0) return;
     VkDeviceSize off = 0;
     vkCmdBindVertexBuffers(cmd, 0, 1, &vb_, &off);
     if (alpha_vertices_ > 0) {
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, alpha_);
-        vkCmdPushConstants(cmd, layout_, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(Mat4),
-                           &view_proj);
+        vkCmdPushConstants(cmd, layout_, VK_SHADER_STAGE_VERTEX_BIT, 0, 2 * sizeof(Mat4),
+                           view_proj.data());
         vkCmdDraw(cmd, alpha_vertices_, 1, 0, 0);
     }
     if (add_vertices_ > 0) {
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, additive_);
-        vkCmdPushConstants(cmd, layout_, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(Mat4),
-                           &view_proj);
+        vkCmdPushConstants(cmd, layout_, VK_SHADER_STAGE_VERTEX_BIT, 0, 2 * sizeof(Mat4),
+                           view_proj.data());
         vkCmdDraw(cmd, add_vertices_, 1, alpha_vertices_, 0);
     }
+}
+
+void FxRenderer::set_frame_slot(int slot) {
+    slot = ((slot % kSlots) + kSlots) % kSlots;
+    if (slot == slot_) return;
+    slots_[static_cast<size_t>(slot_)] = SlotBuffer{vb_, vb_alloc_, vb_mapped_, vb_capacity_};
+    const SlotBuffer& s = slots_[static_cast<size_t>(slot)];
+    vb_ = s.vb;
+    vb_alloc_ = s.alloc;
+    vb_mapped_ = s.mapped;
+    vb_capacity_ = s.capacity;
+    slot_ = slot;
 }
 
 void FxRenderer::shutdown() {
@@ -265,7 +277,11 @@ void FxRenderer::shutdown() {
     if (layout_) vkDestroyPipelineLayout(dev, layout_, nullptr);
     if (vs_) vkDestroyShaderModule(dev, vs_, nullptr);
     if (fs_) vkDestroyShaderModule(dev, fs_, nullptr);
-    if (vb_) vmaDestroyBuffer(vk_->allocator(), vb_, vb_alloc_);
+    slots_[static_cast<size_t>(slot_)] = SlotBuffer{vb_, vb_alloc_, vb_mapped_, vb_capacity_};
+    for (auto& s : slots_) {
+        if (s.vb) vmaDestroyBuffer(vk_->allocator(), s.vb, s.alloc);
+        s = SlotBuffer{};
+    }
     additive_ = alpha_ = VK_NULL_HANDLE;
     layout_ = VK_NULL_HANDLE;
     vs_ = fs_ = VK_NULL_HANDLE;

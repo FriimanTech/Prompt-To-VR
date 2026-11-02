@@ -145,6 +145,139 @@ class SocketContractError(RuntimeError):
     """
 
 
+class TextureContractError(RuntimeError):
+    """A placed mesh references a texture file that does not exist."""
+
+
+def _check_scene_textures(ctx: PipelineContext, compiled: list, state) -> list[str]:
+    """Missing texture files across every placed mesh, plus a texture
+    summary written into each scene's performance block.
+
+    Quest projects also want every texture to have its ASTC KTX2 twin; a
+    texture without one is reported (the headset decodes it on load) but is
+    not fatal -- a missing file is."""
+    from ptv_schemas import TargetDevice
+
+    from .texture_refs import check_mesh_textures
+
+    quest = getattr(state, "target_device", TargetDevice.pcvr) == TargetDevice.quest
+    repo = ctx.settings.repo_root
+    problems: list[str] = []
+    checked: dict[str, tuple[list[str], list[str], int]] = {}
+    for scene_id, doc in compiled:
+        textured_meshes = 0
+        no_ktx2_total: set[str] = set()
+        for e in doc.get("entities") or []:
+            mesh = e.get("mesh") if isinstance(e, dict) else None
+            if not isinstance(mesh, dict):
+                continue
+            paths = [mesh.get("glb_path")] + list(mesh.get("lod_paths") or [])
+            any_textured = False
+            for p in dict.fromkeys(x for x in paths if isinstance(x, str) and x):
+                if p not in checked:
+                    glb = repo / p
+                    checked[p] = (check_mesh_textures(glb, need_ktx2=quest)
+                                  if glb.is_file() else ([], [], 0))
+                missing, no_ktx2, refs = checked[p]
+                problems.extend(f"{scene_id}/{e.get('id', '?')}: {m}" for m in missing)
+                no_ktx2_total.update(no_ktx2)
+                any_textured = any_textured or refs > 0
+            textured_meshes += any_textured
+        perf = doc.setdefault("performance", {})
+        perf["textures"] = {"textured_mesh_entities": textured_meshes,
+                            "textures_without_astc": len(no_ktx2_total)}
+        if quest and no_ktx2_total:
+            ctx.emit(ProjectStage.scene_compile, "warning",
+                     f"{scene_id}: {len(no_ktx2_total)} texture(s) have no ASTC KTX2 and "
+                     "will be decoded on the headset")
+    return problems
+
+
+def _apply_scene_complexity(ctx: PipelineContext, compiled: list) -> None:
+    from . import memory_model as mm
+    from .scene_complexity import analyse, apply_static_batch_flags, decide_initial_settings
+
+    calib_path = ctx.settings.projects_dir / "memory_calibration.json"
+    calibration = mm.load_calibration(calib_path)
+    summary: dict[str, Any] = {"scenes": {}, "calibration": calibration}
+    worst_status = "estimated_safe_not_device_tested"
+    # A headset run from before beats the model: its measured frame cost
+    # drives this compile's starting settings.
+    measured: dict[str, Any] = {}
+    try:
+        rv = json.loads((ctx.project_dir / "runtime_verification.json").read_text(
+            encoding="utf-8"))
+        measured = dict(rv.get("performance") or {})
+    except (OSError, ValueError):
+        measured = {}
+    for scene_id, doc in compiled:
+        perf = doc.setdefault("performance", {})
+        analysis = analyse(doc)
+        if measured.get("gpu_p95") and scene_id == (compiled[0][0] if compiled else scene_id):
+            analysis["measured"] = {k: measured[k] for k in (
+                "gpu", "gpu_p95", "cpu", "cpu_p95", "fps", "calls", "tris", "ffr")
+                if k in measured}
+            # Measured at that run's FFR level, i.e. with its saving already
+            # in; it decides whether the scene counts as heavy.
+            analysis["estimate"] = dict(analysis["estimate"],
+                                        gpu_ms_p95=float(measured["gpu_p95"]),
+                                        cpu_ms_p95=float(measured.get("cpu_p95")
+                                                         or analysis["estimate"]["cpu_ms_p95"]),
+                                        source="measured on Quest 3")
+            if "estimate_with_room_culling" in analysis:
+                analysis["estimate_with_room_culling"] = analysis["estimate"]
+        notes = decide_initial_settings(perf, analysis)
+        batched = (apply_static_batch_flags(doc, analysis["static_batch_ids"])
+                   if perf.get("static_batching", True) else 0)
+        perf["complexity"] = {k: v for k, v in analysis.items() if k != "static_batch_ids"}
+        c, v, est = analysis["counts"], analysis["visibility"], analysis["estimate"]
+        ctx.emit(ProjectStage.scene_compile, "info",
+                 f"{scene_id}: {c['entities']} entities, {c['triangles_lod0_total']:,} LOD0 "
+                 f"tris; visible p95 {int(v['visible_tris_p95']):,} tris / "
+                 f"{int(v['draws_p95'])} draws; estimated GPU {est['gpu_ms_p95']:.1f} ms, "
+                 f"CPU {est['cpu_ms_p95']:.1f} ms; {batched} static-batch entities")
+        for note in notes:
+            ctx.emit(ProjectStage.scene_compile, "info", f"{scene_id}: {note}")
+
+        # Memory: exact from the built files where possible.
+        mem = mm.estimate(mm.inputs_from_scene(doc, ctx.settings.repo_root),
+                          baseline_mb=float(perf.get("engine_baseline_pss_mb") or 260.0),
+                          target_mb=float(perf.get("memory_target_mb") or 4608.0),
+                          ceiling_mb=float(perf.get("memory_ceiling_mb") or 5120.0),
+                          calibration=calibration)
+        perf["memory_estimate"] = {k: mem[k] for k in (
+            "steady_mb", "peak_mb", "always_resident_mb", "streamable_mb",
+            "load_transient_mb", "outcome", "calibration", "gap_mb")}
+        perf["resident_memory_budget_mb"] = mem["resident_memory_budget_mb"]
+        status = mm.memory_status_without_device(mem)
+        if status == "at_risk":
+            worst_status = status
+        ctx.emit(ProjectStage.scene_compile, "warning" if mem["outcome"] == "over" else "info",
+                 f"{scene_id}: memory estimate steady {mem['steady_mb']:.0f} MB, peak "
+                 f"{mem['peak_mb']:.0f} MB (target {mem['target_mb']:.0f}, ceiling "
+                 f"{mem['ceiling_mb']:.0f}, Meta limit 5888) -- {mem['outcome']}")
+        summary["scenes"][scene_id] = {"complexity": perf["complexity"], "memory_estimate": mem}
+
+    (ctx.project_dir / "scene_complexity.json").write_text(
+        json.dumps(summary, indent=2, sort_keys=True), encoding="utf-8")
+    # Provisional until a headset measures it; never "verified" from here.
+    status_path = ctx.project_dir / "memory_status.json"
+    prev: dict[str, Any] = {}
+    if status_path.exists():
+        try:
+            prev = json.loads(status_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            prev = {}
+    if prev.get("source") != "device":
+        status_path.write_text(json.dumps({
+            "status": worst_status, "source": "estimate",
+            "reasons": ["not tested on a Quest 3"],
+            "estimates": {sid: {"steady_mb": s["memory_estimate"]["steady_mb"],
+                                "peak_mb": s["memory_estimate"]["peak_mb"]}
+                          for sid, s in summary["scenes"].items()},
+        }, indent=2), encoding="utf-8")
+
+
 class EquipSlotContractError(RuntimeError):
     """Something binds ``builtin.equip`` and no wearer offers it a slot.
 
@@ -633,6 +766,10 @@ def _mesh_render_fields(
         out["lod_paths"] = list(lod_paths)
     if norm.get("triangle_counts"):
         out["lod_triangle_counts"] = list(norm["triangle_counts"])
+    errs = norm.get("lod_errors_rel") or []
+    if errs and len(errs) == len(lod_paths or []):
+        # Projected-error LOD selection at runtime (relative to mesh extent).
+        out["lod_errors_rel"] = [float(e) for e in errs]
     unit_radius = norm.get("bounds_radius_m")
     if unit_radius:
         # The optimizer reports the radius of a mesh normalised to a 1 m
@@ -2013,6 +2150,20 @@ def run(ctx: PipelineContext) -> StageResult:
         compiled.append((scene_entry.id, doc))
         if scene_entry.entry_point or entry_id_written is None:
             entry_id_written = scene_entry.id
+
+    # Textures: every LOD a scene places must resolve the texture files it
+    # references, or the headset would draw that surface magenta / flat.
+    tex_problems = _check_scene_textures(ctx, compiled, state)
+    if tex_problems:
+        msg = ("texture files referenced by placed meshes are missing (re-run "
+               "asset_optimization): " + "; ".join(tex_problems[:12]))
+        ctx.store.append_log(ctx.project_id, "scene_compile", msg)
+        raise TextureContractError(msg)
+
+    # What each scene costs to draw, and the starting settings that follow
+    # from it (initial FFR, room culling, static batching) -- never for a
+    # knob the user locked.
+    _apply_scene_complexity(ctx, compiled)
 
     # Both checks name every problem at once, and both stop the stage: a
     # scene that ships either one loads fine and quietly lacks what the

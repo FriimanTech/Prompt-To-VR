@@ -249,7 +249,7 @@ bool TextRenderer::create_pipeline(VkRenderPass pass, VkSampleCountFlagBits samp
     dyn.dynamicStateCount = 2;
     dyn.pDynamicStates = dyn_states;
 
-    VkPushConstantRange pc{VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(Mat4)};
+    VkPushConstantRange pc{VK_SHADER_STAGE_VERTEX_BIT, 0, 2 * sizeof(Mat4)};
     VkPipelineLayoutCreateInfo plci{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
     plci.setLayoutCount = 1;
     plci.pSetLayouts = &set_layout_;
@@ -327,20 +327,38 @@ void TextRenderer::prepare(const std::vector<TextItem>& items) {
     vertex_count_ = static_cast<std::uint32_t>(scratch_.size());
 }
 
-void TextRenderer::record(VkCommandBuffer cmd, const Mat4& view_proj) {
+void TextRenderer::record(VkCommandBuffer cmd, const std::array<Mat4, 2>& view_proj) {
     if (!ready() || vertex_count_ == 0) return;
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, layout_, 0, 1, &set_, 0,
                             nullptr);
-    vkCmdPushConstants(cmd, layout_, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(Mat4), &view_proj);
+    vkCmdPushConstants(cmd, layout_, VK_SHADER_STAGE_VERTEX_BIT, 0, 2 * sizeof(Mat4),
+                       view_proj.data());
     VkDeviceSize off = 0;
     vkCmdBindVertexBuffers(cmd, 0, 1, &vb_, &off);
     vkCmdDraw(cmd, vertex_count_, 1, 0, 0);
 }
 
+void TextRenderer::set_frame_slot(int slot) {
+    slot = ((slot % kSlots) + kSlots) % kSlots;
+    if (slot == slot_) return;
+    slots_[static_cast<size_t>(slot_)] = SlotBuffer{vb_, vb_alloc_, vb_mapped_, vb_capacity_};
+    const SlotBuffer& s = slots_[static_cast<size_t>(slot)];
+    vb_ = s.vb;
+    vb_alloc_ = s.alloc;
+    vb_mapped_ = s.mapped;
+    vb_capacity_ = s.capacity;
+    slot_ = slot;
+}
+
 void TextRenderer::shutdown() {
     if (!vk_) return;
     VkDevice dev = vk_->device();
+    slots_[static_cast<size_t>(slot_)] = SlotBuffer{vb_, vb_alloc_, vb_mapped_, vb_capacity_};
+    for (auto& s : slots_) {
+        if (s.vb && s.vb != vb_) vmaDestroyBuffer(vk_->allocator(), s.vb, s.alloc);
+    }
+    slots_ = {};
     if (pipeline_) vkDestroyPipeline(dev, pipeline_, nullptr);
     if (layout_) vkDestroyPipelineLayout(dev, layout_, nullptr);
     if (vs_) vkDestroyShaderModule(dev, vs_, nullptr);

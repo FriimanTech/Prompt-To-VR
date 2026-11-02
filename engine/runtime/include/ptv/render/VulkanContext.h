@@ -67,6 +67,15 @@ public:
     VkQueue graphics_queue() const { return graphics_queue_; }
     VmaAllocator allocator() const { return allocator_; }
 
+    /** Optional device features this context turned on (each only when the
+     *  physical device reports it). */
+    bool astc_ldr_enabled() const { return astc_ldr_; }
+    bool anisotropy_enabled() const { return anisotropy_; }
+    bool multiview_enabled() const { return multiview_; }
+    bool fragment_density_map_enabled() const { return fdm_; }
+    /** Device extensions the renderer may use beyond what OpenXR asked for. */
+    static std::vector<std::string> optional_device_extensions(VkPhysicalDevice pd);
+
     /** Number of validation-layer ERROR messages seen since process start.
      *
      * Process-wide rather than per-context because the debug callback the
@@ -89,6 +98,10 @@ private:
     uint32_t graphics_queue_family_{0};
     VmaAllocator allocator_{nullptr};
     bool validation_{false};
+    bool astc_ldr_{false};
+    bool anisotropy_{false};
+    bool multiview_{false};
+    bool fdm_{false};
 };
 
 }  // namespace ptv

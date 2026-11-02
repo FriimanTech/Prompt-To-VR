@@ -54,6 +54,27 @@ std::optional<std::vector<std::uint8_t>> AndroidAssetSource::read_bytes(
     return bytes;
 }
 
+std::optional<AssetView> AndroidAssetSource::map(const std::string& path) const {
+    if (!mgr_) return std::nullopt;
+    const std::string key = to_asset_key(path);
+    AAsset* asset = AAssetManager_open(mgr_, key.c_str(), AASSET_MODE_BUFFER);
+    if (!asset) return std::nullopt;
+    const void* buf = AAsset_getBuffer(asset);
+    const off_t len = AAsset_getLength(asset);
+    if (buf == nullptr || len <= 0) {
+        AAsset_close(asset);
+        return IAssetSource::map(path);
+    }
+    AssetView v;
+    v.data = static_cast<const std::uint8_t*>(buf);
+    v.size = static_cast<std::size_t>(len);
+    // The mapping lives exactly as long as the AAsset stays open.
+    v.keepalive = std::shared_ptr<const void>(asset, [](const void* a) {
+        AAsset_close(const_cast<AAsset*>(static_cast<const AAsset*>(a)));
+    });
+    return v;
+}
+
 bool AndroidAssetSource::exists(const std::string& path) const {
     if (!mgr_) return false;
     const std::string key = to_asset_key(path);

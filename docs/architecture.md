@@ -46,6 +46,8 @@
 ```mermaid
 flowchart TD
   Prompt[prompt.txt] --> BuildSpec[build_spec.json]
+  Prompt --> OptPrefs["optimization_preferences.json (Custom Quest Optimizations)"]
+  OptPrefs --> Optimize
   BuildSpec --> AssetManifest[asset_manifest.json]
   Prompt --> NpcPlan[npc_plan.json]
   AssetManifest --> NpcPlan
@@ -74,7 +76,7 @@ flowchart TD
   BuildSpec --> WorldGen
   AssetManifest --> WorldGen
   CppGen --> WorldGen[world_generation → world.scene.json]
-  WorldGen --> Optimize["asset_optimization: decimate + LOD chain"]
+  WorldGen --> Optimize["asset_optimization: LODs + ASTC textures + profile/locks + memory fit"]
   Normalize --> Optimize
   Contract --> Optimize
   WorldGen --> SceneCompile[scene.json]
@@ -88,7 +90,8 @@ flowchart TD
   CppGen --> CMake
   CppGen --> QuestApk
   CMake --> Promote[engine_promotion]
-  QuestApk --> QuestVerify["quest_runtime_verify (report-only)"]
+  QuestApk --> QuestVerify["quest_runtime_verify: NPCs, loop, weapons, textures, locks, memory"]
+  QuestVerify -->|memory failure, max 2 rounds| Optimize
   QuestVerify --> Promote
   CMake --> Launch[OpenXR via Quest Link]
   QuestApk --> AdbLaunch[adb install + NativeActivity]
@@ -114,6 +117,10 @@ flowchart TD
 | Save | `src/save/SaveSystem.cpp` | JSON world snapshot / load |
 | Text | `src/render/TextAtlas.cpp` + `src/render/TextRenderer.cpp` | SDF glyph atlas (stb_truetype, bundled Atkinson Hyperlegible, OFL) and world-space text pass |
 | Weapons | `src/gameplay/EffectsSystem.cpp`, `ProjectileSystem.cpp`, `WeaponBoard.h`, `CombatRules.h` + `src/render/FxRenderer.cpp` | Procedural FX (flashes, tracers, beams, impacts, decals, flash lights), the projectile pool (swept casts, stick / bounce / explode), the shared weapon state / hit board -- see [weapons.md](weapons.md) |
+| Textures | `src/render/TextureCache.cpp` + `src/render/Ktx2.cpp` | Base-colour textures: KTX2 ASTC (mapped from the APK) or PNG/JPEG, shared by content hash -- see [rendering.md](rendering.md#textures-base-colour) |
+| Quality governor | `src/core/QualityGovernor.cpp` | GPU / CPU-bound ladders over FFR, render scale, LOD bias, draw distance; honours user locks |
+| Memory guard | `src/core/MemoryGuard.cpp` | Always-on Quest 3 memory protection: PSS + GPU sampling, projected levels, eviction and heap purge -- see [quest-optimization.md](quest-optimization.md#memory-safety) |
+| Verification | `src/core/TextureGallery.cpp`, `WeaponVerifier`, NPC telemetry | Verify-mode helpers (texture gallery, scripted weapon hand) |
 | Application | `src/core/Application.cpp` | Main loop |
 
 Every subsystem exposes its public API through `engine/runtime/include/ptv/`.

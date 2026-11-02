@@ -27,6 +27,9 @@ public:
     std::optional<std::vector<std::uint8_t>> read_bytes(
         const std::string& path) const override;
     bool exists(const std::string& path) const override;
+    /** AAsset_getBuffer: a memory map for uncompressed (noCompress) entries,
+     *  falling back to a heap copy for compressed ones. */
+    std::optional<AssetView> map(const std::string& path) const override;
 
 private:
     // Normalise a possibly-prefixed path down to an APK-relative asset key.

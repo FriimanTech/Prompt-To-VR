@@ -169,6 +169,19 @@ orchestrator and a reusable Vulkan + OpenXR engine core.
    and `player_experience` (Hands Only / Full Player Avatar) are the
    user's choices and are forced to match `ProjectState`; the model
    decides the `movement` block (modes may be empty for stationary games).
+   Optimization wording in the prompt never shapes the BuildSpec.
+1a. Prompt + the New Project page's optional "Custom Quest Optimizations"
+   box → **OptimizationPreferences** (`optimization_preferences`): a keyword
+   gate (no optimization wording → no model call), one light-tier
+   structured-output call through `LlmClient`, and a deterministic validator
+   (each setting's quote must appear VERBATIM in its source, the box wins
+   over the prompt, requests past a hard limit are clamped, eye tracking /
+   no texture compression / disabling memory protection are reported
+   unsupported even without the model). Only FFR, dynamic resolution, model
+   detail, texture quality, draw distance, room culling, anti-aliasing and
+   frame rate are user-controllable; memory safety never is. Each override
+   becomes a LOCK in `performance.locks` the runtime governor never moves.
+   Warnings never block. See `docs/quest-optimization.md`.
 2. BuildSpec → **AssetManifest** (Claude Sonnet, structured output). Only
    OBJECTS (characters, props, fx, ui) — the environment is not a GLB, and
    neither is a SOUND. Every item costs a reference image plus a paid Tripo
@@ -406,6 +419,21 @@ orchestrator and a reusable Vulkan + OpenXR engine core.
    data as an attribute), `--sloppy` is refused because it invents vertex
    positions that carry no bindings, and every LOD emits a byte-identical
    skeleton so one joint palette serves all four levels.
+   **Textures** survive decimation (per-material submeshes, per-material
+   weld, UV-weighted, seam-protected simplification), are written once per
+   content hash to `assets/ptv_textures/` and compressed by
+   `ptv_texture_compress` (vcpkg `ktx`) to KTX2 ASTC 6x6 (4x4 UI) with linear
+   mips, sized by the closest distance the player can view them from inside
+   `texture_memory_budget_mb`; a source texture lost in a LOD, or a render of
+   the LOD that loses colour against the source, fails the asset. Each LOD
+   records its simplification error (`lod_errors_rel`) for projected-error
+   LOD at runtime. The stage then applies the user's locks
+   (`apply_overrides`) and a **memory fit** against the engine's 4.5 GiB
+   steady-state / 5.0 GiB peak targets (Meta's limit is 5.75 GiB PSS):
+   when even the always-resident set would not fit, least-visible-first
+   corrections run (far textures, background LOD0s, a user's render scale
+   high, near textures last), never removing content; still over → the APK
+   is built and flagged `at_risk`.
 9. Deterministic scene compiler merges `world.scene.json` (environment) with
    gameplay entities and emits `scene.json` + build metadata, including each
    mesh's `lod_paths`/`bounds_radius_m`/`sockets`/`skinned`/`animations` and
@@ -440,14 +468,31 @@ orchestrator and a reusable Vulkan + OpenXR engine core.
    (`projectile_scale.py`, explicit sizes kept), and fails on a gun without
    a muzzle, a bow without limb tips, a melee weapon without a strike
    point, or a seen projectile without a mesh. See `docs/weapons.md`.
+   It fails when a placed mesh references a texture file that does not
+   exist (`performance.textures` reports the rest). Then
+   **`scene_complexity`** samples visibility from the walkable regions
+   (p50 / p95 visible triangles and draws), estimates frame cost, detects
+   rooms closed on all four sides, marks `static_batch` entities (nothing
+   moves, holds, binds or reads them) and chooses each scene's starting
+   settings for knobs the user did not lock: FFR level (1, or 2 when heavy),
+   multiview (only above 120 p95 draws -- it measured ~10% more GPU at low
+   draw counts), room culling, the batch cell size. The **memory model**
+   (`memory_model.py`, exact from the built files where possible, calibrated
+   by measured runs in `projects/memory_calibration.json`) writes
+   `performance.memory_estimate` and `resident_memory_budget_mb`, plus
+   `scene_complexity.json` and a provisional `memory_status.json`
+   (`estimated_safe_not_device_tested` / `at_risk`, never "verified").
 10. Build (branches on `ProjectState.target_device`, the create-time UI toggle
    that is the single source of truth and is mirrored into
    `BuildSpec.target_device`; every planning prompt names the target too, so a
    Quest project is planned against a mobile GPU budget):
     - `pcvr`: CMake configure + build (Visual Studio 18 2026, toolset v145) → `.exe`.
     - `quest`: `quest_build` instantiates `engine/android`, packages
-      `scene.json` + GLBs + `.spv` into the APK assets, and runs
+      `scene.json` + GLBs + KTX2 textures + `.spv` into the APK assets
+      (stored uncompressed so the engine memory-maps them), and runs
       `gradlew assembleDebug` (NDK) → standalone APK. See `docs/quest-build.md`.
+      The APK is always downloadable (`GET /projects/{id}/apk`) whatever its
+      verification or memory status.
 10b. **On-headset verification** (`quest_runtime_verify`, Quest tail ONLY,
  never PC VR, report-only): installs and launches the APK on the connected
  headset in verification mode (`debug.ptv.verify`: scripted player walk,
@@ -465,9 +510,22 @@ orchestrator and a reusable Vulkan + OpenXR engine core.
  scripted hand holds and fires every weapon at a hostile) and checks each
  was held, fired, shot from within 2 cm of its muzzle, hit, damaged through
  `ctx.combat`, kept the projectile pool inside its cap and held the frame
- budget. Writes
+ budget. With textured meshes it runs a fourth launch
+ (`debug.ptv.verify_textures`: the engine shows each textured asset in turn)
+ and compares a Quest screenshot of each with an offline render of the same
+ LOD (visible, no magenta, colour kept, no white-out). It checks the user's
+ locks held in every `perf:` line (a frame miss the locks caused is a
+ warning), and runs the **memory pass**: `dumpsys meminfo` / `gpumeminfo` /
+ the engine's `mem:` line, a lowmemorykiller scan after every launch, PSS
+ growth across restarts, a soak (`quest_memory_soak_seconds`) and a
+ MemoryGuard pressure launch, against the 5.0 GiB peak and 4.5 GiB steady
+ targets. `memory_status` is `verified_safe` only from those measurements;
+ a memory failure re-runs asset_optimization → scene_compile → quest_build
+ → verify with the measured calibration, at most
+ `quest_memory_max_correction_rounds` times. Writes
  `runtime_verification.json`. SKIPPED, never failed, when no headset is
- connected. See `docs/quest-build.md`.
+ connected (memory then reads `estimated_safe_not_device_tested` or
+ `at_risk`). See `docs/quest-build.md`, `docs/quest-optimization.md`.
 11. Launch (branches on target_device): `pcvr` runs the `.exe` through OpenXR
  (Quest Link); `quest` does `adb install -r` + `am start` the NativeActivity.
 
