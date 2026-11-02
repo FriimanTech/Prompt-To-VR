@@ -1,25 +1,72 @@
+# ---------------------------------------------------------------------------
+# Secrets & credentials -- never commit
+# ---------------------------------------------------------------------------
+.env
+.env.*
+*.env
+!.env.example
+!apps/web/.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+*.keystore
+*.keystore.properties
+keystore.properties
+signing.properties
+local.properties
+id_rsa*
+id_ed25519*
+*.ppk
+.npmrc
+.pypirc
+.netrc
+credentials.json
+service-account*.json
+*-service-account.json
+SECRET_AUDIT_REPORT.md
+
+# ---------------------------------------------------------------------------
 # Node / web
+# ---------------------------------------------------------------------------
 node_modules/
 dist/
+dist-ssr/
 .vite/
 .turbo/
 .next/
+*.tsbuildinfo
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+.eslintcache
 
+# ---------------------------------------------------------------------------
 # Python
+# ---------------------------------------------------------------------------
 __pycache__/
-*.pyc
-*.pyo
+*.py[cod]
 .venv/
 venv/
 vrvenv/
-.env
-.env.local
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+.tox/
+.nox/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
 *.egg-info/
+*.egg
+.ipynb_checkpoints/
 
+# ---------------------------------------------------------------------------
 # C++ / CMake / vcpkg
+# ---------------------------------------------------------------------------
 build/
 builds/
 # Android NDK staging, relocated here so FetchContent stamp paths stay under
@@ -30,42 +77,99 @@ cmake-build-*/
 CMakeCache.txt
 CMakeFiles/
 CMakeScripts/
+CMakeUserPresets.json
 Testing/
 compile_commands.json
 vcpkg_installed/
-
-# Visual Studio
-.vs/
-*.user
-*.suo
-
-# IDE
-.idea/
-.vscode/
-!.vscode/settings.json
-
-# OS
-Thumbs.db
-.DS_Store
-
-# Generated project workspaces (each contains artifacts/builds/logs)
-projects/*/
-!projects/.gitkeep
+**/vcpkg_installed/
+_deps/
+*.obj
+*.o
+*.lib
+*.a
+*.pdb
+*.ilk
+*.idb
+*.ipch
+*.exp
+*.tlog
+*.exe
+*.dll
+*.so
 
 # CMake build trees (engine + offline world-gen host)
 engine/build/
 engine/worldgen/build/
-**/vcpkg_installed/
 
-# Logs
+# ---------------------------------------------------------------------------
+# Android / Gradle (Quest APK packaging)
+# ---------------------------------------------------------------------------
+.gradle/
+.externalNativeBuild/
+captures/
+*.apk
+*.aab
+*.ap_
+*.dex
+*.idsig
+*.hprof
+# Gradle wrapper is required to build the Quest APK -- keep it.
+!engine/android/gradle/wrapper/gradle-wrapper.jar
+
+# ---------------------------------------------------------------------------
+# Generated content (recreated by the pipeline)
+# ---------------------------------------------------------------------------
+# Per-project workspaces (artifacts / builds / logs / paid API outputs)
+projects/*/
+!projects/.gitkeep
+# LLM-generated C++
+engine/generated/*
+!engine/generated/CMakeLists.txt
+!engine/generated/**/.gitkeep
+# Compiled shaders / compressed textures produced at build time
+*.spv
+!**/fixtures/**/*.spv
+
+# ---------------------------------------------------------------------------
+# Logs, caches, temp
+# ---------------------------------------------------------------------------
 *.log
 logs/
-
-# Local cache
 .cache/
+tmp/
+temp/
+*.tmp
+*.bak
+*.bak-*
+*.orig
+*.swp
+*~
 
-# Generated files
-engine/generated/
+# ---------------------------------------------------------------------------
+# IDE / editors
+# ---------------------------------------------------------------------------
+.vs/
+*.user
+*.suo
+*.sln.docstates
+.idea/
+.vscode/
+!.vscode/settings.json
+.history/
 
-#Other
-3D_object_Test
+# ---------------------------------------------------------------------------
+# OS
+# ---------------------------------------------------------------------------
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+.DS_Store
+
+# ---------------------------------------------------------------------------
+# Local experiments / test outputs
+# ---------------------------------------------------------------------------
+3D_object_Test/
+3D_Objects/
+Uthana_Test/projects/*/builds/
+Uthana_Test/projects/*/logs/
