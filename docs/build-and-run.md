@@ -1,110 +1,77 @@
-# Build and run
+# Build and run on Quest
 
-For the full pipeline (23 shared stages, then `cmake_build` +
-`engine_promotion` on PC VR or `quest_build` + `quest_runtime_verify` +
-`engine_promotion` on Quest), see
-[`All_Stages_Docs/README.md`](All_Stages_Docs/README.md).
+This page is the standalone Quest path. A Quest 3 is the headset recent testing has used. Quest 2 can be used, but it has not had that same testing.
 
-## The hand-authored sample (no API keys required)
+PC VR through Quest Link is a different path, and it has not been tested recently. Those steps are in [Build and run on PC VR](build-and-run-pcvr.md).
 
-```powershell
-# 1. Configure + build the engine.
-cd engine
-cmake --preset vs2026-x64
-cmake --build --preset vs2026-x64-release
+Finish [local setup](local-setup.md) before you generate a new game. The sample APK (VR Game) below does not need that.
 
-# 2. Make sure the Quest 3 is connected.
-#    - Start the Meta Quest Link desktop app.
-#    - Settings > Beta > "Set Oculus as active OpenXR runtime".
-#    - Put the headset on and enter the Quest Link (or Air Link) environment.
+## Optional but recommended: try the sample Quest APK
 
-# 3. Launch the native VR sample.
-.\build\vs2026-x64\samples\starter-room\Release\ptv_starter_room.exe
-```
+An **APK (VR Game)** is the installable Quest game file. This sample is the fastest way to put a game this engine has already built onto a headset. You do not need Visual Studio, an API key, or a new pipeline run.
 
-On success:
+You do need Quest setup [step 5](setup/05-quest-developer-mode-and-adb-drivers.md) (developer account, Developer Mode, Oculus ADB driver) and [step 6](setup/06-android-studio.md) (Android Studio, Platform-Tools, and `adb` on your Path).
 
-- a desktop *mirror* window opens (`ptv_starter_room [mirror]`),
-- the headset shows the OpenXR runtime's stage,
-- the on-mirror ImGui panel shows `Mirror: 1280x720` and `ECS entities: N`.
+The sample APK (VR Game) is in the repo at `samples/quest-sample/GlockLaserDeck.apk`. It is **Glock Laser Deck**, used as the sample until a dedicated starter APK is added. You do not need anything from `projects/`.
 
-## A generated project
-
-1. Start the orchestrator:
-
-   ```powershell
-   .\vrvenv\Scripts\Activate.ps1
-   uvicorn ptv_orchestrator.main:app --host 127.0.0.1 --port 8787 --reload
-   ```
-
-2. Start the web control panel in another terminal:
-
-   ```powershell
-   cd apps\web
-   npm run dev
-   ```
-
-3. Open <http://127.0.0.1:5173>, click *New project*, paste a prompt, and
-   press *Create & run pipeline*. The *Pipeline* tab shows per-stage progress
-   in real time.
-
-4. When the pipeline reaches *Ready to launch*, press *Launch latest build*.
-   The FastAPI endpoint `/api/projects/<id>/launch` spawns the built `.exe`
-   with `PTV_SCENE_JSON` pointing at `projects/<id>/scene.json`.
-
-   The generated executable is named after the project's title (e.g.
-   `GREEN LANTERN WILLPOWER VR.exe`) rather than the generic
-   `ptv_starter_room.exe`, so each build is easy to identify on disk. The label
-   shown in the Quest Link *recents* list comes from the OpenXR application
-   name, which the runtime sets from the scene's `title` at launch — so the
-   headset shows the project's title regardless of the exe filename.
-
-## Quest standalone (APK)
-
-When `ProjectState.target_device` is `quest`, stage 16 runs `quest_build` instead
-of `cmake_build`, followed by `quest_runtime_verify` (16b), which runs the APK on
-the connected headset and checks the NPCs, the game loop, weapons, textures,
-the user's optimization locks and memory that this game calls for (report-only;
-skipped when no headset is connected; never part of PC VR). A memory failure
-re-runs `asset_optimization` → `scene_compile` → `quest_build` → verify, at most
-`quest_memory_max_correction_rounds` (default 2) times. **Verify on headset** in
-the web panel (`POST /api/projects/<id>/verify`) re-runs it. The APK is always
-downloadable from `GET /api/projects/<id>/apk`. The web panel's **Launch latest
-build** uses `adb install -r` and starts the NativeActivity on a connected
-Quest 3.
-
-Prerequisites: Android SDK/NDK, `adb`, and a USB-connected headset. See
-[`quest-build.md`](quest-build.md) for the full toolchain checklist, APK
-packaging details, and on-device validation ladder.
-
-## CMake from the IDE
-
-Opening the repo folder in Visual Studio Community 2026 detects the
-`CMakePresets.json` automatically. Select **vs2026-x64** from the preset
-dropdown and build.
-
-## Quest 3 via Quest Link — checklist
-
-- The Quest Link app shows *Active* in its status bar.
-- *Developer Runtime Features* is enabled under *Settings → Beta*.
-- Oculus is the active OpenXR runtime (same screen).
-- USB 3 cable (or Air Link with a good Wi-Fi 6E+ link).
-- No competing OpenXR runtime (SteamVR / Virtual Desktop) is set as active
-  while you're testing through Link.
-
-The engine requests the `XR_KHR_vulkan_enable2` extension and the stage
-reference space. If either is missing, the log shows a clear error.
-
-## Command-line launch variants
+1. Connect the Quest to the Windows PC with a **data** USB cable.
+2. Put on the headset and choose **Always allow from this computer** if it asks.
+3. In PowerShell, from the repository root, confirm the headset:
 
 ```powershell
-# Explicit scene JSON:
-.\ptv_starter_room.exe C:\Users\micha\Documents\Prompt-To-VR\samples\starter-room\scene.json
-
-# Through the env var (used by the orchestrator):
-$env:PTV_SCENE_JSON = "C:\Users\micha\Documents\Prompt-To-VR\projects\<id>\scene.json"
-.\ptv_starter_room.exe
-
-# Pick a different OpenXR runtime (rarely needed with Quest Link):
-$env:XR_RUNTIME_JSON = "C:\Program Files\Oculus\Support\oculus-runtime\oculus_openxr_64.json"
+adb devices
 ```
+
+The headset line must end in `device`.
+
+4. **Install the APK (VR Game).** This is the same install command the engine uses (`adb install -r`):
+
+```powershell
+adb install -r .\samples\quest-sample\GlockLaserDeck.apk
+```
+
+Wait until PowerShell prints `Success`.
+
+### 5. Start the APK (VR Game)
+
+Pick either way.
+
+#### A. In the headset
+
+1. In the Quest, click **Library** to open your game library.
+2. Click **Menu**.
+3. In the menu panel, click **Unknown Sources**.
+4. In the Unknown Sources panel, click **Glock Laser Deck**.
+
+#### B. Via the terminal
+
+With the headset still connected to the computer, run:
+
+```powershell
+adb shell am start -n com.prompttovr.p20261030_165846_glock_laser_deck/android.app.NativeActivity
+```
+
+## Generate your own Quest game
+
+1. Start the orchestrator from the repository root:
+
+```powershell
+.\vrvenv\Scripts\Activate.ps1
+uvicorn ptv_orchestrator.main:app --host 127.0.0.1 --port 8787 --reload
+```
+
+2. In a second PowerShell window, start the website:
+
+```powershell
+cd apps\web
+npm run dev
+```
+
+3. Open <http://127.0.0.1:5173>. Click **New project**, paste a prompt, choose **Quest (standalone APK)**, and click **Create & run pipeline**. On the project page, the **Pipeline** tab shows each stage.
+4. When the APK (VR Game) is built, click **Install & launch on Quest**. The headset must be connected to your computer. That button installs the new APK (VR Game) with `adb install -r` and starts it on the Quest. You can also download it from the same page with the **Download APK** button. That button works only after the APK exists. Everything for that game is in the `projects` folder.
+
+The headset must show up in `adb devices` before launch. Developer Mode and the data cable are the same requirements as the sample install above.
+
+> **Notice:** The first Quest APK (VR Game) build compiles the engine with the Android NDK and may download Gradle. Plan on a long wait, often **20–40 minutes**, sometimes longer on a slower PC. Later builds of the same project are shorter.
+
+How packaging works is in [Quest build](quest-build.md). Stage-by-stage notes are in [All stages](All_Stages_Docs/README.md).

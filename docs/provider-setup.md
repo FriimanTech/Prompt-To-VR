@@ -1,21 +1,24 @@
 # Provider setup
 
-The providers used by the pipeline: Anthropic, OpenAI, Google (Gemini),
-Tripo and Uthana. Every key is read from the repo-root `.env` by
-`apps/orchestrator/ptv_orchestrator/settings.py`.
+The recommended public setup uses **OpenAI, Gemini, Tripo3D, and Uthana**, and does **not** set a Claude key. Account and key steps are in [`setup/api-keys.md`](setup/api-keys.md). This page is the model and endpoint reference.
+
+Hands Only with no full-body avatar and no in-game NPCs skips Uthana. That is the only three-key case.
+
+Every key is read from the repo-root `.env` by `apps/orchestrator/ptv_orchestrator/settings.py`.
+
+If `ANTHROPIC_API_KEY` is empty, `LlmClient` uses OpenAI for the regular LLM stages (BuildSpec, AssetManifest, optimization preferences). The OpenAI Agents SDK stages already require `OPENAI_API_KEY`. A Claude key left in the Windows environment still selects Claude for those regular calls. Clear it and restart the orchestrator. There is no separate provider-mode switch.
 
 | Env var | Needed for | Without it |
 |---|---|---|
-| `ANTHROPIC_API_KEY` | BuildSpec, AssetManifest (and the light call in `optimization_preferences`) | `LlmClient` falls back to OpenAI |
-| `OPENAI_API_KEY` | every Agents SDK stage (interaction design, NPC plan, game design, mechanic plan, scene spec, character routing, Uthana motion plan, world, codegen) and the Claude fallback | those stages fail |
-| `GOOGLE_API_KEY` (or `GEMINI_API_KEY`) | reference images, socket vision | no reference images; sockets use the geometry fallback (`heuristic`) |
+| `ANTHROPIC_API_KEY` | BuildSpec, AssetManifest, and the light call in `optimization_preferences`, when you set a Claude key | Leave this empty. `LlmClient` then uses OpenAI |
+| `OPENAI_API_KEY` | every Agents SDK stage (interaction design, NPC plan, game design, mechanic plan, scene spec, character routing, Uthana motion plan, world, codegen) and the regular LLM stages when Claude is unset | those stages fail |
+| `GOOGLE_API_KEY` | reference images, socket vision. This is the variable the orchestrator loads. The image client also accepts `GEMINI_API_KEY` from the process environment, but settings do not | no reference images; sockets use the geometry fallback (`heuristic`) |
 | `TRIPO_API_KEY` | image-to-3D, Tripo rig / retarget | no meshes |
-| `UTHANA_API_KEY` | Uthana auto-rig + motions | optional: `character_routing` sends every character to Tripo (the avatar loses finger curls) |
-
-`UTHANA_API_KEY` is read by `settings.py` and `ptv_providers.uthana_client`
-but is **not** listed in `.env.example`; add the line yourself.
+| `UTHANA_API_KEY` | Uthana auto-rig + motions. Listed in `.env.example` | skip only for Hands Only with no full-body avatar and no NPCs. Otherwise characters that need Uthana, including the full-body avatar, fall back to Tripo and the avatar has no finger joints |
 
 ## Anthropic (Claude)
+
+Not part of the recommended setup. Leave `ANTHROPIC_API_KEY` empty so the regular LLM stages use OpenAI. The notes below describe the existing Claude path if a key is present.
 
 - Get an API key at <https://console.anthropic.com> → *API Keys*.
 - Paste into `.env` as `ANTHROPIC_API_KEY`.

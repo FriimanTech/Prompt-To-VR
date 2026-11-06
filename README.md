@@ -1,51 +1,147 @@
-# Prompt-To-Native-VR
+# Prompt to VR Engine
 
-Local-first system that turns a detailed text prompt for a VR game into a
-**native C++ Vulkan + OpenXR executable** (PC VR over Quest Link) or a
-**standalone Quest 3 APK** (local sideload via `adb`).
+## Introduction
+
+**Prompt to VR Engine**, created by **FriimanTech**, is an AI-powered VR game creation engine that turns text descriptions into playable VR games for the **Meta Quest 3**, with some **PC VR support**. No Unity, Unreal Engine, or Godot is required.
+
+The VR engine is built in **C++ using Vulkan and OpenXR**. It coordinates the game creation process through AI agents that plan gameplay, generate 3D assets, automate character rigging and animation, build environments, and write additional gameplay code. Compiler errors are fed back to the coding agents for correction, while reusable engine systems handle interactions, movement, NPC behavior, and game rules.
+
+The pipeline runs locally on your computer and connects to external AI services. It produces **native Quest APKs (VR Games) that can be downloaded and installed on your Quest 3 headset**, rather than browser-based WebXR experiences. This gives developers a foundation they can explore, extend, and build upon. **PC VR through Quest Link was tested during early development; recent testing and updates have primarily focused on standalone Quest 3 support.**
+
+## Prerequisites
+
+**A Windows machine is required** to run this engine's local pipeline.
+
+**A Meta Quest 3 or Quest 2 is highly advised.** Recent development and testing have focused on standalone Quest 3. Quest 2 is a reasonable headset to try, but it has not received the same recent testing.
+
+You can run the engine and create a complete VR game as an installable APK **without a Quest headset**. A headset is required to play that game and to run the on-headset checks. Building an APK and verifying it on a device are separate steps.
+
+**Cursor is highly advised.** Other IDEs are acceptable. Cursor's AI agent can help with some dependency setup and is especially useful if you want to modify the VR engine. Using Cursor still involves a substantial amount of manual setup, particularly when installing and configuring Visual Studio Community 2026 and Android Studio.
+
+| You need this to build VR Games | You need this to play and test on a headset |
+| --- | --- |
+| Windows, the tools in the download list below, and the API keys for the kind of game you are making | A Quest headset, Developer Mode Turned on, a data USB cable, and `adb` seeing the headset |
+
+## Required downloads (Quest)
+
+> **First-time setup:** Follow the [complete Quest setup guide](docs/setup/README.md) for download links and step-by-step installation and configuration instructions for every tool listed here. Start with [Python](docs/setup/01-python.md).
+
+| Tool | Version or requirement | What it does here |
+| --- | --- | --- |
+| Python | **3.11+**; **3.13 via `uv` recommended** | Runs the local pipeline. Packages require Python 3.11 or newer. The project environment is Python 3.13, created later with `uv`. |
+| Node.js | **20+** | Runs the local web control panel. |
+| Visual Studio Community 2026 | **Desktop development with C++ / MSVC v145** | Compiles the C++ engine on Windows. |
+| vcpkg | As required by the repository | Fetches the C++ libraries the engine builds with. |
+| CMake | **4.2 or newer** (desktop) | Configures the Windows engine build. This is separate from the Android SDK CMake used for Quest. |
+| Vulkan SDK | **1.4.341.x** | Provides Vulkan headers and the shader compiler. |
+| uv | Python environment manager | Installs Python 3.13 and creates the `vrvenv` environment the engine runs in. |
+| Oculus ADB Drivers | Windows drivers for Quest development | Lets Windows talk to a Quest over USB. |
+| Android Studio | **SDK Platform 34**, **NDK `30.0.15729638`**, **Platform-Tools / `adb`**, and **JDK 17** | Packages the standalone Quest APK. Also install Build-Tools 34.0.0 or newer, Android SDK CMake 3.22.1 or newer, and the Android SDK command-line tools. The [Android Studio guide](docs/setup/06-android-studio.md) sets `JAVA_HOME` to Android Studio's `jbr` folder. |
+
+> **First-time setup:** Follow the [complete Quest setup guide](docs/setup/README.md) for download links and step-by-step installation and configuration instructions for every tool listed here. Start with [Python](docs/setup/01-python.md).
+
+<details>
+<summary><strong>PC VR through Quest Link: requirements</strong></summary>
+
+**PC VR through Quest Link has not been tested recently and may have major issues. The recommended path is standalone Quest, especially Quest 3, because recent development and testing have focused there.**
+
+The full list is in [PC VR through Quest Link: requirements](docs/setup/pc-vr-requirements.md). It is not the same list as the Quest downloads above. Android Studio, the NDK, Platform-Tools, and the Oculus ADB Drivers are for standalone Quest packaging, not for a PC VR-only workflow.
+
+</details>
+
+## Required API providers
+
+> **API keys:** Follow the [API key setup guide](docs/setup/api-keys.md) for account, billing, and key steps for every provider below. Put real keys only in the local `.env` file, which is git-ignored.
+
+| API key | What it does here |
+| --- | --- |
+| **OpenAI API key** | Powers the AI planning, reasoning, and code-generation stages, including stages that use the OpenAI Agents SDK. |
+| **Gemini API key** | Generates the reference images used to create the game's 3D assets. |
+| **Tripo3D API key** | Creates the 3D objects and characters used throughout the VR game. |
+| **Uthana API key** | Provides character rigging and animation for workflows that need it, including the full-body VR avatar. |
+
+### A. Use OpenAI for the LLM and agent stages
+
+This engine has several stages that do AI-generated work. Some of those stages use regular LLM API calls. Most of them use OpenAI Agents through the OpenAI Agents SDK.
+
+The code still lists OpenAI as the fallback for the regular LLM calls. If `ANTHROPIC_API_KEY` is empty, those calls use OpenAI. The agent stages already require OpenAI.
+
+**Use OpenAI for all AI-generated LLM and agent stages instead of configuring both Claude and OpenAI.** You then need one LLM provider key, not two.
+
+The full recommended setup is **four API keys: OpenAI, Gemini, Tripo3D, and Uthana.** Gemini, Tripo3D, and Uthana still provide image, 3D, and animation services.
+
+### B. OpenAI is the best-tested configuration
+
+The latest updates to this engine have been tested with OpenAI, not with Claude.
+
+**For the best-tested and most reliable results, use OpenAI and do not configure a Claude API key.**
+
+### C. Hands Only, with no avatar and no NPCs, needs three keys
+
+If you want a VR game in **Hands Only** mode, without a full-body VR avatar **and without any in-game NPCs**, you only need **three API keys: OpenAI, Gemini, and Tripo3D.**
+
+You do not need a Uthana API key for that configuration, because no character rigging or animation is required. Hands Only by itself does not remove Uthana. A Hands Only game that still has NPCs can still need Uthana.
+
+> **API keys:** Follow the [API key setup guide](docs/setup/api-keys.md) for account, billing, and key steps for every provider above.
+
+## Recommended API funding
+
+These amounts are **recommended starting funds in USD**, not the price of an API key and not a guaranteed charge for generating one game. Actual use depends on the prompt, assets, animations, model choices, retries, and the work the pipeline does.
+
+For the Hands Only, no-avatar, no-NPC configuration above, ignore the Uthana column. That setup does not need a Uthana key.
+
+| Game size | OpenAI | Gemini | Tripo3D | Uthana |
+| --- | --- | --- | --- | --- |
+| **Small prompt games** | **$50; comfortable: $75** | **$5** | **$10** | **$5** |
+| **Medium prompt games** | **$100; comfortable: $150** | **$10** | **$25** | **$10** |
+| **Large prompt games** | **$200; comfortable: $300** | **$25** | **$50–75** | **$20–25** |
+
+The standard and comfortable OpenAI amounts are different. Use the comfortable amount if you want more room for retries. There is no medium example; the medium funding row still applies to a medium-sized prompt.
+
+**Small prompt game examples:**
+
+- “Create a Goblin Shooter game where I have a laser blaster and can face off against waves of goblins for 5 waves.”
+- “A simple shooting range with one pistol and floating targets.”
+
+**Large prompt game examples:**
+
+- “A Navy SEAL-style raid across two rooms: breach a door, clear hostiles with an assault rifle and a sidearm, then extract. Full-body avatar, 3 enemy types, ammo, and reload.”
+- “An open combat campaign: desert outpost, underground bunker, and rooftop finale. Full avatar. Assault rifle, shotgun, grenades, shield. Multiple enemy factions—soldiers, drones, and heavy brutes—scripted waves, objectives, and a pause/end-game flow.”
+- “A multi-room museum heist: stealth and shooting, laser puzzles, guards with varied weapons, a getaway courtyard. Full avatar, several unique characters, many grabbable props.”
+- “A survival arena with three biomes linked by portals, a crafting bench, ranged and melee loadouts, and rotating boss waves.”
+
+These examples show the size of prompt each funding row is meant for. They are not a promise that generation will succeed or that the game will hold a particular frame rate.
+
+## Repository map
 
 The repo is a monorepo:
 
 - `apps/web` — React + Vite control panel (local website).
 - `apps/orchestrator` — FastAPI backend that runs the generation pipeline.
-- `engine/runtime` — hand-authored reusable VR engine (Vulkan + OpenXR + EnTT
-  + Jolt).
-- `engine/generated/{mechanics,ai,dialogue,world}` — the only place LLM-produced
-  C++ is allowed (`world/` = offline VR environment builders).
+- `engine/runtime` — hand-authored reusable VR engine (Vulkan + OpenXR + EnTT + Jolt).
+- `engine/generated/{mechanics,ai,dialogue,world}` — the only place LLM-produced C++ is allowed (`world/` = offline VR environment builders).
 - `engine/worldgen` — offline `ptv_worldgen` host for generated world builders.
 - `engine/android` — Gradle template the Quest build stage instantiates per project.
-- `engine/tools` — scene compiler, GLB validator / optimizer (meshoptimizer LODs),
-  KTX2 texture compressor, GLB view renderer and socket derivation, bounds check.
+- `engine/tools` — scene compiler, GLB validator / optimizer (meshoptimizer LODs), KTX2 texture compressor, GLB view renderer and socket derivation, bounds check.
 - `engine/promoted` — generated modules promoted into the reuse catalog.
 - `packages/schemas` — strict Pydantic + JSON schemas used across the pipeline.
-- `packages/provider-clients` — Anthropic, OpenAI, Google GenAI, Tripo V3 and
-  Uthana clients (plus the shared `LlmClient` with Claude → OpenAI fallback).
-- `samples/starter-room` — hand-authored demo scene that boots without calling
-  any LLM.
-- `projects/` — per-project local artifact workspace (created by the orchestrator,
-  git-ignored).
-- `docs/` — end-user documentation; **`docs/All_Stages_Docs/`** has per-stage
-  relearning guides (summary + deep dive for every stage, PC VR and Quest).
+- `packages/provider-clients` — OpenAI, Google GenAI, Tripo V3, and Uthana clients, plus the shared `LlmClient`.
+- `samples/starter-room` — hand-authored demo scene that boots without calling any LLM.
+- `projects/` — per-project local artifact workspace (created by the orchestrator, git-ignored).
+- `docs/` — documentation. Start with [`docs/setup/README.md`](docs/setup/README.md). [`docs/All_Stages_Docs/`](docs/All_Stages_Docs/README.md) has per-stage notes.
 
 ## Quick links
 
-- [`docs/All_Stages_Docs/README.md`](docs/All_Stages_Docs/README.md) — **stage-by-stage pipeline docs**
+- [`docs/setup/README.md`](docs/setup/README.md) — **start here for installation**
+- [`docs/setup/api-keys.md`](docs/setup/api-keys.md) — API keys
+- [`docs/local-setup.md`](docs/local-setup.md) — commands after the tools are installed
+- [`docs/build-and-run.md`](docs/build-and-run.md) — play on Quest, including the sample APK
+- [`docs/build-and-run-pcvr.md`](docs/build-and-run-pcvr.md) — PC VR `.exe` through Quest Link
+- [`docs/quest-build.md`](docs/quest-build.md)
+- [`docs/All_Stages_Docs/README.md`](docs/All_Stages_Docs/README.md) — stage-by-stage pipeline docs
 - [`docs/overview.md`](docs/overview.md)
 - [`docs/architecture.md`](docs/architecture.md)
-- [`docs/local-setup.md`](docs/local-setup.md)
-- [`docs/build-and-run.md`](docs/build-and-run.md)
-- [`docs/quest-build.md`](docs/quest-build.md)
-- [`docs/run-lifecycle.md`](docs/run-lifecycle.md) — aborting a run, recovering a stuck project
-- [`docs/provider-setup.md`](docs/provider-setup.md)
-- [`docs/prompt-schema.md`](docs/prompt-schema.md)
-- [`docs/world-generation.md`](docs/world-generation.md)
-- [`docs/npc-and-ai.md`](docs/npc-and-ai.md)
-- [`docs/game-flow.md`](docs/game-flow.md) — health, lives, objectives, end screens
-- [`docs/weapons.md`](docs/weapons.md) and [`docs/sockets.md`](docs/sockets.md)
-- [`docs/uthana.md`](docs/uthana.md) — character routing, rigging and motions
-- [`docs/rendering.md`](docs/rendering.md) and [`docs/quest-optimization.md`](docs/quest-optimization.md)
-- [`docs/runtime-subsystems.md`](docs/runtime-subsystems.md)
-- [`docs/project-layout.md`](docs/project-layout.md)
+- [`docs/provider-setup.md`](docs/provider-setup.md) — model and endpoint reference
 - [`docs/troubleshooting.md`](docs/troubleshooting.md)
 
 ## High-level flow
@@ -58,10 +154,10 @@ mirrored into `BuildSpec.target_device`).
 
 ```
 prompt
-  →  1.  build_spec               Claude Opus (OpenAI fallback)
+  →  1.  build_spec               regular LLM call (OpenAI when no Claude key)
   →  1b. optimization_preferences user's Quest optimization overrides → locks
-  →  2.  asset_manifest           Claude Sonnet; objects only (environment is C++)
-  →  2b. interaction_design       how each item is held / fired; its sockets
+  →  2.  asset_manifest           regular LLM call; objects only (environment is C++)
+  →  2b. interaction_design       OpenAI Agents SDK
   →  3.  npc_plan                 roles, factions, animate vs slide, encounters
   →  3b. game_design              health, lives, objectives, endings, menus
   →  4.  mechanic_plan            built-in vs generated; controller bindings
@@ -84,163 +180,31 @@ prompt
   → 16.  pcvr:  cmake_build       Windows .exe
          quest: quest_build       standalone APK (Gradle + NDK)
   → 16b. quest only: quest_runtime_verify
-                                  run on the headset: NPCs, game loop, weapons,
-                                  textures, memory. A failed check fails the
-                                  stage (the APK stays downloadable); no headset
-                                  = skipped, not failed; a memory failure re-runs
-                                  14 → 15 → 16 first
+                                  run on the headset when one is connected
   → 17.  engine_promotion         index generated modules for reuse
 ```
 
-World generation runs **before** code generation so the C++ gameplay agents can
-reference the ids of rooms, doors and spawn zones the world actually declared.
+The recommended setup leaves the Claude key empty, so steps 1, 1b, and 2 use OpenAI. Steps from interaction design through code generation already use the OpenAI Agents SDK. World generation runs **before** code generation so gameplay code can use the room and spawn ids the world declared.
 
-The engine core is hand-authored and reusable. Generation only produces assets,
-scene data, bounded gameplay modules, and offline world builders. Built-in VR
-mechanics (teleport, slide, snap / smooth turn, grab, throw, hand pose, avatar
-body, equip, character locomotion, NPC follow / melee chase, encounter director,
-game flow + HUD, and the weapon set: weapon, bow, melee weapon, shield, item
-source, NPC ranged attack) are reused whenever possible and are data-driven via
-`SceneSpec.mechanic_bindings`.
+The engine core is hand-authored and reusable. Generation produces assets, scene data, bounded gameplay modules, and offline world builders. Built-in VR mechanics (teleport, slide, snap / smooth turn, grab, throw, hand pose, avatar body, equip, character locomotion, NPC follow / melee chase, encounter director, game flow + HUD, and the weapon set) are reused whenever possible.
 
-## Minimal first-run (once prerequisites are installed and keys filled in)
+## Run the engine after setup
+
+Install the tools from the [Quest setup guide](docs/setup/README.md) and fill in [`.env`](docs/setup/api-keys.md) first. Then, from PowerShell at the repo root:
 
 ```powershell
-# 1. Install Python deps (from repo root; uv manages CPython 3.13)
-uv python install 3.13
-uv venv .\vrvenv --python 3.13
+# Backend (vrvenv from the build-tools guide)
 .\vrvenv\Scripts\Activate.ps1
-uv pip install -e .\packages\schemas -e .\packages\provider-clients -e ".\apps\orchestrator[dev]"
-
-# 2. Install web deps
-cd apps\web
-npm install
-
-# 3. Start the orchestrator (repo root, vrvenv already active)
-cd ..\..
 uvicorn ptv_orchestrator.main:app --host 127.0.0.1 --port 8787 --reload
 
-# 4. In another shell, start the web control panel
+# New terminal: web control panel
 cd apps\web
 npm run dev
 # open http://127.0.0.1:5173
-
-# 5. Configure + build the engine skeleton / starter room (PowerShell)
-cd engine
-cmake --preset vs2026-x64
-cmake --build --preset vs2026-x64-release
 ```
 
-When the starter-room sample is built, the web panel's "Launch sample" button
-(or running `ptv_starter_room.exe` directly while Meta Quest Link is active)
-boots a native XR session on PC VR.
+In the web panel, click **New project**, paste a prompt, choose **Quest (standalone APK)**, and click **Create & run pipeline**. That is the recommended target. **Launch starter sample** on the home page starts the hand-authored PC VR starter room. It does not build that program, and it does not call the API providers. Build it first with the commands in [local setup](docs/local-setup.md).
 
-See [`docs/local-setup.md`](docs/local-setup.md) for the full checklist,
-[`docs/build-and-run.md`](docs/build-and-run.md) for PC VR launch,
-[`docs/quest-build.md`](docs/quest-build.md) for the Quest APK path, and
-[`docs/provider-setup.md`](docs/provider-setup.md) for API keys.
+Quest APK packaging, install, and on-headset checks are in [`docs/build-and-run.md`](docs/build-and-run.md) and [`docs/quest-build.md`](docs/quest-build.md). A PC VR `.exe` launch through Quest Link is documented in [`docs/build-and-run-pcvr.md`](docs/build-and-run-pcvr.md). That path has not been tested recently and may have major issues.
 
----
-
-# Manual Steps I Still Need To Do
-
-This list is the authoritative summary of everything that can only be done on
-your machine.
-
-## 1. Software to install
-
-| Item | Why | Notes |
-|---|---|---|
-| **Visual Studio Community 2026** with the *Desktop development with C++* workload, *C++ CMake tools for Windows*, and the *Windows 10 SDK / 11 SDK* components | Required for the native runtime build | Toolset `v145`, CMake generator string `"Visual Studio 18 2026"` |
-| **CMake ≥ 4.2** | VS 2026 generator support | `winget install Kitware.CMake` or use the one shipped with VS 2026 |
-| **Vulkan SDK 1.4.341.x** (Windows x64) from LunarG | Vulkan headers, validation layers, `glslc` shader compiler | Sets `VULKAN_SDK` env var automatically |
-| **vcpkg** (checkout anywhere, e.g. `C:\src\vcpkg`) | C++ dependency manifest mode | Set `VCPKG_ROOT=C:\src\vcpkg` in `.env` and run `bootstrap-vcpkg.bat` once |
-| **uv** (`winget install --id=astral-sh.uv -e`) | Orchestrator + schemas + provider clients | uv installs a managed CPython 3.13; no global Python required |
-| **Node.js 20+** and **npm** | Vite frontend | Ship with Windows installer |
-| **Meta Quest Link** desktop app | Routes Quest 3 as a PC VR headset and registers the Oculus OpenXR runtime | Enable "Developer Runtime Features" under Beta |
-| **Oculus Quest 3** connected by Link cable or Air Link, with Meta Quest Link active | PC VR headset | Set the Oculus OpenXR runtime as the active one in the Meta Quest Link app |
-| **Android Studio SDK/NDK + adb** (Quest target only) | Builds and sideloads standalone APKs | See [`docs/quest-build.md`](docs/quest-build.md) |
-
-Optional: install **Git** if you don't already have it.
-
-## 2. API accounts / keys you must create
-
-| Provider | Used for | Required? | Where to get a key |
-|---|---|---|---|
-| Anthropic | BuildSpec, AssetManifest, optimization preferences (Claude structured JSON) | Recommended (falls back to OpenAI when blank) | <https://console.anthropic.com> → *API Keys* |
-| OpenAI | Every Agents SDK stage (interaction design, NPC plan, game design, mechanic plan, scene spec, character routing, Uthana motion plan, world + code generation); Claude fallback | Yes | <https://platform.openai.com/api-keys> |
-| Google AI Studio | Gemini reference images and socket vision (socket generation falls back to geometry-only without it) | Yes | <https://aistudio.google.com/app/apikey> |
-| Tripo | Image-to-3D, rig-check, rigging, animation retarget (V3 API) | Yes | <https://developers.tripo3d.ai> |
-| Uthana | Player-avatar / humanoid auto-rig with fingers, locomotion and idle motions | Optional (without it every character routes to Tripo, so the player avatar gets no finger joints) | <https://uthana.com> |
-
-## 3. Environment variables to fill
-
-Copy `.env.example` to `.env` at the repo root and fill in the keys. `.env`
-(and every `.env.*` variant except `.env.example`) is git-ignored; never commit
-real keys.
-
-```
-ANTHROPIC_API_KEY=
-OPENAI_API_KEY=
-GOOGLE_API_KEY=
-TRIPO_API_KEY=
-UTHANA_API_KEY=
-VCPKG_ROOT=C:\src\vcpkg
-```
-
-The orchestrator reads `.env` via `pydantic-settings`. The frontend picks up the
-orchestrator URL from its own `apps/web/.env` (`VITE_API_BASE_URL`, default
-`http://127.0.0.1:8787`).
-
-## 4. Things that are scaffolded but blocked on your action
-
-- **Running the full generation pipeline** requires Anthropic, OpenAI, Google,
-  and Tripo keys. Without them you can still build and launch the hand-authored
-  `starter-room` sample end-to-end, which validates Vulkan + OpenXR + mechanics
-  without spending credits.
-- **First-time vcpkg install** will download and build Vulkan/OpenXR/Jolt/etc.
-  Expect 10–30 minutes on the first `cmake --preset`. Subsequent builds are
-  cached.
-- **Meta Quest Link's OpenXR runtime selection** is a one-time click: in the
-  Meta Quest Link desktop app, open *Settings → Beta → Set Oculus as active
-  OpenXR runtime*.
-- **Shader compilation** relies on `glslc` from the Vulkan SDK being on
-  `PATH`. The Vulkan SDK installer adds it automatically.
-- **Quest standalone builds** need `ANDROID_HOME`, `ANDROID_NDK_HOME`, `JAVA_HOME`,
-  and `adb` on PATH — see [`docs/quest-build.md`](docs/quest-build.md).
-
-## 5. Exact commands to run the first example
-
-From a PowerShell at the repo root, once installs are done and `.env` is
-filled:
-
-```powershell
-# One-time: bootstrap vcpkg
-& "$env:VCPKG_ROOT\bootstrap-vcpkg.bat"
-
-# Backend (from repo root)
-uv python install 3.13
-uv venv .\vrvenv --python 3.13
-.\vrvenv\Scripts\Activate.ps1
-uv pip install -e .\packages\schemas -e .\packages\provider-clients -e ".\apps\orchestrator[dev]"
-uvicorn ptv_orchestrator.main:app --host 127.0.0.1 --port 8787 --reload
-
-# (new terminal) Frontend
-cd apps\web
-npm install
-npm run dev
-# open http://127.0.0.1:5173
-
-# (new terminal) Build the engine + starter room sample
-cd engine
-cmake --preset vs2026-x64
-cmake --build --preset vs2026-x64-release
-
-# Put on the Quest 3, start Meta Quest Link, then launch:
-.\build\vs2026-x64\samples\starter-room\Release\ptv_starter_room.exe
-```
-
-Then in the web panel click **New Project**, paste a detailed VR game prompt,
-choose **PC VR** or **Quest**, and watch the pipeline run. You can also press
-**Launch starter sample** on the home page to verify the engine without
-invoking providers.
+More command detail is in [`docs/local-setup.md`](docs/local-setup.md).

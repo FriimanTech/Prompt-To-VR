@@ -77,7 +77,7 @@ CMake cache variables passed by the stage:
 2. Build: `cmake --build build_dir --config <cmake_build_config> --parallel`.
 3. cmake runs in its own process group so a uvicorn reload or Ctrl+C in the parent does not kill it. `proc_hooks` registers the child so Abort kills the whole tree (cmake → msbuild → compilers).
 
-The stage does **not** use `engine/CMakePresets.json`. Those presets (`vs2026-x64` with toolset `v145`, `ninja-x64`) are for manual builds; see [`docs/build-and-run.md`](../../../build-and-run.md). The stage passes no `-T` toolset, so Visual Studio uses the generator's default toolset (v145 for VS 18 2026).
+The stage does **not** use `engine/CMakePresets.json`. Those presets (`vs2026-x64` with toolset `v145`, `ninja-x64`) are for manual builds; see [`docs/build-and-run-pcvr.md`](../../../build-and-run-pcvr.md). The stage passes no `-T` toolset, so Visual Studio uses the generator's default toolset (v145 for VS 18 2026).
 
 ### Executable name (`_project_app_name`)
 
@@ -119,7 +119,7 @@ Every line goes to `cmake.log`. Lines are emitted as `log` events on `cmake_conf
 
 ## See also
 
-- [`docs/build-and-run.md`](../../../build-and-run.md): toolchain and manual builds
+- [`docs/build-and-run-pcvr.md`](../../../build-and-run-pcvr.md): toolchain and manual builds
 - [`docs/engine-growth.md`](../../../engine-growth.md): promoted sources in the build
 - Quest counterpart: [`16_quest_build`](../../Quest_Stages/16_quest_build/README.md)
 - Next: [`17_engine_promotion`](../17_engine_promotion/README.md)

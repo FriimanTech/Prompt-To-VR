@@ -135,6 +135,7 @@ Prompt-To-VR/
     ├── architecture.md
     ├── local-setup.md
     ├── build-and-run.md
+    ├── build-and-run-pcvr.md
     ├── run-lifecycle.md
     ├── quest-build.md
     ├── quest-optimization.md

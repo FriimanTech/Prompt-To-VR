@@ -1,52 +1,19 @@
 # Local setup
 
-This project is Windows-first and assumes Visual Studio Community 2026 as the
-C++ toolchain.
+Install the tools first from the [Quest setup guide](setup/README.md). That walkthrough is Quest-first. The recommended API setup is OpenAI, Gemini, Tripo3D, and Uthana, with no Claude key. See [API keys](setup/api-keys.md).
 
-## One-time installs
+This page is the commands to run after those installs. The project is Windows-only and uses Visual Studio Community 2026 for the C++ toolchain.
 
-1. **Visual Studio Community 2026** with:
-   - *Desktop development with C++* workload
-   - *C++ CMake tools for Windows* component
-   - *Windows 10 SDK* or *Windows 11 SDK*
-2. **CMake ≥ 4.2** — the one shipped with VS 2026 is fine
-   (`Visual Studio 18 2026` generator requires CMake 4.2+).
-3. **Vulkan SDK 1.4.341.x** from [LunarG](https://vulkan.lunarg.com/sdk/home#windows).
-   The installer sets `VULKAN_SDK` automatically.
-4. **vcpkg** (manifest mode):
-
-   ```powershell
-   git clone https://github.com/microsoft/vcpkg C:\src\vcpkg
-   C:\src\vcpkg\bootstrap-vcpkg.bat
-   $env:VCPKG_ROOT = "C:\src\vcpkg"   # add to system env vars permanently
-   ```
-
-5. **uv** — install with `winget install --id=astral-sh.uv -e`, then open a
-   new PowerShell so `uv` is on PATH. uv downloads a managed CPython 3.13
-   for this repo; you do not need a global Python install. (The packages
-   declare `requires-python >= 3.11`; 3.13 is what the venv is pinned to.)
-6. **Node.js 20+** and npm (the web app uses Vite 5; `package.json` pins no
-   `engines` field).
-7. **Meta Quest Link** desktop app. Connect the Quest 3 by Link cable (or
-   enable Air Link) and — once connected — open *Settings → Beta* and click
-   *Set Oculus as active OpenXR runtime*.
-8. **Quest target only:** Android SDK (compile/target SDK 34, `minSdk` 32),
-   NDK `30.0.15729638` (the `android_ndk_version` default), JDK 17, and
-   `adb`. The Gradle wrapper (8.9, Android Gradle Plugin 8.7.0) ships in
-   `engine/android`. The orchestrator finds them via `ANDROID_HOME` /
-   `ANDROID_NDK_HOME` / `adb` on PATH, or `ANDROID_SDK_ROOT`,
-   `ANDROID_NDK_HOME`, `ADB_PATH` in `.env`. See
-   [`quest-build.md`](quest-build.md).
+PC VR through Quest Link has not been tested recently and may have major issues. Requirements for that path are in [PC VR requirements](setup/pc-vr-requirements.md). The recommended target is standalone Quest, especially Quest 3.
 
 ## Repo setup
 
 ```powershell
-cd C:\Users\micha\Documents\Prompt-To-VR
+cd C:\path\to\Prompt-To-VR
 copy .env.example .env
-# then open .env in an editor and fill in ANTHROPIC_API_KEY, OPENAI_API_KEY,
-# GOOGLE_API_KEY, TRIPO_API_KEY, and VCPKG_ROOT. For Uthana-rigged characters
-# also add UTHANA_API_KEY=... (it is not in .env.example yet).
 ```
+
+Open `.env` and set `OPENAI_API_KEY`, `GOOGLE_API_KEY`, `TRIPO_API_KEY`, `UTHANA_API_KEY` (skip Uthana only for Hands Only with no full-body avatar and no NPCs), and `VCPKG_ROOT`. Leave `ANTHROPIC_API_KEY` empty. Step-by-step key setup is in [`setup/api-keys.md`](setup/api-keys.md). `UTHANA_API_KEY` is already listed in `.env.example`. The other lines in `.env` are the engine's defaults. Leave them unless you want to customize.
 
 ## Python side
 
@@ -61,12 +28,16 @@ uv pip install -e .\packages\schemas -e .\packages\provider-clients -e ".\apps\o
 
 `vrvenv` is pinned to uv’s managed 3.13, not whatever Python is on PATH.
 
+> **Notice:** The first `uv python install` and `uv pip install` download Python 3.13 and the project packages. Expect about **2–10 minutes**. Later runs are much shorter.
+
 ## Web side
 
 ```powershell
 cd apps\web
 npm install
 ```
+
+> **Notice:** The first `npm install` usually takes about **1–5 minutes**.
 
 ## C++ side
 
@@ -80,12 +51,13 @@ cmake --build --preset vs2026-x64-release
 ctest --preset vs2026-x64-release
 ```
 
-The first `cmake --preset vs2026-x64` downloads and builds Vulkan / OpenXR /
-GLFW / Jolt / EnTT / VMA / ImGui / TinyGLTF / spdlog, plus `meshoptimizer`
-(LOD decimation in `ptv_glb_optimize`) and `ktx` (KTX2 ASTC compression in
-`ptv_texture_compress`) through vcpkg. Other presets: `ninja-x64` /
-`ninja-x64-release` and `vs2026-x64-debug`. Expect
-10-30 minutes the first time; subsequent configures are cached.
+> **Notice:** The first `cmake --preset vs2026-x64` is the long configure step. vcpkg downloads and compiles Vulkan, OpenXR, Jolt, and the other C++ libraries. Expect **10–30 minutes**. Later configures are cached and finish much faster.
+
+> **Notice:** `cmake --build --preset vs2026-x64-release` is a separate wait. It compiles the engine, the starter-room sample, the tools, and the tests. The first compile often takes about **10–30 minutes** as well, and a slower PC can take longer. Later builds are shorter when only a few files changed.
+
+> **Notice:** `ctest --preset vs2026-x64-release` usually finishes in a few minutes.
+
+The libraries built on that first configure are Vulkan / OpenXR / GLFW / Jolt / EnTT / VMA / ImGui / TinyGLTF / spdlog, plus `meshoptimizer` (LOD decimation in `ptv_glb_optimize`) and `ktx` (KTX2 ASTC compression in `ptv_texture_compress`). Other presets: `ninja-x64` / `ninja-x64-release` and `vs2026-x64-debug`.
 
 ## Quick sanity check
 
@@ -99,14 +71,14 @@ cd apps\web
 npm run dev
 # open http://127.0.0.1:5173
 
-# Build + launch the starter sample (no API keys needed)
+# Build the engine (no API keys needed for this compile)
 cd engine
 cmake --preset vs2026-x64
 cmake --build --preset vs2026-x64-release
-# Put on the Quest 3, start Meta Quest Link, then:
-.\build\vs2026-x64\samples\starter-room\Release\ptv_starter_room.exe
 ```
 
-See [`build-and-run.md`](build-and-run.md) for the full launch procedure,
-[`All_Stages_Docs/README.md`](All_Stages_Docs/README.md) for the pipeline
-stages, and [`troubleshooting.md`](troubleshooting.md) for common failures.
+> **Notice:** Skip these two commands if you already ran them in the C++ section above. If you did not, they are the same **10–30 minute** configure and the same **10–30 minute** first compile.
+
+That build produces the Windows engine, which the Quest code-generation check also uses. Launching `ptv_starter_room.exe` through Quest Link is the PC VR path and has not been tested recently. See [`setup/pc-vr-requirements.md`](setup/pc-vr-requirements.md) and [`build-and-run-pcvr.md`](build-and-run-pcvr.md). The recommended way to play a generated game is the Quest APK (VR Game) in [`build-and-run.md`](build-and-run.md).
+
+See [`All_Stages_Docs/README.md`](All_Stages_Docs/README.md) for the pipeline stages and [`troubleshooting.md`](troubleshooting.md) for common failures.

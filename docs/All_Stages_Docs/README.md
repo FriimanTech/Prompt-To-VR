@@ -122,7 +122,8 @@ All_Stages_Docs/
 | Quest optimization + memory | [`docs/quest-optimization.md`](../quest-optimization.md) |
 | Engine catalog growth | [`docs/engine-growth.md`](../engine-growth.md) |
 | Quest packaging | [`docs/quest-build.md`](../quest-build.md) |
-| Build and launch (PC) | [`docs/build-and-run.md`](../build-and-run.md) |
+| Build and launch (Quest) | [`docs/build-and-run.md`](../build-and-run.md) |
+| Build and launch (PC VR) | [`docs/build-and-run-pcvr.md`](../build-and-run-pcvr.md) |
 | Overview (pipeline summary) | [`docs/overview.md`](../overview.md) |
 | Runtime subsystems | [`docs/runtime-subsystems.md`](../runtime-subsystems.md) |
 

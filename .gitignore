@@ -4,8 +4,8 @@
 .env
 .env.*
 *.env
-# Templates with empty values are safe to commit, in any folder.
-!**/.env.example
+!.env.example
+!apps/web/.env.example
 *.pem
 *.key
 *.p12
@@ -108,6 +108,7 @@ engine/worldgen/build/
 .externalNativeBuild/
 captures/
 *.apk
+!samples/quest-sample/GlockLaserDeck.apk
 *.aab
 *.ap_
 *.dex
