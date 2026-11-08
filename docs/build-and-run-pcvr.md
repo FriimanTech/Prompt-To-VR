@@ -29,7 +29,7 @@ Then:
 
 On success, a desktop window titled `ptv_starter_room [mirror]` opens, and the headset shows the OpenXR stage.
 
-You can also press **Launch starter sample** on the website home page after the orchestrator is running. That button starts this same executable.
+You can also press **PC VR: Launch Starter Sample** in the website header after the orchestrator is running. That button starts this same executable.
 
 ## A generated PC VR game
 
@@ -47,7 +47,7 @@ cd apps\web
 npm run dev
 ```
 
-3. Open <http://127.0.0.1:5173>, click **New project**, paste a prompt, choose **PC VR (Quest Link)**, and click **Create & run pipeline**.
+3. Open <http://127.0.0.1:5173> and click **New project**. Change the target from **Quest (standalone APK)** to **PC VR (Quest Link)**, paste a prompt, and click **Create & run pipeline**.
 
 4. When the `.exe` is built, press **Launch build**. The site starts that project's `.exe` and passes that project's `scene.json`. The executable is named from the project title, not `ptv_starter_room.exe`. Quest Link's recents list uses the scene title. Everything for that game is in the `projects` folder.
 

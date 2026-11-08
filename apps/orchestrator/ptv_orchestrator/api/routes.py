@@ -19,9 +19,10 @@ from ..pipeline import (
     run_pipeline,
     run_stage,
 )
+from ..quest_ids import quest_package_name
 from ..settings import get_settings
 from ..storage import ProjectStore
-from .launch import find_starter_exe, launch_exe
+from .launch import find_starter_exe, install_and_launch_apk, launch_exe
 from .models import (
     CreateProjectRequest,
     LaunchRequest,
@@ -410,6 +411,32 @@ def launch_sample():
         )
     launch_exe(exe)
     return {"ok": True, "exe": str(exe)}
+
+
+# The public sample APK. It is a copy of the Glock Laser Deck build, kept
+# outside projects/ so a clone can install it without that folder.
+_QUEST_SAMPLE_ID = "20261030-165846-glock-laser-deck"
+
+
+@router.post("/sample/launch-quest")
+def launch_quest_sample():
+    """Install samples/quest-sample/GlockLaserDeck.apk and start it on the Quest."""
+    s = get_settings()
+    apk = s.repo_root / "samples" / "quest-sample" / "GlockLaserDeck.apk"
+    if not apk.is_file():
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Sample Quest APK not found at"
+                " samples/quest-sample/GlockLaserDeck.apk."
+            ),
+        )
+    package = quest_package_name(s.android_package_prefix, _QUEST_SAMPLE_ID)
+    try:
+        install_and_launch_apk(apk, package=package, adb_path=s.adb_path)
+    except Exception as exc:  # noqa: BLE001 - surface adb/file errors to the button
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"ok": True, "apk": str(apk), "package": package}
 
 
 # ---------------------------------------------------------------------------

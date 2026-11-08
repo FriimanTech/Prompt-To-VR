@@ -7,7 +7,7 @@ import {
   type TargetDevice,
 } from "../api/client";
 
-const SAMPLE = `A small Iron Man-style training arcade (local PC VR, Quest 3 via Quest Link).
+const SAMPLE = `A small Iron Man-style training arcade on a Quest 3 (standalone APK).
 
 Scene: a single clean room with polished floor, a pedestal on the left with a
 glowing repulsor gauntlet, three floating cylindrical targets at head height,
@@ -31,7 +31,7 @@ export default function NewProjectPage() {
   const nav = useNavigate();
   const [title, setTitle] = useState("Iron Man training arcade");
   const [prompt, setPrompt] = useState(SAMPLE);
-  const [device, setDevice] = useState<TargetDevice>("pcvr");
+  const [device, setDevice] = useState<TargetDevice>("quest");
   const [experience, setExperience] =
     useState<PlayerExperience>("full_avatar");
   const [busy, setBusy] = useState(false);
@@ -104,23 +104,23 @@ export default function NewProjectPage() {
           <div className="flex gap-2">
             <button
               type="button"
-              className={device === "pcvr" ? "ptv-button-primary" : "ptv-button"}
-              onClick={() => setDevice("pcvr")}
-            >
-              PC VR (Quest Link)
-            </button>
-            <button
-              type="button"
               className={device === "quest" ? "ptv-button-primary" : "ptv-button"}
               onClick={() => setDevice("quest")}
             >
               Quest (standalone APK)
             </button>
+            <button
+              type="button"
+              className={device === "pcvr" ? "ptv-button-primary" : "ptv-button"}
+              onClick={() => setDevice("pcvr")}
+            >
+              PC VR (Quest Link)
+            </button>
           </div>
           <div className="text-xs text-muted mt-1">
             {device === "pcvr"
               ? "Builds a Windows .exe you run on the PC and view over Quest Link."
-              : "Builds a standalone Android APK installed and run locally on the Quest 3."}
+              : "Builds a standalone Android APK (VR Game) installed and run locally on the Quest 3."}
           </div>
         </label>
         <label className="block">
@@ -129,20 +129,20 @@ export default function NewProjectPage() {
             <button
               type="button"
               className={
-                experience === "hands_only" ? "ptv-button-primary" : "ptv-button"
-              }
-              onClick={() => setExperience("hands_only")}
-            >
-              Hands Only
-            </button>
-            <button
-              type="button"
-              className={
                 experience === "full_avatar" ? "ptv-button-primary" : "ptv-button"
               }
               onClick={() => setExperience("full_avatar")}
             >
               Full Player Avatar
+            </button>
+            <button
+              type="button"
+              className={
+                experience === "hands_only" ? "ptv-button-primary" : "ptv-button"
+              }
+              onClick={() => setExperience("hands_only")}
+            >
+              Hands Only
             </button>
           </div>
           <div className="text-xs text-muted mt-1">

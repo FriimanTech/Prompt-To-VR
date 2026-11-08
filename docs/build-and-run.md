@@ -10,9 +10,12 @@ Finish [local setup](local-setup.md) before you generate a new game. The sample 
 
 An **APK (VR Game)** is the installable Quest game file. This sample is the fastest way to put a game this engine has already built onto a headset. You do not need Visual Studio, an API key, or a new pipeline run.
 
-You do need Quest setup [step 5](setup/05-quest-developer-mode-and-adb-drivers.md) (developer account, Developer Mode, Oculus ADB driver) and [step 6](setup/06-android-studio.md) (Android Studio, Platform-Tools, and `adb` on your Path).
+You do need Quest setup [step 5](setup/05-quest-developer-mode-and-adb-drivers.md) (developer account, Developer Mode, and the Oculus ADB driver). Then pick one way to get `adb`:
 
-The sample APK (VR Game) is in the repo at `samples/quest-sample/GlockLaserDeck.apk`. It is **Glock Laser Deck**, used as the sample until a dedicated starter APK is added. You do not need anything from `projects/`.
+- **[No Android Studio: Fastest Way](setup/platform-tools-no-android-studio.md).** If you do not want to install Android Studio and only want to test the sample VR game this engine already created, use this path.
+- **[Android Studio: Recommended if you plan to run or build on top of the VR Engine later](setup/06-android-studio.md).** This is the normal [step 6](setup/06-android-studio.md). It installs Platform-Tools with the rest of the Android SDK.
+
+The sample APK (VR Game) is in the repo at `samples/quest-sample/GlockLaserDeck.apk`. It is **Glock Laser Deck**, used as the sample until a dedicated starter APK is added. You do not need anything from `projects/`. The header button **Quest: Launch Sample Game** runs these same install and start steps for you. The headset still has to be connected, with Developer Mode on.
 
 1. Connect the Quest to the Windows PC with a **data** USB cable.
 2. Put on the headset and choose **Always allow from this computer** if it asks.
@@ -67,7 +70,7 @@ cd apps\web
 npm run dev
 ```
 
-3. Open <http://127.0.0.1:5173>. Click **New project**, paste a prompt, choose **Quest (standalone APK)**, and click **Create & run pipeline**. On the project page, the **Pipeline** tab shows each stage.
+3. Open <http://127.0.0.1:5173>. Click **New project**. **Quest (standalone APK)** and **Full Player Avatar** are already selected. Paste a prompt and click **Create & run pipeline**. On the project page, the **Pipeline** tab shows each stage.
 4. When the APK (VR Game) is built, click **Install & launch on Quest**. The headset must be connected to your computer. That button installs the new APK (VR Game) with `adb install -r` and starts it on the Quest. You can also download it from the same page with the **Download APK** button. That button works only after the APK exists. Everything for that game is in the `projects` folder.
 
 The headset must show up in `adb devices` before launch. Developer Mode and the data cable are the same requirements as the sample install above.

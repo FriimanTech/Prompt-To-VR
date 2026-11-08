@@ -1,4 +1,5 @@
-import { Link, Outlet, NavLink } from "react-router-dom";
+import { useState } from "react";
+import { Link, NavLink, Outlet } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "./api/client";
 
@@ -8,105 +9,149 @@ export default function App() {
     queryFn: api.health,
     refetchInterval: 10_000,
   });
+  const [sampleNote, setSampleNote] = useState<string | null>(null);
+  const [sampleBusy, setSampleBusy] = useState<"pcvr" | "quest" | null>(null);
   const keys = health.data
     ? {
-        anthropic: health.data.has_anthropic_key,
         openai: health.data.has_openai_key,
         google: health.data.has_google_key,
         tripo: health.data.has_tripo_key,
-        uthana: Boolean(health.data.has_uthana_key),
+        anthropic: health.data.has_anthropic_key,
       }
-    : { anthropic: false, openai: false, google: false, tripo: false, uthana: false };
+    : { openai: false, google: false, tripo: false, anthropic: false };
+
+  async function launchPcvrSample() {
+    setSampleBusy("pcvr");
+    setSampleNote(null);
+    try {
+      await api.launchSample();
+      setSampleNote("PC VR starter sample is starting. Put on the headset with Quest Link active.");
+    } catch (e) {
+      setSampleNote(String(e));
+    } finally {
+      setSampleBusy(null);
+    }
+  }
+
+  async function launchQuestSample() {
+    setSampleBusy("quest");
+    setSampleNote(null);
+    try {
+      await api.launchQuestSample();
+      setSampleNote("Glock Laser Deck is installed and starting on the Quest.");
+    } catch (e) {
+      setSampleNote(String(e));
+    } finally {
+      setSampleBusy(null);
+    }
+  }
 
   return (
     <div className="min-h-full">
-      <header className="border-b border-white/5 bg-panel">
-        <div className="mx-auto max-w-6xl px-6 py-3 flex items-center justify-between">
-          <Link to="/" className="text-lg font-semibold tracking-tight">
-            <span className="text-accent">Prompt</span>
-            <span className="text-muted">›</span>
-            <span className="text-accent2">Native VR</span>
-          </Link>
-          <nav className="flex items-center gap-3 text-sm">
-            <NavLink
-              to="/projects"
-              className={({ isActive }) =>
-                "px-3 py-1 rounded-md " +
-                (isActive ? "bg-accent/20 text-accent" : "text-muted hover:text-white")
-              }
-            >
-              Projects
-            </NavLink>
-            <NavLink
-              to="/projects/new"
-              className={({ isActive }) =>
-                "px-3 py-1 rounded-md " +
-                (isActive ? "bg-accent/20 text-accent" : "text-muted hover:text-white")
-              }
-            >
-              New
-            </NavLink>
-            <button
-              onClick={() => void api.launchSample().catch(() => void 0)}
-              className="ptv-button"
-              title="Launch the hand-authored starter-room sample"
-            >
-              Launch starter sample
-            </button>
-            <KeyPill label="ANTHROPIC" ok={keys.anthropic} />
-            <KeyPill label="OPENAI" ok={keys.openai} optional />
-            <KeyPill label="GOOGLE" ok={keys.google} />
-            <KeyPill label="TRIPO" ok={keys.tripo} />
-          </nav>
+      <header className="border-b border-white/10 bg-panel/80 backdrop-blur">
+        <div className="mx-auto max-w-6xl px-6 py-4">
+          <div className="flex flex-wrap items-center justify-between gap-4">
+            <Link to="/" className="text-lg font-semibold tracking-tight">
+              <span className="text-accent">Prompt</span>
+              <span className="text-muted"> to </span>
+              <span className="text-accent2">VR</span>
+            </Link>
+            <nav className="flex items-center gap-1 rounded-full border border-white/10 bg-white/5 p-1 text-sm">
+              <NavLink
+                to="/projects"
+                className={({ isActive }) =>
+                  "rounded-full px-3 py-1 " +
+                  (isActive ? "bg-white/10 text-white" : "text-muted hover:text-white")
+                }
+              >
+                Projects
+              </NavLink>
+              <NavLink
+                to="/projects/new"
+                className={({ isActive }) =>
+                  "rounded-full px-3 py-1 " +
+                  (isActive ? "bg-white/10 text-white" : "text-muted hover:text-white")
+                }
+              >
+                New project
+              </NavLink>
+            </nav>
+          </div>
+
+          <div className="mt-4 flex flex-wrap items-end justify-between gap-4">
+            <div>
+              <div className="mb-2 text-[11px] uppercase tracking-wider text-muted">
+                Try a sample
+              </div>
+              <div className="flex flex-wrap gap-2">
+                <button
+                  onClick={() => void launchQuestSample()}
+                  className="ptv-button-primary"
+                  disabled={sampleBusy !== null}
+                  title="Installs samples/quest-sample/GlockLaserDeck.apk on the connected Quest and starts Glock Laser Deck."
+                >
+                  {sampleBusy === "quest" ? "Installing Quest sample…" : "Quest: Launch Sample Game"}
+                </button>
+                <button
+                  onClick={() => void launchPcvrSample()}
+                  className="ptv-button"
+                  disabled={sampleBusy !== null}
+                  title="Starts the Windows starter-room program through Quest Link. Build it first."
+                >
+                  {sampleBusy === "pcvr" ? "Starting PC VR sample…" : "PC VR: Launch Starter Sample"}
+                </button>
+              </div>
+            </div>
+            <div>
+              <div className="mb-2 text-right text-[11px] uppercase tracking-wider text-muted">
+                API keys
+              </div>
+              <div className="flex flex-wrap justify-end gap-2">
+                <KeyPill label="OPENAI" ok={keys.openai} />
+                <KeyPill label="GOOGLE" ok={keys.google} />
+                <KeyPill label="TRIPO" ok={keys.tripo} />
+                <KeyPill label="ANTHROPIC" ok={keys.anthropic} />
+              </div>
+            </div>
+          </div>
+
+          {sampleNote && (
+            <p className="mt-3 max-w-3xl text-sm text-muted">{sampleNote}</p>
+          )}
         </div>
       </header>
-      <main className="mx-auto max-w-6xl px-6 py-6">
+      <main className="mx-auto max-w-6xl px-6 py-8">
         <Outlet />
       </main>
-      <footer className="border-t border-white/5 mt-10">
-        <div className="mx-auto max-w-6xl px-6 py-4 text-xs text-muted flex justify-between">
-          <span>
-            Native C++ Vulkan + OpenXR · Local-first · Claude / Imagen / Tripo
-          </span>
-          <span>
-            {health.data?.cmake_generator ?? "cmake generator: unknown"}
-          </span>
+      <footer className="mt-16 border-t border-white/10">
+        <div className="mx-auto flex max-w-6xl flex-wrap items-center justify-between gap-2 px-6 py-5 text-xs text-muted">
+          <span>Native C++ · Vulkan + OpenXR · OpenAI · Gemini · Tripo3D · Uthana</span>
+          <span>Engine build: {health.data?.cmake_generator ?? "unknown"}</span>
         </div>
       </footer>
     </div>
   );
 }
 
-function KeyPill({
-  label,
-  ok,
-  optional = false,
-}: {
-  label: string;
-  ok: boolean;
-  optional?: boolean;
-}) {
-  // Optional keys (e.g. OPENAI fallback) show neutral styling when missing.
-  const missingClass = optional
-    ? "border-white/10 text-muted bg-panelmuted"
-    : "border-err/40 text-err bg-err/10";
-  const title = optional
-    ? ok
-      ? `${label} key set in .env (used as a fallback)`
-      : `${label} key is not set (optional fallback disabled)`
-    : ok
-      ? `${label} key is set in .env`
-      : `${label} key is missing from .env`;
+function KeyPill({ label, ok }: { label: string; ok: boolean }) {
+  const title =
+    label === "ANTHROPIC"
+      ? ok
+        ? "Claude key is set. The recommended setup leaves this empty so those stages use OpenAI."
+        : "Claude key is not set. That is the recommended setup."
+      : ok
+        ? `${label} key is set in .env`
+        : `${label} key is missing from .env`;
   return (
     <span
       className={
         "ptv-pill " +
-        (ok ? "border-ok/40 text-ok bg-ok/10" : missingClass)
+        (ok ? "border-ok/40 bg-ok/10 text-ok" : "border-err/40 bg-err/10 text-err")
       }
       title={title}
     >
       {label}
-      {ok ? " ✓" : optional ? " –" : " ✗"}
+      {ok ? " ✓" : " ✗"}
     </span>
   );
 }

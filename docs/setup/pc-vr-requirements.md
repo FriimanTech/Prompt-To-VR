@@ -59,6 +59,6 @@ With Quest Link connected, the starter-room executable is:
 engine\build\vs2026-x64\samples\starter-room\Release\ptv_starter_room.exe
 ```
 
-The website's **Launch starter sample** button starts that PC VR executable. Choosing **Quest (standalone APK)** in New project builds an APK (VR Game) instead, which is the path this repo has been updating. The full PC VR launch steps are in [Build and run on PC VR](../build-and-run-pcvr.md).
+The website's **PC VR: Launch Starter Sample** button starts that PC VR executable. **Quest: Launch Sample Game** installs the sample APK (VR Game). Choosing **Quest (standalone APK)** in New project builds a new APK (VR Game) instead, which is the path this repo has been updating. The full PC VR launch steps are in [Build and run on PC VR](../build-and-run-pcvr.md).
 
 Back to the [setup index](README.md) or the [README](../../README.md).

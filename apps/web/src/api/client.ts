@@ -104,7 +104,7 @@ export const api = {
   createProject: (
     title: string,
     prompt: string,
-    target_device: TargetDevice = "pcvr",
+    target_device: TargetDevice = "quest",
     player_experience: PlayerExperience = "full_avatar",
     custom_quest_optimizations = "",
   ) =>
@@ -174,6 +174,10 @@ export const api = {
     }),
   launchSample: () =>
     req<{ ok: boolean; exe: string }>("/sample/launch", { method: "POST" }),
+  launchQuestSample: () =>
+    req<{ ok: boolean; apk: string; package: string }>("/sample/launch-quest", {
+      method: "POST",
+    }),
 };
 
 export function eventStream(projectId: string): EventSource {

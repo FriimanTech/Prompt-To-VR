@@ -231,7 +231,6 @@ function ProviderHealth() {
   if (!health.data) return null;
   const h = health.data;
   const keys: [string, boolean][] = [
-    ["Anthropic", h.has_anthropic_key],
     ["OpenAI", h.has_openai_key],
     ["Google", h.has_google_key],
     ["Tripo", h.has_tripo_key],

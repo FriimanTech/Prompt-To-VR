@@ -29,9 +29,14 @@ export default function ProjectListPage() {
   });
 
   return (
-    <div className="space-y-4">
-      <div className="flex items-center justify-between">
-        <h1 className="text-xl font-semibold">Projects</h1>
+    <div className="space-y-5">
+      <div className="flex flex-wrap items-end justify-between gap-3">
+        <div>
+          <h1 className="text-2xl font-semibold tracking-tight">Projects</h1>
+          <p className="mt-1 text-sm text-muted">
+            Each card is one VR game. Open it to watch the pipeline or launch the build.
+          </p>
+        </div>
         <div className="flex gap-2">
           <button className="ptv-button" onClick={() => refetch()}>
             Refresh
@@ -59,7 +64,7 @@ export default function ProjectListPage() {
           <Link
             to={`/projects/${p.project_id}`}
             key={p.project_id}
-            className="ptv-card p-4 transition hover:border-accent/40"
+            className="ptv-card p-4 transition hover:-translate-y-0.5 hover:border-accent/40"
           >
             <div className="flex justify-between gap-4">
               <div className="min-w-0">

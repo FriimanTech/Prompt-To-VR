@@ -9,11 +9,12 @@ prompt names it. `BuildSpec.target_device` is a mirrored copy — the build_spec
 stage overwrites whatever the model returned with the project's value, and a
 stale copy from an older project is re-stamped at run start.
 
-- `pcvr` (default): a Windows `.exe` (Vulkan + Win32 OpenXR) run on the PC
-and viewed on the headset over Quest Link. Built by `stage_cmake`.
-- `quest`: a standalone Android APK (Vulkan + Android OpenXR loader,
+- `quest` (selected when New project opens): a standalone Android APK (Vulkan + Android OpenXR loader,
 NativeActivity) installed and run locally on the Quest 3. Built by
 `stage_quest_build` and installed with `adb`.
+- `pcvr`: a Windows `.exe` (Vulkan + Win32 OpenXR) run on the PC
+and viewed on the headset over Quest Link. Built by `stage_cmake`.
+  This path has not been tested recently.
 
 Stages 1–15 (BuildSpec → … → scene compile, including C++ codegen, world
 generation, and asset optimization) are **identical** for both targets. Only

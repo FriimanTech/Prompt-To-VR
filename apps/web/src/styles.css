@@ -14,7 +14,11 @@ body,
 
 body {
   font-family: theme("fontFamily.sans");
-  @apply bg-ink text-white antialiased;
+  background:
+    radial-gradient(900px 420px at 12% -10%, rgba(103, 232, 249, 0.14), transparent 55%),
+    radial-gradient(700px 380px at 100% 0%, rgba(167, 139, 250, 0.12), transparent 50%),
+    #0b0d13;
+  @apply text-white antialiased;
 }
 
 code,
@@ -32,7 +36,7 @@ pre,
 }
 
 .ptv-button-primary {
-  @apply inline-flex items-center gap-2 rounded-lg px-4 py-2 bg-accent text-ink font-medium hover:bg-accent/90 transition-colors;
+  @apply inline-flex items-center gap-2 rounded-lg px-4 py-2 bg-accent text-ink font-medium hover:bg-accent/90 transition-colors shadow-lg shadow-accent/10;
 }
 
 .ptv-button-danger {

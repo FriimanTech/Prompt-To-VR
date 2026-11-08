@@ -8,15 +8,23 @@ The VR engine is built in **C++ using Vulkan and OpenXR**. It coordinates the ga
 
 The pipeline runs locally on your computer and connects to external AI services. It produces **native Quest APKs (VR Games) that can be downloaded and installed on your Quest 3 headset**, rather than browser-based WebXR experiences. This gives developers a foundation they can explore, extend, and build upon. **PC VR through Quest Link was tested during early development; recent testing and updates have primarily focused on standalone Quest 3 support.**
 
+## Choose a path
+
+There are three ways to use what is in this repository. Pick the one that matches what you want to do.
+
+1. **Play a game this VR Engine already created.** This is the fastest path. You need a Quest headset and do not need Android Studio, Python, or Node.js. Follow [No Android Studio: Fastest Way](docs/setup/platform-tools-no-android-studio.md).
+2. **Run the VR Engine and create games with it.** This is the normal path. It installs the full Windows and Quest toolchain, then lets you generate and play new games. Follow the [Quest setup guide](docs/setup/README.md).
+3. **PC VR through Quest Link.** **This path is not recommended.** PC VR through Quest Link has not been tested recently and may have major issues. Recent development and testing have focused on standalone Quest, especially Quest 3. If you still want this path, follow [PC VR through Quest Link: requirements](docs/setup/pc-vr-requirements.md).
+
 ## Prerequisites
 
-**A Windows machine is required** to run this engine's local pipeline.
+**A Windows machine is required** to run this engine's local pipeline (**Howver, Path 1 can be ran on Windows or Mac**).
 
 **A Meta Quest 3 or Quest 2 is highly advised.** Recent development and testing have focused on standalone Quest 3. Quest 2 is a reasonable headset to try, but it has not received the same recent testing.
 
 You can run the engine and create a complete VR game as an installable APK **without a Quest headset**. A headset is required to play that game and to run the on-headset checks. Building an APK and verifying it on a device are separate steps.
 
-**Cursor is highly advised.** Other IDEs are acceptable. Cursor's AI agent can help with some dependency setup and is especially useful if you want to modify the VR engine. Using Cursor still involves a substantial amount of manual setup, particularly when installing and configuring Visual Studio Community 2026 and Android Studio.
+**Cursor is highly advised.** Other IDEs are acceptable. Cursor's AI agent can help with some dependency setup and is especially useful if you want to modify the VR engine. Using Cursor still involves a substantial amount of manual setup, particularly when installing and configuring Visual Studio Community 2026 and Android Studio. **(IDE are needed for paths 2 and 3)**
 
 | You need this to build VR Games | You need this to play and test on a headset |
 | --- | --- |
@@ -26,28 +34,25 @@ You can run the engine and create a complete VR game as an installable APK **wit
 
 > **First-time setup:** Follow the [complete Quest setup guide](docs/setup/README.md) for download links and step-by-step installation and configuration instructions for every tool listed here. Start with [Python](docs/setup/01-python.md).
 
-| Tool | Version or requirement | What it does here |
-| --- | --- | --- |
-| Python | **3.11+**; **3.13 via `uv` recommended** | Runs the local pipeline. Packages require Python 3.11 or newer. The project environment is Python 3.13, created later with `uv`. |
-| Node.js | **20+** | Runs the local web control panel. |
-| Visual Studio Community 2026 | **Desktop development with C++ / MSVC v145** | Compiles the C++ engine on Windows. |
-| vcpkg | As required by the repository | Fetches the C++ libraries the engine builds with. |
-| CMake | **4.2 or newer** (desktop) | Configures the Windows engine build. This is separate from the Android SDK CMake used for Quest. |
-| Vulkan SDK | **1.4.341.x** | Provides Vulkan headers and the shader compiler. |
-| uv | Python environment manager | Installs Python 3.13 and creates the `vrvenv` environment the engine runs in. |
-| Oculus ADB Drivers | Windows drivers for Quest development | Lets Windows talk to a Quest over USB. |
-| Android Studio | **SDK Platform 34**, **NDK `30.0.15729638`**, **Platform-Tools / `adb`**, and **JDK 17** | Packages the standalone Quest APK. Also install Build-Tools 34.0.0 or newer, Android SDK CMake 3.22.1 or newer, and the Android SDK command-line tools. The [Android Studio guide](docs/setup/06-android-studio.md) sets `JAVA_HOME` to Android Studio's `jbr` folder. |
+| Tool                         | Version or requirement                                                                   | What it does here                                                                                                                                                                                                                                                      |
+| ---------------------------- | ---------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Python                       | **3.11+**; **3.13 via** `uv` **recommended**                                             | Runs the local pipeline. Packages require Python 3.11 or newer. The project environment is Python 3.13, created later with `uv`.                                                                                                                                       |
+| Node.js                      | **20+**                                                                                  | Runs the local web control panel.                                                                                                                                                                                                                                      |
+| Visual Studio Community 2026 | **Desktop development with C++ / MSVC v145**                                             | Compiles the C++ engine on Windows.                                                                                                                                                                                                                                    |
+| vcpkg                        | As required by the repository                                                            | Fetches the C++ libraries the engine builds with.                                                                                                                                                                                                                      |
+| CMake                        | **4.2 or newer** (desktop)                                                               | Configures the Windows engine build. This is separate from the Android SDK CMake used for Quest.                                                                                                                                                                       |
+| Vulkan SDK                   | **1.4.341.x**                                                                            | Provides Vulkan headers and the shader compiler.                                                                                                                                                                                                                       |
+| uv                           | Python environment manager                                                               | Installs Python 3.13 and creates the `vrvenv` environment the engine runs in.                                                                                                                                                                                          |
+| Oculus ADB Drivers           | Windows drivers for Quest development                                                    | Lets Windows talk to a Quest over USB.                                                                                                                                                                                                                                 |
+| Android Studio               | **SDK Platform 34**, **NDK** `30.0.15729638`, **Platform-Tools /** `adb`, and **JDK 17** | Packages the standalone Quest APK. Also install Build-Tools 34.0.0 or newer, Android SDK CMake 3.22.1 or newer, and the Android SDK command-line tools. The [Android Studio guide](docs/setup/06-android-studio.md) sets `JAVA_HOME` to Android Studio's `jbr` folder. |
 
 > **First-time setup:** Follow the [complete Quest setup guide](docs/setup/README.md) for download links and step-by-step installation and configuration instructions for every tool listed here. Start with [Python](docs/setup/01-python.md).
 
-<details>
-<summary><strong>PC VR through Quest Link: requirements</strong></summary>
+**PC VR through Quest Link: requirements**
 
 **PC VR through Quest Link has not been tested recently and may have major issues. The recommended path is standalone Quest, especially Quest 3, because recent development and testing have focused there.**
 
 The full list is in [PC VR through Quest Link: requirements](docs/setup/pc-vr-requirements.md). It is not the same list as the Quest downloads above. Android Studio, the NDK, Platform-Tools, and the Oculus ADB Drivers are for standalone Quest packaging, not for a PC VR-only workflow.
-
-</details>
 
 ## Required API providers
 
@@ -203,7 +208,7 @@ npm run dev
 # open http://127.0.0.1:5173
 ```
 
-In the web panel, click **New project**, paste a prompt, choose **Quest (standalone APK)**, and click **Create & run pipeline**. That is the recommended target. **Launch starter sample** on the home page starts the hand-authored PC VR starter room. It does not build that program, and it does not call the API providers. Build it first with the commands in [local setup](docs/local-setup.md).
+In the web panel, click **New project**. **Quest (standalone APK)** and **Full Player Avatar** are already selected. Paste a prompt and click **Create & run pipeline**. That is the recommended target. Switch to **PC VR (Quest Link)** or **Hands Only** only when you want those. **PC VR: Launch Starter Sample** starts the hand-authored PC VR starter room. It does not build that program, and it does not call the API providers. Build it first with the commands in [local setup](docs/local-setup.md). **Quest: Launch Sample Game** installs `samples/quest-sample/GlockLaserDeck.apk` on a connected Quest. Finish setup steps 5 and 6 first.
 
 Quest APK packaging, install, and on-headset checks are in [`docs/build-and-run.md`](docs/build-and-run.md) and [`docs/quest-build.md`](docs/quest-build.md). A PC VR `.exe` launch through Quest Link is documented in [`docs/build-and-run-pcvr.md`](docs/build-and-run-pcvr.md). That path has not been tested recently and may have major issues.
 
