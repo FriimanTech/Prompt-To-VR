@@ -12,7 +12,7 @@ An **APK (VR Game)** is the installable Quest game file. This sample is the fast
 
 You do need Quest setup [step 5](setup/05-quest-developer-mode-and-adb-drivers.md) (developer account, Developer Mode, and the Oculus ADB driver). Then pick one way to get `adb`:
 
-- **[No Android Studio: Fastest Way](setup/platform-tools-no-android-studio.md).** If you do not want to install Android Studio and only want to test the sample VR game this engine already created, use this path.
+- **No Android Studio: Fastest Way.** If you do not want to install Android Studio and only want to test the sample VR game this engine already created, use [Windows](setup/platform-tools-no-android-studio.md) or [Mac](setup/platform-tools-no-android-studio-mac.md).
 - **[Android Studio: Recommended if you plan to run or build on top of the VR Engine later](setup/06-android-studio.md).** This is the normal [step 6](setup/06-android-studio.md). It installs Platform-Tools with the rest of the Android SDK.
 
 The sample APK (VR Game) is in the repo at `samples/quest-sample/GlockLaserDeck.apk`. It is **Glock Laser Deck**, used as the sample until a dedicated starter APK is added. You do not need anything from `projects/`. The header button **Quest: Launch Sample Game** runs these same install and start steps for you. The headset still has to be connected, with Developer Mode on.

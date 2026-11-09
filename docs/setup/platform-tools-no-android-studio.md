@@ -1,6 +1,10 @@
-# No Android Studio: Fastest Way
 
-Use this page when you only want to play the sample VR game, **Glock Laser Deck**, on a Quest. You do not need Android Studio, Python, or Node.js.
+
+# No Android Studio: Fastest Way (Windows)
+
+Use this page when you only want to play the sample VR game, **Glock Laser Deck**, on a Quest from a Windows PC. You do not need Android Studio, Python, or Node.js.
+
+On a Mac, use [No Android Studio: Fastest Way (Mac)](platform-tools-no-android-studio-mac.md).
 
 ## 1. Prerequisites
 

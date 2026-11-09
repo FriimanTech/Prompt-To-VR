@@ -4,7 +4,7 @@ Install these tools in order on **Windows**. The first guide is [Python](01-pyth
 
 A Quest headset is highly advised for playing and testing. You can install the build tools and produce an APK (VR Game) without one. Come back to the headset steps in guides 5 and 6 when you have a device.
 
-**Fastest way to play a game this engine already built:** finish [step 5](05-quest-developer-mode-and-adb-drivers.md), then follow [No Android Studio: Fastest Way](platform-tools-no-android-studio.md). You do not need Android Studio, Python, Node.js, or API keys for that install. If you plan to build games with this engine, use [step 6](06-android-studio.md) instead.
+**Fastest way to play a game this engine already built:** on Windows, finish [step 5](05-quest-developer-mode-and-adb-drivers.md), then follow [No Android Studio: Fastest Way (Windows)](platform-tools-no-android-studio.md). On a Mac, follow [No Android Studio: Fastest Way (Mac)](platform-tools-no-android-studio-mac.md). You do not need Android Studio, Python, Node.js, or API keys for that install. If you plan to build games with this engine, use [step 6](06-android-studio.md) on Windows instead.
 
 **PC VR through Quest Link has not been tested recently and may have major issues.** The recommended path is standalone Quest, especially Quest 3. PC VR requirements are a separate page, not a step in this list: [PC VR through Quest Link: requirements](pc-vr-requirements.md).
 

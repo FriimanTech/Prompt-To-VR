@@ -12,13 +12,13 @@ The pipeline runs locally on your computer and connects to external AI services.
 
 There are three ways to use what is in this repository. Pick the one that matches what you want to do.
 
-1. **Play a game this VR Engine already created.** This is the fastest path. You need a Quest headset and do not need Android Studio, Python, or Node.js. Follow [No Android Studio: Fastest Way](docs/setup/platform-tools-no-android-studio.md).
+1. **Play a game this VR Engine already created.** This is the fastest path. You need a Quest headset and do not need Android Studio, Python, or Node.js. On **Windows**, follow [No Android Studio: Fastest Way (Windows)](docs/setup/platform-tools-no-android-studio.md). On a **Mac**, follow [No Android Studio: Fastest Way (Mac)](docs/setup/platform-tools-no-android-studio-mac.md). 
 2. **Run the VR Engine and create games with it.** This is the normal path. It installs the full Windows and Quest toolchain, then lets you generate and play new games. Follow the [Quest setup guide](docs/setup/README.md).
 3. **PC VR through Quest Link.** **This path is not recommended.** PC VR through Quest Link has not been tested recently and may have major issues. Recent development and testing have focused on standalone Quest, especially Quest 3. If you still want this path, follow [PC VR through Quest Link: requirements](docs/setup/pc-vr-requirements.md).
 
 ## Prerequisites
 
-**A Windows machine is required** to run this engine's local pipeline (**Howver, Path 1 can be ran on Windows or Mac**).
+**A Windows machine is required** to run this engine's local pipeline (**However, Path 1 can be ran on Windows or Mac**).
 
 **A Meta Quest 3 or Quest 2 is highly advised.** Recent development and testing have focused on standalone Quest 3. Quest 2 is a reasonable headset to try, but it has not received the same recent testing.
 
