@@ -150,6 +150,15 @@
           "title": "Rigged",
           "type": "boolean"
         },
+        "satisfies": {
+          "description": "Ids of the requirements (requirements.json) this asset satisfies (it exists, it looks as asked).",
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 16,
+          "title": "Satisfies",
+          "type": "array"
+        },
         "socket_hints": {
           "description": "Named attachment points gameplay will need on this asset, e.g. ['muzzle', 'grip'] for a weapon. The deterministic asset_contract stage derives their transforms from the geometry and the scene compiler writes them into scene.json, so generated C++ can fire from the barrel tip via ctx.sockets->socket_world(self, 'muzzle') without ever inspecting the mesh. Leave empty for scenery and any asset no mechanic attaches to.",
           "items": {

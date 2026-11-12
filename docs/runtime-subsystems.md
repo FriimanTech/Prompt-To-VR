@@ -152,7 +152,11 @@ costs the same whether the character fills the view or is a speck, and Meta
 call out animation and skinning as work that delays the render thread.
 Skipped time is banked in `lod_debt_s` and repaid on the next sample, so a
 distant character still covers the same ground per second — only the
-smoothness drops.
+smoothness drops. "Not at all" means HOLDING a pose of the current clip
+(`CAnimator::posed_clip`): a character whose current clip has not been
+sampled yet is posed once whatever the distance, so a goblin spawned 50 m
+down a lane stands in its idle (or falls in its death clip) instead of the
+bind-pose T-pose it used to keep for its whole life.
 
 **Sockets on a rigged mesh.** `CSkeleton::socket_joint` binds each named
 socket to its nearest joint at attach, and `socket_world` pushes the socket
@@ -182,6 +186,15 @@ generated mesh is absent the entities are never created, `hand_entity` returns
 invalid, and the render loop falls back to the procedural palm-and-wrist
 blocks — so a checkout without Python still shows hands. See
 [input-and-bindings.md](input-and-bindings.md#player-hand-poses-builtinhand_pose).
+
+Nothing else may draw on the player's hands or body. The collider proxies
+`PlayerParts` makes (one per finger, palm, forearm, shin) are tagged
+`collider_only`, and a meshless entity is drawn only when a tag asks for a
+placeholder (see [rendering.md](rendering.md#gameplay-tags-are-data-not-renderer-code)).
+Each frame the application hands the renderer the tracked hands' and the
+avatar's feet's positions plus the entities that belong there
+(`Renderer::set_player_focus`); any other draw at them is a `player_draws`
+in the `render_body:` line, which quest verification fails on.
 
 ### Scene loader (`ptv::LoadSceneJson`, `ptv::ApplySceneToWorld`)
 
@@ -302,7 +315,16 @@ Registered built-in ids (`PTV_REGISTER_MECHANIC` under
 | Weapons | `builtin.weapon`, `builtin.bow`, `builtin.melee_weapon`, `builtin.shield`, `builtin.item_source`, `builtin.npc.ranged_attack` |
 | NPCs | `builtin.character_locomotion`, `builtin.npc.follow`, `builtin.npc.melee_chase`, `builtin.encounter_director` |
 | World affordances | `builtin.door`, `builtin.container`, `builtin.mover`, `builtin.switchable`, `builtin.breakable`, `builtin.harvestable` |
+| Interactions | `builtin.press_button`, `builtin.world_display`, `builtin.target_challenge`, `builtin.destructible`, `builtin.explosive` ([interactions.md](interactions.md)) |
 | Game loop | `builtin.game_flow`, `builtin.game_hud` |
+
+Services added with the interactions: `ctx.signals` (named events),
+`ctx.vars` (live values), `ctx.anchors` (the world's gameplay anchors and
+anchor sets, [placement.md](placement.md)), `IHands::fingertip_world`,
+`IPhysicsAccess::raycast_floor` / `distance_to_body` /
+`set_collision_enabled` / `teleport_body`, `IApp::request_flash`, and the
+`CStun` component. Physics layers and the player's body are in
+[physics.md](physics.md).
 
 The planner-facing descriptions, params and player `role:` mapping live in
 `apps/orchestrator/ptv_orchestrator/engine_catalog.py`; see
@@ -407,7 +429,9 @@ Every generated C++ file MUST:
 
 An include violation fails the CodeTask loudly (it is fed back to the agent
 as repair context, never silently stripped), and paths outside the allowed
-subtrees are rejected. `codegen_contracts.py` (API contract v5) additionally
+subtrees are rejected. `codegen_contracts.py` (API contract v6) additionally
 rejects code that compiles but fights the engine: context-free AI, finding
 the player by name, private damage inboxes, private lives / respawn /
-restart, and private weapons, ammo or muzzle raycasts.
+restart, private weapons, ammo or muzzle raycasts, buttons pressed by hand
+contact, private fuses and blasts, spawns at typed-in coordinates when the
+world declares anchors, and private scoreboard text beside a world display.

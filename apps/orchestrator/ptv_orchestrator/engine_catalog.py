@@ -410,6 +410,90 @@ _BUILTINS: tuple[CatalogEntry, ...] = (
                 "burst_pause_s": "float, default 1.2", "weapon": "entity id (optional)"},
     ),
     CatalogEntry(
+        id="builtin.press_button",
+        summary=(
+            "A button / switch the player PRESSES: an index-finger poke through "
+            "its press surface (Meta's poke model: fingertip crossing the plane, "
+            "7 mm travel), or the trigger / grip of an empty hand near it. The "
+            "cap dips, a click and haptics play, and it emits a named signal on "
+            "ctx.signals (and counts presses in ctx.vars '<signal>.count'). "
+            "Wire it to builtin.target_challenge's start_signal, a door, or "
+            "anything that reads ctx.signals. Never generate a button."
+        ),
+        category="interaction",
+        params={"signal": "string (default '<entity>.pressed')",
+                "press_with": "'finger_or_trigger' (default) | 'finger' | 'trigger'",
+                "travel_m": "float, default 0.007", "cooldown_s": "float, default 0.35",
+                "radius_m": "float (default: the press surface's measured size)"},
+        inputs=("index fingertip poke", "trigger or grip of an empty hand near it"),
+    ),
+    CatalogEntry(
+        id="builtin.world_display",
+        summary=(
+            "A scoreboard, timer or status screen IN THE WORLD: world-space SDF "
+            "text on the display's screen socket (or its collider face toward "
+            "the player), lines templated from ctx.vars, e.g. "
+            "'TIME {lane2.time_left:0.0}'. builtin.game_hud is only the wrist "
+            "HUD; a screen on a wall or a stand is this."
+        ),
+        category="ui",
+        params={"lines": "list of template strings ('{var}' / '{var:0.0}')",
+                "display_asset": "asset id", "text_height_m": "float, default 0.06",
+                "color_rgb": "[r,g,b], default white"},
+    ),
+    CatalogEntry(
+        id="builtin.target_challenge",
+        summary=(
+            "A timed or score challenge: on its start signal it counts down, "
+            "spawns targets (from hidden templates) at a world-declared anchor "
+            "set (hang_from / on_surface / mount_on_wall points), counts each "
+            "destroyed target, ends after duration_s and clears them. Publishes "
+            "<id>.state (ready / countdown / running / finished), "
+            "<id>.time_left, <id>.score and <id>.best to ctx.vars and "
+            "<id>.started / <id>.finished signals."
+        ),
+        category="gameplay",
+        params={"id": "string", "start_signal": "signal name", "duration_s": "float, default 30",
+                "countdown_s": "float, default 3", "anchor_set": "world anchor set id",
+                "templates": "list of template entity ids", "max_active": "int, default 3",
+                "spawn_interval_s": "float, default 0.8", "target_lifetime_s": "float, 0 = until hit"},
+    ),
+    CatalogEntry(
+        id="builtin.destructible",
+        summary=(
+            "Something shot or blown up that BREAKS (a range target, crate, "
+            "bottle, barrel): it has health; bullets, beams, melee and blasts "
+            "through ctx.combat lower it; at zero it breaks with an effect, "
+            "loses its collider, raises '<id>.destroyed' and optionally comes "
+            "back after respawn_after_s."
+        ),
+        category="gameplay",
+        params={"effect": "'shatter' | 'explode' | 'knock_down' | 'vanish'",
+                "respawn_after_s": "float, 0 = never", "max_health": "float, default 50"},
+    ),
+    CatalogEntry(
+        id="builtin.explosive",
+        summary=(
+            "A grenade / flashbang / smoke / impact explosive the player holds, "
+            "arms (trigger pulls the pin) and throws (builtin.grab release); the "
+            "fuse starts when it leaves the hand. Frag: radial damage with "
+            "falloff blocked by walls, impulse on loose props, fireball + light "
+            "+ scorch; flash: a white-out scaled by distance and gaze plus a "
+            "CStun on NPCs in sight; smoke: a cloud; impact: detonates on the "
+            "first hit. Restocks where the scene placed it. Never generate a "
+            "fuse or a blast."
+        ),
+        category="interaction",
+        params={"kind": "'frag' | 'flash' | 'smoke' | 'impact' | 'sticky'",
+                "activation": "'pull_pin_trigger' | 'button' | 'on_impact'",
+                "fuse_s": "float, default 3", "radius_m": "float, default 6",
+                "inner_radius_m": "float, default 1.5", "damage": "float, default 120",
+                "impulse": "float, default 12", "flash_radius_m": "float, default 10",
+                "stun_s": "float, default 4", "hurts_player": "bool, default false",
+                "respawn_after_s": "float, default 4"},
+        inputs=("trigger while held (arm)", "release (throw)"),
+    ),
+    CatalogEntry(
         id="builtin.hand_pose",
         summary=(
             "Curls the PLAYER'S OWN fingers from the controller: index "

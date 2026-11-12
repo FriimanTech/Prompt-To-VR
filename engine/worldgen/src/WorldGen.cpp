@@ -213,16 +213,85 @@ public:
                 scale_m = entry.value("target_scale_meters", 1.0f);
             }
         }
+        // Align the object by its measured bounds: by default its BASE sits
+        // at position.y. A generated GLB is centred on its origin, so the
+        // old origin-at-the-floor reading sank every table halfway in.
+        Transform t = d.transform;
+        Vec3 lo{}, hi{};
+        const bool has_bounds = bounds_of(d.asset_id, lo, hi);
+        if (has_bounds) {
+            float min_y = 1e30f, max_y = -1e30f;
+            for (int i = 0; i < 8; ++i) {
+                const Vec3 c{(i & 1) ? hi.x : lo.x, (i & 2) ? hi.y : lo.y,
+                             (i & 4) ? hi.z : lo.z};
+                const float y = rotate(t.rotation, c).y;
+                min_y = std::min(min_y, y);
+                max_y = std::max(max_y, y);
+            }
+            if (d.align == Align::Base) t.position.y -= min_y;
+            else if (d.align == Align::Top) t.position.y -= max_y;
+        }
         nlohmann::json e = base_entity(d.name.empty() ? d.asset_id : d.name, d.tags);
-        e["transform"] = transform_json(d.transform);
+        e["transform"] = transform_json(t);
         e["mesh"] = nlohmann::json{
             {"asset_id", d.asset_id},
             {"glb_path", glb},
             {"target_scale_meters", scale_m},
             {"collision_shape", "mesh"},
         };
+        if (has_bounds) {
+            e["mesh"]["aabb_min"] = vec3_json(lo);
+            e["mesh"]["aabb_max"] = vec3_json(hi);
+        }
+        e["align"] = d.align == Align::Base ? "base" : d.align == Align::Top ? "top" : "center";
         e["physics"] = physics_json(Collision::Mesh);
         doc_["entities"].push_back(std::move(e));
+    }
+
+    AssetSize asset_size(const std::string& asset_id) const override {
+        AssetSize s{};
+        Vec3 lo{}, hi{};
+        if (!bounds_of(asset_id, lo, hi)) return s;
+        s.size = Vec3{hi.x - lo.x, hi.y - lo.y, hi.z - lo.z};
+        s.bottom = -lo.y;
+        s.top = hi.y;
+        s.known = true;
+        return s;
+    }
+
+    void gameplay_anchor(const GameplayAnchorDesc& d) override {
+        if (d.id.empty()) return;
+        nlohmann::json tags = nlohmann::json::array();
+        for (const auto& t : d.tags) tags.push_back(t);
+        anchors_.push_back(nlohmann::json{
+            {"id", d.id},
+            {"position", vec3_json(d.position)},
+            {"facing", vec3_json(d.facing)},
+            {"normal", vec3_json(d.normal)},
+            {"relation", d.relation},
+            {"support", d.support},
+            {"tags", tags},
+        });
+    }
+
+    void anchor_set(const AnchorSetDesc& d) override {
+        if (d.id.empty()) return;
+        nlohmann::json pts = nlohmann::json::array();
+        for (const auto& p : d.points) pts.push_back(vec3_json(p));
+        nlohmann::json tags = nlohmann::json::array();
+        for (const auto& t : d.tags) tags.push_back(t);
+        anchor_sets_.push_back(nlohmann::json{
+            {"id", d.id},
+            {"relation", d.relation},
+            {"points", pts},
+            {"facing", vec3_json(d.facing)},
+            {"tags", tags},
+        });
+    }
+
+    void satisfies(const std::string& requirement_id, const std::string& how) override {
+        if (requirement_id.empty()) return;
+        requirements_.push_back(nlohmann::json{{"id", requirement_id}, {"how", how}});
     }
 
     void nav_region(const NavRegionDesc& d) override {
@@ -356,10 +425,38 @@ public:
         if (!npc_spawn_zones_.empty()) doc_["npc_spawn_zones"] = npc_spawn_zones_;
         if (!npc_anchors_.empty()) doc_["npc_anchors"] = npc_anchors_;
         if (!portals_.empty()) doc_["portals"] = portals_;
+        if (!anchors_.empty()) doc_["anchors"] = anchors_;
+        if (!anchor_sets_.empty()) doc_["anchor_sets"] = anchor_sets_;
+        if (!requirements_.empty()) doc_["requirements"] = requirements_;
         return doc_;
     }
 
 private:
+    /** Measured bounds (metres, entity space) of an asset from the asset map. */
+    bool bounds_of(const std::string& asset_id, Vec3& lo, Vec3& hi) const {
+        if (!asset_map_.is_object() || !asset_map_.contains(asset_id)) return false;
+        const auto& entry = asset_map_.at(asset_id);
+        if (!entry.is_object() || !entry.contains("aabb_min") || !entry.contains("aabb_max")) {
+            return false;
+        }
+        const auto& a = entry["aabb_min"];
+        const auto& b = entry["aabb_max"];
+        if (!a.is_array() || !b.is_array() || a.size() != 3 || b.size() != 3) return false;
+        lo = Vec3{a[0].get<float>(), a[1].get<float>(), a[2].get<float>()};
+        hi = Vec3{b[0].get<float>(), b[1].get<float>(), b[2].get<float>()};
+        return hi.x >= lo.x && hi.y >= lo.y && hi.z >= lo.z;
+    }
+
+    static Vec3 rotate(const Quat& q, const Vec3& v) {
+        // v + 2w(u x v) + 2u x (u x v), u = (x, y, z)
+        const float tx = 2.0f * (q.y * v.z - q.z * v.y);
+        const float ty = 2.0f * (q.z * v.x - q.x * v.z);
+        const float tz = 2.0f * (q.x * v.y - q.y * v.x);
+        return Vec3{v.x + q.w * tx + (q.y * tz - q.z * ty),
+                    v.y + q.w * ty + (q.z * tx - q.x * tz),
+                    v.z + q.w * tz + (q.x * ty - q.y * tx)};
+    }
+
     /** Serialize a StateValue, tagging the variant so a reader can tell an
      *  enumerated "3" from the number 3. */
     static nlohmann::json state_value_json(const StateValue& v) {
@@ -437,6 +534,9 @@ private:
     std::vector<nlohmann::json> npc_spawn_zones_;
     std::vector<nlohmann::json> npc_anchors_;
     std::vector<nlohmann::json> portals_;
+    std::vector<nlohmann::json> anchors_;
+    std::vector<nlohmann::json> anchor_sets_;
+    std::vector<nlohmann::json> requirements_;
     /** Occurrences per slugified name, so a repeated name gets a stable
      *  suffix instead of every entity depending on call order. */
     std::unordered_map<std::string, int> name_counts_;

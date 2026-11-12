@@ -22,6 +22,11 @@ const std::vector<Row>& rows() {
     static const std::vector<Row> table = {
         // --- visibility policy ------------------------------------------
         {"template", Role::kAlwaysHidden, {}, 0, 0, {}, 0},
+        // Physics proxies the engine makes (the player's finger, palm, forearm
+        // and shin colliders): never drawn, mesh or not. Without this row each
+        // drew as a 0.3 m placeholder cube over the player's hands and feet.
+        {"collider_only", Role::kAlwaysHidden, {}, 0, 0, {}, 0},
+        {"player_part", Role::kAlwaysHidden, {}, 0, 0, {}, 0},
         {"player_system", Role::kHiddenWhenMeshless, {}, 0, 0, {}, 0},
         // The player's own collision capsule and rig carry no mesh; drawn as
         // placeholders they are the grey box a player sees when looking
@@ -132,6 +137,17 @@ const std::vector<Row>& rows() {
          0.6f,
          0.25f,
          {0.35f, 0.62f, 0.32f, 1.0f},
+         0.0f},
+
+        // --- explicit debug geometry --------------------------------------
+        // Opt-in grey box for hand-built scenes (the starter room's walls).
+        // Untagged meshless entities are no longer drawn at all.
+        {"placeholder",
+         Role::kPlaceholder,
+         {},
+         0.3f,
+         0.3f,
+         {0.78f, 0.78f, 0.82f, 1.0f},
          0.0f},
 
         // --- gameplay volumes --------------------------------------------

@@ -65,6 +65,17 @@ alwaysApply: true
   fire-on-trigger from a muzzle, a private ammo count or a private
   projectile type fails the CodeTask (`codegen_contracts.py`, API contract
   v5); rays that must skip the shooter use `raycast_ignoring`.
+- Generated code never runs an interaction the engine has a built-in for.
+  Buttons are `builtin.press_button` (fingertip poke / trigger; it emits a
+  named signal), in-world screens `builtin.world_display` (lines templated
+  from `ctx.vars`), timed / score challenges `builtin.target_challenge`,
+  things that break `builtin.destructible`, grenades and flashbangs
+  `builtin.explosive`. Generated code wires them with `ctx.signals`
+  (`fired_since`) and `ctx.vars`, and places / spawns things at the world's
+  `ctx.anchors`. A press by `ctx.contacts` on a button, a private fuse with
+  blast damage, a spawn at typed-in coordinates when the world declares
+  anchors, or private scoreboard text when the game has a world display
+  fails the CodeTask (`codegen_contracts.py`, API contract v6).
 - The orchestrator validates includes before writing files (fail-loudly)
   and `engine/tools/check_generated_bounds.py` runs before the build as a
   secondary check, failing the stage on any violation.

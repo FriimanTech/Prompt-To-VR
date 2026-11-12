@@ -188,14 +188,18 @@ void tick_animators(World& world, float dt, const Vec3& viewer,
                     stride = 2;
                 }
 
-                if (stride == 0) {
+                // A pose of the current clip exists to hold or interpolate
+                // from; otherwise sample now, whatever the distance.
+                const bool posed = anim->posed_clip == anim->active_clip &&
+                                   anim->active_clip >= 0;
+                if (stride == 0 && posed) {
                     // Hold the last pose and keep the palette as it is. The
                     // debt still accrues, so walking back into range does not
                     // rewind the animation.
                     anim->lod_debt_s += dt;
                     continue;
                 }
-                if (stride > 1 &&
+                if (stride > 1 && posed &&
                     (frame_index % static_cast<std::uint64_t>(stride)) != 0) {
                     anim->lod_debt_s += dt;
                     continue;
@@ -269,6 +273,7 @@ void tick_animators(World& world, float dt, const Vec3& viewer,
                 }
                 sample_animation_clip(clip, anim->time_s,
                                       anim->joint_overridden, sk.local_pose);
+                anim->posed_clip = anim->active_clip;
             }
 
             // --- Cross-fade ----------------------------------------------

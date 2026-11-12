@@ -66,6 +66,11 @@ public:
         if (!world.valid(self) || !world.has<CTransform>(self)) return;
         auto& want = world.registry().get_or_emplace<CLocomotionIntent>(
             static_cast<entt::entity>(self));
+        // Stunned (a flashbang): stand still, attack nothing.
+        if (world.has<CStun>(self)) {
+            want.desired_velocity = Vec3(0.0f);
+            return;
+        }
         if (!alive(world, ctx, self)) {
             want.desired_velocity = Vec3(0.0f);
             return;

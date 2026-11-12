@@ -265,7 +265,7 @@ Each row carries roles, and a tag may have several:
 
 | Role | Effect |
 | --- | --- |
-| `kAlwaysHidden` | Never drawn (`template`: construct prefabs parked at a staging coordinate for runtime spawning). |
+| `kAlwaysHidden` | Never drawn (`template`: construct prefabs parked at a staging coordinate for runtime spawning; `collider_only` / `player_part`: physics proxies such as the player's finger, palm, forearm and shin colliders). |
 | `kHiddenWhenMeshless` | Drawn only with a real mesh (`player_system`, `tutorial`, `checkpoint`, `spawn_point`). Marker entities have a transform and nothing to look at; without this they fell through to the procedural cube path and littered the world with debug cubes on top of the real environment. |
 | `kGround` | Oversized with the grid material, so the play-area edge never shows in the headset. |
 | `kMeshTint` | A resting tint on a real mesh. |
@@ -273,6 +273,17 @@ Each row carries roles, and a tag may have several:
 
 Row order is priority: `ground` sits above the affordances so a floor also
 tagged `grabbable` still draws as a floor.
+
+**Meshless entities draw only on request.** An entity with no mesh,
+primitive or inline mesh is drawn as a placeholder shape only when one of
+its tags has the `kPlaceholder` role (`ground`, `door`, `grabbable`,
+`trigger`, ... or the explicit `placeholder` row used by the starter room's
+walls); `render_tags::draws_meshless` is the rule. Anything else -- a logic
+host, a HUD anchor, a weapon hub, a collider proxy -- is not drawn, counted
+in `FrameStats::meshless_hidden` and named once in the log
+(`render: '<id>' has nothing to draw ...`). The old default drew every one
+as a 0.3 m grey cube, including one per finger collider over the player's
+hands. scene_compile also tags such entities `mechanic_host`.
 
 ## Affordance cues (`CHighlight`)
 
@@ -586,6 +597,10 @@ logs four lines, plus a hands line:
   | calls N pipes P sets S | draw D of E (cull frustum a dist b small c room d,
   batches e) | tris T | meshes M resident (R tris), Q streaming | rigs K
   (J animating, budget B) | lod_bias L cull Um ffr V scale Z`;
+- `render_body:` `placeholders=` (non-floor placeholder boxes drawn),
+  `meshless_hidden=`, `player_draws=` (draws of anything but the player's
+  hands, avatar and held items with its origin within 35 cm of a tracked hand
+  or an avatar foot) and the first `names=`, maxima over the second;
 - `perf_fx:` live projectiles vs cap, FX quads drawn vs cap, casts last tick;
 - `tex:` resident textures and MB, KTX2 vs decoded, missing (and missing
   draws), ASTC support, mesh and target MB, instances;

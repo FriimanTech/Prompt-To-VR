@@ -108,12 +108,21 @@ BUILTIN_MECHANIC_IDS = {
     "builtin.shield",
     "builtin.item_source",
     "builtin.npc.ranged_attack",
+    "builtin.press_button",
+    "builtin.world_display",
+    "builtin.target_challenge",
+    "builtin.destructible",
+    "builtin.explosive",
 }
 
 
 class MechanicPlanItem(StrictModel):
     id: IdStr
     classification: MechanicClassification
+    satisfies: List[str] = Field(
+        default_factory=list, max_length=24,
+        description="Ids of the requirements (requirements.json) this mechanic"
+                    " delivers.")
     builtin_id: Optional[str] = Field(
         default=None,
         description=(

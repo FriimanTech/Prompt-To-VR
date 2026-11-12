@@ -16,6 +16,7 @@ decision is one the engine can run:
 
 from __future__ import annotations
 
+import re
 from typing import Any, Optional
 
 from ptv_schemas import (
@@ -49,7 +50,51 @@ def _singular_assets(spec: Optional[BuildSpec]) -> set[str]:
     }
 
 
-def npc_plan_violations(plan: NpcPlan, spec: Optional[BuildSpec]) -> list[str]:
+#: Words a prompt uses to say WHERE a group of NPCs appears: "the front
+#: band", "the back row", "the north gate", "lane 2".
+_PLACES_GROUPS = re.compile(
+    r"\b(front|middle|mid|back|rear|near|far|left|right|north|south|east|west|first|second|"
+    r"third|inner|outer|upper|lower)(?:[\s_-]+of(?:[\s_-]+the)?)?[\s_-]+(band|row|line|zone|"
+    r"area|section|lane|gate|side|end|ring|wall|platform|balcony|tier)s?\b|"
+    r"\b(band|row|zone|lane|tier)[\s_-]*\d\b",
+    re.IGNORECASE,
+)
+#: "they all respawn once every one of them is dead" -> waves + repeat.
+_RESPAWN_ALL = re.compile(
+    r"(re[\s-]?spawn|come back|return|reappear)\w*[^.]{0,60}\b(all|every|each)\b[^.]{0,80}"
+    r"\b(dead|killed|destroyed|defeated|down|cleared)|"
+    r"\b(all|every|each)\b[^.]{0,80}\b(dead|killed|destroyed|defeated|cleared)[^.]{0,60}"
+    r"(re[\s-]?spawn|come back|return|reappear)",
+    re.IGNORECASE,
+)
+
+
+def placement_phrases(prompt: str) -> list[str]:
+    """The prompt's phrases that place NPC groups somewhere ("front band")."""
+    out: list[str] = []
+    for m in _PLACES_GROUPS.finditer(prompt or ""):
+        p = m.group(0).strip()
+        if p.lower() not in (o.lower() for o in out):
+            out.append(p)
+    return out[:12]
+
+
+def zone_tags_required(plan: NpcPlan) -> list[str]:
+    """Every zone tag the encounter groups name -- the world must declare an
+    npc_spawn_zone carrying each."""
+    out: list[str] = []
+    if plan.encounters is None:
+        return out
+    for w in plan.encounters.waves:
+        for g in w.groups:
+            for t in g.zone_tags:
+                if t not in out:
+                    out.append(t)
+    return out
+
+
+def npc_plan_violations(plan: NpcPlan, spec: Optional[BuildSpec],
+                        prompt: str = "") -> list[str]:
     """Problems worth sending back to the NPC director, in its terms."""
 
     problems: list[str] = []
@@ -84,6 +129,26 @@ def npc_plan_violations(plan: NpcPlan, spec: Optional[BuildSpec]) -> list[str]:
         problems.append(
             f"{wave_enemies} arrive in waves but there is no encounters plan"
         )
+    if plan.encounters is not None and prompt:
+        places = placement_phrases(prompt)
+        untagged = sorted({g.asset_id for w in plan.encounters.waves for g in w.groups
+                           if not g.zone_tags})
+        if places and untagged:
+            problems.append(
+                f"the prompt says where NPCs appear ({', '.join(repr(p) for p in places[:6])}) "
+                f"but the groups of {untagged} have no zone_tags: give every EncounterGroup "
+                "the zone_tags of where it appears (e.g. 'front_band'), its zone_quote "
+                "(verbatim), and zone_visibility 'any' when the player is meant to see "
+                "them appear")
+        for w in plan.encounters.waves:
+            for g in w.groups:
+                if g.zone_quote and g.zone_quote.lower() not in prompt.lower():
+                    problems.append(f"zone_quote for '{g.asset_id}' is not verbatim from "
+                                    f"the prompt: {g.zone_quote[:80]!r}")
+        if (_RESPAWN_ALL.search(prompt) and plan.encounters.mode.value == "waves"
+                and not plan.encounters.repeat):
+            problems.append("the prompt has the NPCs return once all are defeated: set "
+                            "encounters.repeat = true (waves mode) so it never ends in victory")
     return problems
 
 
@@ -329,11 +394,29 @@ def repair_npc_plan(
     plan: NpcPlan,
     spec: Optional[BuildSpec],
     animated_budget: int = DEFAULT_ANIMATED_BUDGET,
+    prompt: str = "",
 ) -> tuple[NpcPlan, list[str]]:
     """Deterministic fixes the engine can make without the director."""
 
     notes: list[str] = []
     singular = _singular_assets(spec)
+
+    if plan.encounters is not None and prompt:
+        # A placement quote the prompt does not contain is an invention.
+        waves = []
+        for w in plan.encounters.waves:
+            groups = []
+            for g in w.groups:
+                if g.zone_quote and g.zone_quote.lower() not in prompt.lower():
+                    notes.append(f"dropped a non-verbatim zone_quote for '{g.asset_id}'")
+                    g = g.model_copy(update={"zone_quote": ""})
+                groups.append(g)
+            waves.append(w.model_copy(update={"groups": groups}))
+        enc = plan.encounters.model_copy(update={"waves": waves})
+        if _RESPAWN_ALL.search(prompt) and enc.mode.value == "waves" and not enc.repeat:
+            enc = enc.model_copy(update={"repeat": True})
+            notes.append("the prompt has the NPCs return once all are defeated: waves repeat")
+        plan = plan.model_copy(update={"encounters": enc})
 
     if plan.encounters is not None:
         by_asset = {n.asset_id: n for n in plan.npcs}

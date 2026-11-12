@@ -58,11 +58,14 @@
 #include <glm/gtc/quaternion.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 
+#include "core/GameBoards.h"
 #include "core/NpcRuntime.h"
+#include "core/PlayerParts.h"
 #include "gameplay/EffectsSystem.h"
 #include "gameplay/ProjectileSystem.h"
 #include "gameplay/WeaponBoard.h"
 #include "TextureGallery.h"
+#include "InteractionVerifier.h"
 #include "WeaponVerifier.h"
 #include "mechanics/builtin/HandRig.h"
 #include "ptv/api/BodySlots.h"
@@ -306,10 +309,10 @@ bool is_finite(const Quat& q) {
 constexpr float kMaxTranslatePerCall = 2.0f;    // metres
 constexpr float kMaxImpulseMagnitude = 200.0f;  // kg*m/s
 
-// The walking body. Narrower than the old contact capsule (0.17 x height)
-// because it is centred under the head rather than the torso, and a 0.3 m
-// radius stops the player well short of anything they reach for.
-constexpr float kPlayerBodyRadius = 0.22f;
+// The walking body when the scene does not say (``player.body_radius_m``,
+// measured from the avatar's torso): a 0.3 m radius stops the player well
+// short of anything they reach for.
+constexpr float kPlayerBodyRadius = 0.18f;
 // Roughly a head: large enough that the near clip plane never pokes through
 // a wall, small enough that the player can put their face up to one.
 constexpr float kHeadRadius = 0.12f;
@@ -660,6 +663,28 @@ public:
         return true;
     }
 
+    bool raycast_floor(std::uint32_t self, const Vec3& origin, const Vec3& dir,
+                       float max_dist, PhysicsRayHit& out) const override {
+        out = PhysicsRayHit{};
+        if (!is_finite(origin) || !is_finite(dir) || !std::isfinite(max_dist)) {
+            return false;
+        }
+        PhysicsWorld::RayFilter filter{};
+        if (self != InputSnapshot::kInvalidEntity) filter.ignore.push_back(self);
+        filter.floor_only = true;
+        Vec3 hit(0.0f);
+        Vec3 normal(0.0f, 1.0f, 0.0f);
+        std::uint32_t entity = InputSnapshot::kInvalidEntity;
+        if (!app_->physics_.raycast(origin, dir, max_dist, filter, hit, normal, entity)) {
+            return false;
+        }
+        out.point = hit;
+        out.normal = normal;
+        out.entity = entity;
+        out.hit = true;
+        return true;
+    }
+
     bool raycast_ignoring(const std::uint32_t* ignore, int count, const Vec3& origin,
                           const Vec3& dir, float max_dist,
                           PhysicsRayHit& out) const override {
@@ -697,6 +722,22 @@ public:
         return app_->physics_.has_body(entity);
     }
 
+    float distance_to_body(std::uint32_t entity, const Vec3& point) const override {
+        if (!is_finite(point)) return -1.0f;
+        return app_->physics_.distance_to_body(entity, point);
+    }
+
+    void set_collision_enabled(std::uint32_t entity, bool enabled) override {
+        // A death (begin_death) destroys the body outright; something that
+        // comes back -- a restored target -- gets a fresh one.
+        if (enabled && !app_->physics_.has_body(entity) && app_->world_.valid(entity) &&
+            app_->world_.has<CPhysics>(entity)) {
+            app_->physics_.add_body_for(app_->world_, entity);
+            return;
+        }
+        app_->physics_.set_collision_enabled(entity, enabled);
+    }
+
     bool body_center(std::uint32_t entity, Vec3* out) const override {
         return app_->physics_.body_center(entity, out);
     }
@@ -712,6 +753,19 @@ public:
             return;
         }
         app_->physics_.move_kinematic(entity, pos, rot, dt);
+    }
+
+    void teleport_body(std::uint32_t entity, const Vec3& pos, const Quat& rot) override {
+        if (!is_finite(pos) || !is_finite(rot)) {
+            PTV_WARN_CLAMP_ONCE("physics: rejected non-finite teleport_body");
+            return;
+        }
+        app_->physics_.teleport(entity, pos, rot);
+        if (app_->world_.has<CTransform>(entity)) {
+            auto& t = app_->world_.get<CTransform>(entity).t;
+            t.position = pos;
+            t.rotation = rot;
+        }
     }
 
     void apply_impulse(std::uint32_t entity, const Vec3& impulse) override {
@@ -846,6 +900,14 @@ public:
     void request_fade(float amount) override {
         if (!std::isfinite(amount)) return;
         app_->fade_request_ = std::max(app_->fade_request_, std::clamp(amount, 0.0f, 1.0f));
+    }
+    void request_flash(float amount, const Vec3& color) override {
+        if (!std::isfinite(amount) || !is_finite(color)) return;
+        const float a = std::clamp(amount, 0.0f, 1.0f);
+        if (a > app_->flash_request_) {
+            app_->flash_request_ = a;
+            app_->flash_color_ = glm::clamp(color, Vec3(0.0f), Vec3(1.0f));
+        }
     }
     bool place_player(const Vec3& feet, float yaw) override {
         if (!std::isfinite(feet.x) || !std::isfinite(feet.y) ||
@@ -1006,6 +1068,18 @@ void Application::tick_comfort_vignette(float dt) {
     fade_level_ += (fade_request_ - fade_level_) * (1.0f - std::exp(-dt / 0.12f));
     if (fade_level_ < 1e-3f) fade_level_ = 0.0f;
     fade_request_ = 0.0f;
+    // A flash (a flashbang's white-out) hits at once and eases out as the
+    // requester decays it.
+    flash_level_ = flash_request_ > flash_level_
+                       ? flash_request_
+                       : flash_level_ + (flash_request_ - flash_level_) *
+                                            (1.0f - std::exp(-dt / 0.08f));
+    if (flash_level_ < 1e-3f) flash_level_ = 0.0f;
+    flash_request_ = 0.0f;
+    if (flash_level_ > fade_level_ && flash_level_ > opacity) {
+        renderer_.set_vignette(flash_level_, 0.0f, 1.0f, flash_color_);
+        return;
+    }
     if (fade_level_ > opacity) {
         // Clear half-angle 0 with a narrow feather covers the whole view.
         renderer_.set_vignette(fade_level_, 0.0f, 1.0f);
@@ -1096,6 +1170,34 @@ public:
             (entity == InputSnapshot::kInvalidEntity)
                 ? entt::null
                 : static_cast<entt::entity>(entity);
+    }
+
+    bool fingertip_world(int hand, const char* finger, Vec3* out) const override {
+        if (hand < 0 || hand > 1 || out == nullptr) return false;
+        const std::string f = (finger != nullptr && *finger) ? finger : "index";
+        const std::string side = hand == 0 ? "_l" : "_r";
+        const std::uint32_t skel = finger_target(hand);
+        const ISkeleton* sk = app_->mech_ctx_.skeleton;
+        if (sk != nullptr && skel != InputSnapshot::kInvalidEntity && sk->has_skeleton(skel)) {
+            const int j3 = sk->joint_for_slot(skel, (f + "_3" + side).c_str());
+            const int j2 = sk->joint_for_slot(skel, (f + "_2" + side).c_str());
+            if (j3 >= 0 && j2 >= 0) {
+                const Vec3 a(sk->joint_world(skel, j2)[3]);
+                const Vec3 b(sk->joint_world(skel, j3)[3]);
+                // The distal joint is the last knuckle; the tip is about one
+                // middle-phalanx length past it.
+                *out = b + 0.85f * (b - a);
+                return is_finite(*out);
+            }
+        }
+        // No posable fingers: an index tip ~9.5 cm ahead of the grip pose.
+        const auto he = app_->hand_entities_[static_cast<size_t>(hand)];
+        if (he != entt::null && app_->world_.registry().all_of<CTransform>(he)) {
+            const auto& t = app_->world_.registry().get<CTransform>(he).t;
+            *out = t.position + t.rotation * Vec3(0.0f, -0.01f, -0.095f);
+            return true;
+        }
+        return false;
     }
 
     std::uint32_t player_entity() const override {
@@ -2555,12 +2657,17 @@ public:
                         position.z);
         if (!app_->physics_svc_) return position;
         // The floor, not a character standing on it (or the one asking).
-        if (!app_->physics_svc_->raycast_excluding(
+        if (!app_->physics_svc_->raycast_floor(
                 InputSnapshot::kInvalidEntity, from, Vec3(0.0f, -1.0f, 0.0f),
-                kGroundProbeUp + kGroundProbeDown, hit, /*floor_only=*/true)) {
+                kGroundProbeUp + kGroundProbeDown, hit)) {
             return position;
         }
         return Vec3(position.x, hit.point.y, position.z);
+    }
+
+    Vec3 nearest_walkable(const Vec3& position, float margin_m) const override {
+        const Vec3 p = app_->nav_graph_.nearest_inside(position, margin_m);
+        return p == position ? position : project_to_ground(Vec3(p.x, position.y, p.z));
     }
 
     bool line_of_sight(const Vec3& from, const Vec3& to) const override {
@@ -3480,6 +3587,11 @@ void Application::log_hands_telemetry(const bool tracked[2]) {
     PTV_INFO("hands: source={} {}", scene_.hands_source, line);
 }
 
+float Application::player_body_radius() const {
+    return scene_.player_body_radius_m > 1e-3f ? scene_.player_body_radius_m
+                                               : kPlayerBodyRadius;
+}
+
 void Application::create_player_body() {
     if (player_entity_ != entt::null) return;
 
@@ -3529,6 +3641,8 @@ void Application::create_player_body() {
     cp.collision_shape = "capsule";
     cp.friction = 0.0f;
     cp.restitution = 0.0f;
+    // The same radius as the walking body: the body the player sees.
+    cp.capsule_radius_m = player_body_radius();
     world_.registry().emplace<CPhysics>(e, cp);
 
     if (!adopted) world_.registry().emplace<CTag>(e, CTag{{"player"}});
@@ -3554,12 +3668,20 @@ void Application::create_player_body() {
              adopted ? "the scene's player_rig" : "engine-made __player");
     player_capsule_center_ = ct.t.position;
     physics_.add_body_for(world_, static_cast<std::uint32_t>(e));
+    // The player's body touches the world and NPCs, never a prop.
+    physics_.set_body_class(static_cast<std::uint32_t>(e),
+                            PhysicsWorld::BodyClass::PlayerBody);
 
     // The body that actually walks. Feet on the spawn point until the first
     // headset pose moves it under the player's head.
     physics_.create_player_character(rig_world_position(),
                                      player_capsule_height_,
-                                     kPlayerBodyRadius);
+                                     player_body_radius());
+    PTV_INFO("Player body radius {:.3f} m ({})", player_body_radius(),
+             scene_.player_body_radius_m > 0.0f ? "from the scene" : "default");
+    // Fresh per scene: the previous scene's part entities went with its world.
+    player_parts_ = std::make_unique<PlayerParts>();
+    player_parts_->configure(scene_.hands_source == "avatar");
     motor_needs_sync_ = true;
     motor_has_grounded_ = false;
     motor_virtual_floor_ = false;
@@ -4602,6 +4724,9 @@ bool Application::load_scene_at(const std::string& path,
     //    sweep against it.
     scene_ = std::move(next);
     scene_path_ = path;
+    // Signals and live values belong to the scene that raised them.
+    if (signal_board_) signal_board_->reset();
+    if (var_board_) var_board_->reset();
 
     place_player_at_spawn(spawn_point_id);
     ApplySceneToWorld(scene_, world_);
@@ -4971,6 +5096,16 @@ void Application::begin_death(std::uint32_t entity) {
 void Application::tick_combat(float dt) {
     if (dt <= 0.0f) return;
     std::vector<std::uint32_t> finished;
+    {
+        std::vector<entt::entity> recovered;
+        auto stunned = world_.registry().view<CStun>();
+        for (auto e : stunned) {
+            auto& s = stunned.get<CStun>(e);
+            s.remaining_s -= dt;
+            if (s.remaining_s <= 0.0f) recovered.push_back(e);
+        }
+        for (auto e : recovered) world_.registry().remove<CStun>(e);
+    }
 
     auto view = world_.registry().view<CHealth>();
     for (auto entity : view) {
@@ -5118,9 +5253,29 @@ void Application::read_verify_mode() {
         PTV_INFO("verify: WEAPONS mode on (player stands still, a scripted hand "
                  "holds and fires every weapon, player cannot die)");
     }
+    bool interactions = false;
+#if defined(__ANDROID__)
+    char interactions_value[PROP_VALUE_MAX] = {0};
+    if (__system_property_get("debug.ptv.verify_interactions", interactions_value) > 0) {
+        interactions = interactions_value[0] == '1' || interactions_value[0] == 't' ||
+                       interactions_value[0] == 'y';
+    }
+#else
+    if (const char* v = std::getenv("PTV_VERIFY_INTERACTIONS")) {
+        interactions = v[0] == '1' || v[0] == 't' || v[0] == 'y';
+    }
+#endif
+    verify_interactions_ = interactions && !flow && !verify_weapons_ && !verify_textures_;
+    interaction_verifier_ = verify_interactions_
+                                ? std::make_unique<InteractionVerifier>(scene_.verify_viewpoints)
+                                : nullptr;
+    if (verify_interactions_) {
+        PTV_INFO("verify: INTERACTIONS mode on (a scripted player settles, walks into, "
+                 "grabs, presses and throws every interactive thing; player cannot die)");
+    }
     // The flow pass is a verification run too (scripted walk, telemetry).
     verify_flow_ = flow;
-    verify_mode_ = on || flow || verify_weapons_ || verify_textures_;
+    verify_mode_ = on || flow || verify_weapons_ || verify_textures_ || verify_interactions_;
     verify_time_s_ = 0.0f;
     verify_origin_set_ = false;
     if (flow) {
@@ -5132,7 +5287,10 @@ void Application::read_verify_mode() {
 }
 
 void Application::tick_verify_autopilot(float dt) {
-    if (!verify_mode_ || verify_weapons_ || player_entity_ == entt::null || dt <= 0.0f) return;
+    if (!verify_mode_ || verify_weapons_ || verify_interactions_ || player_entity_ == entt::null ||
+        dt <= 0.0f) {
+        return;
+    }
     verify_time_s_ += dt;
     // Settle first: spawn, ground the body, let the scene's start delay run.
     constexpr float kSettleS = 3.0f;
@@ -5215,6 +5373,29 @@ void Application::log_npc_manifest() {
              verify_mode_ ? 1 : 0);
 }
 
+void Application::watch_npc_heights(const char* phase) {
+    // Startup only: an NPC that jumps more than a metre in one step of the
+    // frame names the step that moved it. Cheap (a few dozen entities, the
+    // first 600 frames), and it is what tells a floor-probe climb from a
+    // physics or attachment write.
+    if (frame_index_ > 600 || npc_watch_warnings_ >= 12) return;
+    for (auto e : world_.registry().view<CTransform, CMesh>()) {
+        const auto id = static_cast<std::uint32_t>(e);
+        if (!is_npc_entity(world_, id) || has_tag(world_, id, "template")) continue;
+        const float y = world_.get<CTransform>(id).t.position.y;
+        auto it = npc_watch_y_.find(id);
+        if (it != npc_watch_y_.end() && std::fabs(y - it->second) > 1.0f &&
+            npc_watch_warnings_ < 12) {
+            ++npc_watch_warnings_;
+            const std::string* name = world_.id_of(e);
+            PTV_WARN("npc_jump: '{}' y {:.2f} -> {:.2f} at {} (frame {})",
+                     name != nullptr ? *name : std::to_string(id), it->second, y, phase,
+                     frame_index_);
+        }
+        npc_watch_y_[id] = y;
+    }
+}
+
 void Application::tick_npc_telemetry(float dt) {
     if (dt <= 0.0f) return;
     npc_telemetry_clock_s_ += dt;
@@ -5256,25 +5437,34 @@ void Application::tick_npc_telemetry(float dt) {
         const auto& cm = view.get<CMesh>(ent);
         const Vec3 pos = view.get<CTransform>(ent).t.position;
         float speed = 0.0f;
+        float vertical_speed = 0.0f;
         if (auto it = npc_last_pos_.find(e); it != npc_last_pos_.end()) {
             const Vec3 d(pos.x - it->second.x, 0.0f, pos.z - it->second.z);
             speed = glm::length(d) / window;
+            vertical_speed = (pos.y - it->second.y) / window;
         }
         npc_last_pos_[e] = pos;
-        // Height of the soles above whatever floor is below: ~0 when the
-        // character is standing, large when something launched it.
+        // Height of the soles above the FLOOR below -- level geometry only.
+        // Measured against anything else (the rifle in its own hands) this
+        // read a steady -0.63 m while the NPC was climbing into the sky.
         const float h = cm.target_scale_meters > 1.0e-4f ? cm.target_scale_meters
                                                          : 1.8f;
         const float foot = cm.foot_offset_m > 1.0e-4f ? cm.foot_offset_m : 0.5f * h;
         PhysicsWorld::RayFilter filter{};
         filter.ignore.push_back(e);
-        filter.skip_characters = true;
+        filter.floor_only = true;
         Vec3 hit(0.0f), n(0.0f, 1.0f, 0.0f);
         std::uint32_t what = InputSnapshot::kInvalidEntity;
         std::string feet_gap = "none";
         std::string origin_gap = "none";
-        if (physics_.raycast(pos + Vec3(0.0f, 0.5f * h, 0.0f), Vec3(0, -1, 0),
-                             200.0f, filter, hit, n, what)) {
+        // Just above the soles first (under a table top or a balcony), then
+        // from the head for a body sunk below its floor.
+        const bool floor_hit =
+            physics_.raycast(Vec3(pos.x, pos.y - foot + 0.5f, pos.z), Vec3(0, -1, 0),
+                             200.0f, filter, hit, n, what) ||
+            physics_.raycast(pos + Vec3(0.0f, 0.5f * h, 0.0f), Vec3(0, -1, 0),
+                             200.0f, filter, hit, n, what);
+        if (floor_hit) {
             char buf[32];
             // What the CONTRACT says: origin minus the declared foot offset.
             std::snprintf(buf, sizeof(buf), "%.2f", pos.y - foot - hit.y);
@@ -5340,14 +5530,21 @@ void Application::tick_npc_telemetry(float dt) {
                            world_.registry().get<CHealth>(ent).alive;
         const Vec3 to_player(player.x - pos.x, 0.0f, player.z - pos.z);
         const std::string* name = world_.id_of(ent);
+        std::string tags_csv;
+        if (const auto* tg = world_.registry().try_get<CTag>(ent)) {
+            for (const auto& t : tg->tags) {
+                if (!tags_csv.empty()) tags_csv += ',';
+                tags_csv += t;
+            }
+        }
         PTV_INFO(
             "npc t={:.1f} id={} e={} asset={} pos={} feet_gap={} "
-            "origin_gap={} facing_err_deg={} motor={} speed={:.2f} "
-            "intent={:.2f} clip=\"{}\" alive={} dist_player={:.2f}",
+            "origin_gap={} vy={:.2f} facing_err_deg={} motor={} speed={:.2f} "
+            "intent={:.2f} clip=\"{}\" alive={} dist_player={:.2f} tags={}",
             npc_telemetry_clock_s_, name ? *name : std::string("clone"), e,
-            cm.asset_id, fmt_vec(pos), feet_gap, origin_gap, facing_err,
+            cm.asset_id, fmt_vec(pos), feet_gap, origin_gap, vertical_speed, facing_err,
             npc_motor_of(world_, e), speed, intent, clip, alive ? 1 : 0,
-            glm::length(to_player));
+            glm::length(to_player), tags_csv.empty() ? std::string("-") : tags_csv);
     }
     // Forget NPCs that no longer exist so a reused entity id starts clean.
     for (auto it = npc_last_pos_.begin(); it != npc_last_pos_.end();) {
@@ -5693,7 +5890,23 @@ int Application::run(const Config& cfg) {
         // along the controller body. Locomotion that asks "where is the
         // controller pointing?" must read /aim, not /grip, or pushing
         // the stick forward feels like the controller is angled up.
-        const bool hand_valid[2] = {input.hand_left_valid, input.hand_right_valid};
+        bool hand_valid[2] = {input.hand_left_valid, input.hand_right_valid};
+        // The interactions verification pass drives the hands itself: its
+        // pose replaces the tracked one here, at the source, so the drawn
+        // hand, its fingertip, its colliders and its velocity all follow.
+        bool scripted[2] = {false, false};
+        Vec3 scripted_pos[2]{Vec3(0.0f), Vec3(0.0f)};
+        Quat scripted_rot[2]{Quat(1, 0, 0, 0), Quat(1, 0, 0, 0)};
+        if (interaction_verifier_) {
+            for (int h = 0; h < 2; ++h) {
+                bool valid = false;
+                if (interaction_verifier_->scripted_pose(h, &scripted_pos[h], &scripted_rot[h],
+                                                         &valid)) {
+                    scripted[h] = true;
+                    hand_valid[h] = valid;
+                }
+            }
+        }
         const XrPosef hand_poses[2] = {input.hand_left.pose, input.hand_right.pose};
         const bool aim_valid[2]  = {input.aim_left_valid, input.aim_right_valid};
         const XrPosef aim_poses[2] = {input.aim_left.pose, input.aim_right.pose};
@@ -5711,13 +5924,24 @@ int Application::run(const Config& cfg) {
         Quat aim_world_rot[2]{Quat(1,0,0,0), Quat(1,0,0,0)};
         bool aim_world_valid[2]{false, false};
         for (int h = 0; h < 2; ++h) {
-            if (hand_valid[h]) {
+            if (scripted[h]) {
+                if (hand_valid[h]) {
+                    hand_world[h] = glm::translate(Mat4(1.0f), scripted_pos[h]) *
+                                    glm::mat4_cast(scripted_rot[h]);
+                    hand_world_pos[h] = scripted_pos[h];
+                    hand_world_rot[h] = scripted_rot[h];
+                    aim_world_rot[h] = scripted_rot[h];
+                    aim_world_valid[h] = true;
+                }
+            } else if (hand_valid[h]) {
                 hand_world[h] = rig_mat * xr_pose_to_matrix(hand_poses[h]);
                 hand_world_pos[h] = mat_translation(hand_world[h]);
                 // Rig rotation is yaw only, so we can compose rotations directly.
                 hand_world_rot[h] = rig_yaw_quat * xr_pose_to_quat(hand_poses[h]);
             }
-            if (aim_valid[h]) {
+            if (scripted[h]) {
+                // Pose set above.
+            } else if (aim_valid[h]) {
                 aim_world_rot[h] = rig_yaw_quat * xr_pose_to_quat(aim_poses[h]);
                 aim_world_valid[h] = true;
             } else if (hand_valid[h]) {
@@ -5740,7 +5964,7 @@ int Application::run(const Config& cfg) {
                 world_.registry().all_of<CTransform>(he)) {
                 place_hand_entity(h, hand_world_pos[h], hand_world_rot[h]);
             } else if (he != entt::null && verify_mode_ && !weapon_verifier_ &&
-                       world_.registry().all_of<CTransform>(he)) {
+                       !interaction_verifier_ && world_.registry().all_of<CTransform>(he)) {
                 // Verification on a headset lying on a desk: no controller is
                 // tracked, so hold the visible hands where a player's would
                 // be (in front of the eyes) so the run can confirm they draw.
@@ -5773,6 +5997,18 @@ int Application::run(const Config& cfg) {
         // systems -- the menu anchor placement, debug overlays -- have
         // a sensible value when the HMD pose was momentarily invalid.)
         // ------------------------------------------------------------
+        // The eyes always render (and cull) from the real headset.
+        const XrPosef real_head_pose = input.head.pose;
+        const bool real_head_valid = input.head_valid;
+        // The interactions pass drives the head too: a standing player, eyes
+        // kEyeHeightM over its feet, level, facing the way the pass turned
+        // the rig. A headset lying on a desk otherwise sized the full-body
+        // avatar to 0.75 and turned its torso away from the scripted hand.
+        if (interaction_verifier_ && interaction_verifier_->scripts_head()) {
+            input.head_valid = true;
+            input.head.pose.position = {0.0f, InteractionVerifier::kEyeHeightM, 0.0f};
+            input.head.pose.orientation = {0.0f, 0.0f, 0.0f, 1.0f};
+        }
         Vec3 head_world_pos = last_head_world_pos_;
         Quat head_world_rot = Quat(1, 0, 0, 0);
         Vec3 head_forward_xz = last_head_forward_xz_;
@@ -5898,6 +6134,7 @@ int Application::run(const Config& cfg) {
                 s.head_valid = true;
             }
             if (weapon_verifier_) weapon_verifier_->patch(s);
+            if (interaction_verifier_) interaction_verifier_->patch(s);
             return s;
         };
 
@@ -6023,8 +6260,10 @@ int Application::run(const Config& cfg) {
         // Physics, then the ordinary (Simulate-phase) mechanics, which see
         // settled transforms and an up-to-date snapshot.
         // ------------------------------------------------------------
+        watch_npc_heights("before physics");
         physics_.step(dt);
         physics_.sync_to_world(world_);
+        watch_npc_heights("physics sync");
 
         // Bodies just moved, so the overlap sets computed during the Input
         // phase describe where things used to be. Drop them; Simulate-phase
@@ -6033,9 +6272,13 @@ int Application::run(const Config& cfg) {
 
         mechanics_.update(world_, dt, snapshot, mech_ctx_,
                           MechanicPhase::Simulate);
+        watch_npc_heights("simulate mechanics");
         if (weapon_verifier_) {
             weapon_verifier_->tick(dt, world_, mech_ctx_, head_world_pos, head_world_rot,
                                    scene_.performance.max_live_projectiles);
+        }
+        if (interaction_verifier_) {
+            interaction_verifier_->tick(dt, world_, mech_ctx_, head_world_pos, head_world_rot);
         }
 
         // Every motion mechanic has asked for (or not asked for) a vignette
@@ -6077,6 +6320,10 @@ int Application::run(const Config& cfg) {
         // parented to a goblin's hand has to read the hand's ANIMATED
         // position, not the bind pose it had at the top of the frame.
         tick_attachments(dt);
+        // The player's hands and limbs as colliders, on this frame's pose.
+        if (player_parts_ && skeleton_svc_ && hands_svc_) {
+            player_parts_->update(world_, physics_, *skeleton_svc_, *hands_svc_, snapshot, dt);
+        }
 
         // Age invulnerability windows and clear away anything whose death
         // animation has finished playing.
@@ -6131,10 +6378,10 @@ int Application::run(const Config& cfg) {
             // being conservative, can only ever draw a few extra objects at
             // the very edge -- never wrongly remove one the player can see.
             Renderer::ViewInfo view_info{};
-            if (input.head_valid) {
+            if (real_head_valid) {
                 constexpr float kCullFovRadians = 2.443f;  // 140 degrees
                 const Mat4 world_from_head =
-                    rig_render * xr_pose_to_matrix(input.head.pose);
+                    rig_render * xr_pose_to_matrix(real_head_pose);
                 const Mat4 cull_proj = glm::perspective(
                     kCullFovRadians, 1.0f, 0.05f, 2000.0f);
                 view_info.camera_pos = mat_translation(world_from_head);
@@ -6167,7 +6414,51 @@ int Application::run(const Config& cfg) {
                         xr_.render_scale();
                 }
             }
+            {
+                // The player's hands (and an avatar's feet) and what belongs
+                // there, so the renderer can count anything else drawn on
+                // top of them -- collider proxies once drew as white boxes.
+                std::vector<Vec3> points;
+                std::vector<std::uint32_t> allowed;
+                const auto own = [&](entt::entity e) {
+                    if (e != entt::null) allowed.push_back(static_cast<std::uint32_t>(e));
+                };
+                own(player_entity_);
+                for (int h = 0; h < 2; ++h) {
+                    own(hand_entities_[static_cast<size_t>(h)]);
+                    own(finger_targets_[static_cast<size_t>(h)]);
+                    own(hands_[static_cast<size_t>(h)].held);
+                    if (hands_svc_ != nullptr) {
+                        const std::uint32_t held = hands_svc_->held_entity(h);
+                        const std::uint32_t support = hands_svc_->support_entity(h);
+                        if (held != InputSnapshot::kInvalidEntity) allowed.push_back(held);
+                        if (support != InputSnapshot::kInvalidEntity) allowed.push_back(support);
+                    }
+                    if (hand_valid[h]) points.push_back(hand_world_pos[h]);
+                }
+                const entt::entity avatar = finger_targets_[1] != entt::null ? finger_targets_[1]
+                                                                             : finger_targets_[0];
+                if (scene_.hands_source == "avatar" && avatar != entt::null && skeleton_svc_) {
+                    const auto a = static_cast<std::uint32_t>(avatar);
+                    for (const char* slot : {"foot_l", "foot_r"}) {
+                        const int j = skeleton_svc_->joint_for_slot(a, slot);
+                        if (j >= 0) points.emplace_back(skeleton_svc_->joint_world(a, j)[3]);
+                    }
+                }
+                renderer_.set_player_focus(std::move(points), std::move(allowed));
+            }
             renderer_.build_items_from_world(world_, items, view_info);
+            {
+                const auto& fs = renderer_.frame_stats();
+                body_draws_max_ = std::max(body_draws_max_, fs.player_draws);
+                placeholders_max_ = std::max(placeholders_max_, fs.placeholders);
+                meshless_hidden_last_ = fs.meshless_hidden;
+                if (fs.player_draws > 0 && body_draw_names_.empty()) {
+                    for (const auto& n : renderer_.player_draw_names()) {
+                        body_draw_names_ += (body_draw_names_.empty() ? "" : ",") + n;
+                    }
+                }
+            }
 
             // Hand visuals. When the rigged hand meshes loaded, the hands are
             // ordinary entities that build_items_from_world has already drawn
@@ -6200,11 +6491,30 @@ int Application::run(const Config& cfg) {
             items.insert(items.end(), mech_draw_items_.begin(),
                          mech_draw_items_.end());
 
+            const Renderer::RenderEnv* frame_env = &render_env_;
+            Renderer::RenderEnv gallery_env;
             if (texture_gallery_) {
                 if (!texture_gallery_->started()) texture_gallery_->start(world_, renderer_);
                 texture_gallery_->update(dt);
                 texture_gallery_->build_items(items, renderer_, last_head_world_pos_,
                                               last_head_forward_xz_);
+                if (!texture_gallery_->done()) {
+                    // A neutral key light from behind the eyes: a night
+                    // scene lit the asset from behind and the check measured
+                    // the darkness, not the texture. Same pipeline otherwise.
+                    gallery_env = render_env_;
+                    Vec3 key = last_head_forward_xz_ + Vec3(0.0f, -0.5f, 0.0f);
+                    if (glm::length(key) < 1e-4f) key = Vec3(0.0f, -0.5f, -1.0f);
+                    gallery_env.sun_direction = glm::normalize(key);
+                    gallery_env.sun_color = Vec3(1.0f);
+                    gallery_env.sun_intensity = std::max(render_env_.sun_intensity, 1.0f);
+                    gallery_env.ambient_ground = Vec3(0.5f);
+                    gallery_env.ambient_intensity = std::max(render_env_.ambient_intensity, 0.4f);
+                    gallery_env.exposure = 1.0f;
+                    gallery_env.fog_density = 0.0f;
+                    gallery_env.points.clear();
+                    frame_env = &gallery_env;
+                }
             }
 
             xr_.render_frame(
@@ -6245,11 +6555,11 @@ int Application::run(const Config& cfg) {
                     if (effects_) {
                         // Muzzle flashes and explosions light the scene for
                         // a few frames.
-                        Renderer::RenderEnv env = render_env_;
+                        Renderer::RenderEnv env = *frame_env;
                         effects_->append_lights(env.points);
                         renderer_.draw_frame(targets, items, env);
                     } else {
-                        renderer_.draw_frame(targets, items, render_env_);
+                        renderer_.draw_frame(targets, items, *frame_env);
                     }
                 });
         } else if (xr_should_render) {
@@ -6371,6 +6681,16 @@ int Application::run(const Config& cfg) {
                     scene_.performance.max_animated_agents,
                     renderer_.lod_bias(),
                     renderer_.cull_distance(), xr_.foveation_level(), xr_.render_scale());
+                // What draws besides real meshes: placeholder boxes, meshless
+                // entities left undrawn, and anything on the player's hands
+                // or feet that is not theirs (max over the second).
+                PTV_INFO("render_body: placeholders={} meshless_hidden={} player_draws={} "
+                         "names={}",
+                         placeholders_max_, meshless_hidden_last_, body_draws_max_,
+                         body_draw_names_.empty() ? "-" : body_draw_names_);
+                placeholders_max_ = 0;
+                body_draws_max_ = 0;
+                body_draw_names_.clear();
                 // Weapons: live projectiles, effect quads drawn and casts.
                 PTV_INFO("perf_fx: projectiles {} (cap {}) | fx_quads {} (cap {}) | "
                          "casts {}",
@@ -6627,6 +6947,15 @@ bool Application::initialize(const Config& cfg) {
     mech_ctx_.persistence = persistence_svc_.get();
     mech_ctx_.transition = transition_svc_.get();
     mech_ctx_.ui = ui_svc_.get();
+    signal_board_ = std::make_unique<SignalBoard>();
+    var_board_ = std::make_unique<VarBoard>();
+    anchor_board_ = std::make_unique<AnchorBoard>();
+    // Bound to the scene document's own vectors, which every scene load
+    // refills in place.
+    anchor_board_->bind(&scene_.anchors, &scene_.anchor_sets, &world_);
+    mech_ctx_.signals = signal_board_.get();
+    mech_ctx_.vars = var_board_.get();
+    mech_ctx_.anchors = anchor_board_.get();
 
     check_player_mechanic_roles();
     mechanics_.attach_bindings(world_, mech_ctx_);

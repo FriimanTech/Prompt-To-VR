@@ -394,3 +394,37 @@ Open `projects/<id>/logs/cmake.log`. Likely causes:
 - The mechanic id registered in `PTV_REGISTER_MECHANIC(...)` doesn't match
   the `mechanic_id` in the scene. Check the generated file and the
   `scene.json`.
+
+## A stage fails with "requirement(s) left unclaimed"
+
+`RequirementGateError`: a planning stage (asset_manifest, mechanic_plan,
+scene_spec, world_generation) left a requirement it owns unclaimed after its
+repair round. The message lists each with the prompt's quote. Read
+`requirements.json`: a requirement that is not really in the prompt can be
+removed there, then resume the stage. See [requirements.md](requirements.md).
+
+## scene_compile fails with a placement contract error
+
+`PlacementContractError` lists every item sunk, floating, with nothing
+under it, hanging from nothing, with a missing anchor, or overlapping
+another; `builds/scene/placement_report.<scene>.json` has the numbers. A
+missing anchor usually means the world architect did not declare the id the
+scene spec asked for -- re-run `world_generation` (its contract check lists
+the missing ids). See [placement.md](placement.md).
+
+## Props move when the player walks into them / NPCs float or sink
+
+Check the asset has measured collision (`mesh.collision` in `scene.json`;
+re-run `asset_optimization` for an old project), and the headset run's
+interactions pass (`settle`, `walk`, `grab` lines). An NPC whose
+`feet_gap` drifts or whose `vy` is large climbs something: a held item on a
+layer other than `HELD`, or a world body tagged `walkable` by mistake. See
+[physics.md](physics.md).
+
+## "HANDS:" warnings
+
+No reference image / mesh passed the hand check after
+`hand_qa_max_retries` (2) regenerations; the best-scoring attempt was kept.
+`images/<id>/hand_qa.json` and `assets/<id>/hand_qa.json` hold each
+attempt's per-hand answers. Delete the asset's image (or asset) folder and
+resume to try again, or rewrite the asset's reference prompt.

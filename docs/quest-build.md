@@ -147,15 +147,24 @@ only when the game calls for it:
   controller tracked (the headset on a desk) verify mode holds the visible
   hands in front of the eyes, so the check runs unattended. These hands once
   loaded 20 m long -- a room the player stood inside -- while every other
-  check passed. A game with no
+  check passed. Every game, Hands Only or Full Player Avatar, must also
+  draw nothing over the player's hands / body (`render_body:` reports zero
+  `player_draws` in every second) and, when generated, no placeholder boxes
+  (`placeholders=0`): the player's finger, forearm and shin colliders once
+  drew as white 0.3 m cubes over the hands and feet. A game with no
   NPCs runs only these; its NPC section reads "not applicable: this game has
   no NPCs".
 - **Placed at load (`persistent_count > 0`):** present, skeleton and clips
   resolved, DRAWN feet within 5 cm of the floor (median; the lowest animated
   foot joint, not the declared offset -- a hovering NPC is checked against
   its hover height instead and a free flyer not at all), faces where it is
-  going (median heading error under 20 degrees while moving), inside the
-  walkable area.
+  going (median heading error under 20 degrees while moving, judged only
+  over 3 or more moving samples -- one sample a second is as likely mid-turn
+  as not), inside the walkable area. A moving NPC that is not a follower
+  must move, unless it only engages what it notices (chase, ranged / melee
+  attack, cover, guard ...) and the player never came within its sight or
+  hearing range during the capture: then "moves" is not applicable (an
+  insurgent 50 m away in a hut has no one to engage). A patrol always must.
 - **Stationary (`movement_style: stationary`):** stays within 0.25 m of where
   it was placed, plays `idle` if it has one; with combat behaviours it must
   land hits on the player from its spot. Follow / chase movement checks never
@@ -201,7 +210,10 @@ only when the game calls for it:
   default hands included) 1.1 m in front of the player, three-quarter view,
   one every 4 s -- a rigged asset framed by its skinned bind pose, measured on
   the CPU, because a rig's raw vertices can be in another scale (the default
-  hands' span 2 mm before skinning) -- logging
+  hands' span 2 mm before skinning) -- lit by a neutral white key light from
+  behind the player's eyes (ambient at least 0.4, exposure 1, no fog) in
+  place of the scene's lights, so a night scene does not turn every asset
+  into a silhouette, and logging
   `texgallery: show i/n <path> textured= missing=`. The stage takes a Quest
   screenshot of the empty background and of each asset (`metacam`
   `TAKE_SCREENSHOT`, pulled from `/sdcard/Oculus/Screenshots/` into
@@ -209,6 +221,42 @@ only when the game calls for it:
   `ptv_glb_views` render of the same LOD: the asset must cover enough of the
   view, show no magenta (missing-texture) pixels, keep at least 30% of the
   reference's colourfulness and gain no more than 30% near-white surface.
+- **Interactions + requirement viewpoints (scenes with grabbables, buttons,
+  challenges, explosives or `verify_viewpoints`):** a FIFTH launch with
+  `debug.ptv.verify_interactions 1`. The engine's `InteractionVerifier`
+  drives the player and the right hand -- its pose replaces the tracked pose
+  at the source, so the drawn hand, its fingertip, its colliders and its
+  velocity all follow; until the viewpoint screenshots (which use the real
+  headset's view, and cull from it throughout) the head pose is replaced the
+  same way by a standing, level one 1.6 m over the scripted feet, facing the
+  way the pass turned the player, so a Full Player Avatar calibrated against
+  a headset lying on a desk neither shrinks until its arms cannot reach the
+  scripted hand nor faces wherever the desk points -- and logs `interact:`
+  lines: every loose prop must
+  move under 3 cm in 3 s untouched (`settle`); the player walks into and past
+  each grabbable, which must move under 1 cm when it rests above the legs
+  (0.55 m; lower ones may meet the shins, reported only) (`walk`); an open
+  hand reaches for each (moving it under 3 cm), closes, lifts, lets go
+  (`grab`, must be held) and the pass puts it back where it started while
+  it is still falling, so it never lands on the next item and charges that
+  item's reach with its knock; an index-finger poke through each button's cap,
+  else the trigger beside it (`press`; a trigger-only press is noted); a
+  pressed button that starts a challenge must start it, spawn targets and run
+  its clock (`challenge`); each explosive is picked up, armed and thrown and
+  must detonate (`explosive`); then both scripted hands are held 35 cm in
+  front of the real eye for a `self_view.jpg` screenshot of the player's own
+  hands (every game with player hands runs this pass for it); and at each
+  scene_review viewpoint (one per
+  place, 0.75 m apart, over walkable floor and at most 3 m above it, spawn
+  first, at most 10) the
+  player stands facing its target while the stage takes a Quest screenshot
+  (`logs/runtime/views_<ts>/`); 0.25 s after placing the rig the pass moves
+  it again by the real eye's horizontal error, because a headset on a desk
+  sits wherever it sits in the play area and once put the camera through
+  the outer wall. The NPC pass also checks each zone-tagged
+  NPC type is first seen inside a zone carrying its tag. Results go into the
+  requirements ledger and `requirements_report.json`
+  ([requirements.md](requirements.md)).
 - **Render health (every Quest game):** FFR's density map reached the render
   pass on every frame (without it nothing draws); a merged static batch that
   dissolved because a "static" member moved, or a GPU allocation that needed
@@ -245,7 +293,7 @@ Output: `runtime_verification.json` (`RuntimeVerification` in
 pass / fail / not applicable / warning and its evidence, the measured
 `performance` medians, the `memory` section, plus
 `logs/runtime/verify_<timestamp>.log` (and `_flow`, `_weapons`, `_textures`,
-`_soak`, `_pressure`). A failed check fails the stage with the exact list,
+`_interactions`, `_soak`, `_pressure`). A failed check fails the stage with the exact list,
 memory failures first. A skipped run (no headset) still records the memory
 estimate as `estimated_safe_not_device_tested` or `at_risk` -- never as
 verified. The APK stays downloadable in every case

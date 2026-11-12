@@ -19,6 +19,12 @@ list(FILTER PTV_RUNTIME_SOURCES EXCLUDE REGEX "/src/platform/android/")
 
 add_library(ptv_runtime STATIC ${PTV_RUNTIME_SOURCES})
 
+# Application.cpp (one translation unit hosting every engine service) is past
+# MSVC's default 65k-section COFF limit (error C1128).
+if(MSVC)
+  target_compile_options(ptv_runtime PRIVATE /bigobj)
+endif()
+
 target_include_directories(ptv_runtime PUBLIC
   "${CMAKE_CURRENT_SOURCE_DIR}/include"
 )

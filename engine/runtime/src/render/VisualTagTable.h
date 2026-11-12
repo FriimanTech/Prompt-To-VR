@@ -76,6 +76,15 @@ struct TagVisuals {
     float placeholder_material_id = 0.0f;
 };
 
+/** Whether an entity with nothing to draw (no mesh, primitive or inline
+ *  mesh) is drawn as a placeholder shape. Only when a tag ASKS for one
+ *  (``ground``, ``door``, ``placeholder`` ...): the old default cube drew
+ *  every logic host, anchor and collider proxy -- the player's finger
+ *  colliders among them, as white boxes over their hands. */
+inline bool draws_meshless(const TagVisuals& v) {
+    return !v.always_hidden && !v.hidden_when_meshless && v.has_placeholder;
+}
+
 /** Resolve every tag on one entity in a single pass.
  *
  *  Earlier rows win for any field already set, so the table's order is its

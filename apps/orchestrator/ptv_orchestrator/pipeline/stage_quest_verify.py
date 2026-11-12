@@ -73,10 +73,15 @@ ARTIFACT = "runtime_verification.json"
 #: Median distance between the DRAWN feet (lowest animated foot joint, less
 #: its bind height above the soles) and the floor for a grounded NPC.
 FEET_TOLERANCE_M = 0.05
+#: A grounded NPC moving vertically faster than this for more than a couple
+#: of samples is climbing or sinking, whatever its feet gap says.
+VERTICAL_DRIFT_MPS = 1.0
 #: A hovering NPC's median sole height may differ from its hover height by this.
 HOVER_TOLERANCE_M = 0.15
 #: Median heading error, while moving, against the travel direction or target.
 FACING_TOLERANCE_DEG = 20.0
+#: Moving samples needed before the facing check judges at all.
+MIN_FACING_SAMPLES = 3
 #: A stationary NPC may sway (idle clip, turning to face) but not walk.
 STATIONARY_DRIFT_M = 0.25
 #: The scripted walk starts this long after launch (engine kSettleS).
@@ -243,11 +248,12 @@ def parse_telemetry(text: str) -> Telemetry:
                     kv[key] = float(kv.get(key, "nan"))
                 except ValueError:
                     kv[key] = math.nan
-            for key in ("feet_gap", "origin_gap", "facing_err_deg"):
+            for key in ("feet_gap", "origin_gap", "facing_err_deg", "vy"):
                 try:
                     kv[key] = float(kv.get(key, "nan"))
                 except ValueError:
                     kv[key] = math.nan
+            kv["_tags"] = [x for x in str(kv.get("tags", "-")).split(",") if x and x != "-"]
             t.status.append(kv)
         elif body.startswith("spawn:"):
             m = _SPAWN.search(body)
@@ -289,6 +295,33 @@ def _inside(regions: list[dict], pos: tuple[float, float, float]) -> bool:
     return any(float(r["min"][0]) - 0.5 <= pos[0] <= float(r["max"][0]) + 0.5
                and float(r["min"][2]) - 0.5 <= pos[2] <= float(r["max"][2]) + 0.5
                for r in regions)
+
+
+#: Behaviours that move an NPC toward / around someone it has NOTICED; with
+#: nobody within sight or hearing it rightly holds its post.
+_ENGAGE_BEHAVIOURS = {"chase", "ranged_attack", "melee_attack", "contact_damage", "take_cover",
+                      "reposition", "guard_point", "flee"}
+
+
+def _moves_expected(npc: Any, behaviours: set[str], samples: list[dict]) -> tuple[bool, str]:
+    """Should this moving NPC have moved during the capture? A patrol always
+    should; an NPC that only engages what it notices should only when the
+    player came within its sight / hearing (the scripted walk stays near
+    the spawn, and an insurgent 50 m away in a hut has no one to engage)."""
+    if "patrol" in behaviours or not behaviours & _ENGAGE_BEHAVIOURS:
+        return True, ""
+    perception = getattr(npc, "perception", None)
+    notice = max(float(getattr(perception, "sight_range_m", 25.0) or 0.0),
+                 float(getattr(perception, "hearing_range_m", 0.0) or 0.0))
+    dists = [float(s["dist_player"]) for s in samples
+             if isinstance(s.get("dist_player"), (int, float)) and not math.isnan(s["dist_player"])]
+    if not dists:
+        return True, ""
+    closest = min(dists)
+    if closest > notice + 1.0:
+        return False, (f"the player never came within its {notice:.0f} m notice range "
+                       f"(closest {closest:.0f} m); it had no one to engage")
+    return True, ""
 
 
 def _clip_names(entity: dict, intents: tuple[str, ...]) -> set[str]:
@@ -373,9 +406,27 @@ def evaluate(tel: Telemetry, npc_plan: Optional[NpcPlan], scene: dict,
                 "stands on the floor", category, ok,
                 f"drawn feet {median:+.2f} m from the floor (median), "
                 f"worst {worst:+.2f} m over {len(gaps)} samples", subject))
+        # A grounded body climbing or sinking steadily is broken even when
+        # its floor probe is fooled: a held rifle once read as "floor" and
+        # the NPC rose 41 m/s while reporting a constant -0.63 m gap.
+        if motor != "flying" and not motor.startswith("hover:"):
+            vys = [s["vy"] for s in samples[2:] if not math.isnan(s.get("vy", math.nan))]
+            if vys:
+                drifting = [v for v in vys if abs(v) > VERTICAL_DRIFT_MPS]
+                checks.append(_check(
+                    "does not drift vertically", category, len(drifting) <= 2,
+                    f"{len(drifting)}/{len(vys)} samples moving vertically faster than "
+                    f"{VERTICAL_DRIFT_MPS:.1f} m/s (worst {max(vys, key=abs):+.2f} m/s)",
+                    subject))
         faced = [s["facing_err_deg"] for s in samples
                  if s["speed"] > 0.3 and not math.isnan(s["facing_err_deg"])]
-        if faced:
+        if 0 < len(faced) < MIN_FACING_SAMPLES:
+            # One sample a second: a single one is as likely mid-turn as not.
+            checks.append(_check(
+                "faces where it is going", category, None,
+                f"only {len(faced)} moving sample(s); {MIN_FACING_SAMPLES} needed to judge",
+                subject))
+        elif faced:
             median = sorted(faced)[len(faced) // 2]
             checks.append(_check(
                 "faces where it is going", category, median <= FACING_TOLERANCE_DEG,
@@ -464,8 +515,11 @@ def evaluate(tel: Telemetry, npc_plan: Optional[NpcPlan], scene: dict,
                         f"{in_gait}/{len(moving_clips)} moving samples in a gait clip", eid))
             elif npc.movement_style.value in ("animated_locomotion", "slide_no_animation"):
                 moved = [s for s in samples if s["speed"] > 0.3]
-                checks.append(_check("moves", "persistent", bool(moved),
-                                     f"{len(moved)} samples faster than 0.3 m/s", eid))
+                outcome, detail = _moves_expected(npc, behaviours, samples)
+                checks.append(_check("moves", "persistent",
+                                     bool(moved) if outcome else None,
+                                     f"{len(moved)} samples faster than 0.3 m/s" if outcome
+                                     else detail, eid))
 
     # --- Encounters -------------------------------------------------------
     enc = npc_plan.encounters
@@ -503,6 +557,9 @@ def evaluate(tel: Telemetry, npc_plan: Optional[NpcPlan], scene: dict,
                 continue
             samples = [x for s in mine for x in status_by_e.get(s["e"], [])]
             floor_and_area(subject, samples, "enemy")
+            band = zone_band_check(npc.asset_id, mine, status_by_e, npc_plan, scene)
+            if band is not None:
+                checks.append(band)
             tmpl_ent = next((e for e in entities if e.get("id") == tmpl_by_asset.get(npc.asset_id)), {})
             if npc.movement_style.value == "stationary":
                 continue
@@ -533,6 +590,47 @@ def evaluate(tel: Telemetry, npc_plan: Optional[NpcPlan], scene: dict,
     summary = (f"{len(npc_plan.npcs)} NPC type(s): {placed} placed at load, "
                f"{len(npc_plan.spawned_asset_ids())} spawned in waves")
     return checks, summary
+
+
+#: How far outside its zone's radius a spawned NPC may first be seen.
+ZONE_SLACK_M = 1.5
+
+
+def zone_band_check(asset_id: str, spawns: list[dict], status_by_e: dict[str, list[dict]],
+                    npc_plan: Any, scene: dict) -> Optional[VerificationCheck]:
+    """An NPC type the plan put in a place ("front_band") is first seen in a
+    zone carrying that tag; None when the plan does not place it."""
+    enc = getattr(npc_plan, "encounters", None)
+    tags = sorted({t for w in (enc.waves if enc else []) for g in w.groups
+                   if g.asset_id == asset_id for t in g.zone_tags})
+    if not tags:
+        return None
+    director = next((b for e in scene.get("entities") or [] for b in e.get("mechanic_bindings") or []
+                     if isinstance(b, dict)
+                     and (b.get("builtin_id") or b.get("id")) == "builtin.encounter_director"), None)
+    zones = [z for z in ((director or {}).get("params") or {}).get("zones") or []
+             if isinstance(z, dict) and ({z.get("id"), *(z.get("tags") or [])} & set(tags))]
+    if not zones:
+        return _check("spawns in its zone", "encounter", False,
+                      f"no npc_spawn_zone carries {tags}", asset_id)
+    inside = total = 0
+    worst = ""
+    for s in spawns:
+        first = next((x["_pos"] for x in status_by_e.get(s["e"], []) if x.get("_pos")), None)
+        if first is None:
+            continue
+        total += 1
+        d = min(math.hypot(first[0] - float(z["position"][0]), first[2] - float(z["position"][2]))
+                - float(z.get("radius") or 2.0) for z in zones)
+        if d <= ZONE_SLACK_M:
+            inside += 1
+        else:
+            worst = f"{s['e']} first seen {d:.1f} m outside its zone(s)"
+    if total == 0:
+        return _check("spawns in its zone", "encounter", None, "no position samples", asset_id)
+    return _check("spawns in its zone", "encounter", inside == total,
+                  f"{inside}/{total} instance(s) inside a zone tagged {tags}"
+                  + (f"; {worst}" if worst else ""), asset_id)
 
 
 #: Extra watching per wave before the last NPC type first appears. In
@@ -695,6 +793,33 @@ def evaluate_hands(text: str, scene: dict) -> list[VerificationCheck]:
                    evidence=(good or [l.strip() for l in lines])[:3])]
 
 
+def evaluate_body_draws(text: str, scene: dict) -> list[VerificationCheck]:
+    """Nothing but the player's own hands / body / held items draws on their
+    hands and feet, and a generated game draws no placeholder boxes
+    (``render_body:`` telemetry). The player's collider proxies once drew as
+    white 0.3 m cubes over every finger, in both Hands Only and Full Player
+    Avatar games, and every other check passed."""
+    lines = [_kv(l.split("render_body:", 1)[1]) for l in text.splitlines()
+             if "render_body:" in l]
+    if not lines:
+        return [_check("nothing draws over the player's hands / body", "base", None,
+                       "no 'render_body:' telemetry (engine built before it existed)")]
+    worst = max(lines, key=lambda kv: int(_f(kv.get("player_draws"))))
+    over = int(_f(worst.get("player_draws")))
+    checks = [_check(
+        "nothing draws over the player's hands / body", "base", over == 0,
+        f"{over} foreign draw(s) at a hand or foot in the worst second"
+        + (f" ({worst.get('names')})" if over else "")
+        + f" over {len(lines)} sample(s)")]
+    if scene.get("prompt_id") or scene.get("environment_builder_id"):
+        boxes = max(int(_f(kv.get("placeholders"))) for kv in lines)
+        checks.append(_check(
+            "no placeholder boxes in a generated game", "base", boxes == 0,
+            f"{boxes} meshless entit(ies) drawn as placeholder boxes in the worst second "
+            "(the log names each one: 'render: ... drawn as a placeholder box')"))
+    return checks
+
+
 #: TextureGallery.h timing (settle, per asset) plus launch slack.
 GALLERY_SETTLE_S = 6.0
 GALLERY_SLOT_S = 4.0
@@ -734,6 +859,12 @@ def evaluate_texture_gallery(ctx: PipelineContext, shots: list[dict[str, Any]],
     if bg_img is None:
         return [_check("texture gallery screenshots", cat, False,
                        "no background screenshot to separate the assets from")]
+    # The second background can land after the first asset appeared (it did:
+    # the blaster read "0.09% of the view" against a background showing the
+    # blaster). Judge each asset against whichever background it differs from.
+    backgrounds = [bg_img] + [img for s in shots if s.get("name") == "background_first"
+                              and s.get("file") for img in [load_rgb(s["file"])]
+                              if img is not None]
     views_tool = None
     root = ctx.settings.engine_dir / "build"
     exe = "ptv_glb_views.exe" if os.name == "nt" else "ptv_glb_views"
@@ -749,7 +880,8 @@ def evaluate_texture_gallery(ctx: PipelineContext, shots: list[dict[str, Any]],
             checks.append(_check("texture shows on the headset", cat, False,
                                  "screenshot missing", subject=name))
             continue
-        stats = screenshot_object_stats(img, bg_img)
+        stats = max((screenshot_object_stats(img, b) for b in backgrounds),
+                    key=lambda s: s.get("share", 0.0))
         ref: dict[str, float] = {}
         glb = ctx.settings.repo_root / entry.get("path", "")
         if views_tool is not None and glb.is_file():
@@ -1227,8 +1359,236 @@ def evaluate_weapons(events: list[dict[str, str]], scene: dict) -> list[Verifica
 
 
 # ---------------------------------------------------------------------------
+# Interactions pass (debug.ptv.verify_interactions): a scripted player settles,
+# walks into, grabs, presses and throws everything -- see
+# engine/runtime/src/core/InteractionVerifier.h.
+# ---------------------------------------------------------------------------
+
+#: A loose prop left alone for three seconds moves less than this.
+SETTLE_TOLERANCE_CM = 3.0
+#: Walking into a prop the body only passes through moves it less than this.
+WALK_TOLERANCE_CM = 1.0
+#: An open hand reaching for an item knocks it less than this.
+REACH_TOLERANCE_CM = 3.0
+#: Props resting this high are out of the legs' way; lower ones meet the
+#: shins, which may push them as a real leg would.
+WALK_BODY_HEIGHT_M = 0.55
+INTERACT_FIXED_S = 30.0
+
+
+def _bound_ids(e: dict) -> list[str]:
+    return [str(b.get("builtin_id") or b.get("id")) for b in e.get("mechanic_bindings") or []
+            if isinstance(b, dict)]
+
+
+def scene_interactives(scene: dict) -> dict[str, list[dict]]:
+    """What the pass exercises, the way the engine collects it."""
+    out: dict[str, list[dict]] = {"props": [], "buttons": [], "challenges": [],
+                                  "explosives": []}
+    for e in scene.get("entities") or []:
+        if not isinstance(e, dict) or "template" in (e.get("tags") or []) or e.get("attached_to"):
+            continue
+        ids = _bound_ids(e)
+        kind = (e.get("physics") or {}).get("kind")
+        if "builtin.grab" in ids and kind == "dynamic" and len(out["props"]) < 16:
+            out["props"].append(e)
+        if "builtin.press_button" in ids:
+            out["buttons"].append(e)
+        if "builtin.target_challenge" in ids:
+            out["challenges"].append(e)
+        if "builtin.explosive" in ids and len(out["explosives"]) < 2:
+            out["explosives"].append(e)
+    return out
+
+
+def interactions_wanted(scene: dict) -> bool:
+    """Anything to interact with or look at -- and every game with player
+    hands, whose ``self_view`` screenshot photographs them."""
+    found = scene_interactives(scene)
+    return (any(found.values()) or bool(scene.get("verify_viewpoints"))
+            or bool((scene.get("player") or {}).get("hands")))
+
+
+def interactions_capture_seconds(scene: dict) -> float:
+    f = scene_interactives(scene)
+    views = min(10, len(scene.get("verify_viewpoints") or [])) + 1  # + self_view
+    return min(420.0, INTERACT_FIXED_S + 4.6 * len(f["props"]) + 2.8 * len(f["buttons"])
+               + 9.5 * len(f["challenges"]) + 9.0 * len(f["explosives"]) + 4.2 * views)
+
+
+def parse_interactions(text: str) -> list[dict[str, str]]:
+    out: list[dict[str, str]] = []
+    for raw in text.splitlines():
+        if "interact:" not in raw:
+            continue
+        body = raw.split("interact:", 1)[1].strip()
+        kv = _kv(body)
+        kv["_event"] = body.split(" ", 1)[0]
+        kv["_text"] = body
+        out.append(kv)
+    return out
+
+
+def evaluate_interactions(events: list[dict[str, str]], scene: dict) -> list[VerificationCheck]:
+    """Every loose prop settles and is never shoved by the body; every
+    grabbable can be reached for without knocking it and then held; every
+    button presses; a button that starts a challenge starts it; every
+    explosive goes off."""
+    cat = "interactions"
+    found = scene_interactives(scene)
+    if not any(found.values()) and not scene.get("verify_viewpoints"):
+        return []
+    begun = [e for e in events if e["_event"] == "begin"]
+    done = [e for e in events if e["_event"] == "done"]
+    checks = [_check("interactions pass ran to the end", cat, bool(begun and done),
+                     "" if done else "no 'interact: done' line (crash, or the capture ended early)",
+                     evidence=[e["_text"] for e in (begun + done)[:2]])]
+    if not begun:
+        return checks
+
+    def by(event: str, name: str) -> Optional[dict]:
+        return next((e for e in events if e["_event"] == event and e.get("e") == name), None)
+
+    for p in found["props"]:
+        name = str(p.get("id"))
+        settle = by("settle", name)
+        if settle is not None:
+            moved = _f(settle.get("moved_cm"))
+            checks.append(_check("stays put when left alone", cat, moved <= SETTLE_TOLERANCE_CM,
+                                 f"moved {moved:.2f} cm in 3 s (tolerance "
+                                 f"{SETTLE_TOLERANCE_CM} cm)", subject=name))
+        walk = by("walk", name)
+        if walk is not None:
+            moved = _f(walk.get("moved_cm"))
+            high = _f(walk.get("height_m")) >= WALK_BODY_HEIGHT_M
+            checks.append(_check(
+                "not pushed by the player's body", cat,
+                (moved <= WALK_TOLERANCE_CM) if high else None,
+                f"moved {moved:.2f} cm when the player walked into it"
+                + ("" if high else f" (rests below {WALK_BODY_HEIGHT_M} m: legs may push it)"),
+                subject=name))
+        grab = by("grab", name)
+        if grab is None:
+            checks.append(_check("can be picked up", cat, False, "the pass never reached it",
+                                 subject=name))
+            continue
+        pushed = _f(grab.get("pushed_cm"))
+        checks.append(_check("not knocked away by a reaching hand", cat,
+                             pushed <= REACH_TOLERANCE_CM,
+                             f"moved {pushed:.2f} cm while the open hand approached",
+                             subject=name))
+        checks.append(_check("can be picked up", cat, grab.get("held") == "1",
+                             grab["_text"], subject=name))
+    pressed: set[str] = set()
+    for b in found["buttons"]:
+        name = str(b.get("id"))
+        ev = by("press", name)
+        how = (ev or {}).get("by", "none")
+        if how != "none":
+            pressed.add(str((ev or {}).get("signal", "")))
+        checks.append(_check("presses", cat, ev is not None and how != "none",
+                             (ev or {}).get("_text", "the pass never reached it"), subject=name))
+        if ev is not None and how == "trigger":
+            checks.append(_check("presses with a fingertip poke", cat, None,
+                                 "pressed by the trigger fallback; the scripted poke did not "
+                                 "register (fingertip not posed on this headset run)",
+                                 subject=name))
+    for c in found["challenges"]:
+        params = next((b.get("params") or {} for b in c.get("mechanic_bindings") or []
+                       if (b.get("builtin_id") or b.get("id")) == "builtin.target_challenge"), {})
+        cid = str(params.get("id") or c.get("id"))
+        ev = next((e for e in events if e["_event"] == "challenge" and e.get("id") == cid), None)
+        if ev is None:
+            checks.append(_check("challenge starts", cat, False, "the pass never reached it",
+                                 subject=cid))
+            continue
+        if ev.get("pressed") != "1":
+            checks.append(_check("challenge starts", cat, None,
+                                 f"its start signal was not pressed: {ev['_text']}", subject=cid))
+            continue
+        running = ev.get("state") in ("running", "countdown", "finished")
+        checks.append(_check("challenge starts", cat, running, ev["_text"], subject=cid))
+        if running:
+            checks.append(_check("challenge spawns targets", cat, int(_f(ev.get("active"))) > 0,
+                                 f"{ev.get('active', '0')} live target(s)", subject=cid))
+            checks.append(_check("challenge clock runs", cat, _f(ev.get("time_left_drop")) > 0.5,
+                                 f"time_left dropped {ev.get('time_left_drop', '0')} s in 1.5 s",
+                                 subject=cid))
+    for x in found["explosives"]:
+        name = str(x.get("id"))
+        ev = by("explosive", name)
+        if ev is None:
+            checks.append(_check("explodes", cat, False, "the pass never reached it",
+                                 subject=name))
+            continue
+        checks.append(_check("can be picked up", cat, ev.get("held") == "1", ev["_text"],
+                             subject=name))
+        checks.append(_check("explodes when armed and thrown", cat, ev.get("detonated") == "1",
+                             ev["_text"], subject=name))
+    return checks
+
+
+def interaction_requirement_results(events: list[dict[str, str]], scene: dict, ledger: Any,
+                                    shots: list[dict[str, Any]]) -> dict[str, tuple[str, list[str]]]:
+    """requirement id -> (outcome, evidence) for interaction / mechanic
+    requirements whose entities this pass exercised, and the viewpoint
+    screenshots taken for the rest."""
+    from .stage_scene_review import entities_for
+
+    out: dict[str, tuple[str, list[str]]] = {}
+    if ledger is None:
+        return out
+    ok_by_entity: dict[str, tuple[bool, str]] = {}
+    for e in events:
+        name = e.get("e")
+        if not name:
+            continue
+        ev = e["_event"]
+        if ev == "grab":
+            ok_by_entity[name] = (e.get("held") == "1", e["_text"])
+        elif ev == "press":
+            ok_by_entity[name] = (e.get("by", "none") != "none", e["_text"])
+        elif ev == "explosive":
+            ok_by_entity[name] = (e.get("detonated") == "1", e["_text"])
+    for r in ledger.requirements:
+        if r.kind.value not in ("interaction", "mechanic"):
+            continue
+        ents = [str(x.get("id")) for x in entities_for(r, scene, ledger)]
+        seen = [ok_by_entity[i] for i in ents if i in ok_by_entity]
+        if not seen:
+            continue
+        outcome = "pass" if any(ok for ok, _ in seen) else "fail"
+        out[r.id] = (outcome, [f"headset: {t}" for _, t in seen][:6])
+    for s in shots:
+        rid = str(s.get("viewpoint", "")).split("__", 1)[0]
+        if rid and ledger.get(rid) is not None and rid not in out and s.get("file"):
+            out[rid] = ("unverified", [f"headset screenshot: {s['file']}"])
+    return out
+
+
+# ---------------------------------------------------------------------------
 # Stage
 # ---------------------------------------------------------------------------
+
+def _record_requirements(ctx: PipelineContext, events: list[dict[str, str]], scene: dict,
+                         shots: list[dict[str, Any]], checks: list[VerificationCheck]) -> None:
+    """Fold what the headset showed into the requirements ledger and write
+    requirements_report.json (pass / fail / unverified per requirement)."""
+    from ptv_schemas.requirements import RequirementOutcome
+
+    from . import requirements_ledger as rl
+
+    ledger = rl.load(ctx.project_dir)
+    if ledger is None:
+        return
+    rl.clear_results(ledger, "quest_runtime_verify")
+    for rid, (outcome, evidence) in interaction_requirement_results(
+            events, scene, ledger, shots).items():
+        rl.record_result(ledger, rid, RequirementOutcome(outcome), evidence,
+                         "quest_runtime_verify")
+    rl.save(ctx.project_dir, ledger)
+    rl.write_report(ctx.project_dir, ledger)
+
 
 def _write(ctx: PipelineContext, result: RuntimeVerification) -> str:
     path = ctx.project_dir / ARTIFACT
@@ -1330,6 +1690,9 @@ def run_with_adb(ctx: PipelineContext, runner: Optional[AdbRunner] = None,
     textures_log_file = log_file.with_name(log_file.stem + "_textures.log")
     textures_text = ""
     gallery_shots: list[dict[str, Any]] = []
+    interact_log_file = log_file.with_name(log_file.stem + "_interactions.log")
+    interact_text = ""
+    view_shots: list[dict[str, Any]] = []
     # Memory pass (Quest 3 PSS).
     mem_samples: list[dict[str, Any]] = []
     gpu_mem: dict[str, float] = {}
@@ -1596,6 +1959,8 @@ def run_with_adb(ctx: PipelineContext, runner: Optional[AdbRunner] = None,
                         waited += 2.0
                         bg = take_shot("background") or first
                         gallery_shots.append({"name": "background", "file": bg})
+                        if first and first != bg:
+                            gallery_shots.append({"name": "background_first", "file": first})
                         bg_taken = True
                     for entry in parse_gallery_lines(text):
                         if entry["index"] in seen:
@@ -1617,6 +1982,73 @@ def run_with_adb(ctx: PipelineContext, runner: Optional[AdbRunner] = None,
                 _, textures_text = adb_s(["logcat", "-d", "-v", "time", "-s", "ptv:*"], 60)
             scan_kills()
             adb_s(["shell", "setprop", "debug.ptv.verify_textures", "0"])
+            adb_s(["shell", "am", "force-stop", package])
+
+        # --- Fifth pass: interactions + requirement viewpoints -----------
+        # A scripted player settles, walks into, grabs, presses and throws
+        # every interactive thing; at each scene_review viewpoint a Quest
+        # screenshot is taken.
+        if interactions_wanted(scene):
+            view_dir = log_dir / f"views_{log_file.stem}"
+            view_dir.mkdir(parents=True, exist_ok=True)
+            adb_s(["shell", "am", "force-stop", package])
+            adb_s(["shell", "setprop", "debug.ptv.verify", "1"])
+            adb_s(["shell", "setprop", "debug.ptv.verify_flow", "0"])
+            adb_s(["shell", "setprop", "debug.ptv.verify_weapons", "0"])
+            adb_s(["shell", "setprop", "debug.ptv.verify_textures", "0"])
+            adb_s(["shell", "setprop", "debug.ptv.verify_interactions", "1"])
+            adb_s(["logcat", "-c"])
+            if streamer is not None:
+                stop_stream = streamer(["-s", serial, "logcat", "-v", "time", "-s", "ptv:*"],
+                                       interact_log_file)
+
+            def view_shot(name: str) -> Optional[Path]:
+                before = set(adb_s(["shell", "ls", "/sdcard/Oculus/Screenshots/"])[1].split())
+                adb_s(["shell", "am", "startservice", "-n",
+                       "com.oculus.metacam/.capture.CaptureService", "-a", "TAKE_SCREENSHOT"])
+                for _ in range(12):
+                    sleep(0.75)
+                    after = adb_s(["shell", "ls", "/sdcard/Oculus/Screenshots/"])[1].split()
+                    fresh = [f for f in after if f not in before and package in f]
+                    if fresh:
+                        local = view_dir / f"{name}.jpg"
+                        adb_s(["pull", f"/sdcard/Oculus/Screenshots/{sorted(fresh)[-1]}",
+                               str(local)], 60)
+                        return local if local.exists() else None
+                return None
+
+            if start_game():
+                budget = interactions_capture_seconds(scene)
+                ctx.emit(stage, "info", f"interactions pass: up to {budget:.0f} s")
+                waited, shot_ids = 0.0, set()
+                while waited < budget:
+                    ctx.raise_if_cancelled()
+                    sleep(1.0)
+                    waited += 1.0
+                    try:
+                        text = interact_log_file.read_text(encoding="utf-8", errors="replace")
+                    except OSError:
+                        text = ""
+                    for ev in parse_interactions(text):
+                        if ev["_event"] != "viewpoint" or ev.get("id") in shot_ids:
+                            continue
+                        shot_ids.add(ev.get("id"))
+                        f = view_shot("self_view" if ev.get("id") == "self_view"
+                                      else f"view_{len(shot_ids):02d}")
+                        view_shots.append({"viewpoint": ev.get("id"), "file": str(f) if f else ""})
+                    if "interact: done" in text:
+                        break
+                    if not still_there():
+                        raise DeviceGone("the headset disconnected during the interactions pass")
+                    if exited():
+                        break
+            if stop_stream is not None:
+                interact_text = stop_stream()
+                stop_stream = None
+            else:
+                _, interact_text = adb_s(["logcat", "-d", "-v", "time", "-s", "ptv:*"], 60)
+            scan_kills()
+            adb_s(["shell", "setprop", "debug.ptv.verify_interactions", "0"])
             adb_s(["shell", "am", "force-stop", package])
 
         # --- Memory soak: the scripted walk for minutes, PSS every 15 s --
@@ -1693,6 +2125,7 @@ def run_with_adb(ctx: PipelineContext, runner: Optional[AdbRunner] = None,
                      ["shell", "setprop", "debug.ptv.verify_flow", "0"],
                      ["shell", "setprop", "debug.ptv.verify_weapons", "0"],
                      ["shell", "setprop", "debug.ptv.verify_textures", "0"],
+                     ["shell", "setprop", "debug.ptv.verify_interactions", "0"],
                      ["shell", "setprop", "debug.ptv.simulate_memory_pressure", "1"],
                      ["shell", "setprop", "debug.oculus.guardian_pause", prev_guardian],
                      ["shell", "am", "broadcast", "-a",
@@ -1713,6 +2146,7 @@ def run_with_adb(ctx: PipelineContext, runner: Optional[AdbRunner] = None,
     checks, npc_summary = evaluate(tel, npc_plan, scene, process_alive=alive,
                                    crash_text=crash_text)
     checks.extend(evaluate_hands(log_text, scene))
+    checks.extend(evaluate_body_draws(log_text, scene))
     checks.extend(evaluate_textures(log_text, scene))
     checks.extend(evaluate_locks(log_text, scene))
     if "Renderer ready" in log_text:
@@ -1730,6 +2164,28 @@ def run_with_adb(ctx: PipelineContext, runner: Optional[AdbRunner] = None,
         if textures_text and not (textures_log_file.exists() and textures_log_file.stat().st_size):
             textures_log_file.write_text(textures_text, encoding="utf-8")
         checks.extend(evaluate_texture_gallery(ctx, gallery_shots, scene))
+    interact_events: list[dict[str, str]] = []
+    if interactions_wanted(scene):
+        if interact_text and not (interact_log_file.exists() and interact_log_file.stat().st_size):
+            interact_log_file.write_text(interact_text, encoding="utf-8")
+        interact_events = parse_interactions(interact_text)
+        checks.extend(evaluate_interactions(interact_events, scene))
+        self_view = next((s for s in view_shots if s.get("viewpoint") == "self_view"), None)
+        req_views = [s for s in view_shots if s.get("viewpoint") != "self_view"]
+        if self_view is not None:
+            checks.append(_check(
+                "the player's own hands photographed (self_view)", "interactions",
+                bool(self_view.get("file")) or None,
+                "both scripted hands 35 cm in front of the eyes"
+                + ("" if self_view.get("file") else "; the screenshot was not captured"),
+                evidence=[self_view["file"]] if self_view.get("file") else []))
+        if req_views:
+            checks.append(_check(
+                "requirement viewpoint screenshots", "interactions",
+                any(s.get("file") for s in req_views),
+                f"{sum(1 for s in req_views if s.get('file'))} of {len(req_views)} captured",
+                evidence=[s["file"] for s in req_views if s.get("file")][:10]))
+    _record_requirements(ctx, interact_events, scene, view_shots, checks)
     if pressure_text and not (pressure_log_file.exists() and pressure_log_file.stat().st_size):
         pressure_log_file.write_text(pressure_text, encoding="utf-8")
     compromises = []

@@ -93,6 +93,14 @@ turned half a turn about Z.
 is the direction the point faces, **+Y** is the item's up. Generated code reads
 `Vec3(m[3])` as the origin and `Vec3(m[2])` as the direction.
 
+**Surface sockets** (`press_surface`, `screen`): **+Z** is the surface normal,
+pointing out of the object toward the person using it. `press_surface` is the
+cap a fingertip pokes (`builtin.press_button` uses its normal and footprint);
+`screen` is the face a `builtin.world_display` writes on. The geometry
+fallback finds a press surface among the top, upward-facing triangles and a
+screen among the triangles facing along the thinnest axis. See
+[interactions.md](interactions.md).
+
 ## Holding (runtime)
 
 `builtin.grab` (`HoldSolver.h`) picks the solve from `CHoldProfile`:

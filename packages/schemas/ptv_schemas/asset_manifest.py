@@ -184,6 +184,10 @@ class AssetItem(StrictModel):
     name: str = Field(..., max_length=128)
     category: AssetCategory
     style_notes: str = Field(..., max_length=2000)
+    satisfies: List[str] = Field(
+        default_factory=list, max_length=16,
+        description="Ids of the requirements (requirements.json) this asset"
+                    " satisfies (it exists, it looks as asked).")
     # What this character is for, when it is one. Read by the reference-image
     # stage to decide pose and by the scene compiler to place the avatar,
     # replacing style_notes keyword matching.

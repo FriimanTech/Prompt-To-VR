@@ -84,6 +84,27 @@ int NavGraph::region_at(const Vec3& p, float snap_radius_m) const {
     return best;
 }
 
+Vec3 NavGraph::nearest_inside(const Vec3& p, float margin_m) const {
+    if (regions_.empty()) return p;
+    for (const auto& r : regions_) {
+        if (r.contains_xz(p)) return p;
+    }
+    int best = -1;
+    float best_d = 0.0f;
+    for (std::size_t i = 0; i < regions_.size(); ++i) {
+        const float d = distance_xz(p, regions_[i].clamp_xz(p));
+        if (best < 0 || d < best_d) {
+            best = static_cast<int>(i);
+            best_d = d;
+        }
+    }
+    const auto& r = regions_[static_cast<std::size_t>(best)];
+    const float mx = std::min(std::max(0.0f, margin_m), 0.5f * (r.max.x - r.min.x));
+    const float mz = std::min(std::max(0.0f, margin_m), 0.5f * (r.max.z - r.min.z));
+    return Vec3(std::clamp(p.x, r.min.x + mx, r.max.x - mx), r.floor_y,
+                std::clamp(p.z, r.min.z + mz, r.max.z - mz));
+}
+
 bool NavGraph::search(int start, int goal, std::vector<int>& out_regions) const {
     out_regions.clear();
     if (start < 0 || goal < 0) return false;

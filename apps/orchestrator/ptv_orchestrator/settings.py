@@ -75,6 +75,20 @@ class Settings(BaseSettings):
     # endpoints are discontinued after 2026-08-17; Google recommends
     # ``gemini-3.1-flash-image`` via ``generate_content``.
     gemini_image_model: str = "gemini-3.1-flash-image"
+    # Output size for character / avatar reference images (``image_config.
+    # image_size``: 1K | 2K | 4K). A T-posed body spans the frame, so at 1K
+    # each hand is ~60 px and Tripo cannot see the fingers.
+    reference_character_image_size: str = "2K"
+    reference_avatar_image_size: str = "4K"
+    # Hands QA (reference image, Tripo multiview, finished mesh): how many
+    # regenerations before keeping the best attempt with a warning.
+    hand_qa_max_retries: int = 2
+    hand_qa_enabled: bool = True
+    # Humanoid characters are reconstructed by Tripo from four views
+    # (image-to-multiview -> multiview-to-model) instead of one image.
+    tripo_multiview_humanoids: bool = True
+    # Held and thrown items are never smaller than this in VR (metres).
+    vr_min_handheld_size_m: float = 0.12
     # Leave empty to use the client's default (v3.1-20260211, Tripo's latest
     # image-to-3D checkpoint). V3 has no server-side default, so an empty
     # value here resolves to that constant rather than omitting the field.
@@ -260,6 +274,13 @@ class Settings(BaseSettings):
     socket_vision_model: str = "gemini-3.8-flash"
     socket_vision_enabled: bool = True
     socket_vision_max_parallel: int = Field(default=6, ge=1, le=32)
+    # scene_review: offline renders of the compiled scene (ptv_scene_views),
+    # deterministic layout checks, then a Gemini vision check per layout /
+    # placement requirement (socket_vision_model). Report-only.
+    scene_review_enabled: bool = True
+    scene_review_vision: bool = True
+    scene_review_max_vision_checks: int = Field(default=16, ge=0, le=80)
+    scene_review_image_size: int = Field(default=768, ge=256, le=2048)
     socket_view_size: int = Field(default=768, ge=256, le=1536)
     # Render-and-verify rounds after the first solve (0 = do not verify).
     socket_verify_rounds: int = Field(default=1, ge=0, le=3)

@@ -29,6 +29,7 @@ from ptv_schemas import (
 )
 from ptv_schemas.asset_manifest import AssetItem, CharacterRole
 
+from . import requirements_ledger as rl
 from .context import PipelineContext, StageResult
 from .llm import make_llm
 from .player_experience import is_player_avatar_item
@@ -173,10 +174,12 @@ def run(ctx: PipelineContext) -> StageResult:
     ctx.build_spec = build_spec
 
     client = make_llm(ctx.settings)
+    ledger_text = rl.brief(rl.load(ctx.project_dir), "asset_manifest")
     resp = client.generate_json(
         prompt=(
             "BuildSpec (JSON):\n"
             + json.dumps(build_spec.model_dump(mode="json"), indent=2)
+            + ("\n\n" + ledger_text if ledger_text else "")
             + "\n\nProduce an AssetManifest JSON object for the assets above."
             + (
                 "\n\nplayer_experience is 'hands_only': plan NO player-avatar"
@@ -274,6 +277,56 @@ def run(ctx: PipelineContext) -> StageResult:
                 "info",
                 f"Hands Only: no player body is generated ({ids})",
             )
+
+    # Every asset / visual requirement needs an item that delivers it.
+    ledger = rl.load(ctx.project_dir)
+    if ledger is not None:
+        known = {r.id for r in ledger.requirements}
+
+        def _claims(m):
+            return rl.merge_claims(
+                rl.claims_from_manifest(m, known),
+                rl.name_claims(ledger, "asset_manifest",
+                               [(i.id, i.name) for i in m.items]))
+
+        missing = rl.gate(ledger, "asset_manifest", _claims(manifest))
+        if missing:
+            ctx.emit(ProjectStage.asset_manifest, "warning",
+                     f"{len(missing)} asset requirement(s) unclaimed; asking again")
+            resp = client.generate_json(
+                prompt=(
+                    "BuildSpec (JSON):\n"
+                    + json.dumps(build_spec.model_dump(mode="json"), indent=2)
+                    + "\n\n" + rl.brief(ledger, "asset_manifest")
+                    + "\n\nYour previous manifest (below) has no item for these"
+                      " requirements. Return the COMPLETE manifest again with items"
+                      " added or extended so each is delivered, listing the ids in"
+                      " `satisfies`:\n" + rl.uncovered_text(missing)
+                    + "\n\nPrevious manifest:\n" + manifest.model_dump_json(indent=1)[:60000]
+                ),
+                schema=AssetManifest.model_json_schema(by_alias=True),
+                system=ASSET_MANIFEST_SYSTEM,
+                model=ctx.settings.claude_light_model,
+            )
+            retry = AssetManifest.model_validate(resp.data)
+            kept_retry, _, _ = _partition(retry.items)
+            if build_spec.player_experience == PlayerExperience.hands_only:
+                kept_retry = [i for i in kept_retry if not is_player_avatar_item(i)]
+            if kept_retry:
+                retry = retry.model_copy(update={"items": kept_retry})
+                retry, _ = normalise_roster_items(retry, build_spec)
+                if not missing_roster_assets(retry, build_spec) or missing_roster_assets(
+                        manifest, build_spec):
+                    manifest = retry
+            missing = rl.gate(ledger, "asset_manifest", _claims(manifest))
+        rl.save(ctx.project_dir, ledger)
+        if missing:
+            msg = ("the asset manifest has no item for these requirements:\n"
+                   + rl.uncovered_text(missing))
+            ctx.store.record_stage(state, ProjectStage.asset_manifest,
+                                   ProjectStatus.failed, message=msg[:400])
+            ctx.emit(ProjectStage.asset_manifest, "failed", msg[:400])
+            raise rl.RequirementGateError(msg)
 
     ctx.asset_manifest = manifest
     art = ctx.store.save_asset_manifest(ctx.project_id, manifest)

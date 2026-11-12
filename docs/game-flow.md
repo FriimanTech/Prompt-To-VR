@@ -71,8 +71,10 @@ to the designer up to `game_design_max_repair_rounds` times:
 - every terminal state has a screen and every screen has a button;
   something always offers Leave Game;
 - `survive_time` needs a duration, `defeat_count` a count and real NPC types,
-  `clear_waves` an encounter, `collect` real assets, `reach_location` a named
-  spawn point;
+  `clear_waves` an encounter that can end (an encounter that repeats --
+  `continuous`, or `waves` with `repeat: true`, "they all respawn once every
+  one is dead" -- never clears, so the objective is removed), `collect` real
+  assets, `reach_location` a named spawn point;
 - a game with no way to end is `free_play`.
 
 Whatever is still incomplete is repaired deterministically, completing only

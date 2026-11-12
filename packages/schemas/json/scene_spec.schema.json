@@ -127,6 +127,27 @@
           ],
           "default": null
         },
+        "placement": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PlacementSpec"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Where it belongs relative to the world. Required for anything that rests on furniture, hangs, mounts on a wall or stands at a world feature."
+        },
+        "satisfies": {
+          "description": "Ids of the requirements (requirements.json) this entity's existence and placement satisfy.",
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 16,
+          "title": "Satisfies",
+          "type": "array"
+        },
         "tags": {
           "items": {
             "type": "string"
@@ -471,6 +492,67 @@
         }
       },
       "title": "PhysicsProps",
+      "type": "object"
+    },
+    "PlacementRelation": {
+      "description": "How an entity relates to the world it sits in.",
+      "enum": [
+        "free",
+        "on_floor",
+        "on_surface",
+        "hang_from",
+        "mount_on_wall",
+        "at_anchor"
+      ],
+      "title": "PlacementRelation",
+      "type": "string"
+    },
+    "PlacementSpec": {
+      "additionalProperties": false,
+      "description": "WHERE an entity belongs, in terms of the world -- not coordinates.\n\nThe scene composer writes this; the world architect builds the furniture\nand declares an anchor (or an anchor SET, for runtime spawns) for every\nrequest; the scene compiler rests the entity on it using the mesh's\nmeasured bounds. Coordinates in ``transform`` are then only a fallback.",
+      "properties": {
+        "anchor": {
+          "default": "",
+          "description": "Id of the world anchor this entity uses, e.g. 'firearms_table_glock'. The world must declare it.",
+          "maxLength": 96,
+          "title": "Anchor",
+          "type": "string"
+        },
+        "anchor_set": {
+          "default": "",
+          "description": "For a TEMPLATE spawned at runtime: id of the world anchor set whose points it is spawned at, e.g. 'lane2_hang_points'.",
+          "maxLength": 96,
+          "title": "Anchor Set",
+          "type": "string"
+        },
+        "count": {
+          "default": 0,
+          "description": "How many points the anchor_set needs.",
+          "maximum": 64,
+          "minimum": 0,
+          "title": "Count",
+          "type": "integer"
+        },
+        "description": {
+          "default": "",
+          "description": "Where it goes in plain words: 'on the left end of the firearms table', 'hanging under the red poles in lane 2'.",
+          "maxLength": 300,
+          "title": "Description",
+          "type": "string"
+        },
+        "group": {
+          "default": "",
+          "description": "Area it belongs to, e.g. 'lane_2', 'firearms_table'.",
+          "maxLength": 64,
+          "title": "Group",
+          "type": "string"
+        },
+        "relation": {
+          "$ref": "#/$defs/PlacementRelation",
+          "default": "free"
+        }
+      },
+      "title": "PlacementSpec",
       "type": "object"
     },
     "PlayerSpawn": {

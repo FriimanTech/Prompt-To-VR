@@ -59,6 +59,7 @@ from ptv_schemas.scene_spec import (
     MechanicBinding,
     MeshRef,
     PhysicsProps,
+    PlacementSpec,
     PlayerSpawn,
     Transform,
 )
@@ -117,6 +118,16 @@ class WireEntity(StrictModel):
     id: IdStr
     name: str = Field(..., max_length=128)
     transform: Transform = Field(default_factory=Transform)
+    placement: Optional[PlacementSpec] = Field(
+        default=None,
+        description="Where it belongs relative to the world (relation + anchor id, or"
+                    " anchor_set + count for a template). Required for anything that"
+                    " rests on furniture, hangs, mounts on a wall or stands at a world"
+                    " feature.")
+    satisfies: List[str] = Field(
+        default_factory=list, max_length=16,
+        description="Ids of the requirements this entity's existence and placement"
+                    " satisfy.")
     mesh: Optional[WireMeshRef] = None
     physics: Optional[PhysicsProps] = None
     mechanic_bindings: List[WireMechanicBinding] = Field(
@@ -183,6 +194,8 @@ def to_scene_spec(wire: WireSceneSpec) -> SceneSpec:
             id=e.id,
             name=e.name,
             transform=e.transform,
+            placement=e.placement,
+            satisfies=list(e.satisfies),
             mesh=(
                 MeshRef(asset_id=e.mesh.asset_id, glb_path=e.mesh.glb_path, sockets={})
                 if e.mesh is not None

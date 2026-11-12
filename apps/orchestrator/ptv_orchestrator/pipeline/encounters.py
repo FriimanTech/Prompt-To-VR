@@ -23,6 +23,8 @@ from typing import Any, Callable, Iterable, Optional
 MIN_ZONE_DISTANCE_M = 12.0
 #: How many zones to derive from nav regions when the world declared none.
 MAX_DERIVED_ZONES = 6
+#: Closest two NPCs placed at load (or an NPC and the player spawn) may stand.
+PERSISTENT_SPACING_M = 0.9
 #: Templates are parked this far below the floor: hidden, not simulated.
 TEMPLATE_PARK_Y = -50.0
 DIRECTOR_ENTITY_ID = "game_director"
@@ -67,8 +69,10 @@ def _apply_npc_stats(e: dict, npc: Any, generated_ai: set[str]) -> list[str]:
         e["health"] = {"max": float(npc.combat.max_health), "invuln_after_hit_s": 0.2}
     if not e.get("faction"):
         e["faction"] = {"id": npc.faction, "hostile_to": list(npc.hostile_to)}
-    if (e.get("physics") or {}).get("kind") in (None, "static", "dynamic") and \
-            npc.movement_style.value != "stationary":
+    # Every NPC is a kinematic capsule, stationary ones included: it is what
+    # a shot hits and what the ground snap positions.
+    if (e.get("physics") or {}).get("kind") in (None, "static", "dynamic") or \
+            (e.get("physics") or {}).get("collision_shape") != "capsule":
         phys = dict(e.get("physics") or {})
         phys.update({"kind": "kinematic", "collision_shape": "capsule"})
         phys.setdefault("mass_kg", 70.0)
@@ -99,6 +103,16 @@ def _apply_npc_stats(e: dict, npc: Any, generated_ai: set[str]) -> list[str]:
         hover = float(getattr(npc.locomotion, "hover_height_m", 0.0) or 0.0)
         if style == "flying" and hover > 0.0:
             loco.setdefault("hover_height_m", hover)
+    elif style == "stationary":
+        # Never travels, but is still the one writer of the NPC's pose: it
+        # stands on the floor (feet planted), plays idle, and an NPC that
+        # fights the player turns to face them.
+        loco = _ensure_binding(e, LOCOMOTION_ID)["params"]
+        loco.setdefault("stationary", True)
+        loco.setdefault("motor", "grounded")
+        loco.setdefault("animated", bool((e.get("mesh") or {}).get("skinned", False)))
+        loco.setdefault("turn_rate_deg_s", float(npc.locomotion.turn_rate_deg_s))
+        loco.setdefault("face_player", "player" in list(npc.hostile_to))
     if has_ai or not moves:
         return bound
     if "follow_leader" in behaviours and not behaviours & {"chase", "melee_attack"}:
@@ -252,7 +266,10 @@ def apply_npc_population(
     if enc is not None and summary["templates"]:
         waves = []
         for w in enc.waves:
-            groups = [{"template": summary["templates"][g.asset_id], "count": int(g.count)}
+            groups = [{"template": summary["templates"][g.asset_id], "count": int(g.count),
+                       "zone_tags": list(getattr(g, "zone_tags", []) or []),
+                       "zone_visibility": getattr(getattr(g, "zone_visibility", None),
+                                                  "value", "prefer_hidden")}
                       for g in w.groups if g.asset_id in summary["templates"]]
             if groups:
                 waves.append({"groups": groups})
@@ -270,6 +287,7 @@ def apply_npc_population(
             "spawn_interval_s": float(enc.spawn_interval_s),
             "inter_wave_delay_s": float(enc.inter_wave_delay_s),
             "min_player_distance_m": float(enc.min_player_distance_m),
+            "repeat": bool(getattr(enc, "repeat", False)),
             "waves": waves,
             "zones": [],
         }
@@ -377,6 +395,24 @@ def place_persistent_npcs(
                and isinstance(a.get("position"), list) and len(a["position"]) >= 3]
     used: set[str] = set()
     npcs = {n.asset_id: n for n in npc_plan.npcs}
+    taken: list[list[float]] = [[float(v) for v in spawn[:3]]]
+
+    def crowded(p: list[float]) -> bool:
+        return any(math.hypot(p[0] - q[0], p[2] - q[2]) < PERSISTENT_SPACING_M for q in taken)
+
+    def spread(p: list[float]) -> list[float]:
+        """A free spot around ``p`` on walkable floor: two companions given
+        the same place stand side by side, not inside each other."""
+        for ring in (1.0, 1.6, 2.4):
+            for k in range(8):
+                a = math.pi / 2 * (k % 4) + (math.pi / 4 if k >= 4 else 0.0)
+                q = [p[0] + ring * PERSISTENT_SPACING_M * math.cos(a), p[1],
+                     p[2] + ring * PERSISTENT_SPACING_M * math.sin(a)]
+                if regions and _region_at(regions, q) is None:
+                    continue
+                if not crowded(q):
+                    return q
+        return p
 
     for aid, ids in persistent.items():
         npc = npcs.get(aid)
@@ -411,6 +447,14 @@ def place_persistent_npcs(
                         f"({pos[0]:.1f}, {pos[2]:.1f}); moved to "
                         f"({moved[0]:.1f}, {moved[2]:.1f})")
                     pos = moved
+            if anchor is None and crowded(pos):
+                moved = spread(pos)
+                if moved is not pos:
+                    notes.append(f"{eid}: shared its spot with another NPC; moved to "
+                                 f"({moved[0]:.1f}, {moved[2]:.1f})")
+                    pos = moved
+            if regions:
+                region = _region_at(regions, pos)
                 if region is not None:
                     lo = region.get("min") or [0, 0, 0]
                     floor = float(region.get("floor_y", lo[1] if len(lo) > 1 else 0.0))
@@ -423,6 +467,7 @@ def place_persistent_npcs(
             foot = float(mesh.get("foot_offset_m") or 0.5 * height)
             pos[1] = floor + foot
             t["position"] = pos
+            taken.append(pos)
             if (npc is not None and npc.role.value == "ally" and anchor is None
                     and math.hypot(pos[0] - float(spawn[0]),
                                    pos[2] - float(spawn[2])) > 8.0):
@@ -450,9 +495,19 @@ def finalize_encounter_zones(doc: dict, on_warning: Optional[WarnFn] = None) -> 
         if on_warning:
             on_warning(f"the world declared no npc_spawn_zones; using {source}")
     b.setdefault("params", {})["zones"] = zones
+    declared = {str(t) for z in zones for t in (z.get("tags") or [])} | \
+               {str(z.get("id")) for z in zones}
+    wanted = {t for w in (b.get("params") or {}).get("waves") or []
+              for g in w.get("groups") or [] for t in g.get("zone_tags") or []}
+    missing = sorted(wanted - declared)
+    if missing and on_warning:
+        on_warning(f"encounter groups spawn in zone tag(s) {missing} that no npc_spawn_zone "
+                   "declares; those groups will use any zone")
     if isinstance(doc.get("encounters"), dict):
         doc["encounters"]["zones"] = len(zones)
         doc["encounters"]["zones_source"] = source
+        if missing:
+            doc["encounters"]["missing_zone_tags"] = missing
     return len(zones)
 
 

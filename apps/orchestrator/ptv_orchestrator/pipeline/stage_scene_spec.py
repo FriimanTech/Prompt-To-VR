@@ -92,12 +92,15 @@ from ptv_schemas import (
     MechanicPlan,
     ProjectStage,
     ProjectStatus,
+    RequirementKind,
     SceneSpec,
     TargetDevice,
 )
 
 from ..settings import Settings
+from . import requirements_ledger as rl
 from .context import PipelineContext, StageResult
+from .placement import world_owned_assets
 from .prompts import scene_spec_system
 from .scene_spec_agent import (
     SceneSpecAgentError,
@@ -272,7 +275,14 @@ def run_with_composer_factory(
         os.environ["OPENAI_API_KEY"] = ctx.settings.openai_api_key
 
     npc_plan = ctx.npc_plan or ctx.store.load_npc_plan(ctx.project_id)
-    static = _StaticContext.build(build_spec, manifest, plan, npc_plan)
+    try:
+        design = ctx.interaction_design or ctx.store.load_interaction_design(ctx.project_id)
+    except Exception:  # noqa: BLE001 - older projects
+        design = None
+    static = _StaticContext.build(
+        build_spec, manifest, plan, npc_plan,
+        world_owned=world_owned_assets(manifest, design, plan, npc_plan, build_spec),
+        ledger=rl.load(ctx.project_dir))
     max_repair_rounds = int(ctx.settings.scene_spec_max_repair_rounds)
 
     max_workers = max(
@@ -393,6 +403,7 @@ def run_with_composer_factory(
         artifacts.extend(job.artifacts)
 
     _remove_stale_scene_specs(ctx, build_spec)
+    _placement_gate(ctx, state, scenes, static.ledger)
     ctx.scene_specs = scenes
     ctx.store.record_stage(
         state,
@@ -403,6 +414,47 @@ def run_with_composer_factory(
     )
     ctx.emit(ProjectStage.scene_spec, "succeeded", f"{len(scenes)} scenes")
     return StageResult(stage=ProjectStage.scene_spec, artifacts=artifacts, data=scenes)
+
+
+def _npc_plan_or_none(ctx: PipelineContext) -> Any:
+    try:
+        return ctx.npc_plan or ctx.store.load_npc_plan(ctx.project_id)
+    except Exception:  # noqa: BLE001 - a game may have no NPC plan
+        return None
+
+
+def _world_owned_ids(ctx: PipelineContext) -> set[str]:
+    try:
+        manifest = ctx.asset_manifest or ctx.store.load_asset_manifest(ctx.project_id)
+        build_spec = ctx.build_spec or ctx.store.load_build_spec(ctx.project_id)
+        plan = ctx.mechanic_plan or ctx.store.load_mechanic_plan(ctx.project_id)
+    except Exception:  # noqa: BLE001
+        return set()
+    try:
+        design = ctx.interaction_design or ctx.store.load_interaction_design(ctx.project_id)
+    except Exception:  # noqa: BLE001 - older projects
+        design = None
+    return world_owned_assets(manifest, design, plan, _npc_plan_or_none(ctx), build_spec)
+
+
+def _placement_gate(ctx: PipelineContext, state: Any, scenes: list[SceneSpec],
+                    ledger: Any) -> None:
+    """Every placement requirement claimed by some scene's entity (the
+    per-scene repair loop already asked; this is the across-scenes check)."""
+    if ledger is None:
+        return
+    known = {r.id for r in ledger.requirements}
+    claims = rl.merge_claims(
+        rl.claims_from_scene_specs(scenes, known),
+        rl.placement_claims(ledger, scenes, _world_owned_ids(ctx), _npc_plan_or_none(ctx)))
+    missing = rl.gate(ledger, "scene_spec", claims)
+    rl.save(ctx.project_dir, ledger)
+    if missing:
+        msg = ("no scene places these requirements:\n" + rl.uncovered_text(missing))
+        ctx.store.record_stage(state, ProjectStage.scene_spec, ProjectStatus.failed,
+                               message=msg[:400])
+        ctx.emit(ProjectStage.scene_spec, "failed", msg[:400])
+        raise rl.RequirementGateError(msg)
 
 
 # ---------------------------------------------------------------------------
@@ -544,6 +596,7 @@ def _finalize_all_existing(
         )
 
     _remove_stale_scene_specs(ctx, build_spec)
+    _placement_gate(ctx, state, scenes, rl.load(ctx.project_dir))
     ctx.scene_specs = scenes
     ctx.store.record_stage(
         state,
@@ -716,6 +769,13 @@ def _compose_one_scene(
             return scene
         repair_message = build_repair_message(issues)
         if attempt >= max_repair_rounds:
+            try:
+                rejected = (ctx.store.dir_for(ctx.project_id) / "logs" /
+                            f"scene_spec.{scene_entry.id}.rejected.json")
+                rejected.parent.mkdir(parents=True, exist_ok=True)
+                rejected.write_text(scene.model_dump_json(indent=2), encoding="utf-8")
+            except Exception:  # noqa: BLE001 - diagnostics only
+                pass
             raise SceneSpecAgentError(
                 f"scene '{scene_entry.id}' failed semantic validation after "
                 f"{max_repair_rounds} repair round(s): " + "; ".join(issues)
@@ -749,13 +809,23 @@ def _validate_scene_semantics(
             "rig and one entity per AssetItem"
         )
 
-    # Asset coverage: every AssetItem must appear at least once as a mesh.
+    # Asset coverage: every AssetItem must appear at least once as a mesh --
+    # except world-owned furniture, which only the world places.
     mesh_asset_ids = {
         e.mesh.asset_id for e in scene.entities if e.mesh is not None
     }
     missing = [
-        a["id"] for a in static.assets_compact if a["id"] not in mesh_asset_ids
+        a["id"] for a in static.assets_compact
+        if a["id"] not in mesh_asset_ids and a["id"] not in static.world_owned
     ]
+    placed_owned = sorted({e.id for e in scene.entities if e.mesh is not None
+                           and e.mesh.asset_id in static.world_owned})
+    if placed_owned:
+        issues.append(
+            "these entities place WORLD-OWNED furniture (the world architect builds it): "
+            f"{placed_owned}. Remove them and give the items that rest on that furniture "
+            "a placement {relation: on_surface, anchor: <id>, description: 'on the ...'}")
+    issues.extend(_placement_issues(scene, static))
     if missing:
         shown = ", ".join(missing[:20]) + (" ..." if len(missing) > 20 else "")
         issues.append(
@@ -790,6 +860,41 @@ def _validate_scene_semantics(
             f"{shown}"
         )
 
+    return issues
+
+
+def _placement_issues(scene: SceneSpec, static: "_StaticContext") -> list[str]:
+    """Placements the world can act on, and the scene's requirement claims."""
+    issues: list[str] = []
+    anchors: dict[str, str] = {}
+    for e in scene.entities:
+        p = e.placement
+        if p is None or p.relation.value == "free":
+            continue
+        is_template = "template" in e.tags
+        if is_template and not p.anchor_set:
+            issues.append(f"'{e.id}' is a template with relation {p.relation.value}: give it "
+                          "an anchor_set (+ count) naming the points it is spawned at")
+        if not is_template and not p.anchor:
+            issues.append(f"'{e.id}' has relation {p.relation.value} but no anchor id")
+        if p.anchor:
+            if p.anchor in anchors:
+                issues.append(f"anchor '{p.anchor}' is used by both '{anchors[p.anchor]}' and "
+                              f"'{e.id}'; every placed item needs its own anchor")
+            anchors[p.anchor] = e.id
+    ledger = static.ledger
+    if ledger is not None and static.single_scene:
+        known = {r.id for r in ledger.requirements}
+        claimed = {rid for e in scene.entities for rid in e.satisfies if rid in known}
+        claimed |= set(rl.placement_claims(ledger, [scene], static.world_owned,
+                                           static.npc_plan))
+        unclaimed = [r for r in ledger.requirements
+                     if r.kind == RequirementKind.placement and r.id not in claimed
+                     and r.priority.value == "must"]
+        if unclaimed:
+            issues.append("no entity claims these placement requirements in `satisfies` "
+                          "(place the items they describe, with the right placement, and "
+                          "list the ids):\n" + rl.uncovered_text(unclaimed))
     return issues
 
 
@@ -841,8 +946,13 @@ def _build_user_message(scene_entry: Any, static: "_StaticContext") -> str:
         + "\n\nOTHER_SCENES (id+name only, for nav tags):\n"
         + _pretty(other_scenes)
         + "\n\nASSETS (every AssetItem must appear at least once in "
-          "entities[]):\n"
+          "entities[], EXCEPT those in WORLD_OWNED_ASSETS):\n"
         + _pretty(static.assets_compact)
+        + "\n\nWORLD_OWNED_ASSETS (static furniture the world architect builds -- "
+          "never emit these; rest items ON them with placements):\n"
+        + _pretty(sorted(static.world_owned))
+        + (("\n\n" + rl.brief(static.ledger, "scene_spec", all_kinds=True))
+           if static.ledger is not None else "")
         + "\n\nMECHANICS (use 'binding_id' as the MechanicBinding "
           "mechanic_id, forward 'config' into params):\n"
         + _pretty(static.mechanics_compact)
@@ -886,6 +996,14 @@ class _StaticContext:
     assets_compact: list[dict[str, Any]]
     mechanics_compact: list[dict[str, Any]]
     npcs_compact: list[dict[str, Any]] = field(default_factory=list)
+    #: Static furniture the world places; never emitted here.
+    world_owned: set[str] = field(default_factory=set)
+    #: requirements.json, when the project has one.
+    ledger: Any = None
+    #: True when this game has one scene (placement requirements are all its).
+    single_scene: bool = True
+    #: The NPC plan (zone-tagged encounter groups claim NPC placements).
+    npc_plan: Any = None
 
     @classmethod
     def build(
@@ -894,6 +1012,8 @@ class _StaticContext:
         manifest: AssetManifest,
         plan: MechanicPlan,
         npc_plan: Any = None,
+        world_owned: Optional[set[str]] = None,
+        ledger: Any = None,
     ) -> "_StaticContext":
         return cls(
             build_spec_meta=_compress_build_spec_meta(build_spec),
@@ -903,6 +1023,10 @@ class _StaticContext:
             assets_compact=[_compress_asset(a) for a in manifest.items],
             mechanics_compact=_compress_mechanics(build_spec, plan),
             npcs_compact=_compress_npcs(npc_plan),
+            world_owned=set(world_owned or ()),
+            ledger=ledger,
+            single_scene=len(build_spec.scenes) <= 1,
+            npc_plan=npc_plan,
         )
 
 

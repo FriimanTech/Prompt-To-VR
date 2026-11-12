@@ -95,6 +95,11 @@ public:
         // for an asset whose clips were authored at an unusual stride.
         ref_walk_override_ = std::max(0.0f, p.value("reference_walk_mps", 0.0f));
         ref_run_override_ = std::max(0.0f, p.value("reference_run_mps", 0.0f));
+        // A stationary NPC (a range target, a sentry, a shopkeeper) is still
+        // stood on the floor, turned and animated by this mechanic -- it is
+        // the one writer of an NPC's pose -- it just never travels.
+        stationary_ = p.value("stationary", false);
+        face_player_ = p.value("face_player", false);
     }
 
     void tick(World& world, std::uint32_t self, float dt,
@@ -120,6 +125,10 @@ public:
         // --- Desired motion -------------------------------------------
         Vec3 wanted = intent.desired_velocity;
         if (!flying || hover_height_ > 0.0f) wanted.y = 0.0f;
+        if (stationary_) {
+            wanted.x = 0.0f;
+            wanted.z = 0.0f;
+        }
         float wanted_speed = glm::length(wanted);
         if (wanted_speed > run_speed_) {
             wanted *= (run_speed_ / wanted_speed);
@@ -162,7 +171,20 @@ public:
         } else if (ground_snap_ && ctx.physics != nullptr) {
             next = ground_vertical(world, ctx, self, transform.position, next,
                                    height, foot, intent.jump_velocity, dt);
+            if (have_floor_ && !airborne_) {
+                last_grounded_ = next;
+                has_last_grounded_ = true;
+            }
             next.y += plant_feet(world, ctx, self, next, height, dt);
+            if (next.y - transform.position.y > 1.0f && rise_warnings_ < 3) {
+                ++rise_warnings_;
+                const std::string* id = world.id_of(static_cast<entt::entity>(self));
+                PTV_WARN("character_locomotion: '{}' rose {:.2f} m in one frame (dt {:.3f}, "
+                         "floor {} at {:.2f}, airborne {}, plant {:.3f})",
+                         id != nullptr ? *id : std::to_string(self),
+                         next.y - transform.position.y, dt, have_floor_ ? "yes" : "no", floor_y_,
+                         airborne_ ? 1 : 0, plant_offset_);
+            }
         }
 
         // The speed ACHIEVED, not the speed requested. A character pressed
@@ -184,6 +206,12 @@ public:
             face = wanted_xz;
         } else if (achieved > kIdleSpeedEpsilon) {
             face = moved;
+        } else if (face_player_ && ctx.hands != nullptr) {
+            const std::uint32_t player = ctx.hands->player_entity();
+            if (player != self && world.valid(player) && world.has<CTransform>(player)) {
+                face = world.get<CTransform>(player).t.position - transform.position;
+                face.y = 0.0f;
+            }
         }
         if (glm::length(face) > 1.0e-4f) {
             transform.rotation =
@@ -213,16 +241,21 @@ private:
                          const Vec3& from_pos, Vec3 next, float height,
                          float foot, float jump_velocity, float dt) {
         PhysicsRayHit hit{};
-        bool has_floor = probe_floor(ctx, self, next, height, hit);
+        bool has_floor = probe_floor(ctx, self, next, height, foot, hit);
 
         // A floor this steep is a wall: undo the horizontal step onto it.
         // Only when it is ABOVE the current floor -- walking down a steep
-        // bank is a fall, handled below.
-        if (has_floor && !airborne_ && hit.normal.y < max_slope_cos_ &&
-            hit.point.y + foot > from_pos.y + 0.05f) {
+        // bank is a fall, handled below. So is a "floor" more than a step
+        // above the one it stands on: a crate or a table top is an obstacle
+        // to walk around, not a step to climb.
+        const bool steep = has_floor && hit.normal.y < max_slope_cos_ &&
+                           hit.point.y + foot > from_pos.y + 0.05f;
+        const bool ledge = has_floor && have_floor_ &&
+                           hit.point.y > floor_y_ + kMaxStepUpM + 0.02f;
+        if (!airborne_ && (steep || ledge)) {
             next.x = from_pos.x;
             next.z = from_pos.z;
-            has_floor = probe_floor(ctx, self, next, height, hit);
+            has_floor = probe_floor(ctx, self, next, height, foot, hit);
             if (!has_floor) {
                 have_floor_ = false;
                 return next;
@@ -241,6 +274,20 @@ private:
         }
 
         if (!has_floor) {
+            // Thrown far above the floor it stood on (something outside the
+            // character moved its body): go back to where it last stood.
+            if (!airborne_ && has_last_grounded_ && next.y > last_grounded_.y + 2.0f) {
+                if (!warned_recover_) {
+                    warned_recover_ = true;
+                    const std::string* id = world.id_of(static_cast<entt::entity>(self));
+                    PTV_WARN("character_locomotion: '{}' lost its floor {:.1f} m up; returned "
+                             "to where it last stood",
+                             id != nullptr ? *id : std::to_string(self),
+                             next.y - last_grounded_.y);
+                }
+                have_floor_ = true;
+                return last_grounded_;
+            }
             // Nothing underneath at all (a scene with no floor here): leave
             // the height alone rather than drop into the void.
             if (!airborne_) return next;
@@ -331,7 +378,7 @@ private:
             return next;
         }
         PhysicsRayHit hit{};
-        if (!probe_floor(ctx, self, next, height + hover_height_, hit)) {
+        if (!probe_floor(ctx, self, next, height + hover_height_, foot + hover_height_, hit)) {
             return next;
         }
         const float target = hit.point.y + hover_height_ + foot;
@@ -339,24 +386,36 @@ private:
         return next;
     }
 
-    /** Floor under ``position``. Ray starts on top of the body so a step up
-     *  is found, reaches below the feet so a step down is too, and ignores
-     *  this body and every other character. */
+    /** Floor under ``position``: level geometry and walkable bodies only
+     *  (``raycast_floor``), never a prop, a character or anything carried.
+     *
+     *  The ray starts just above a climbable step over the SOLES, not at the
+     *  chest: from the chest, a table edge the NPC walked under, a balcony
+     *  overhead or the rifle in its own hands read as floor. Only when that
+     *  finds nothing -- a body spawned with its origin at the floor, soles
+     *  below it -- does it look again from the chest, which with static-only
+     *  floors cannot climb anything that moves with the body. */
     static bool probe_floor(MechanicContext& ctx, std::uint32_t self,
-                            const Vec3& position, float height,
+                            const Vec3& position, float height, float foot,
                             PhysicsRayHit& hit) {
         if (ctx.physics == nullptr) return false;
-        const float half = 0.5f * height;
-        const Vec3 from(position.x, position.y + half, position.z);
-        return ctx.physics->raycast_excluding(self, from,
-                                              Vec3(0.0f, -1.0f, 0.0f),
-                                              2.0f * height + 4.0f, hit,
-                                              /*floor_only=*/true);
+        const Vec3 down(0.0f, -1.0f, 0.0f);
+        const float sole = position.y - foot;
+        const Vec3 low(position.x, sole + kProbeAboveSoleM, position.z);
+        if (ctx.physics->raycast_floor(self, low, down, kProbeAboveSoleM + height + 4.0f,
+                                       hit)) {
+            return true;
+        }
+        const Vec3 high(position.x, position.y + 0.5f * height, position.z);
+        return ctx.physics->raycast_floor(self, high, down, 0.5f * height + foot + 4.0f, hit);
     }
 
     /** A step this high is climbed in one frame; anything taller rises at
      *  ``kMaxRiseMps``. Generous enough for stairs and spawn settling. */
     static constexpr float kMaxStepUpM = 0.35f;
+    /** Floor probes start this far above the soles: over a climbable step,
+     *  under a table top or a held weapon. */
+    static constexpr float kProbeAboveSoleM = 0.5f;
     static constexpr float kMaxRiseMps = 6.0f;
     static constexpr float kTerminalFallMps = 30.0f;
 
@@ -441,6 +500,10 @@ private:
     float turn_in_place_deg_{60.0f};
     bool animated_{true};
     bool ground_snap_{true};
+    int rise_warnings_{0};
+    Vec3 last_grounded_{0.0f};
+    bool has_last_grounded_{false};
+    bool warned_recover_{false};
     Motor motor_{Motor::Grounded};
     float hover_height_{0.0f};
     float gravity_{9.81f};
@@ -448,6 +511,8 @@ private:
     float max_slope_cos_{0.6427876f};
     float ref_walk_override_{0.0f};
     float ref_run_override_{0.0f};
+    bool stationary_{false};
+    bool face_player_{false};
     mutable bool airborne_{false};
     float vertical_speed_{0.0f};
     mutable bool warned_foot_{false};

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from enum import Enum
 from typing import Dict, List, Optional
 
 from pydantic import Field, model_validator
@@ -260,10 +261,64 @@ class EquipSlotSpec(StrictModel):
     )
 
 
+class PlacementRelation(str, Enum):
+    """How an entity relates to the world it sits in."""
+
+    #: Coordinates are authoritative (markers, triggers, the player rig).
+    free = "free"
+    #: Stands on the floor at a world anchor (a button pedestal, an NPC post).
+    on_floor = "on_floor"
+    #: Rests on top of world furniture (a pistol on a table).
+    on_surface = "on_surface"
+    #: Hangs below a world point (a target on a pole from the ceiling).
+    hang_from = "hang_from"
+    #: Its back flat against a wall, facing out (a scoreboard, a poster).
+    mount_on_wall = "mount_on_wall"
+    #: Exactly at a world anchor (its origin there).
+    at_anchor = "at_anchor"
+
+
+class PlacementSpec(StrictModel):
+    """WHERE an entity belongs, in terms of the world -- not coordinates.
+
+    The scene composer writes this; the world architect builds the furniture
+    and declares an anchor (or an anchor SET, for runtime spawns) for every
+    request; the scene compiler rests the entity on it using the mesh's
+    measured bounds. Coordinates in ``transform`` are then only a fallback.
+    """
+
+    relation: PlacementRelation = PlacementRelation.free
+    anchor: str = Field(
+        default="", max_length=96,
+        description="Id of the world anchor this entity uses, e.g."
+                    " 'firearms_table_glock'. The world must declare it.")
+    anchor_set: str = Field(
+        default="", max_length=96,
+        description="For a TEMPLATE spawned at runtime: id of the world anchor set"
+                    " whose points it is spawned at, e.g. 'lane2_hang_points'.")
+    count: int = Field(default=0, ge=0, le=64,
+                       description="How many points the anchor_set needs.")
+    group: str = Field(default="", max_length=64,
+                       description="Area it belongs to, e.g. 'lane_2', 'firearms_table'.")
+    description: str = Field(
+        default="", max_length=300,
+        description="Where it goes in plain words: 'on the left end of the firearms"
+                    " table', 'hanging under the red poles in lane 2'.")
+
+
 class EntitySpec(StrictModel):
     id: IdStr
     name: str = Field(..., max_length=128)
     transform: Transform = Field(default_factory=Transform)
+    placement: Optional[PlacementSpec] = Field(
+        default=None,
+        description="Where it belongs relative to the world. Required for anything"
+                    " that rests on furniture, hangs, mounts on a wall or stands at"
+                    " a world feature.")
+    satisfies: List[str] = Field(
+        default_factory=list, max_length=16,
+        description="Ids of the requirements (requirements.json) this entity's"
+                    " existence and placement satisfy.")
     mesh: Optional[MeshRef] = None
     physics: Optional[PhysicsProps] = None
     mechanic_bindings: List[MechanicBinding] = Field(default_factory=list)

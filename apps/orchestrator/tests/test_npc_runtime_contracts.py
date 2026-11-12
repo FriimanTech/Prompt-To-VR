@@ -156,6 +156,19 @@ def test_persistent_npc_stands_on_the_floor_inside_the_walkable_area() -> None:
     assert any("walkable" in n for n in notes)
 
 
+def test_two_npcs_given_one_spot_stand_apart() -> None:
+    doc = _doc([2.0, 0.0, 1.0])
+    doc["entities"].append({
+        "id": "ally_2", "transform": {"position": [2.0, 0.0, 1.0]},
+        "mesh": {"asset_id": "green_ally", "target_scale_meters": 1.72, "foot_offset_m": 0.86}})
+    notes = place_persistent_npcs(doc, {"green_ally": ["ally_1", "ally_2"]},
+                                  _npc_plan(["follow_leader"]))
+    a, b = (e["transform"]["position"] for e in doc["entities"])
+    assert ((a[0] - b[0]) ** 2 + (a[2] - b[2]) ** 2) ** 0.5 >= 0.9 - 1e-6
+    assert -10 <= b[0] <= 10 and -10 <= b[2] <= 10
+    assert any("shared its spot" in n for n in notes)
+
+
 def test_world_anchor_naming_the_npc_wins() -> None:
     doc = _doc([0.0, 0.0, 1.0], anchors=[
         {"id": "porch", "position": [4.0, 0.25, -3.0], "facing": [1, 0, 0],

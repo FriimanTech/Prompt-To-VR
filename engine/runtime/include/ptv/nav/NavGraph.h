@@ -80,6 +80,11 @@ public:
      *  ``snap_radius_m``. -1 when the point is nowhere near walkable floor. */
     int region_at(const Vec3& p, float snap_radius_m = 2.0f) const;
 
+    /** ``p`` if a region contains it, else the nearest point inside the
+     *  closest region, inset ``margin_m`` from its edge (less for a region
+     *  narrower than twice that). ``p`` when there are no regions. */
+    Vec3 nearest_inside(const Vec3& p, float margin_m) const;
+
     /** Route between two points as a list of world-space corners, starting
      *  at ``from`` and ending at ``to``.
      *

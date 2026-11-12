@@ -119,6 +119,9 @@ def game_design_violations(design: GameDesign, *, prompt: str, npc_plan=None,
                 getattr(npc_plan, "encounters", None) is None:
             problems.append(f"objective '{o.id}' (clear_waves) but the NPC plan has "
                             "no encounter waves")
+        elif o.kind == ObjectiveKind.clear_waves and _endless(npc_plan):
+            problems.append(f"objective '{o.id}' (clear_waves) can never complete: the "
+                            "encounter repeats (they come back once all are defeated)")
         if o.kind == ObjectiveKind.collect:
             bad = [t for t in o.target_ids if t not in asset_ids]
             if not o.target_ids or bad:
@@ -165,6 +168,14 @@ def game_design_violations(design: GameDesign, *, prompt: str, npc_plan=None,
     return problems
 
 
+def _endless(npc_plan) -> bool:
+    """The encounter never runs out: continuous, or waves that repeat."""
+    enc = getattr(npc_plan, "encounters", None)
+    if enc is None:
+        return False
+    return enc.mode.value == "continuous" or bool(getattr(enc, "repeat", False))
+
+
 def repair_game_design(design: GameDesign, *, npc_plan=None) -> tuple[GameDesign, list[str]]:
     """Complete what the design chose, deterministically. Returns notes."""
     d = design.model_copy(deep=True)
@@ -191,6 +202,12 @@ def repair_game_design(design: GameDesign, *, npc_plan=None) -> tuple[GameDesign
         d.failure.append(EndCondition(kind=ConditionKind.lives_exhausted))
         notes.append("added failure: lives exhausted")
 
+    if _endless(npc_plan):
+        endless = [o.id for o in d.objectives if o.kind == ObjectiveKind.clear_waves]
+        if endless:
+            d.objectives = [o for o in d.objectives if o.id not in endless]
+            notes.append(f"removed objective(s) {endless}: the encounter repeats, so the "
+                         "waves are never all cleared")
     ids = {o.id for o in d.objectives}
     for o in d.objectives:
         if o.kind == ObjectiveKind.survive_time and not o.duration_s:
@@ -275,7 +292,8 @@ def fallback_design(build_spec, npc_plan, prompt: str) -> GameDesign:
         lives=Lives(count=3 if attackers else None, provenance=why),
         hud=HudSpec(health=bool(attackers), lives=bool(attackers)),
     )
-    if attackers and getattr(npc_plan, "encounters", None) is not None:
+    if attackers and getattr(npc_plan, "encounters", None) is not None \
+            and not _endless(npc_plan):
         design.objectives.append(Objective(id="clear_waves", kind=ObjectiveKind.clear_waves,
                                            description="Defeat every wave", provenance=why))
         design.victory = EndCondition(kind=ConditionKind.all_objectives,

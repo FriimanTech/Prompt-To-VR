@@ -1,0 +1,201 @@
+{
+  "$defs": {
+    "Requirement": {
+      "additionalProperties": false,
+      "properties": {
+        "acceptance": {
+          "description": "What an observer would see when it is met.",
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 6,
+          "title": "Acceptance",
+          "type": "array"
+        },
+        "id": {
+          "description": "Stable id, e.g. 'req_lane2_timer'.",
+          "pattern": "^[a-z0-9][a-z0-9_.\\-]{0,63}$",
+          "title": "Id",
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/$defs/RequirementKind"
+        },
+        "priority": {
+          "$ref": "#/$defs/RequirementPriority",
+          "default": "must"
+        },
+        "quote": {
+          "description": "The prompt's own words, copied verbatim.",
+          "maxLength": 800,
+          "title": "Quote",
+          "type": "string"
+        },
+        "statement": {
+          "description": "One atomic, checkable statement in plain words.",
+          "maxLength": 400,
+          "title": "Statement",
+          "type": "string"
+        },
+        "subjects": {
+          "description": "The objects, characters or areas it is about, in the prompt's words.",
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 12,
+          "title": "Subjects",
+          "type": "array"
+        }
+      },
+      "required": [
+        "id",
+        "kind",
+        "statement",
+        "quote"
+      ],
+      "title": "Requirement",
+      "type": "object"
+    },
+    "RequirementClaim": {
+      "additionalProperties": false,
+      "description": "One artifact item saying it satisfies a requirement.",
+      "properties": {
+        "item": {
+          "maxLength": 128,
+          "title": "Item",
+          "type": "string"
+        },
+        "note": {
+          "default": "",
+          "maxLength": 300,
+          "title": "Note",
+          "type": "string"
+        },
+        "stage": {
+          "maxLength": 64,
+          "title": "Stage",
+          "type": "string"
+        }
+      },
+      "required": [
+        "stage",
+        "item"
+      ],
+      "title": "RequirementClaim",
+      "type": "object"
+    },
+    "RequirementKind": {
+      "enum": [
+        "asset",
+        "visual",
+        "placement",
+        "layout",
+        "interaction",
+        "mechanic",
+        "rule",
+        "npc"
+      ],
+      "title": "RequirementKind",
+      "type": "string"
+    },
+    "RequirementOutcome": {
+      "enum": [
+        "pass",
+        "fail",
+        "unverified"
+      ],
+      "title": "RequirementOutcome",
+      "type": "string"
+    },
+    "RequirementPriority": {
+      "enum": [
+        "must",
+        "should"
+      ],
+      "title": "RequirementPriority",
+      "type": "string"
+    },
+    "RequirementResult": {
+      "additionalProperties": false,
+      "description": "What was actually observed for one requirement.",
+      "properties": {
+        "evidence": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 20,
+          "title": "Evidence",
+          "type": "array"
+        },
+        "id": {
+          "description": "Snake-case identifier, max 64 chars.",
+          "pattern": "^[a-z0-9][a-z0-9_.\\-]{0,63}$",
+          "title": "Id",
+          "type": "string"
+        },
+        "outcome": {
+          "$ref": "#/$defs/RequirementOutcome",
+          "default": "unverified"
+        },
+        "source": {
+          "default": "",
+          "description": "scene_review | quest_runtime_verify | plan",
+          "maxLength": 64,
+          "title": "Source",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "title": "RequirementResult",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "claims": {
+      "additionalProperties": {
+        "items": {
+          "$ref": "#/$defs/RequirementClaim"
+        },
+        "type": "array"
+      },
+      "title": "Claims",
+      "type": "object"
+    },
+    "notes": {
+      "items": {
+        "type": "string"
+      },
+      "maxItems": 100,
+      "title": "Notes",
+      "type": "array"
+    },
+    "prompt_id": {
+      "maxLength": 128,
+      "title": "Prompt Id",
+      "type": "string"
+    },
+    "requirements": {
+      "items": {
+        "$ref": "#/$defs/Requirement"
+      },
+      "maxItems": 200,
+      "title": "Requirements",
+      "type": "array"
+    },
+    "results": {
+      "additionalProperties": {
+        "$ref": "#/$defs/RequirementResult"
+      },
+      "title": "Results",
+      "type": "object"
+    }
+  },
+  "required": [
+    "prompt_id"
+  ],
+  "title": "RequirementsLedger",
+  "type": "object"
+}

@@ -144,14 +144,22 @@ def run(ctx: PipelineContext) -> StageResult:
 
     attempted = 0
     per_item_errors: list[str] = []
+    humanoids = _humanoid_ids(ctx, manifest)
     for item in pending:
         ctx.raise_if_cancelled()
         item_dir = assets_dir / item.id
         item_dir.mkdir(parents=True, exist_ok=True)
         attempted += 1
         try:
+            img = (_pick_reference_image(ctx.project_dir / "images" / item.id)
+                   if item.strategy.value == "image_to_3d" else None)
+            if img is not None and item.id in humanoids:
+                glb, task_id = _humanoid_model(ctx, client, item, img, item_dir)
+                produced.append(str(glb.relative_to(ctx.settings.repo_root)).replace("\\", "/"))
+                _write_task_record(item_dir, item.id, task_id)
+                ctx.emit(ProjectStage.tripo_models, "info", f"{item.id}: success")
+                continue
             if item.strategy.value == "image_to_3d":
-                img = _pick_reference_image(ctx.project_dir / "images" / item.id)
                 if img is None:
                     ctx.store.append_log(
                         ctx.project_id,
@@ -222,6 +230,137 @@ def run(ctx: PipelineContext) -> StageResult:
     )
     ctx.emit(ProjectStage.tripo_models, "succeeded", message)
     return StageResult(stage=ProjectStage.tripo_models, artifacts=produced)
+
+
+def _humanoid_ids(ctx: PipelineContext, manifest) -> set[str]:
+    """Characters posed in a T-pose for their reference: the ones whose
+    hands are reconstructed (multiview) and checked."""
+    from ptv_schemas.asset_manifest import ReferencePose
+
+    from .stage_reference_images import _npc_asset_ids, resolve_pose
+
+    npc_ids = _npc_asset_ids(ctx)
+    return {i.id for i in manifest.items
+            if resolve_pose(i, npc_ids) == ReferencePose.t_pose}
+
+
+def _vision_client(ctx: PipelineContext):
+    if not (ctx.settings.hand_qa_enabled and ctx.settings.google_api_key):
+        return None
+    from ptv_providers.gemini_vision_client import GeminiVisionClient, GeminiVisionConfig
+
+    v = GeminiVisionClient(GeminiVisionConfig(api_key=ctx.settings.google_api_key,
+                                              model=ctx.settings.socket_vision_model))
+    return v if v.is_available() else None
+
+
+def _views_tool(ctx: PipelineContext) -> Path | None:
+    import sys
+
+    exe = "ptv_glb_views.exe" if sys.platform == "win32" else "ptv_glb_views"
+    build = ctx.settings.engine_dir / "build"
+    if not build.exists():
+        return None
+    found = sorted(build.rglob(exe), key=lambda p: p.stat().st_mtime, reverse=True)
+    return found[0] if found else None
+
+
+def _humanoid_model(ctx: PipelineContext, client: TripoClient, item, img: Path,
+                    item_dir: Path) -> tuple[Path, str]:
+    """A humanoid character: four views (image-to-multiview) whose hands are
+    checked, a model from them (multiview-to-model), close-ups of the
+    model's hands checked; each check retried up to ``hand_qa_max_retries``
+    times, then the best attempt is kept with a loud warning. Falls back to
+    single-image reconstruction when multiview is off or fails."""
+    import shutil
+
+    from ptv_providers import ProviderCallError
+
+    from . import hand_qa
+
+    stage = ProjectStage.tripo_models
+    tries = 1 + max(0, int(ctx.settings.hand_qa_max_retries))
+    vision = _vision_client(ctx)
+    tool = _views_tool(ctx) if vision is not None else None
+    work_root = ctx.project_dir / "builds" / "hand_qa" / item.id
+    record: dict = {"asset_id": item.id, "multiview": bool(ctx.settings.tripo_multiview_humanoids),
+                    "views": [], "meshes": []}
+
+    mv_task = None
+    if ctx.settings.tripo_multiview_humanoids:
+        view_attempts: list[tuple[hand_qa.HandReport, str]] = []
+        for n in range(tries):
+            ctx.raise_if_cancelled()
+            try:
+                task, views = client.image_to_multiview(
+                    image_path=img, out_dir=work_root / f"views{n}")
+            except ProviderCallError as exc:
+                ctx.emit(stage, "warning",
+                         f"{item.id}: image-to-multiview failed ({exc}); single-image model")
+                break
+            rep = (hand_qa.check_views(vision, views) if vision is not None
+                   else hand_qa.HandReport(source="multiview", passed=True, score=1.0,
+                                           error="not checked"))
+            view_attempts.append((rep, task))
+            record["views"].append(dict(rep.as_dict(), task_id=task))
+            ctx.emit(stage, "info", f"{item.id}: multiview hand check {n + 1}/{tries}: "
+                     + ("pass" if rep.passed else f"score {rep.score:.2f}"))
+            if rep.passed or (rep.error and not rep.hands):
+                break
+        if view_attempts:
+            mv_task = view_attempts[hand_qa.best([r for r, _ in view_attempts])][1]
+
+    meshes: list[tuple[hand_qa.HandReport, Path, str]] = []
+    for n in range(tries):
+        ctx.raise_if_cancelled()
+        out = work_root / f"model{n}"
+        if mv_task is not None:
+            try:
+                result = client.multiview_to_model(
+                    multiview_task_id=mv_task, out_dir=out,
+                    texture_quality=item.tripo.texture_quality.value,
+                    face_limit=item.tripo.face_limit)
+            except ProviderCallError as exc:
+                ctx.emit(stage, "warning",
+                         f"{item.id}: multiview-to-model failed ({exc}); single-image model")
+                mv_task = None
+                result = client.image_to_model(
+                    image_path=img, out_dir=out,
+                    texture_quality=item.tripo.texture_quality.value,
+                    face_limit=item.tripo.face_limit)
+        else:
+            result = client.image_to_model(
+                image_path=img, out_dir=out,
+                texture_quality=item.tripo.texture_quality.value,
+                face_limit=item.tripo.face_limit)
+        glb = result.primary_glb
+        if glb is None:
+            raise ProviderCallError(f"{item.id}: Tripo returned no GLB")
+        if vision is None or tool is None:
+            meshes.append((hand_qa.HandReport(source="mesh", passed=True, score=1.0,
+                                              error="not checked"), glb, result.task_id))
+            break
+        rep = hand_qa.check_mesh(vision, tool, glb, out / "hand_views")
+        meshes.append((rep, glb, result.task_id))
+        record["meshes"].append(dict(rep.as_dict(), task_id=result.task_id))
+        ctx.emit(stage, "info", f"{item.id}: mesh hand check {n + 1}/{tries}: "
+                 + ("pass" if rep.passed else f"score {rep.score:.2f}")
+                 + (f" ({rep.error})" if rep.error else ""))
+        if rep.passed or (rep.error and not rep.hands):
+            break
+
+    pick = hand_qa.best([r for r, _, _ in meshes])
+    rep, glb, task_id = meshes[pick]
+    final = item_dir / "model.glb"
+    shutil.copyfile(glb, final)
+    record.update({"chosen": pick, "passed": rep.passed, "task_id": task_id})
+    (item_dir / "hand_qa.json").write_text(json.dumps(record, indent=2), encoding="utf-8")
+    if not rep.passed:
+        msg = (f"HANDS: {item.id}: no mesh passed the hand check after {len(meshes)} "
+               f"attempt(s); keeping the best (score {rep.score:.2f}). {rep.critique[:200]}")
+        ctx.emit(stage, "warning", msg[:300])
+        ctx.store.append_log(ctx.project_id, "tripo_models", msg)
+    return final, task_id
 
 
 def _write_task_record(item_dir: Path, asset_id: str, task_id: str) -> None:

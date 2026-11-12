@@ -45,8 +45,11 @@ namespace {
 // flicker between held and dropped while the grip rests near it.
 constexpr float kGrabPress = 0.7f;
 constexpr float kGrabRelease = 0.4f;
-// Reach. Roughly a palm's width around the hand origin.
+// Reach. Roughly a palm's width around the hand origin, for an item with no
+// collider to measure against.
 constexpr float kGrabRadius = 0.18f;
+// Reach beyond an item's collider surface: the palm can close on it.
+constexpr float kGrabSurfaceReach = 0.10f;
 // How close the second hand must be to an item's support socket to steady
 // it rather than take it.
 constexpr float kSupportRadius = 0.16f;
@@ -56,10 +59,16 @@ constexpr float kSupportBreakSlack = 0.15f;
 
 constexpr std::uint32_t kNone = InputSnapshot::kInvalidEntity;
 
-/** Nearest entity tagged "grabbable" within ``max_dist`` of ``pos``. */
-std::uint32_t find_grabbable(World& world, const Vec3& pos, float max_dist) {
+/** Nearest entity tagged "grabbable" the hand at ``pos`` can reach.
+ *
+ *  Reach is measured to the item's COLLIDER when it has one -- a 1 m rifle
+ *  is reachable at its stock, not only within 18 cm of its middle -- and to
+ *  its origin otherwise. Among items the hand is already inside, the one
+ *  whose centre is closest wins. */
+std::uint32_t find_grabbable(World& world, const Vec3& pos, float max_dist,
+                             const IPhysicsAccess* physics) {
     entt::entity best = entt::null;
-    float best_d2 = max_dist * max_dist;
+    float best_score = 1.0e30f;
     auto view = world.registry().view<const CTransform, const CTag>();
     for (auto e : view) {
         const auto& tags = view.get<const CTag>(e).tags;
@@ -84,10 +93,21 @@ std::uint32_t find_grabbable(World& world, const Vec3& pos, float max_dist) {
             }
         }
         const auto& ct = view.get<const CTransform>(e).t;
-        const Vec3 dp = ct.position - pos;
-        const float d2 = glm::dot(dp, dp);
-        if (d2 < best_d2) {
-            best_d2 = d2;
+        const float origin_d = glm::length(ct.position - pos);
+        const float surface_d =
+            physics != nullptr
+                ? physics->distance_to_body(static_cast<std::uint32_t>(e), pos)
+                : -1.0f;
+        float score = 0.0f;
+        if (surface_d >= 0.0f) {
+            if (surface_d > std::min(max_dist, kGrabSurfaceReach)) continue;
+            score = surface_d + 0.01f * origin_d;
+        } else {
+            if (origin_d > max_dist) continue;
+            score = origin_d;
+        }
+        if (score < best_score) {
+            best_score = score;
             best = e;
         }
     }
@@ -232,7 +252,7 @@ private:
     void try_grab(World& world, int h, const InputSnapshot::HandState& hand,
                   MechanicContext& ctx) {
         const std::uint32_t target =
-            find_grabbable(world, hand.hand_position, radius_m_);
+            find_grabbable(world, hand.hand_position, radius_m_, ctx.physics);
         if (target == kNone) return;
         attach_hold(world, h, target, hand, ctx);
     }

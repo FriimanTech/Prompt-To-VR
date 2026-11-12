@@ -31,9 +31,18 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
 
-from ptv_schemas import ProjectStage, ProjectStatus
+from ptv_schemas import ProjectStage, ProjectStatus, RequirementKind, SceneSpec
 
 from ..build.cmake_runner import configure_and_build
+from . import requirements_ledger as rl
+from .placement import (
+    bounds_m_from_glb,
+    placement_requests,
+    requirement_claim_problems,
+    requests_brief,
+    validate_anchors,
+    world_owned_assets,
+)
 from .bounds import (
     GeneratedBoundsError,
     assert_world_path_allowed,
@@ -212,6 +221,31 @@ def _env_brief(job: EnvironmentJob, total: int) -> list[str]:
     return lines
 
 
+def _zoned_groups(plan: Any) -> dict[str, tuple[list[str], str]]:
+    """zone tag -> (NPC types spawning there, the prompt's words)."""
+    out: dict[str, tuple[list[str], str]] = {}
+    enc = getattr(plan, "encounters", None) if plan is not None else None
+    if enc is None:
+        return out
+    for w in enc.waves:
+        for g in w.groups:
+            for tag in g.zone_tags:
+                who, quote = out.setdefault(tag, ([], g.zone_quote))
+                if g.asset_id not in who:
+                    who.append(g.asset_id)
+                if not quote and g.zone_quote:
+                    out[tag] = (who, g.zone_quote)
+    return out
+
+
+def _zone_tag_problems(doc: dict, required: list[str]) -> list[str]:
+    """Every zone tag the NPC plan spawns groups in must be declared."""
+    declared = {str(t) for z in doc.get("npc_spawn_zones") or [] if isinstance(z, dict)
+                for t in [z.get("id"), *(z.get("tags") or [])]}
+    return [f"no npc_spawn_zone carries the tag '{t}' the encounter spawns a group in"
+            for t in required if t not in declared]
+
+
 def _npc_brief(ctx: PipelineContext) -> list[str]:
     """Tell the architect that NPCs arrive during play, so it declares the
     entrances the encounter director spawns them through."""
@@ -231,7 +265,18 @@ def _npc_brief(ctx: PipelineContext) -> list[str]:
             and not getattr(n, "persistent_count", 0))
     ]
     lines: list[str] = []
-    if arriving:
+    zoned = _zoned_groups(plan)
+    if arriving and zoned:
+        lines.append(
+            "NPCs ARRIVE DURING PLAY in this game, in PLACES THE PROMPT NAMES. Declare "
+            "npc_spawn_zone(s) carrying EACH of these tags (required; the encounter "
+            "director spawns each group only in zones with its tag), on walkable floor "
+            "inside a nav_region, sized to the place (a band across a lane is a row of "
+            "zones or one wide zone):\n"
+            + "\n".join(f"  - tag '{tag}': {', '.join(who)}"
+                        + (f" (prompt: \"{quote[:140]}\")" if quote else "")
+                        for tag, (who, quote) in zoned.items()))
+    elif arriving:
         lines.append(
             "NPCs ARRIVE DURING PLAY in this game "
             f"({', '.join(arriving)}). Declare at least 3 npc_spawn_zone "
@@ -355,6 +400,14 @@ def run_with_architect(
 
     guide = _read_engine_guide(ctx)
     build_excerpt = _build_spec_excerpt(ctx)
+    ledger = rl.load(ctx.project_dir)
+    try:
+        _plan = ctx.npc_plan or ctx.store.load_npc_plan(ctx.project_id)
+    except Exception:  # noqa: BLE001 - an older project may have no plan
+        _plan = None
+    # One environment hosts the encounter when there is only one; in a
+    # multi-environment game the brief asks and scene_compile warns.
+    required_zone_tags = [] if multi_env else list(_zoned_groups(_plan))
 
     # Cross-scene structure is checked BEFORE any agent runs, because these
     # problems are the planner's, not the architect's: a link to a scene that
@@ -425,6 +478,24 @@ def run_with_architect(
             extra.extend(_env_brief(job, len(jobs)))
         extra.extend(_npc_brief(ctx))
         extra.extend(_objective_brief(ctx))
+        # What gameplay needs from this world: anchors for every placement
+        # request, and the layout requirements it owns.
+        requests = _placement_requests(ctx, job.scene_id if job is not None else None,
+                                       asset_map)
+        extra.extend(requests_brief(requests))
+        layout_reqs = [r for r in (ledger.requirements if ledger is not None else [])
+                       if r.kind == RequirementKind.layout]
+        if layout_reqs:
+            extra.append(
+                "LAYOUT REQUIREMENTS (required): build each of these and record how with "
+                "w.satisfies(\"<id>\", \"<how, with the real numbers>\"):\n"
+                + "\n".join(f"  - {r.id}: {r.statement} (prompt: \"{r.quote[:160]}\")"
+                            for r in layout_reqs))
+        extra.append(
+            "FURNITURE the game needs (world_builds_it: true in the asset list) is YOURS "
+            "to place with place_object, where the prompt says, at its real size "
+            "(asset_size tells you how big it is). place_object rests an object's BASE at "
+            "position.y by default -- put a table at the floor height, never its centre.")
 
         inp = WorldAgentInput(
             project_id=project_id,
@@ -565,6 +636,31 @@ def run_with_architect(
                 message = build_validation_repair_message(reason)
                 continue
 
+            # Gameplay's contract with this world: every requested anchor on
+            # real, supporting geometry, every layout requirement claimed.
+            # The LAST attempt's world is kept even with problems (a world
+            # without two anchors beats the fallback box); scene_compile then
+            # fails loudly naming what is missing.
+            try:
+                emitted = json.loads(env_scene_path.read_text(encoding="utf-8"))
+            except Exception:  # noqa: BLE001 - validated just above
+                emitted = {}
+            contract = (validate_anchors(emitted, requests)
+                        + requirement_claim_problems(emitted, layout_reqs)
+                        + _zone_tag_problems(emitted, required_zone_tags))
+            if contract and attempt < max_rounds:
+                last_error = f"{len(contract)} placement/requirement problem(s)"
+                _log("CONTRACT PROBLEMS:\n" + "\n".join(contract))
+                ctx.emit(ProjectStage.world_generation, "invalid_scene",
+                         f"{label}: {contract[0]}"[:200])
+                message = build_validation_repair_message(
+                    "The world compiles but does not give gameplay what it needs. Fix "
+                    "ALL of these and return the COMPLETE files again:\n"
+                    + "\n".join(f"- {p}" for p in contract[:40]))
+                continue
+            for p in contract:
+                ctx.emit(ProjectStage.world_generation, "warning", f"{label}: {p}"[:240])
+
             _log(f"SUCCESS in {attempt} attempt(s): {reason}")
             return EnvironmentResult(
                 job=job or _placeholder_job(),
@@ -638,6 +734,27 @@ def run_with_architect(
         )
         ctx.emit(ProjectStage.world_generation, "failed", "no world produced")
         raise RuntimeError(f"world_generation failed: {detail}")
+
+    # Layout requirements are the world's: record who claimed them, and fail
+    # (after every environment's repair rounds) when one is left unclaimed.
+    if ledger is not None:
+        world_docs = []
+        for art in artifacts:
+            try:
+                world_docs.append(json.loads((repo_root / art).read_text(encoding="utf-8")))
+            except Exception:  # noqa: BLE001
+                continue
+        missing = rl.gate(ledger, "world_generation",
+                          rl.claims_from_world(world_docs, {r.id for r in ledger.requirements}))
+        rl.save(ctx.project_dir, ledger)
+        if missing:
+            msg = ("the world does not address these layout requirements:\n"
+                   + rl.uncovered_text(missing))
+            _wlog(msg)
+            ctx.store.record_stage(state, ProjectStage.world_generation,
+                                   ProjectStatus.failed, message=msg[:400])
+            ctx.emit(ProjectStage.world_generation, "failed", msg[:400])
+            raise rl.RequirementGateError(msg)
 
     # A single environment falling back is survivable; the project still
     # boots, and the message says which one so it can be regenerated alone.
@@ -1524,6 +1641,7 @@ def _load_object_assets(ctx: PipelineContext) -> tuple[dict[str, dict], list[dic
         manifest = ctx.store.load_asset_manifest(ctx.project_id)
     except Exception:
         return asset_map, listing
+    world_owned = _world_owned(ctx, manifest)
     for item in manifest.items:
         cat = getattr(item.category, "value", str(item.category))
         if cat == "environment":
@@ -1532,24 +1650,69 @@ def _load_object_assets(ctx: PipelineContext) -> tuple[dict[str, dict], list[dic
         info = norm.get(item.id) if isinstance(norm, dict) else None
         if isinstance(info, dict):
             glb = info.get("glb_path", "") or ""
+        bounds = None
         if glb:
             asset_map[item.id] = {
                 "glb_path": glb,
                 "target_scale_meters": float(item.target_scale_meters),
             }
-        listing.append(
-            {
-                "id": item.id,
-                "name": item.name,
-                "category": cat,
-                "target_scale_meters": float(item.target_scale_meters),
-                # The scene already places this as something the player
-                # interacts with; do NOT place decorative copies of it.
-                "gameplay_owned": item.id in owned,
-                "notes": (item.style_notes or "")[:300],
-            }
-        )
+            # Measured size, so place_object rests it by its BASE and the
+            # architect can build around real dimensions. Characters stand
+            # by their model frame instead and are never world-placed props.
+            if cat != "character":
+                p = Path(glb)
+                p = p if p.is_absolute() else ctx.settings.repo_root / p
+                bounds = bounds_m_from_glb(p, float(item.target_scale_meters))
+                if bounds is not None:
+                    asset_map[item.id].update(bounds)
+        entry = {
+            "id": item.id,
+            "name": item.name,
+            "category": cat,
+            "target_scale_meters": float(item.target_scale_meters),
+            # The scene already places this as something the player
+            # interacts with; do NOT place decorative copies of it.
+            "gameplay_owned": item.id in owned,
+            # Static furniture the GAME needs and only you place (tables,
+            # racks, consoles, posts): build it where the prompt says.
+            "world_builds_it": item.id in world_owned,
+            "notes": (item.style_notes or "")[:300],
+        }
+        if bounds is not None:
+            entry["size_m"] = [round(bounds["aabb_max"][i] - bounds["aabb_min"][i], 3)
+                               for i in range(3)]
+        listing.append(entry)
     return asset_map, listing
+
+
+def _world_owned(ctx: PipelineContext, manifest: Any) -> set[str]:
+    try:
+        design = ctx.interaction_design or ctx.store.load_interaction_design(ctx.project_id)
+    except Exception:  # noqa: BLE001 - older projects
+        design = None
+    try:
+        npc_plan = ctx.npc_plan or ctx.store.load_npc_plan(ctx.project_id)
+    except Exception:  # noqa: BLE001
+        npc_plan = None
+    try:
+        build_spec = ctx.build_spec or ctx.store.load_build_spec(ctx.project_id)
+    except Exception:  # noqa: BLE001
+        build_spec = None
+    return world_owned_assets(manifest, design, None, npc_plan, build_spec)
+
+
+def _placement_requests(ctx: PipelineContext, scene_id: Optional[str],
+                        asset_map: dict[str, dict]) -> list[dict]:
+    """The anchors this environment's scene(s) need declared."""
+    specs = []
+    for path in sorted(ctx.project_dir.glob("scene_spec.*.json")):
+        try:
+            spec = SceneSpec.model_validate(json.loads(path.read_text(encoding="utf-8")))
+        except Exception:  # noqa: BLE001
+            continue
+        if scene_id is None or spec.scene_id == scene_id:
+            specs.append(spec)
+    return placement_requests(specs, asset_map)
 
 
 def _read_engine_guide(ctx: PipelineContext) -> str:

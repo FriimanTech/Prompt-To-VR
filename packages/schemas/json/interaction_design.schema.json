@@ -151,6 +151,143 @@
       "title": "DecisionSource",
       "type": "string"
     },
+    "DestructibleEffect": {
+      "enum": [
+        "shatter",
+        "explode",
+        "knock_down",
+        "vanish"
+      ],
+      "title": "DestructibleEffect",
+      "type": "string"
+    },
+    "DestructibleSpec": {
+      "additionalProperties": false,
+      "description": "Something shot / blown up that BREAKS (``builtin.destructible``).",
+      "properties": {
+        "effect": {
+          "$ref": "#/$defs/DestructibleEffect",
+          "default": "shatter"
+        },
+        "explosion_damage": {
+          "default": true,
+          "title": "Explosion Damage",
+          "type": "boolean"
+        },
+        "max_health": {
+          "default": 50.0,
+          "exclusiveMinimum": 0.0,
+          "maximum": 100000.0,
+          "title": "Max Health",
+          "type": "number"
+        },
+        "provenance": {
+          "$ref": "#/$defs/Provenance"
+        },
+        "respawn_after_s": {
+          "default": 0.0,
+          "maximum": 3600.0,
+          "minimum": 0.0,
+          "title": "Respawn After S",
+          "type": "number"
+        }
+      },
+      "title": "DestructibleSpec",
+      "type": "object"
+    },
+    "ExplosiveActivation": {
+      "enum": [
+        "pull_pin_trigger",
+        "button",
+        "on_impact"
+      ],
+      "title": "ExplosiveActivation",
+      "type": "string"
+    },
+    "ExplosiveKind": {
+      "enum": [
+        "frag",
+        "flash",
+        "smoke",
+        "impact",
+        "sticky"
+      ],
+      "title": "ExplosiveKind",
+      "type": "string"
+    },
+    "ExplosiveSpec": {
+      "additionalProperties": false,
+      "description": "A thrown explosive (``builtin.explosive``).",
+      "properties": {
+        "activation": {
+          "$ref": "#/$defs/ExplosiveActivation",
+          "default": "pull_pin_trigger"
+        },
+        "damage": {
+          "default": 120.0,
+          "maximum": 100000.0,
+          "minimum": 0.0,
+          "title": "Damage",
+          "type": "number"
+        },
+        "flash_radius_m": {
+          "default": 10.0,
+          "maximum": 100.0,
+          "minimum": 0.0,
+          "title": "Flash Radius M",
+          "type": "number"
+        },
+        "fuse_s": {
+          "default": 3.0,
+          "maximum": 30.0,
+          "minimum": 0.0,
+          "title": "Fuse S",
+          "type": "number"
+        },
+        "hurts_player": {
+          "default": false,
+          "title": "Hurts Player",
+          "type": "boolean"
+        },
+        "impulse": {
+          "default": 12.0,
+          "maximum": 10000.0,
+          "minimum": 0.0,
+          "title": "Impulse",
+          "type": "number"
+        },
+        "inner_radius_m": {
+          "default": 1.5,
+          "maximum": 100.0,
+          "minimum": 0.0,
+          "title": "Inner Radius M",
+          "type": "number"
+        },
+        "kind": {
+          "$ref": "#/$defs/ExplosiveKind",
+          "default": "frag"
+        },
+        "provenance": {
+          "$ref": "#/$defs/Provenance"
+        },
+        "radius_m": {
+          "default": 6.0,
+          "exclusiveMinimum": 0.0,
+          "maximum": 100.0,
+          "title": "Radius M",
+          "type": "number"
+        },
+        "stun_s": {
+          "default": 4.0,
+          "maximum": 60.0,
+          "minimum": 0.0,
+          "title": "Stun S",
+          "type": "number"
+        }
+      },
+      "title": "ExplosiveSpec",
+      "type": "object"
+    },
     "FingerPose": {
       "enum": [
         "wrap",
@@ -274,6 +411,28 @@
           ],
           "default": null
         },
+        "destructible": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DestructibleSpec"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "explosive": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ExplosiveSpec"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
         "hold": {
           "$ref": "#/$defs/HoldProfile"
         },
@@ -292,6 +451,17 @@
           "anyOf": [
             {
               "$ref": "#/$defs/MeleeSpec"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "press": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PressSpec"
             },
             {
               "type": "null"
@@ -411,6 +581,8 @@
         "worn",
         "ammo",
         "projectile",
+        "pressable",
+        "display",
         "static_prop",
         "not_interactive"
       ],
@@ -472,6 +644,44 @@
         "explode"
       ],
       "title": "OnHit",
+      "type": "string"
+    },
+    "PressSpec": {
+      "additionalProperties": false,
+      "description": "How a pressable is pressed (``builtin.press_button``).",
+      "properties": {
+        "press_with": {
+          "$ref": "#/$defs/PressWith",
+          "default": "any"
+        },
+        "provenance": {
+          "$ref": "#/$defs/Provenance"
+        },
+        "signal": {
+          "default": "",
+          "maxLength": 96,
+          "title": "Signal",
+          "type": "string"
+        },
+        "travel_m": {
+          "default": 0.007,
+          "maximum": 0.05,
+          "minimum": 0.002,
+          "title": "Travel M",
+          "type": "number"
+        }
+      },
+      "title": "PressSpec",
+      "type": "object"
+    },
+    "PressWith": {
+      "enum": [
+        "poke",
+        "grip",
+        "trigger",
+        "any"
+      ],
+      "title": "PressWith",
       "type": "string"
     },
     "ProjectileKind": {
@@ -754,7 +964,9 @@
         "strike_base",
         "strike_tip",
         "strike_face",
-        "attach_point"
+        "attach_point",
+        "press_surface",
+        "screen"
       ],
       "title": "SocketKind",
       "type": "string"

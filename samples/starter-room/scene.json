@@ -119,7 +119,7 @@
         "restitution": 0.05,
         "friction": 0.9
       },
-      "tags": ["wall"]
+      "tags": ["wall", "placeholder"]
     },
     {
       "id": "wall_n_right",
@@ -137,7 +137,7 @@
         "restitution": 0.05,
         "friction": 0.9
       },
-      "tags": ["wall"]
+      "tags": ["wall", "placeholder"]
     },
     {
       "id": "wall_s_left",
@@ -155,7 +155,7 @@
         "restitution": 0.05,
         "friction": 0.9
       },
-      "tags": ["wall"]
+      "tags": ["wall", "placeholder"]
     },
     {
       "id": "wall_s_right",
@@ -173,7 +173,7 @@
         "restitution": 0.05,
         "friction": 0.9
       },
-      "tags": ["wall"]
+      "tags": ["wall", "placeholder"]
     },
     {
       "id": "wall_e_front",
@@ -191,7 +191,7 @@
         "restitution": 0.05,
         "friction": 0.9
       },
-      "tags": ["wall"]
+      "tags": ["wall", "placeholder"]
     },
     {
       "id": "wall_e_back",
@@ -209,7 +209,7 @@
         "restitution": 0.05,
         "friction": 0.9
       },
-      "tags": ["wall"]
+      "tags": ["wall", "placeholder"]
     },
     {
       "id": "wall_w_front",
@@ -227,7 +227,7 @@
         "restitution": 0.05,
         "friction": 0.9
       },
-      "tags": ["wall"]
+      "tags": ["wall", "placeholder"]
     },
     {
       "id": "wall_w_back",
@@ -245,7 +245,7 @@
         "restitution": 0.05,
         "friction": 0.9
       },
-      "tags": ["wall"]
+      "tags": ["wall", "placeholder"]
     },
     {
       "id": "ceiling",
@@ -263,7 +263,7 @@
         "restitution": 0.05,
         "friction": 0.9
       },
-      "tags": ["wall", "ceiling"]
+      "tags": ["wall", "ceiling", "placeholder"]
     },
     {
       "id": "pillar_ne",
@@ -281,7 +281,7 @@
         "restitution": 0.05,
         "friction": 0.9
       },
-      "tags": ["pillar"]
+      "tags": ["pillar", "placeholder"]
     },
     {
       "id": "pillar_nw",
@@ -299,7 +299,7 @@
         "restitution": 0.05,
         "friction": 0.9
       },
-      "tags": ["pillar"]
+      "tags": ["pillar", "placeholder"]
     },
     {
       "id": "pillar_se",
@@ -317,7 +317,7 @@
         "restitution": 0.05,
         "friction": 0.9
       },
-      "tags": ["pillar"]
+      "tags": ["pillar", "placeholder"]
     },
     {
       "id": "pillar_sw",
@@ -335,7 +335,7 @@
         "restitution": 0.05,
         "friction": 0.9
       },
-      "tags": ["pillar"]
+      "tags": ["pillar", "placeholder"]
     },
     {
       "id": "platform_a",
@@ -353,7 +353,7 @@
         "restitution": 0.1,
         "friction": 0.8
       },
-      "tags": ["platform"]
+      "tags": ["platform", "placeholder"]
     },
     {
       "id": "platform_b",
@@ -371,7 +371,7 @@
         "restitution": 0.1,
         "friction": 0.8
       },
-      "tags": ["platform"]
+      "tags": ["platform", "placeholder"]
     },
     {
       "id": "platform_c",
@@ -389,7 +389,7 @@
         "restitution": 0.1,
         "friction": 0.8
       },
-      "tags": ["platform"]
+      "tags": ["platform", "placeholder"]
     },
     {
       "id": "centerpiece",
@@ -407,7 +407,7 @@
         "restitution": 0.1,
         "friction": 0.6
       },
-      "tags": ["centerpiece"]
+      "tags": ["centerpiece", "placeholder"]
     },
     {
       "id": "cube_a",

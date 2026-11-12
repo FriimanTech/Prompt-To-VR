@@ -45,6 +45,25 @@
           "minimum": 1,
           "title": "Count",
           "type": "integer"
+        },
+        "zone_quote": {
+          "default": "",
+          "maxLength": 300,
+          "title": "Zone Quote",
+          "type": "string"
+        },
+        "zone_tags": {
+          "description": "Spawn only in world npc_spawn_zones carrying one of these tags ('front_band', 'north_gate'). Required whenever the prompt says WHERE a group appears; the world is told to declare them. Empty = any zone.",
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 8,
+          "title": "Zone Tags",
+          "type": "array"
+        },
+        "zone_visibility": {
+          "$ref": "#/$defs/ZoneVisibility",
+          "default": "prefer_hidden"
         }
       },
       "required": [
@@ -98,6 +117,11 @@
           "maxLength": 1000,
           "title": "Notes",
           "type": "string"
+        },
+        "repeat": {
+          "default": false,
+          "title": "Repeat",
+          "type": "boolean"
         },
         "spawn_interval_s": {
           "default": 1.5,
@@ -473,6 +497,15 @@
       ],
       "title": "NpcSpec",
       "type": "object"
+    },
+    "ZoneVisibility": {
+      "description": "Whether a group should arrive where the player can see it.",
+      "enum": [
+        "prefer_hidden",
+        "any"
+      ],
+      "title": "ZoneVisibility",
+      "type": "string"
     }
   },
   "additionalProperties": false,

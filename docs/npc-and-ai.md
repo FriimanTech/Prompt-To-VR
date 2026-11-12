@@ -137,6 +137,19 @@ above the soles, against the floor the snap found, and eases the body by the
 difference (time constant 0.25 s, so a stride's natural foot lift is not
 chased; clamped to 12% of the height and below the step-down distance).
 
+The floor itself is found with a **floor-only probe** (`raycast_floor`:
+static bodies plus bodies tagged `walkable`) cast from 0.5 m above the
+current soles, ignoring the NPC's whole attachment family; a "floor" more
+than a step above the soles is refused. Held and attached items live on the
+`HELD` physics layer and are never a floor -- the Navy SEAL insurgents'
+probes used to hit their own rifles' 0.5 m fallback boxes and climbed 35 cm
+a frame into the sky while reporting "grounded". **Stationary** NPCs get
+`builtin.character_locomotion` too (`stationary: true`, `face_player` when
+hostile to the player): one ground writer for every skinned NPC, so a range
+goblin stands on the floor and turns to the player without travelling. The
+director and the scene compiler place every NPC at `floor + foot_offset_m`.
+See [physics.md](physics.md).
+
 ### When Tripo has no clip for something
 
 The ability is never blocked on the animation. `NpcSpec.animation_fallback`
@@ -354,13 +367,22 @@ runs the NPC plan's encounters:
 - **Spawning.** It clones the wave's templates interleaved by type, one per
   `spawn_interval_s`, while fewer than `max_concurrent` are alive and the
   animated-agent budget allows. A refused spawn retries half a second later.
-- **Placement.** It picks a spawn zone at least `min_player_distance_m` away,
-  preferring one the player cannot see, and spawns facing the player. With no
-  zones it uses a ring around the player and keeps only reachable points.
+- **Placement.** A group with `zone_tags` spawns only in zones carrying one
+  of them (by id or tag) -- the regular goblins in the front band, the bulky
+  ones at the back -- even inside `min_player_distance_m` when that is where
+  the prompt put them; `zone_visibility: any` lets it appear in plain sight
+  (range targets), `prefer_hidden` (default) prefers a zone the player cannot
+  see. Without tags it picks any zone at least `min_player_distance_m` away,
+  preferring hidden ones. Points inside a zone spiral out per zone, so
+  consecutive spawns never stack. With no zones it uses a ring around the
+  player and keeps only reachable points. A group whose tags no zone carries
+  warns once and uses any zone. It spawns facing the player.
 - **Progress.** A defeat is counted once, when an instance dies or is
   destroyed. A cleared wave starts the inter-wave countdown; clearing the last
-  wave is victory (`waves`), the last wave repeats (`continuous`), or play
-  simply continues (`fixed`). The player's death stops it.
+  wave is victory (`waves`), starts over from wave 1 (`waves` with
+  `repeat: true` -- "they all respawn once every one is dead"), the last wave
+  repeats (`continuous`), or play simply continues (`fixed`). The player's
+  death stops it.
 
 Everything else reads it through `ctx.encounters`: `configured()`, `phase()`
 (`Idle`, `Active`, `InterWave`, `Victory`, `Failed`), `wave_index()`,
@@ -379,7 +401,11 @@ them per NPC type from the NPC plan:
   (the player by default), walks when the gap is small and runs when it
   grows, navigates around walls, and is placed behind the leader again when
   it falls more than `catchup_distance_m` behind or stays stuck for
-  `stuck_catchup_s`.
+  `stuck_catchup_s`. That catch-up spot is on the nav graph behind the
+  leader (or, without one, 0.8 m behind the leader projected to the
+  ground), raised by the follower's `foot_offset_m` and pushed into its
+  body with `teleport_body`, so the follower lands standing on the floor
+  inside the walkable area rather than half-sunk at the leader's height.
 - **`builtin.npc.melee_chase`** — an enemy acquires the nearest visible
   hostile (or a tagged target), chases it through the nav graph keeping clear
   of its siblings, telegraphs an attack with a wind-up, deals damage if the
@@ -463,6 +489,9 @@ puts every NPC placed at load:
 - otherwise where the population step put it (a companion beside the spawn,
   carried there by the gameplay relocation);
 - moved onto the nearest declared walkable floor if it is off it;
+- fanned out to a free walkable spot when it would stand within
+  `PERSISTENT_SPACING_M` (0.9 m) of the player spawn or another NPC placed
+  before it (two companions given one spot used to start inside each other);
 - with its origin at floor height plus its foot offset, so its feet touch
   the floor on frame one. That matters most for a STATIONARY NPC, which has
   no locomotion to snap it down later.
@@ -510,6 +539,21 @@ tunnel mouths, the far side of a ridge. These are written to the world's
 asks for at least three zones, 12 m or more from the spawn, whenever the NPC
 plan has encounters, and to keep 3 m around the spawn clear for companions.
 A world with no zones still works; see the fallback above.
+
+**Zone tags.** When the prompt says WHERE a group appears ("regular goblins
+at the front of the lane, tall in the middle, bulky at the back"), the NPC
+plan gives each `EncounterGroup` `zone_tags` (`front_band`, ...), the
+prompt's `zone_quote` (verbatim, checked) and `zone_visibility`.
+`npc_plan_violations` sends the plan back once when the prompt places groups
+(`placement_phrases`) and a group has no tags, or when the prompt has them
+come back once all are defeated and `repeat` is unset (the repair sets it).
+The world brief lists every tag it must declare and which NPC types spawn
+there; the world's contract check (`_zone_tag_problems`) sends a world
+missing one back into its repair loop; `finalize_encounter_zones` warns
+about any still missing (`encounters.missing_zone_tags`). A repeating
+encounter has no "clear all waves" victory (`game_design_rules` removes such
+an objective). On the headset, `zone_band_check` requires each type to be
+first seen inside a zone with its tag.
 
 ## Animation clip pairing
 

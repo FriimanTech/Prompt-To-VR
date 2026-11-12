@@ -19,6 +19,10 @@ class ProjectStage(str, Enum):
     # main prompt) mapped onto the settings a user may lock. Never shapes
     # gameplay; no model call when no optimization wording appears.
     optimization_preferences = "optimization_preferences"
+    # Every atomic thing the prompt asks for, each with its verbatim quote.
+    # Every later planning stage claims the requirements it satisfies and a
+    # deterministic gate fails a stage that leaves one unclaimed.
+    requirements = "requirements"
     asset_manifest = "asset_manifest"
     # How every object is used: hold profile, the sockets to find on it, and
     # for weapons how they fire and what they fire (appending projectile
@@ -68,6 +72,10 @@ class ProjectStage(str, Enum):
     code_generation = "code_generation"
     world_generation = "world_generation"
     scene_compile = "scene_compile"
+    # Renders the compiled scene offline from the spawn and from every layout
+    # requirement's viewpoint, checks placement deterministically, then has a
+    # vision model confirm each layout requirement is visibly met.
+    scene_review = "scene_review"
     cmake_configure = "cmake_configure"
     cmake_build = "cmake_build"
     # Quest (standalone Android APK) build path. Used instead of

@@ -28,10 +28,11 @@ Reading the prompt correctly
 
 from __future__ import annotations
 
+import re
 from enum import Enum
 from typing import List, Optional
 
-from pydantic import Field
+from pydantic import Field, field_validator
 
 from .asset_manifest import AnimationIntent
 from .common import IdStr, StrictModel
@@ -240,11 +241,45 @@ class EncounterStart(str, Enum):
     signal = "signal"
 
 
+class ZoneVisibility(str, Enum):
+    """Whether a group should arrive where the player can see it."""
+
+    #: Out of the player's sight when such a zone exists (enemies closing in).
+    prefer_hidden = "prefer_hidden"
+    #: Any of its zones, seen or not -- the player is meant to watch them
+    #: appear (range targets in their bands, an arena gate).
+    any = "any"
+
+
 class EncounterGroup(StrictModel):
     """``count`` of one NPC type within a wave."""
 
     asset_id: IdStr
     count: int = Field(..., ge=1, le=200)
+    zone_tags: List[str] = Field(
+        default_factory=list,
+        max_length=8,
+        description=(
+            "Spawn only in world npc_spawn_zones carrying one of these tags"
+            " ('front_band', 'north_gate'). Required whenever the prompt says"
+            " WHERE a group appears; the world is told to declare them."
+            " Empty = any zone."
+        ),
+    )
+    zone_visibility: ZoneVisibility = ZoneVisibility.prefer_hidden
+    #: The prompt's words placing this group, verbatim ("the regular goblins
+    #: stand in the front band"); empty when the prompt does not place it.
+    zone_quote: str = Field(default="", max_length=300)
+
+    @field_validator("zone_tags")
+    @classmethod
+    def _tags_are_ids(cls, v: List[str]) -> List[str]:
+        out = []
+        for t in v:
+            t = re.sub(r"[^a-z0-9_]+", "_", str(t).strip().lower()).strip("_")[:48]
+            if t and t not in out:
+                out.append(t)
+        return out
 
 
 class EncounterWave(StrictModel):
@@ -271,6 +306,10 @@ class EncounterPlan(StrictModel):
     spawn_interval_s: float = Field(default=1.5, ge=0.0, le=60.0)
     inter_wave_delay_s: float = Field(default=8.0, ge=0.0, le=600.0)
     min_player_distance_m: float = Field(default=10.0, ge=0.0, le=200.0)
+    #: ``waves`` mode only: when the last wave is cleared, start again from
+    #: the first instead of declaring victory ("they all respawn once every
+    #: one is dead").
+    repeat: bool = False
     waves: List[EncounterWave] = Field(..., min_length=1, max_length=50)
     notes: str = Field(default="", max_length=1000)
 

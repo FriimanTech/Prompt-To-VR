@@ -18,10 +18,22 @@ namespace ptv::encounter {
 
 enum class Mode { Waves, Continuous, Fixed };
 enum class Start { OnLoad, Delay, PlayerGrabsTag, Signal };
+/** PreferHidden: out of the player's sight when such a zone exists. Any:
+ *  the player is meant to watch them appear (range targets in a band). */
+enum class Visibility { PreferHidden, Any };
 
 struct Group {
     std::string template_id;  // scene entity id of the hidden template
     int count{0};
+    /** Spawn only in zones carrying one of these (id or tag); empty = any. */
+    std::vector<std::string> zone_tags;
+    Visibility visibility{Visibility::PreferHidden};
+};
+
+/** One queued arrival: which template, from which group of its wave. */
+struct Arrival {
+    std::string template_id;
+    int group{0};
 };
 
 struct Wave {
@@ -46,6 +58,8 @@ struct Plan {
     float min_player_distance_m{10.0f};
     /** Zones this far away are ignored unless nothing closer is eligible. */
     float max_player_distance_m{60.0f};
+    /** Waves mode: after the last wave, start over instead of victory. */
+    bool repeat{false};
     std::vector<Wave> waves;
     std::vector<Zone> zones;
 
@@ -92,6 +106,7 @@ inline Plan parse(const nlohmann::json& p) {
     plan.max_player_distance_m = std::clamp(
         p.value("max_player_distance_m", 60.0f), plan.min_player_distance_m,
         2000.0f);
+    plan.repeat = p.value("repeat", false);
     if (p.contains("waves") && p["waves"].is_array()) {
         for (const auto& w : p["waves"]) {
             Wave wave;
@@ -100,6 +115,16 @@ inline Plan parse(const nlohmann::json& p) {
                     Group group;
                     group.template_id = g.value("template", std::string());
                     group.count = std::clamp(g.value("count", 0), 0, 200);
+                    if (g.contains("zone_tags") && g["zone_tags"].is_array()) {
+                        for (const auto& t : g["zone_tags"]) {
+                            if (t.is_string() && !t.get<std::string>().empty()) {
+                                group.zone_tags.push_back(t.get<std::string>());
+                            }
+                        }
+                    }
+                    group.visibility = g.value("zone_visibility", std::string()) == "any"
+                                           ? Visibility::Any
+                                           : Visibility::PreferHidden;
                     if (!group.template_id.empty() && group.count > 0) {
                         wave.groups.push_back(group);
                     }
@@ -129,8 +154,8 @@ inline Plan parse(const nlohmann::json& p) {
 /** The order a wave's NPCs arrive in: groups interleaved, so a wave of
  *  3 standard + 2 tall arrives standard, tall, standard, tall, standard
  *  rather than as two blocks. */
-inline std::vector<std::string> spawn_order(const Wave& wave) {
-    std::vector<std::string> out;
+inline std::vector<Arrival> arrivals(const Wave& wave) {
+    std::vector<Arrival> out;
     std::vector<int> left;
     for (const auto& g : wave.groups) left.push_back(std::max(0, g.count));
     bool any = true;
@@ -138,12 +163,28 @@ inline std::vector<std::string> spawn_order(const Wave& wave) {
         any = false;
         for (std::size_t i = 0; i < wave.groups.size(); ++i) {
             if (left[i] <= 0) continue;
-            out.push_back(wave.groups[i].template_id);
+            out.push_back(Arrival{wave.groups[i].template_id, static_cast<int>(i)});
             --left[i];
             any = true;
         }
     }
     return out;
+}
+
+inline std::vector<std::string> spawn_order(const Wave& wave) {
+    std::vector<std::string> out;
+    for (const auto& a : arrivals(wave)) out.push_back(a.template_id);
+    return out;
+}
+
+/** Does ``zone`` carry one of ``tags`` (by id or tag)? Empty tags = any. */
+inline bool zone_matches(const Zone& zone, const std::vector<std::string>& tags) {
+    if (tags.empty()) return true;
+    for (const auto& t : tags) {
+        if (zone.id == t) return true;
+        if (std::find(zone.tags.begin(), zone.tags.end(), t) != zone.tags.end()) return true;
+    }
+    return false;
 }
 
 /** A deterministic point inside a zone for the k-th spawn there (golden

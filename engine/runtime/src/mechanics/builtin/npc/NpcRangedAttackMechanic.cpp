@@ -52,6 +52,7 @@ public:
     void on_update(World& world, std::uint32_t self, float dt, const InputSnapshot&,
                    MechanicContext& ctx) override {
         if (ctx.weapons == nullptr || ctx.perception == nullptr) return;
+        if (world.has<CStun>(self)) return;  // a flashbang: no shooting
         if (weapon_ == kNone || !world.valid(weapon_)) weapon_ = find_weapon(world, self, ctx);
         if (ctx.combat != nullptr && !ctx.combat->is_alive(self)) {
             stop(ctx);

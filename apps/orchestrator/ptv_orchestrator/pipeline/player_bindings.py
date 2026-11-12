@@ -19,6 +19,7 @@ movement modes, binds none, and loads without complaint.
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any, Callable
 
 from ptv_schemas import BuildSpec, MechanicPlan, PlayerExperience
@@ -281,6 +282,55 @@ def gait_speed_fields(entities: list[dict[str, Any]]) -> dict[str, Any]:
         "sprint_speed_mps": round(run, 4),
         "sprint": {"activation": "hold", "speed_source": source},
     }
+
+
+#: Body capsule radius when the player has no body (Hands Only): narrow
+#: enough to stand at a table, wide enough that walls keep the head out.
+HANDS_ONLY_BODY_RADIUS_M = 0.18
+#: Clamp for a measured avatar torso.
+AVATAR_BODY_RADIUS_RANGE_M = (0.15, 0.25)
+
+
+def player_body_radius(
+    build_spec: BuildSpec,
+    entities: list[dict[str, Any]],
+    contracts: dict[str, Any],
+    on_warning=None,
+) -> float:
+    """Radius of the player's walking body and contact capsule, in metres.
+
+    Full Player Avatar: the avatar's own torso, measured from its bind pose
+    (``model_frame``), at its in-scene height. A capsule wider than the body
+    the player sees stops them short of everything they reach for -- the old
+    0.29 m contact capsule did exactly that. Hands Only: a fixed 0.18 m.
+    """
+    if build_spec.player_experience != PlayerExperience.full_avatar:
+        return HANDS_ONLY_BODY_RADIUS_M
+    avatar = next(
+        (e for e in entities if isinstance(e, dict) and (
+            "player_avatar" in (e.get("tags") or [])
+            or any(isinstance(b, dict) and (b.get("builtin_id") or b.get("id"))
+                   == "builtin.avatar_body" for b in e.get("mechanic_bindings") or []))
+         and (e.get("mesh") or {}).get("asset_id")),
+        None,
+    )
+    if avatar is None:
+        return HANDS_ONLY_BODY_RADIUS_M
+    mesh = avatar.get("mesh") or {}
+    frame = ((contracts or {}).get(str(mesh.get("asset_id"))) or {}).get("frame") or {}
+    torso = frame.get("torso_radius")
+    if torso is None and frame.get("source_glb"):
+        from .model_frame import try_measure  # noqa: PLC0415 - heavy, only when needed
+        torso = try_measure(Path(str(frame["source_glb"])), rigged=True).get("torso_radius")
+    height_raw = float(frame.get("height") or 0.0)
+    target = float(mesh.get("target_scale_meters") or build_spec.player_height_meters or 0.0)
+    if torso is None or height_raw <= 1e-6 or target <= 0.0:
+        if on_warning is not None:
+            on_warning(f"player avatar '{mesh.get('asset_id')}': torso not measurable; "
+                       f"body radius {HANDS_ONLY_BODY_RADIUS_M} m")
+        return HANDS_ONLY_BODY_RADIUS_M
+    lo, hi = AVATAR_BODY_RADIUS_RANGE_M
+    return round(min(hi, max(lo, float(torso) * target / height_raw)), 4)
 
 
 def player_block_fields(

@@ -219,6 +219,13 @@ public:
      *  use it so the world never jumps under the player's eyes. Request it
      *  every frame the fade should hold; the strongest request wins. */
     virtual void request_fade(float amount) { (void)amount; }
+    /** Flood the whole view with ``color`` THIS frame (0 clear .. 1 solid):
+     *  a flashbang's white-out. Like request_fade, request it every frame it
+     *  should hold, decaying it to fade back in; the strongest wins. */
+    virtual void request_flash(float amount, const Vec3& color) {
+        (void)amount;
+        (void)color;
+    }
     /** Stand the player at ``feet`` facing ``yaw`` exactly as the scene's
      *  start does -- unlike ``ILocomotion::teleport_to`` this is not capped
      *  to a teleport distance. For respawns; ``builtin.game_flow`` calls it.

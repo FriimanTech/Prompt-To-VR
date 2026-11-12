@@ -91,6 +91,7 @@ from .game_flow_plan import reconcile_game_flow_items
 from .npc_population import reconcile_npc_ai_items
 from .proc import proc_hooks
 from .weapon_plan import engine_bindings, reconcile_weapon_items
+from .interaction_plan import reconcile_interaction_items
 from .prompts import code_task_system
 
 
@@ -143,6 +144,30 @@ def _engine_runs_weapons(ctx: PipelineContext) -> bool:
     engine's weapon built-ins (so generated firing code is a second gun)."""
     design = ctx.interaction_design or ctx.store.load_interaction_design(ctx.project_id)
     return design is not None and any(engine_bindings(i, design) for i in design.items)
+
+
+def _contract_flags(ctx: PipelineContext) -> dict[str, bool]:
+    """Which engine systems this project hands to built-ins, for the v6
+    contract rules (codegen_contracts.lint_task_sources)."""
+    design = ctx.interaction_design or ctx.store.load_interaction_design(ctx.project_id)
+    displays = design is not None and any(
+        getattr(i.usage, "value", str(i.usage)) == "display" for i in design.items)
+    anchors = False
+    for path in ctx.project_dir.glob("world*.scene.json"):
+        try:
+            doc = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if doc.get("anchors") or doc.get("anchor_sets"):
+            anchors = True
+            break
+    return {
+        "game_flow": ctx.store.load_game_design(ctx.project_id) is not None,
+        "weapons": _engine_runs_weapons(ctx),
+        "interactions": design is not None,
+        "anchors": anchors,
+        "displays": displays,
+    }
 
 
 def _is_transient(exc: Exception) -> bool:
@@ -231,6 +256,14 @@ def run_with_runner(
         for note in weapon_notes:
             ctx.emit(ProjectStage.code_generation, "info", f"weapons: {note}"[:300])
             ctx.store.append_log(ctx.project_id, "code_generation", f"weapons: {note}")
+    # Buttons, in-world displays, target challenges and destructibles too.
+    plan, interaction_notes = reconcile_interaction_items(plan, interaction)
+    if interaction_notes:
+        ctx.mechanic_plan = plan
+        ctx.store.save_mechanic_plan(ctx.project_id, plan)
+        for note in interaction_notes:
+            ctx.emit(ProjectStage.code_generation, "info", f"interactions: {note}"[:300])
+            ctx.store.append_log(ctx.project_id, "code_generation", f"interactions: {note}")
 
     codegen_items = [it for it in plan.items if it.code_task is not None]
 
@@ -300,12 +333,10 @@ def run_with_runner(
     # Same idea for the engine contract (codegen_contracts): code written
     # before a rule existed -- an AI with no MechanicContext, a private
     # damage inbox -- compiled, shipped and silently did nothing.
-    has_flow = design is not None
-    has_weapons = _engine_runs_weapons(ctx)
+    flags = _contract_flags(ctx)
     api_resets = board.invalidate_on_api_contract_change(
         API_CONTRACT_VERSION, repo_root,
-        lambda files: lint_task_sources("", files, game_flow=has_flow,
-                                        weapons=has_weapons),
+        lambda files: lint_task_sources("", files, **flags),
     )
     for tid, why in api_resets:
         ctx.emit(
@@ -1190,8 +1221,7 @@ class _StageRuntime:
         kind_value = getattr(task.kind, "value", str(task.kind))
         contract = lint_task_sources(
             kind_value, {Path(rel).name: code for rel, code in normalised},
-            game_flow=self.ctx.store.load_game_design(self.ctx.project_id) is not None,
-            weapons=_engine_runs_weapons(self.ctx),
+            **_contract_flags(self.ctx),
         )
         if contract:
             raise CodegenContractError(

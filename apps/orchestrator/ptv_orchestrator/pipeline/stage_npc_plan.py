@@ -184,7 +184,7 @@ def run_with_director(
         # The population has rules the engine depends on (every roster
         # variant planned, companions placed once, waves naming real types).
         # Ask once for a fix, then repair what is left deterministically.
-        problems = npc_plan_violations(plan, build_spec)
+        problems = npc_plan_violations(plan, build_spec, inp.prompt_text)
         if problems:
             ctx.emit(_STAGE, "warning",
                      "NPC plan needs revising: " + "; ".join(problems)[:600])
@@ -200,9 +200,13 @@ def run_with_director(
                                      f"revision failed: {exc}")
             else:
                 plan = _drop_unknown_assets(ctx, revised, {i.id for i in candidates})
-        plan, repairs = repair_npc_plan(plan, build_spec)
+        plan, repairs = repair_npc_plan(plan, build_spec, prompt=inp.prompt_text)
         for note in repairs:
             ctx.emit(_STAGE, "info", note)
+        leftover = [p for p in npc_plan_violations(plan, build_spec, inp.prompt_text)
+                    if "zone_tags" in p]
+        for p in leftover:
+            ctx.emit(_STAGE, "warning", p[:300])
 
     art = ctx.store.save_npc_plan(ctx.project_id, plan)
     ctx.npc_plan = plan

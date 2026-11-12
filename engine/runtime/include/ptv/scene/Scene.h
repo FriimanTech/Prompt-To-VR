@@ -60,6 +60,14 @@ struct MeshRef {
     float model_sole_y{0.0f};
     float model_height{0.0f};
     std::string collision_shape{"aabb"};
+    /** ``mesh.collision``: the collider measured from the mesh itself, in
+     *  metres in entity space (see CCollisionGeom). Absent on scenes
+     *  compiled before colliders were measured. */
+    bool has_collision{false};
+    Vec3 collision_aabb_min{0.0f};
+    Vec3 collision_aabb_max{0.0f};
+    std::vector<Vec3> collision_hull;
+    int collision_mesh_lod{-1};
     /** Decimated level-of-detail chain produced by the ``asset_optimization``
      * pipeline stage, coarsest last. ``lod_paths[0]`` is the same mesh as
      * ``glb_path``. Empty for assets that were never optimized, in which case
@@ -185,6 +193,33 @@ struct PortalSpec {
      *  you were in, is the failure this prevents; an author opts out only for
      *  a portal that IS the intended path. */
     bool requires_interaction{true};
+};
+
+/** A world-declared anchor (``anchors`` in scene.json): where a gameplay
+ *  item rests, hangs or mounts. */
+struct AnchorSpec {
+    std::string id;
+    std::string relation{"on_surface"};
+    Vec3 position{0.0f};
+    Vec3 facing{0.0f, 0.0f, -1.0f};
+    Vec3 normal{0.0f, 1.0f, 0.0f};
+    std::vector<std::string> tags;
+};
+
+/** A camera the scene review rendered from, revisited on the headset. */
+struct VerifyViewpoint {
+    std::string id;
+    Vec3 eye{0.0f};
+    Vec3 target{0.0f, 0.0f, -1.0f};
+};
+
+/** A world-declared set of points things are SPAWNED at (``anchor_sets``). */
+struct AnchorSetSpec {
+    std::string id;
+    std::string relation{"on_floor"};
+    std::vector<Vec3> points;
+    Vec3 facing{0.0f, 0.0f, -1.0f};
+    std::vector<std::string> tags;
 };
 
 /** Walkable topology declared by the world builder, straight from
@@ -448,6 +483,10 @@ struct SceneDoc {
     std::string title;
     std::string name;
     float player_height_meters{1.7f};
+    /** ``player.body_radius_m``: radius of the player's walking body and
+     *  contact capsule, measured from the avatar's torso (Full Player
+     *  Avatar) or 0.18 m (Hands Only). 0 = not in the scene (older scenes). */
+    float player_body_radius_m{0.0f};
     std::string locomotion{"teleport"};
     std::string comfort{"comfort"};
     PlayerSpawn spawn{};
@@ -517,6 +556,12 @@ struct SceneDoc {
     /** Named arrival points, and the ways out of this scene. */
     std::vector<SpawnPointSpec> spawn_points;
     std::vector<PortalSpec> portals;
+    std::vector<AnchorSpec> anchors;
+    std::vector<AnchorSetSpec> anchor_sets;
+    /** Where the interactions verification pass stands the player for a
+     *  screenshot (``verify_viewpoints``, written by scene_review). Unused
+     *  outside ``debug.ptv.verify_interactions``. */
+    std::vector<VerifyViewpoint> verify_viewpoints;
 
     /** scene_id -> the file that scene compiled to, as a path RELATIVE to
      *  this document.

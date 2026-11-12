@@ -18,11 +18,16 @@ So, deterministically and with every change named:
   and ``builtin.recoil`` items are removed, named;
 * items that depended on a removed task lose the dependency and are told to
   read hits and ammo through ``ctx.weapons`` instead;
-* an NPC whose plan has ``ranged_attack`` gets ``builtin.npc.ranged_attack``.
+* an NPC whose plan has ``ranged_attack`` gets ``builtin.npc.ranged_attack``;
+* a thrown item with an ``explosive`` spec gets ``builtin.explosive``, and a
+  generated grenade / fuse / detonation / "activation and throwing" task is
+  removed the same way -- the shooting range's generated grenade hub ran a
+  fuse and never exploded.
 """
 
 from __future__ import annotations
 
+import json
 import re
 from typing import Any, Optional
 
@@ -32,6 +37,8 @@ from ptv_schemas import (
     ItemInteraction,
     ProjectileSpec,
 )
+
+from .interaction_plan import EXPLOSIVE_ID, explosive_params
 
 WEAPON_ID = "builtin.weapon"
 BOW_ID = "builtin.bow"
@@ -55,18 +62,34 @@ _FIRING = re.compile(
 # ... unless it is clearly something else that only mentions a weapon.
 _NOT_FIRING = re.compile(
     r"\bhud\b|score|target[\s_-]*(hit|react|board|range)|enemy|npc|boss|wave|"
-    r"pickup|pick[\s_-]*up|holster|rack|tutorial|dialog",
+    r"pickup|pick[\s_-]*up|holster|rack|tutorial|dialog|\bai\b|_ai\b|behaviou?r|"
+    r"population|respawn",
+    re.IGNORECASE,
+)
+# A generated item whose job is running a designed explosive.
+_EXPLOSIVE = re.compile(
+    r"grenade|explosive|detonat|\bfuse\b|fuse[\s_-]*timer|\bfrag\b|flash[\s_-]*bang|"
+    r"pull[\s_-]*(the[\s_-]*)?pin|pin[\s_-]*pull|"
+    r"activation[\s_-]*(and|&)[\s_-]*throw|arm[\s_-]*(and|&)[\s_-]*throw",
+    re.IGNORECASE,
+)
+# ... unless it is something that merely blows up (a destructible) or reacts.
+_NOT_EXPLOSIVE = re.compile(
+    r"\bhud\b|score|enemy|npc|boss|wave|tutorial|dialog|target[\s_-]*(challenge|range)|"
+    r"barrel|crate|destructible|breakable",
     re.IGNORECASE,
 )
 
 _NOTE_MARK = "no longer exist -- weapons are engine built-ins"
 _DEP_NOTE = (
     " ENGINE NOTE: {gone} " + _NOTE_MARK + " "
-    "(builtin.weapon / bow / melee_weapon / shield). Do not include their "
-    "headers. Read shots, hits and ammo through ctx.weapons (hits_since(), "
+    "(builtin.weapon / bow / melee_weapon / shield / explosive). Do not include "
+    "their headers. Read shots, hits and ammo through ctx.weapons (hits_since(), "
     "hit_seq(), state(), held_weapon()) and projectile hits through "
-    "ctx.projectiles->hits_since(); never fire, raycast from a muzzle, keep "
-    "ammo or apply weapon damage yourself."
+    "ctx.projectiles->hits_since(); grenade detonations arrive as the "
+    "'<entity>.detonated' / 'explosive.detonated' signals on ctx.signals and "
+    "their damage through ctx.combat. Never fire, raycast from a muzzle, keep "
+    "ammo, run a fuse or apply weapon / blast damage yourself."
 )
 
 
@@ -238,6 +261,11 @@ def reconcile_weapon_items(mech_plan: Any, design: Optional[InteractionDesign],
         return mech_plan, []
     notes: list[str] = []
     covered = [i for i in design.items if engine_bindings(i, design)]
+    explosives = {f"explosive_{i.asset_id}"[:64]: i for i in design.items
+                  if i.explosive is not None}
+    held = covered + list(explosives.values())
+    explosive_binding = ControllerBinding.model_validate({"control": "trigger", "hand": "either"})
+    placed: set[str] = set()
     removed: dict[str, str] = {}
     items = []
     for it in mech_plan.items:
@@ -246,10 +274,20 @@ def reconcile_weapon_items(mech_plan: Any, design: Optional[InteractionDesign],
             continue
         if it.builtin_id in ENGINE_WEAPON_IDS:
             continue  # re-added below from the design
+        if it.builtin_id == EXPLOSIVE_ID:
+            # Kept where it is (so a second pass is silent), tuned from the design.
+            spec = explosives.get(it.id)
+            if spec is not None and it.id not in placed:
+                placed.add(it.id)
+                items.append(it.model_copy(update={
+                    "classification": MechanicClassification.builtin_config,
+                    "config": explosive_params(spec.explosive),
+                    "binding": it.binding or explosive_binding}))
+            continue
         task = it.code_task
-        if (task is not None and covered and it.base_builtin_id == "builtin.grab"
+        if (task is not None and held and it.base_builtin_id == "builtin.grab"
                 and any(re.search(rf"\b{re.escape(c.asset_id)}\b", _authored(task))
-                        for c in covered)):
+                        for c in held)):
             # A copy of grab that picks up a designed weapon predates the
             # socket hold solver (two hands, aim alignment, scripted holds)
             # and would hold the weapon wrongly; the built-in holds it.
@@ -261,7 +299,9 @@ def reconcile_weapon_items(mech_plan: Any, design: Optional[InteractionDesign],
             notes.append(f"'{it.id}' is a copy of builtin.grab holding a designed weapon: "
                          "using builtin.grab (socket holds) instead")
             continue
-        if task is not None and covered:
+        # An NPC behaviour that mentions being shot is not weapon code.
+        is_ai = str(getattr(getattr(task, "kind", None), "value", getattr(task, "kind", ""))) == "ai"
+        if task is not None and covered and not is_ai:
             name = _name_of(it)
             if _FIRING.search(name) and not _NOT_FIRING.search(f"{it.id} "
                                                                f"{getattr(task, 'title', '')}"):
@@ -269,6 +309,15 @@ def reconcile_weapon_items(mech_plan: Any, design: Optional[InteractionDesign],
                 notes.append(f"'{it.id}' removed: firing / swinging / ammo for "
                              f"{[c.asset_id for c in covered]} is the engine's "
                              "(builtin.weapon / bow / melee_weapon / shield)")
+                continue
+        if task is not None and explosives and not is_ai:
+            name = _name_of(it)
+            if _EXPLOSIVE.search(name) and not _NOT_EXPLOSIVE.search(
+                    f"{it.id} {getattr(task, 'title', '')}"):
+                removed[task.id] = it.id
+                notes.append(f"'{it.id}' removed: arming, fuse and detonation of "
+                             f"{[e.asset_id for e in explosives.values()]} are the engine's "
+                             f"({EXPLOSIVE_ID})")
                 continue
         items.append(it)
 
@@ -306,8 +355,16 @@ def reconcile_weapon_items(mech_plan: Any, design: Optional[InteractionDesign],
                     id=pid, classification=MechanicClassification.builtin_config,
                     builtin_id=RANGED_NPC_ID, config={}))
                 notes.append(f"'{pid}': {RANGED_NPC_ID} for NPC {npc.asset_id}")
+    for pid, item in explosives.items():
+        if pid in placed:
+            continue
+        items.append(MechanicPlanItem(
+            id=pid, classification=MechanicClassification.builtin_config,
+            builtin_id=EXPLOSIVE_ID, config=explosive_params(item.explosive),
+            binding=explosive_binding))
+        notes.append(f"'{pid}': {EXPLOSIVE_ID} for {item.asset_id}")
 
-    if covered:
+    if covered or explosives:
         # A plan reconciled on an earlier run no longer has the removed
         # tasks, but descriptions still name them: treat a firing-looking
         # task id the plan does not have as removed too.
@@ -316,7 +373,9 @@ def reconcile_weapon_items(mech_plan: Any, design: Optional[InteractionDesign],
             if it.code_task is None:
                 continue
             for tok in set(re.findall(r"\b[a-z][a-z0-9]*(?:_[a-z0-9]+)+\b", _authored(it.code_task))):
-                if tok not in present and _FIRING.search(tok.replace("_", " ") + " " + tok):
+                spoken = tok.replace("_", " ") + " " + tok
+                if tok not in present and ((covered and _FIRING.search(spoken))
+                                           or (explosives and _EXPLOSIVE.search(spoken))):
                     removed.setdefault(tok, tok)
     if removed:
         final = []
@@ -341,8 +400,15 @@ def reconcile_weapon_items(mech_plan: Any, design: Optional[InteractionDesign],
         items = final
     if not items:
         return mech_plan, notes
-    # Idempotent: a plan already reconciled comes back unchanged and silent.
-    if [i.model_dump(mode="json") for i in items] == \
-            [i.model_dump(mode="json") for i in mech_plan.items]:
+    # Idempotent: a plan already reconciled comes back unchanged and silent
+    # (whatever order later reconciles appended their own items in).
+    if same_items(items, mech_plan.items):
         return mech_plan, []
     return mech_plan.model_copy(update={"items": items}), notes
+
+
+def same_items(a: list[Any], b: list[Any]) -> bool:
+    """The same plan items, in any order."""
+    def key(items: list[Any]) -> list[str]:
+        return sorted(json.dumps(i.model_dump(mode="json"), sort_keys=True) for i in items)
+    return key(a) == key(b)

@@ -40,6 +40,9 @@
 #include "../src/mechanics/builtin/avatar_body/NeckDrift.h"
 #include "../src/mechanics/builtin/avatar_body/HeightCalibration.h"
 #include "../src/core/NpcRuntime.h"
+#include "../src/core/GameBoards.h"
+#include "../src/core/PlayerParts.h"
+#include "ptv/api/InputSnapshot.h"
 #include "../src/core/TextureGallery.h"
 #include "ptv/api/BodySlots.h"
 #include "ptv/api/Facing.h"
@@ -3365,6 +3368,50 @@ static int case_physics_overlap() {
               "that Jolt's contact callbacks never report");
 }
 
+// A kinematic target lands exactly where it was asked to, whatever the
+// next step's dt. The target used to become a velocity with the caller's
+// dt and be integrated over the next frame's: a 2 ms frame before a 65 ms
+// load hitch launched every NPC in a hut 32 m into the air.
+static int case_physics_kinematic_hitch() {
+    ptv::World world;
+    const auto e = world.create_entity("npc");
+    ptv::Transform t{};
+    t.position = ptv::Vec3(0.0f, 0.9f, 0.0f);
+    t.scale = 1.8f;
+    world.registry().emplace<ptv::CTransform>(e, ptv::CTransform{t});
+    ptv::CPhysics p{};
+    p.kind = "kinematic";
+    p.collision_shape = "capsule";
+    world.registry().emplace<ptv::CPhysics>(e, p);
+    const auto id = static_cast<std::uint32_t>(e);
+
+    ptv::PhysicsWorld physics;
+    if (!physics.initialize()) return fail("physics failed to initialize");
+    physics.rebuild_from_world(world);
+    const ptv::Quat q(1.0f, 0.0f, 0.0f, 0.0f);
+    physics.move_kinematic(id, ptv::Vec3(0.0f, 0.95f, 0.1f), q, 0.002f);
+    physics.step(0.065f);
+    physics.sync_to_world(world);
+    ptv::Vec3 at = world.registry().get<ptv::CTransform>(e).t.position;
+    if (std::abs(at.y - 0.95f) > 1e-3f || std::abs(at.z - 0.1f) > 1e-3f) {
+        physics.shutdown();
+        return fail(("kinematic body missed its target after a long step: y " +
+                     std::to_string(at.y) + " z " + std::to_string(at.z)).c_str());
+    }
+    // No new target: the body stops rather than coasting on.
+    physics.step(0.065f);
+    physics.sync_to_world(world);
+    at = world.registry().get<ptv::CTransform>(e).t.position;
+    if (std::abs(at.y - 0.95f) > 1e-3f || std::abs(at.z - 0.1f) > 1e-3f) {
+        physics.shutdown();
+        return fail(("kinematic body kept moving without a target: y " + std::to_string(at.y) +
+                     " z " + std::to_string(at.z)).c_str());
+    }
+    physics.shutdown();
+    return ok("physics: a kinematic target is reached exactly whatever the step's dt, "
+              "and a body without one stops");
+}
+
 // A probe mechanic so the runtime-attach test can prove a spawned entity's
 // mechanics actually tick, rather than just that a binding component exists.
 namespace {
@@ -3535,6 +3582,74 @@ static int case_encounter_director() {
               "signal start and reset");
 }
 
+// The shooting range's third lane: regular goblins in the front band, tall
+// in the middle, bulky at the back -- each group only in zones with its tag,
+// the front band closer than min_player_distance_m, all in plain sight --
+// and once every one is dead they all come back.
+static int case_encounter_zones() {
+    ptv::World world;
+    make_actor(world, "player", ptv::Vec3(0.0f), {"player"}, 100.0f);
+    make_actor(world, "regular_tmpl", ptv::Vec3(0.0f, -50.0f, 0.0f), {"enemy", "template"}, 10.0f);
+    make_actor(world, "tall_tmpl", ptv::Vec3(0.0f, -50.0f, 0.0f), {"enemy", "template"}, 10.0f);
+    make_actor(world, "bulky_tmpl", ptv::Vec3(0.0f, -50.0f, 0.0f), {"enemy", "template"}, 10.0f);
+    const auto host = world.create_entity("game_director");
+    world.registry().emplace<ptv::CTransform>(host, ptv::CTransform{});
+    FakeSpawn spawn;
+    spawn.world = &world;
+    ptv::EncounterBoard board;
+    ptv::MechanicContext ctx{};
+    ctx.spawn = &spawn;
+    ctx.encounters = &board;
+    const auto params = nlohmann::json::parse(R"({
+        "mode": "waves", "repeat": true, "start": {"kind": "on_load"},
+        "max_concurrent": 12, "spawn_interval_s": 0.0, "inter_wave_delay_s": 0.5,
+        "min_player_distance_m": 10.0,
+        "waves": [{"groups": [
+            {"template": "regular_tmpl", "count": 3, "zone_tags": ["front_band"], "zone_visibility": "any"},
+            {"template": "tall_tmpl", "count": 2, "zone_tags": ["middle_band"], "zone_visibility": "any"},
+            {"template": "bulky_tmpl", "count": 2, "zone_tags": ["back_band"], "zone_visibility": "any"}]}],
+        "zones": [
+            {"id": "lane3_front", "position": [0, 0, -8], "radius": 2.0, "tags": ["front_band"]},
+            {"id": "lane3_middle", "position": [0, 0, -16], "radius": 2.0, "tags": ["middle_band"]},
+            {"id": "lane3_back", "position": [0, 0, -24], "radius": 2.0, "tags": ["back_band"]},
+            {"id": "far_gate", "position": [40, 0, 0], "radius": 1.0, "tags": ["gate"]}]
+    })");
+    auto mech = ptv::MechanicRegistry::get().make_mechanic("builtin.encounter_director");
+    const auto hid = static_cast<std::uint32_t>(host);
+    mech->on_attach(world, hid, params, ctx);
+    const ptv::InputSnapshot input{};
+    auto tick = [&](float s) {
+        const int n = std::max(1, static_cast<int>(s / 0.05f));
+        for (int i = 0; i < n; ++i) mech->on_update(world, hid, 0.05f, input, ctx);
+    };
+    auto check_bands = [&]() -> const char* {
+        int seen = 0;
+        for (const auto& [c, t] : spawn.live) {
+            if (!world.valid(c) || !world.registry().get<ptv::CHealth>(static_cast<entt::entity>(c)).alive)
+                continue;
+            ++seen;
+            const auto p = world.registry().get<ptv::CTransform>(static_cast<entt::entity>(c)).t.position;
+            const std::string* tid = world.id_of(static_cast<entt::entity>(t));
+            const float want = *tid == "regular_tmpl" ? -8.0f : *tid == "tall_tmpl" ? -16.0f : -24.0f;
+            if (std::fabs(p.z - want) > 2.01f || std::fabs(p.x) > 2.01f) return "a group spawned outside its band";
+        }
+        return seen == 7 ? nullptr : "not every goblin spawned";
+    };
+    tick(0.1f);
+    if (const char* why = check_bands()) return fail(why);
+    for (const auto& [c, t] : spawn.live) {
+        if (world.valid(c)) world.registry().get<ptv::CHealth>(static_cast<entt::entity>(c)).alive = false;
+    }
+    tick(0.1f);
+    if (board.phase() == ptv::EncounterPhase::Victory) return fail("a repeating encounter declared victory");
+    tick(0.6f);
+    if (board.phase() != ptv::EncounterPhase::Active || board.wave_started_seq() != 2)
+        return fail("the goblins did not all come back");
+    if (const char* why = check_bands()) return fail(why);
+    return ok("encounter zones: each group in its tagged band (even inside the minimum "
+              "distance), in sight, and the waves repeat once all are dead");
+}
+
 // Companions follow and catch up; enemies chase, wind up, hit, and flinch.
 static int case_npc_behaviors() {
     ptv::World world;
@@ -3601,9 +3716,18 @@ static int case_npc_behaviors() {
     if (glm::length(reg.get<ptv::CLocomotionIntent>(ally).desired_velocity) > 1e-4f)
         return fail("a companion did not stop beside its leader");
     pos(player) = ptv::Vec3(60.0f, 0.0f, 5.0f);  // teleported far away
+    {
+        ptv::CMesh m{};
+        m.target_scale_meters = 1.8f;
+        m.foot_offset_m = 0.9f;
+        m.skinned = true;
+        reg.emplace<ptv::CMesh>(ally, m);
+    }
     follow->on_update(world, aid, 0.05f, input, ctx);
-    if (glm::length(pos(ally) - pos(player)) > 4.0f)
+    if (glm::length(ptv::Vec3(pos(ally).x, 0.0f, pos(ally).z) - pos(player)) > 4.0f)
         return fail("a lost companion was not re-placed near its leader");
+    if (std::fabs(pos(ally).y - 0.9f) > 1e-3f)
+        return fail("a re-placed companion was not stood on its feet (origin foot_offset up)");
     return ok("npc behaviors: chase, wind-up then hit, cooldown, hurt stagger; "
               "follow, stop in band, catch up when lost");
 }
@@ -3916,13 +4040,25 @@ public:
     std::vector<std::string> variants;
     int fade_rest_calls{0};
     bool one_shot{false};
+    /** Optional named joints (body slots) at world positions. */
+    std::vector<std::string> slot_names;
+    std::vector<ptv::Vec3> slot_pos;
 
     bool has_skeleton(std::uint32_t) const override { return true; }
     int joint_index(std::uint32_t, const char*) const override { return -1; }
     int joint_count(std::uint32_t) const override { return 1; }
-    int joint_for_slot(std::uint32_t, const char*) const override { return -1; }
+    int joint_for_slot(std::uint32_t, const char* slot) const override {
+        if (slot == nullptr) return -1;
+        for (std::size_t i = 0; i < slot_names.size(); ++i) {
+            if (slot_names[i] == slot) return static_cast<int>(i);
+        }
+        return -1;
+    }
     int joint_parent(std::uint32_t, int) const override { return -1; }
-    ptv::Mat4 joint_world(std::uint32_t, int) const override {
+    ptv::Mat4 joint_world(std::uint32_t, int j) const override {
+        if (j >= 0 && j < static_cast<int>(slot_pos.size())) {
+            return glm::translate(ptv::Mat4(1.0f), slot_pos[static_cast<std::size_t>(j)]);
+        }
         return ptv::Mat4(1.0f);
     }
     ptv::Mat4 joint_model(std::uint32_t, int) const override {
@@ -4568,9 +4704,12 @@ static int case_animation_lod(const char* glb) {
         }
     }
 
-    // Out of range entirely: never posed, so its clip has not advanced.
-    if (clip_time(gone_e) != 0.0f)
-        return fail("a character beyond the stop distance was still posed");
+    // Out of range entirely: posed ONCE (its clip's first frame, never the
+    // bind pose -- a goblin spawned 50 m away stood in a T-pose), then held.
+    if (world.get<ptv::CAnimator>(gone_e).posed_clip != 0)
+        return fail("a character beyond the stop distance was never posed (bind T-pose)");
+    if (clip_time(gone_e) > dt + 1e-5f)
+        return fail("a character beyond the stop distance kept being posed");
     // But the time it missed is banked, so walking back into range resumes
     // rather than rewinding.
     if (world.get<ptv::CAnimator>(gone_e).lod_debt_s <= 0.0f)
@@ -4668,6 +4807,21 @@ public:
         out.hit = true;
         return true;
     }
+    float distance_to_body(std::uint32_t entity, const ptv::Vec3& point) const override {
+        return p_.distance_to_body(entity, point);
+    }
+    bool raycast_floor(std::uint32_t self, const ptv::Vec3& origin, const ptv::Vec3& dir,
+                       float max_dist, ptv::PhysicsRayHit& out) const override {
+        out = {};
+        ptv::PhysicsWorld::RayFilter f{};
+        f.ignore.push_back(self);
+        f.floor_only = true;
+        ptv::Vec3 n(0.0f, 1.0f, 0.0f);
+        if (!p_.raycast(origin, dir, max_dist, f, out.point, n, out.entity)) return false;
+        out.normal = n;
+        out.hit = true;
+        return true;
+    }
     bool has_body(std::uint32_t e) const override { return p_.has_body(e); }
     void set_kinematic(std::uint32_t e, bool k) override { p_.set_kinematic(e, k); }
     void move_kinematic(std::uint32_t e, const ptv::Vec3& pos, const ptv::Quat& rot,
@@ -4723,6 +4877,70 @@ std::uint32_t add_npc(ptv::World& world, const char* id, const ptv::Vec3& pos,
 
 }  // namespace
 
+// Diagnostic over a REAL compiled scene: every NPC bound to
+// builtin.character_locomotion, real physics, a first frame as long as the
+// load (9 s) and then normal frames. No NPC may rise more than a step.
+static int case_scene_npc_ground(const char* path) {
+    const ptv::SceneDoc doc = ptv::LoadSceneJson(path);
+    ptv::World world;
+    ptv::ApplySceneToWorld(doc, world);
+    ptv::PhysicsWorld physics;
+    if (!physics.initialize()) return fail("physics failed to initialize");
+    physics.rebuild_from_world(world);
+    RealPhysicsAccess access(physics, world);
+    FakeSkeleton skeleton;
+    ptv::MechanicContext ctx{};
+    ctx.physics = &access;
+    ctx.skeleton = &skeleton;
+    struct Npc {
+        std::uint32_t e;
+        std::string id;
+        float y0;
+        std::unique_ptr<ptv::IMechanic> loco;
+    };
+    std::vector<Npc> npcs;
+    auto view = world.registry().view<ptv::CMechanicBinding, ptv::CTransform>();
+    for (auto ent : view) {
+        const auto e = static_cast<std::uint32_t>(ent);
+        if (ptv::has_tag(world, e, "template")) continue;
+        for (const auto& b : view.get<ptv::CMechanicBinding>(ent).entries) {
+            const std::string& id = b.builtin_id.empty() ? b.id : b.builtin_id;
+            if (id != "builtin.character_locomotion") continue;
+            auto m = ptv::MechanicRegistry::get().make_mechanic(id);
+            const auto params = nlohmann::json::parse(b.params_json, nullptr, false);
+            m->on_attach(world, e, params.is_object() ? params : nlohmann::json::object(), ctx);
+            const std::string* name = world.id_of(ent);
+            npcs.push_back({e, name ? *name : std::to_string(e),
+                            view.get<ptv::CTransform>(ent).t.position.y, std::move(m)});
+            break;
+        }
+    }
+    const ptv::InputSnapshot input{};
+    for (int frame = 0; frame < 150; ++frame) {
+        const float dt = frame == 0 ? 9.0f : 1.0f / 72.0f;
+        for (auto& n : npcs) n.loco->on_update(world, n.e, dt, input, ctx);
+        physics.step(std::min(dt, 1.0f / 30.0f));
+        physics.sync_to_world(world);
+        if (frame == 0 || frame == 1 || frame == 149) {
+            for (const auto& n : npcs) {
+                const float y = world.get<ptv::CTransform>(n.e).t.position.y;
+                if (std::fabs(y - n.y0) > 0.3f) {
+                    std::fprintf(stderr, "  frame %d %s: y %.2f -> %.2f\n", frame, n.id.c_str(),
+                                 n.y0, y);
+                }
+            }
+        }
+    }
+    int bad = 0;
+    for (const auto& n : npcs) {
+        const float y = world.get<ptv::CTransform>(n.e).t.position.y;
+        if (y - n.y0 > 0.4f) ++bad;
+    }
+    physics.shutdown();
+    if (bad > 0) return fail("NPCs rose off the floor in a real scene");
+    return ok("scene NPCs stay on the floor through a long first frame");
+}
+
 static int case_npc_ground_snap_real_physics() {
     ptv::World world;
     add_floor(world);
@@ -4777,6 +4995,802 @@ static int case_npc_ground_snap_real_physics() {
     physics.shutdown();
     return ok("npc ground snap: real-physics NPCs stand on the floor instead of "
               "climbing their own capsules");
+}
+
+namespace {
+
+/** A GLB-style prop with a measured collider: a box ``size`` big whose
+ *  bounds start ``bottom`` below the origin (0 = mesh stands on its origin,
+ *  size.y / 2 = a Tripo-style centred mesh). */
+std::uint32_t add_measured_prop(ptv::World& world, const char* id, const ptv::Vec3& pos,
+                                const ptv::Vec3& size, float bottom, const char* kind,
+                                const char* shape) {
+    const auto e = world.create_entity(id);
+    ptv::Transform t{};
+    t.position = pos;
+    world.registry().emplace<ptv::CTransform>(e, ptv::CTransform{t});
+    ptv::CMesh m{};
+    m.asset_id = id;
+    m.glb_path = std::string(id) + "_missing.glb";
+    m.target_scale_meters = std::max({size.x, size.y, size.z});
+    world.registry().emplace<ptv::CMesh>(e, std::move(m));
+    ptv::CCollisionGeom g{};
+    g.aabb_min = ptv::Vec3(-0.5f * size.x, -bottom, -0.5f * size.z);
+    g.aabb_max = ptv::Vec3(0.5f * size.x, size.y - bottom, 0.5f * size.z);
+    for (int i = 0; i < 8; ++i) {
+        g.hull.push_back(ptv::Vec3((i & 1) ? g.aabb_max.x : g.aabb_min.x,
+                                   (i & 2) ? g.aabb_max.y : g.aabb_min.y,
+                                   (i & 4) ? g.aabb_max.z : g.aabb_min.z));
+    }
+    world.registry().emplace<ptv::CCollisionGeom>(e, std::move(g));
+    ptv::CPhysics p{};
+    p.kind = kind;
+    p.mass_kg = 0.4f;
+    p.collision_shape = shape;
+    world.registry().emplace<ptv::CPhysics>(e, p);
+    return static_cast<std::uint32_t>(e);
+}
+
+}  // namespace
+
+static int case_npc_held_item_floor() {
+    ptv::World world;
+    add_floor(world);
+    // An NPC carrying a rifle whose collider (the old 0.5 m fallback box)
+    // straddles its hip: the floor probe once stood the NPC on it, every
+    // frame, and it climbed 41 m/s into the sky.
+    const auto npc = add_npc(world, "rifleman", ptv::Vec3(0.0f, 0.9f, 0.0f), 1.8f, 0.9f);
+    const auto rifle = add_measured_prop(world, "rifle", ptv::Vec3(0.2f, 0.9f, 0.0f),
+                                         ptv::Vec3(0.5f, 0.5f, 0.5f), 0.25f,
+                                         "kinematic", "mesh");
+    ptv::CAttachment att{};
+    att.parent = npc;
+    att.anchor = "hand_r";
+    world.registry().emplace<ptv::CAttachment>(static_cast<entt::entity>(rifle), att);
+    ptv::PhysicsWorld physics;
+    if (!physics.initialize()) return fail("physics failed to initialize");
+    physics.rebuild_from_world(world);
+    if (physics.body_class(rifle) != ptv::PhysicsWorld::BodyClass::Held)
+        return fail("an attached item was not put in the Held class");
+    RealPhysicsAccess access(physics, world);
+    FakeSkeleton skeleton;
+    ptv::MechanicContext ctx{};
+    ctx.physics = &access;
+    ctx.skeleton = &skeleton;
+    auto loco = ptv::MechanicRegistry::get().make_mechanic("builtin.character_locomotion");
+    if (!loco) return fail("builtin.character_locomotion is not registered");
+    loco->on_attach(world, npc, nlohmann::json::object(), ctx);
+    const ptv::InputSnapshot input{};
+    const float dt = 1.0f / 72.0f;
+    for (int i = 0; i < 300; ++i) {
+        physics.step(dt);
+        loco->on_update(world, npc, dt, input, ctx);
+        // The attachment system carries the rifle with the hand.
+        const auto& tn = world.get<ptv::CTransform>(npc).t;
+        physics.move_kinematic(rifle, tn.position + ptv::Vec3(0.2f, 0.0f, 0.0f),
+                               tn.rotation, dt);
+    }
+    const float y = world.get<ptv::CTransform>(npc).t.position.y;
+    std::fprintf(stderr, "  rifleman y=%.3f (want 0.9)\n", y);
+    if (std::fabs(y - 0.9f) > 0.05f)
+        return fail("the NPC's floor probe stood it on the rifle in its own hand");
+    physics.shutdown();
+    return ok("held items: an NPC's own weapon is never its floor");
+}
+
+static int case_player_never_pushes_props() {
+    ptv::World world;
+    add_floor(world);
+    const auto pistol = add_measured_prop(world, "pistol", ptv::Vec3(0.0f, 0.0f, -1.0f),
+                                          ptv::Vec3(0.2f, 0.14f, 0.04f), 0.0f,
+                                          "dynamic", "mesh");
+    const auto crate = add_measured_prop(world, "crate", ptv::Vec3(3.0f, 0.0f, -1.0f),
+                                         ptv::Vec3(0.6f, 0.6f, 0.6f), 0.0f,
+                                         "dynamic", "aabb");
+    world.registry().get<ptv::CPhysics>(static_cast<entt::entity>(crate)).mass_kg = 60.0f;
+    // The kinematic contact capsule the engine puts on the player rig.
+    const auto rig = world.create_entity("player_rig");
+    {
+        ptv::Transform t{};
+        t.position = ptv::Vec3(-3.0f, 0.85f, -1.0f);
+        t.scale = 1.7f;
+        world.registry().emplace<ptv::CTransform>(rig, ptv::CTransform{t});
+        ptv::CPhysics p{};
+        p.kind = "kinematic";
+        p.mass_kg = 70.0f;
+        p.collision_shape = "capsule";
+        p.capsule_radius_m = 0.18f;
+        world.registry().emplace<ptv::CPhysics>(rig, p);
+        world.registry().emplace<ptv::CTag>(rig, ptv::CTag{{"player"}});
+    }
+    ptv::PhysicsWorld physics;
+    if (!physics.initialize()) return fail("physics failed to initialize");
+    physics.rebuild_from_world(world);
+    if (physics.body_class(static_cast<std::uint32_t>(rig)) !=
+        ptv::PhysicsWorld::BodyClass::PlayerBody)
+        return fail("the player's capsule was not put in the PlayerBody class");
+    const float dt = 1.0f / 90.0f;
+    for (int i = 0; i < 90; ++i) {  // let the props settle
+        physics.step(dt);
+        physics.sync_to_world(world);
+    }
+    const ptv::Vec3 pistol0 = world.get<ptv::CTransform>(pistol).t.position;
+    const ptv::Vec3 crate0 = world.get<ptv::CTransform>(crate).t.position;
+
+    // Walk straight through the pistol, then into the crate.
+    physics.create_player_character(ptv::Vec3(0.0f, 0.0f, 0.5f), 1.7f, 0.18f);
+    for (int i = 0; i < 180; ++i) {
+        physics.move_player_character(ptv::Vec3(0.0f, 0.0f, -1.5f * dt), true, 0.0f, dt);
+        // The contact capsule sweeps through the pistol's row too.
+        physics.move_kinematic(static_cast<std::uint32_t>(rig),
+                               ptv::Vec3(-3.0f + 3.0f * i / 180.0f, 0.85f, -1.0f),
+                               ptv::Quat(1, 0, 0, 0), dt);
+        physics.step(dt);
+        physics.sync_to_world(world);
+    }
+    const ptv::Vec3 pistol1 = world.get<ptv::CTransform>(pistol).t.position;
+    const float pushed = glm::length(pistol1 - pistol0);
+    const float z_after_pistol = physics.player_character_state().feet.z;
+    physics.teleport_player_character(ptv::Vec3(3.0f, 0.0f, 0.5f));
+    for (int i = 0; i < 180; ++i) {
+        physics.move_player_character(ptv::Vec3(0.0f, 0.0f, -1.5f * dt), true, 0.0f, dt);
+        physics.step(dt);
+        physics.sync_to_world(world);
+    }
+    const ptv::Vec3 crate1 = world.get<ptv::CTransform>(crate).t.position;
+    const float crate_pushed = glm::length(crate1 - crate0);
+    const float z_at_crate = physics.player_character_state().feet.z;
+    std::fprintf(stderr,
+                 "  pistol moved %.3f m (player reached z=%.2f); crate moved %.3f m, "
+                 "player stopped at z=%.2f\n",
+                 pushed, z_after_pistol, crate_pushed, z_at_crate);
+    if (pushed > 0.01f) return fail("the player's body pushed a pistol it walked into");
+    if (z_after_pistol > -1.5f) return fail("a light prop blocked the player's body");
+    if (crate_pushed > 0.01f) return fail("the player's body shoved a heavy crate");
+    if (z_at_crate < -1.0f + 0.3f) return fail("a heavy crate did not block the player");
+    physics.shutdown();
+    return ok("player body: walks through light props without touching them, is "
+              "stopped by heavy ones without shoving them");
+}
+
+namespace {
+
+class PartHands final : public ptv::IHands {
+public:
+    std::uint32_t skeleton{0xFFFFFFFFu};
+    std::uint32_t held_entity(int) const override { return 0xFFFFFFFFu; }
+    void set_held_entity(int, std::uint32_t) override {}
+    std::uint32_t hand_entity(int h) const override { return h == 1 ? skeleton : 0xFFFFFFFFu; }
+    std::uint32_t finger_target(int h) const override { return h == 1 ? skeleton : 0xFFFFFFFFu; }
+    void set_finger_target(int, std::uint32_t) override {}
+    std::uint32_t player_entity() const override { return 0xFFFFFFFFu; }
+};
+
+/** A right hand's palm and index finger, laid along -Z from ``wrist``. */
+void pose_hand(FakeSkeleton& sk, const ptv::Vec3& wrist) {
+    sk.slot_names = {"hand_r", "middle_1_r", "index_1_r", "index_3_r"};
+    sk.slot_pos = {wrist, wrist + ptv::Vec3(0, 0, -0.09f),
+                   wrist + ptv::Vec3(0.02f, 0, -0.09f), wrist + ptv::Vec3(0.02f, 0, -0.14f)};
+}
+
+}  // namespace
+
+static int case_player_parts() {
+    ptv::World world;
+    add_floor(world);
+    // A can the open hand sweeps through at waist height, and a pistol the
+    // hand closes in on to grab.
+    const auto can = add_measured_prop(world, "can", ptv::Vec3(0.0f, 0.95f, -1.0f),
+                                       ptv::Vec3(0.066f, 0.12f, 0.066f), 0.06f,
+                                       "dynamic", "mesh");
+    const auto pistol = add_measured_prop(world, "pistol", ptv::Vec3(3.0f, 0.95f, -1.0f),
+                                          ptv::Vec3(0.2f, 0.14f, 0.04f), 0.07f,
+                                          "dynamic", "mesh");
+    world.registry().emplace<ptv::CTag>(static_cast<entt::entity>(pistol),
+                                        ptv::CTag{{"grabbable"}});
+    // Rest both on a static shelf so they stay put while untouched.
+    {
+        const auto shelf = world.create_entity("shelf");
+        ptv::Transform t{};
+        t.position = ptv::Vec3(1.5f, 0.85f, -1.0f);
+        world.registry().emplace<ptv::CTransform>(shelf, ptv::CTransform{t});
+        world.registry().emplace<ptv::CPrimitive>(
+            shelf, ptv::CPrimitive{"box", ptv::Vec3(6.0f, 0.1f, 1.0f), ptv::Vec3(0.5f)});
+        ptv::CPhysics p{};
+        p.kind = "static";
+        p.collision_shape = "box";
+        world.registry().emplace<ptv::CPhysics>(shelf, p);
+    }
+    const auto hand_skel = world.create_entity("hand_r");
+    world.registry().emplace<ptv::CTransform>(hand_skel, ptv::CTransform{});
+    ptv::PhysicsWorld physics;
+    if (!physics.initialize()) return fail("physics failed to initialize");
+    physics.rebuild_from_world(world);
+    FakeSkeleton skel;
+    PartHands hands;
+    hands.skeleton = static_cast<std::uint32_t>(hand_skel);
+    ptv::PlayerParts parts;
+    parts.configure(false);
+    ptv::InputSnapshot input{};
+    input.hands[1].hand_valid = true;
+    input.hands[1].grip = 0.0f;  // open
+    const float dt = 1.0f / 90.0f;
+    for (int i = 0; i < 60; ++i) {  // settle
+        physics.step(dt);
+        physics.sync_to_world(world);
+    }
+    const ptv::Vec3 can0 = world.get<ptv::CTransform>(can).t.position;
+    const ptv::Vec3 pistol0 = world.get<ptv::CTransform>(pistol).t.position;
+    // Sweep the hand sideways through the can at 1 m/s, then push it straight
+    // into the pistol (open, reaching to grab).
+    for (int i = 0; i < 90; ++i) {
+        const ptv::Vec3 wrist(-0.5f + i * dt, 0.96f, -0.88f);
+        pose_hand(skel, wrist);
+        input.hands[1].hand_position = wrist;
+        parts.update(world, physics, skel, hands, input, dt);
+        physics.step(dt);
+        physics.sync_to_world(world);
+    }
+    const float can_moved = glm::length(world.get<ptv::CTransform>(can).t.position - can0);
+    for (int i = 0; i < 90; ++i) {
+        const ptv::Vec3 wrist(3.0f, 0.96f, -0.75f - 0.25f * i / 90.0f);
+        pose_hand(skel, wrist);
+        input.hands[1].hand_position = wrist + ptv::Vec3(0, 0, -0.05f);
+        parts.update(world, physics, skel, hands, input, dt);
+        physics.step(dt);
+        physics.sync_to_world(world);
+    }
+    const float pistol_moved =
+        glm::length(world.get<ptv::CTransform>(pistol).t.position - pistol0);
+    std::fprintf(stderr, "  parts=%d can moved %.3f m, pistol moved %.3f m\n",
+                 parts.live_parts(), can_moved, pistol_moved);
+    if (parts.live_parts() < 2) return fail("the hand's palm and finger got no colliders");
+    if (can_moved < 0.02f) return fail("a hand swept through a can without touching it");
+    if (pistol_moved > 0.01f) return fail("an open hand reaching for a pistol pushed it away");
+    // Colliders, not visuals: each drew as a 0.3 m white box over the hand.
+    int part_entities = 0;
+    for (auto [e, tag] : world.registry().view<ptv::CTag>().each()) {
+        if (std::find(tag.tags.begin(), tag.tags.end(), "player_part") == tag.tags.end()) continue;
+        ++part_entities;
+        if (!ptv::render_tags::resolve(tag.tags).always_hidden) {
+            return fail("a body-part collider entity is drawable (white box over the hand)");
+        }
+    }
+    if (part_entities < 2) return fail("no body-part collider entities were made");
+    physics.shutdown();
+    return ok("player parts: hands nudge props, but never the one they are reaching to grab; "
+              "the colliders are never drawn");
+}
+
+// What an entity with nothing to draw (no mesh, primitive or inline mesh)
+// looks like. The old default drew every one as a 0.3 m grey cube: logic
+// hosts, HUD anchors, weapon hubs and the player's finger colliders.
+static int case_meshless_render_policy() {
+    using ptv::render_tags::draws_meshless;
+    using ptv::render_tags::resolve;
+    struct Case {
+        std::vector<std::string> tags;
+        bool drawn;
+        const char* why;
+    };
+    const Case cases[] = {
+        {{}, false, "an untagged meshless entity"},
+        {{"mission_controller"}, false, "a logic entity with an unknown tag"},
+        {{"mechanic_host"}, false, "a mechanic host"},
+        {{"collider_only"}, false, "a collider proxy"},
+        {{"player_part", "collider_only"}, false, "the player's finger collider"},
+        {{"hud"}, false, "a HUD anchor"},
+        {{"placeholder"}, true, "explicit debug geometry"},
+        {{"wall", "placeholder"}, true, "the starter room's walls"},
+        {{"ground"}, true, "a floor"},
+        {{"grabbable"}, true, "a grabbable whose mesh is missing"},
+        {{"door"}, true, "a declared door"},
+    };
+    for (const Case& c : cases) {
+        if (draws_meshless(resolve(c.tags)) != c.drawn) {
+            return fail((std::string(c.why) + (c.drawn ? " is not drawn" : " is drawn")).c_str());
+        }
+    }
+    // Always-hidden also hides a real mesh; meshless-hidden does not.
+    if (!resolve({"collider_only"}).always_hidden) return fail("collider_only does not hide meshes");
+    if (resolve({"mechanic_host"}).always_hidden) return fail("mechanic_host hides real meshes");
+    return ok("meshless entities draw only when a tag asks for a placeholder");
+}
+
+namespace {
+
+class PokeHands final : public ptv::IHands {
+public:
+    ptv::Vec3 tip{0.0f};
+    std::uint32_t held_entity(int) const override { return 0xFFFFFFFFu; }
+    void set_held_entity(int, std::uint32_t) override {}
+    std::uint32_t hand_entity(int) const override { return 0xFFFFFFFFu; }
+    std::uint32_t finger_target(int) const override { return 0xFFFFFFFFu; }
+    void set_finger_target(int, std::uint32_t) override {}
+    std::uint32_t player_entity() const override { return 0xFFFFFFFFu; }
+    bool fingertip_world(int hand, const char*, ptv::Vec3* out) const override {
+        if (hand != 1) return false;
+        *out = tip;
+        return true;
+    }
+};
+
+}  // namespace
+
+static int case_press_button() {
+    ptv::World world;
+    // A 23 cm pedestal standing on its origin, cap 65 cm up.
+    const auto button = world.create_entity("lane2_start_button");
+    world.registry().emplace<ptv::CTransform>(button, ptv::CTransform{});
+    ptv::CCollisionGeom g{};
+    g.aabb_min = ptv::Vec3(-0.115f, 0.0f, -0.115f);
+    g.aabb_max = ptv::Vec3(0.115f, 0.65f, 0.115f);
+    world.registry().emplace<ptv::CCollisionGeom>(button, g);
+    const auto self = static_cast<std::uint32_t>(button);
+    ptv::SignalBoard signals;
+    ptv::VarBoard vars;
+    PokeHands hands;
+    ptv::MechanicContext ctx{};
+    ctx.hands = &hands;
+    ctx.signals = &signals;
+    ctx.vars = &vars;
+    auto press = ptv::MechanicRegistry::get().make_mechanic("builtin.press_button");
+    if (!press) return fail("builtin.press_button is not registered");
+    press->on_attach(world, self, nlohmann::json{{"signal", "lane2.start"}}, ctx);
+    ptv::InputSnapshot input{};
+    input.hands[1].hand_valid = true;
+    // The controller holds the finger: grip pose 9.5 cm behind / 1 cm above
+    // the index tip. ``trail`` moves the DRAWN tip away from it, as a
+    // full-body avatar's arm does when it lags the controller.
+    ptv::Vec3 trail(0.0f);
+    auto at = [&](const ptv::Vec3& tip) {
+        input.hands[1].hand_position = tip - ptv::Vec3(0.0f, -0.01f, -0.095f);
+        hands.tip = tip + trail;
+    };
+    auto poke = [&](float x, float z) {
+        for (int i = 0; i <= 20; ++i) {  // from 5 cm above the cap to 1.5 cm in
+            at(ptv::Vec3(x, 0.70f - 0.0033f * i, z));
+            press->on_update(world, self, 1.0f / 72.0f, input, ctx);
+        }
+        for (int i = 0; i <= 40; ++i) {  // back out, past the cooldown
+            at(ptv::Vec3(x, 0.66f + 0.002f * i, z));
+            press->on_update(world, self, 1.0f / 72.0f, input, ctx);
+        }
+    };
+    poke(0.0f, 0.0f);
+    if (signals.count("lane2.start") != 1) return fail("a poke on the cap did not press it");
+    poke(0.3f, 0.0f);
+    if (signals.count("lane2.start") != 1) return fail("a poke beside the button pressed it");
+    poke(0.02f, -0.01f);
+    if (signals.count("lane2.start") != 2) return fail("a second poke did not press again");
+    if (vars.number("lane2.start.count") != 2.0f) return fail("the press count var is wrong");
+    std::uint32_t seen = 0;
+    if (!signals.fired_since("lane2.start", seen) || signals.fired_since("lane2.start", seen))
+        return fail("fired_since does not track the count");
+    // The rerun's Full Player Avatar: its drawn fingertip 60 cm behind the
+    // controller that is pushing the cap.
+    trail = ptv::Vec3(0.0f, -0.3f, 0.5f);
+    poke(0.0f, 0.0f);
+    if (signals.count("lane2.start") != 3)
+        return fail("a controller poke did not press while the drawn finger trailed it");
+    return ok("press button: an index-finger poke through the cap raises its signal, "
+              "from the controller's poke point when the drawn finger trails it");
+}
+
+namespace {
+
+class CloneSpawn final : public ptv::ISpawn {
+public:
+    explicit CloneSpawn(ptv::World& w) : w_(w) {}
+    std::uint32_t instance(std::uint32_t tmpl, const ptv::Vec3& pos,
+                           const ptv::Quat& rot) override {
+        const auto e = ptv::clone_entity_components(w_, static_cast<entt::entity>(tmpl), pos, rot);
+        return e == entt::null ? 0xFFFFFFFFu : static_cast<std::uint32_t>(e);
+    }
+    void despawn(std::uint32_t e) override {
+        if (w_.valid(e)) w_.registry().destroy(static_cast<entt::entity>(e));
+    }
+    int live_count(std::uint32_t) const override { return 0; }
+
+private:
+    ptv::World& w_;
+};
+
+}  // namespace
+
+static int case_target_challenge() {
+    ptv::World world;
+    const auto tmpl = world.create_entity("lane2_target_template");
+    {
+        ptv::Transform t{};
+        t.position = ptv::Vec3(0.0f, -50.0f, 0.0f);
+        world.registry().emplace<ptv::CTransform>(tmpl, ptv::CTransform{t});
+        ptv::CCollisionGeom g{};
+        g.aabb_min = ptv::Vec3(-0.4f, -0.9f, -0.05f);
+        g.aabb_max = ptv::Vec3(0.4f, 0.9f, 0.05f);
+        world.registry().emplace<ptv::CCollisionGeom>(tmpl, g);
+        world.registry().emplace<ptv::CTag>(tmpl, ptv::CTag{{"template", "challenge_target"}});
+    }
+    const auto host = world.create_entity("lane2_challenge");
+    world.registry().emplace<ptv::CTransform>(host, ptv::CTransform{});
+    std::vector<ptv::AnchorSpec> anchors;
+    std::vector<ptv::AnchorSetSpec> sets(1);
+    sets[0].id = "lane2_hang_points";
+    sets[0].relation = "hang_from";
+    sets[0].facing = ptv::Vec3(0.0f, 0.0f, 1.0f);
+    for (int i = 0; i < 4; ++i) sets[0].points.push_back(ptv::Vec3(-6.0f + 4.0f * i, 4.9f, 15.0f));
+    ptv::AnchorBoard anchor_board;
+    anchor_board.bind(&anchors, &sets, &world);
+    ptv::SignalBoard signals;
+    ptv::VarBoard vars;
+    CloneSpawn spawn(world);
+    ptv::MechanicContext ctx{};
+    ctx.anchors = &anchor_board;
+    ctx.signals = &signals;
+    ctx.vars = &vars;
+    ctx.spawn = &spawn;
+    auto ch = ptv::MechanicRegistry::get().make_mechanic("builtin.target_challenge");
+    if (!ch) return fail("builtin.target_challenge is not registered");
+    const auto self = static_cast<std::uint32_t>(host);
+    ch->on_attach(world, self,
+                  nlohmann::json{{"id", "lane2"}, {"start_signal", "lane2.start"},
+                                 {"duration_s", 5.0}, {"countdown_s", 0.0},
+                                 {"anchor_set", "lane2_hang_points"}, {"max_active", 3},
+                                 {"spawn_interval_s", 0.1}},
+                  ctx);
+    const ptv::InputSnapshot input{};
+    const float dt = 1.0f / 60.0f;
+    auto step = [&](int frames) {
+        for (int i = 0; i < frames; ++i) ch->on_update(world, self, dt, input, ctx);
+    };
+    step(10);
+    if (std::string(vars.text("lane2.state")) != "ready") return fail("challenge did not wait");
+    signals.emit("lane2.start");
+    step(30);
+    if (std::string(vars.text("lane2.state")) != "running") return fail("start signal ignored");
+    std::vector<entt::entity> live;
+    for (auto e : world.registry().view<ptv::CHealth>()) live.push_back(e);
+    if (live.size() != 3) return fail("did not spawn max_active targets");
+    for (auto e : live) {
+        const auto& p = world.registry().get<ptv::CTransform>(e).t.position;
+        // Hanging: the target's top (0.9 m above its origin) at the point.
+        if (std::fabs(p.y + 0.9f - 4.9f) > 1e-3f || std::fabs(p.z - 15.0f) > 1e-3f)
+            return fail("a target was not hung from its anchor point");
+    }
+    world.registry().get<ptv::CHealth>(live[0]).alive = false;
+    step(60);
+    if (vars.number("lane2.score") != 1.0f) return fail("a destroyed target did not score");
+    step(400);
+    if (std::string(vars.text("lane2.state")) != "finished" || vars.number("lane2.best") != 1.0f)
+        return fail("challenge did not finish with its best score");
+    int remaining = 0;
+    for (auto e : world.registry().view<ptv::CHealth>()) {
+        (void)e;
+        ++remaining;
+    }
+    if (remaining != 0) return fail("targets were left after the challenge ended");
+    if (signals.count("lane2.finished") != 1) return fail("no finished signal");
+    return ok("target challenge: starts on its signal, hangs targets on the world's points, "
+              "scores hits, ends and clears");
+}
+
+static int case_destructible() {
+    ptv::World world;
+    const auto t = world.create_entity("lane1_target_a");
+    world.registry().emplace<ptv::CTransform>(t, ptv::CTransform{});
+    ptv::CHealth h{};
+    h.max = h.current = 30.0f;
+    world.registry().emplace<ptv::CHealth>(t, h);
+    ptv::SignalBoard signals;
+    ptv::VarBoard vars;
+    ptv::MechanicContext ctx{};
+    ctx.signals = &signals;
+    ctx.vars = &vars;
+    auto d = ptv::MechanicRegistry::get().make_mechanic("builtin.destructible");
+    if (!d) return fail("builtin.destructible is not registered");
+    const auto self = static_cast<std::uint32_t>(t);
+    d->on_attach(world, self, nlohmann::json{{"effect", "shatter"}, {"respawn_after_s", 1.0}},
+                 ctx);
+    const ptv::InputSnapshot input{};
+    auto step = [&](int frames) {
+        for (int i = 0; i < frames; ++i) d->on_update(world, self, 1.0f / 60.0f, input, ctx);
+    };
+    step(10);
+    if (signals.count("lane1_target_a.destroyed") != 0) return fail("broke at full health");
+    // What a killing shot through ctx.combat leaves: dead, with the engine's
+    // death linger running (which would delete it when it ran out).
+    auto& hp = world.get<ptv::CHealth>(self);
+    hp.current = 0.0f;
+    hp.alive = false;
+    hp.death_timer_s = 1.5f;
+    step(1);
+    if (signals.count("lane1_target_a.destroyed") != 1) return fail("a dead target did not break");
+    if (!ptv::has_tag(world, self, "destroyed") || !ptv::has_tag(world, self, "template"))
+        return fail("a broken target is not tagged destroyed + hidden");
+    if (hp.death_timer_s >= 0.0f) return fail("the engine would delete a broken target");
+    if (vars.number("destructibles.destroyed") != 1.0f) return fail("no destroyed count");
+    step(30);
+    if (!ptv::has_tag(world, self, "destroyed")) return fail("restored before respawn_after_s");
+    step(40);
+    if (ptv::has_tag(world, self, "template") || !hp.alive || hp.current != hp.max)
+        return fail("did not come back after respawn_after_s");
+    if (signals.count("lane1_target_a.restored") != 1) return fail("no restored signal");
+    return ok("destructible: breaks when its health runs out, hides, comes back on time");
+}
+
+namespace {
+
+class HoldHands final : public ptv::IHands {
+public:
+    std::uint32_t held[2]{0xFFFFFFFFu, 0xFFFFFFFFu};
+    std::uint32_t held_entity(int h) const override { return held[h & 1]; }
+    void set_held_entity(int h, std::uint32_t e) override { held[h & 1] = e; }
+    std::uint32_t hand_entity(int) const override { return 0xFFFFFFFFu; }
+    std::uint32_t finger_target(int) const override { return 0xFFFFFFFFu; }
+    void set_finger_target(int, std::uint32_t) override {}
+    std::uint32_t player{0xFFFFFFFFu};
+    std::uint32_t player_entity() const override { return player; }
+};
+
+class BlastCombat final : public ptv::ICombat {
+public:
+    std::unordered_map<std::uint32_t, float> dealt;
+    bool apply_damage(std::uint32_t t, float amount, std::uint32_t) override {
+        dealt[t] += amount;
+        return true;
+    }
+    void heal(std::uint32_t, float) override {}
+    float health(std::uint32_t) const override { return 100.0f; }
+    float max_health(std::uint32_t) const override { return 100.0f; }
+    bool is_alive(std::uint32_t) const override { return true; }
+    void kill(std::uint32_t) override {}
+    const char* faction(std::uint32_t) const override { return ""; }
+    bool is_hostile(std::uint32_t, std::uint32_t) const override { return false; }
+};
+
+std::uint32_t add_blast_target(ptv::World& world, const char* id, const ptv::Vec3& pos,
+                               bool npc) {
+    const auto e = world.create_entity(id);
+    ptv::Transform t{};
+    t.position = pos;
+    world.registry().emplace<ptv::CTransform>(e, ptv::CTransform{t});
+    ptv::CHealth h{};
+    h.max = h.current = 100.0f;
+    world.registry().emplace<ptv::CHealth>(e, h);
+    if (npc) world.registry().emplace<ptv::CFaction>(e, ptv::CFaction{"enemy", {"player"}});
+    return static_cast<std::uint32_t>(e);
+}
+
+}  // namespace
+
+namespace {
+/** Just enough of ctx.weapons to read a weapon's published state. */
+struct StateBoard final : ptv::IWeapons {
+    ptv::WeaponState last{};
+    bool state(std::uint32_t, ptv::WeaponState* out) const override {
+        if (out) *out = last;
+        return last.configured;
+    }
+    std::uint32_t held_weapon(int) const override { return 0xFFFFFFFFu; }
+    std::uint64_t hit_seq() const override { return 0; }
+    int hits_since(std::uint64_t, ptv::WeaponHit*, int) const override { return 0; }
+    void trigger(std::uint32_t, bool) override {}
+    bool fire_once(std::uint32_t) override { return false; }
+    void aim_at(std::uint32_t, const ptv::Vec3&, bool) override {}
+    bool aim_point(std::uint32_t, ptv::Vec3*) const override { return false; }
+    void publish_state(std::uint32_t, const ptv::WeaponState& s) override { last = s; }
+    void publish_hit(const ptv::WeaponHit&) override {}
+    bool npc_trigger(std::uint32_t) const override { return false; }
+    bool take_fire_request(std::uint32_t) override { return false; }
+};
+}  // namespace
+
+// Infinite ammo with no reload is bottomless. The rerun's blaster was
+// designed "infinite, magazine 1, reload none": it fired once and never
+// again, because the one round was spent and nothing could refill it.
+static int case_weapon_bottomless() {
+    ptv::World world;
+    add_floor(world);
+    const auto gun = world.create_entity("blaster");
+    {
+        ptv::Transform t{};
+        t.position = ptv::Vec3(0.0f, 1.2f, 0.0f);
+        world.registry().emplace<ptv::CTransform>(gun, ptv::CTransform{t});
+    }
+    ptv::PhysicsWorld physics;
+    if (!physics.initialize()) return fail("physics failed to initialize");
+    physics.rebuild_from_world(world);
+    RealPhysicsAccess access(physics, world);
+    HoldHands hands;
+    StateBoard board;
+    ptv::MechanicContext ctx{};
+    ctx.physics = &access;
+    ctx.hands = &hands;
+    ctx.weapons = &board;
+    auto weapon = ptv::MechanicRegistry::get().make_mechanic("builtin.weapon");
+    if (!weapon) return fail("builtin.weapon is not registered");
+    const auto self = static_cast<std::uint32_t>(gun);
+    weapon->on_attach(world, self,
+                      nlohmann::json{{"delivery", "hitscan"}, {"fire_mode", "semi"}, {"rpm", 300.0},
+                                     {"ammo", {{"infinite", true}, {"magazine", 1},
+                                               {"reload", "none"}}}},
+                      ctx);
+    hands.held[1] = self;
+    hands.player = static_cast<std::uint32_t>(world.create_entity("player"));
+    ptv::InputSnapshot input{};
+    input.hands[1].hand_valid = true;
+    input.hands[1].held_entity = self;
+    const float dt = 1.0f / 60.0f;
+    for (int pull = 0; pull < 5; ++pull) {
+        for (int i = 0; i < 30; ++i) {
+            input.hands[1].prev_trigger = input.hands[1].trigger;
+            input.hands[1].trigger = i < 12 ? 1.0f : 0.0f;
+            weapon->on_update(world, self, dt, input, ctx);
+        }
+    }
+    physics.shutdown();
+    if (board.last.fire_seq != 5) {
+        return fail(("a bottomless semi-auto fired " + std::to_string(board.last.fire_seq) +
+                     " time(s) in 5 pulls").c_str());
+    }
+    return ok("weapon: infinite ammo with no reload never runs dry");
+}
+
+static int case_explosive() {
+    ptv::World world;
+    add_floor(world);
+    {
+        const auto wall = world.create_entity("wall");
+        ptv::Transform t{};
+        t.position = ptv::Vec3(-1.5f, 1.5f, 0.0f);
+        world.registry().emplace<ptv::CTransform>(wall, ptv::CTransform{t});
+        world.registry().emplace<ptv::CPrimitive>(
+            wall, ptv::CPrimitive{"box", ptv::Vec3(0.2f, 3.0f, 4.0f), ptv::Vec3(0.5f)});
+        ptv::CPhysics p{};
+        p.kind = "static";
+        p.collision_shape = "box";
+        world.registry().emplace<ptv::CPhysics>(wall, p);
+    }
+    const auto grenade = world.create_entity("frag_grenade");
+    {
+        ptv::Transform t{};
+        t.position = ptv::Vec3(0.0f, 0.05f, 0.0f);
+        world.registry().emplace<ptv::CTransform>(grenade, ptv::CTransform{t});
+    }
+    const auto near_t = add_blast_target(world, "near", ptv::Vec3(1.0f, 0.9f, 0.0f), false);
+    const auto mid_t = add_blast_target(world, "mid", ptv::Vec3(4.0f, 0.9f, 0.0f), false);
+    const auto far_t = add_blast_target(world, "far", ptv::Vec3(10.0f, 0.9f, 0.0f), false);
+    const auto hidden = add_blast_target(world, "behind_wall", ptv::Vec3(-3.0f, 0.9f, 0.0f), false);
+    const auto goblin = add_blast_target(world, "goblin", ptv::Vec3(3.0f, 0.9f, 2.0f), true);
+
+    ptv::PhysicsWorld physics;
+    if (!physics.initialize()) return fail("physics failed to initialize");
+    physics.rebuild_from_world(world);
+    RealPhysicsAccess access(physics, world);
+    HoldHands hands;
+    BlastCombat combat;
+    ptv::SignalBoard signals;
+    ptv::MechanicContext ctx{};
+    ctx.physics = &access;
+    ctx.hands = &hands;
+    ctx.combat = &combat;
+    ctx.signals = &signals;
+
+    auto frag = ptv::MechanicRegistry::get().make_mechanic("builtin.explosive");
+    if (!frag) return fail("builtin.explosive is not registered");
+    const auto self = static_cast<std::uint32_t>(grenade);
+    frag->on_attach(world, self,
+                    nlohmann::json{{"kind", "frag"}, {"fuse_s", 1.0}, {"radius_m", 6.0},
+                                   {"inner_radius_m", 1.5}, {"damage", 120.0},
+                                   {"respawn_after_s", 2.0}},
+                    ctx);
+    ptv::InputSnapshot input{};
+    const float dt = 1.0f / 60.0f;
+    auto step = [&](int frames) {
+        for (int i = 0; i < frames; ++i) {
+            frag->on_update(world, self, dt, input, ctx);
+            input.hands[1].prev_trigger = input.hands[1].trigger;
+        }
+    };
+    hands.held[1] = self;
+    input.hands[1].trigger = 1.0f;  // pull the pin
+    step(120);                      // and keep holding it for 2 s
+    if (!combat.dealt.empty() || signals.count("frag_grenade.detonated") != 0)
+        return fail("a grenade went off in the hand holding it");
+    hands.held[1] = 0xFFFFFFFFu;    // thrown
+    input.hands[1].trigger = 0.0f;
+    step(30);
+    if (signals.count("frag_grenade.detonated") != 0) return fail("went off before its fuse");
+    step(40);
+    if (signals.count("frag_grenade.detonated") != 1) return fail("did not go off after its fuse");
+    std::fprintf(stderr, "  dealt near=%.1f mid=%.1f far=%.1f behind_wall=%.1f goblin=%.1f\n",
+                 combat.dealt[near_t], combat.dealt[mid_t], combat.dealt[far_t],
+                 combat.dealt[hidden], combat.dealt[goblin]);
+    if (std::fabs(combat.dealt[near_t] - 120.0f) > 0.5f)
+        return fail("full damage inside the inner radius");
+    if (combat.dealt[mid_t] <= 10.0f || combat.dealt[mid_t] >= 120.0f)
+        return fail("damage did not fall off with distance");
+    if (combat.dealt.count(far_t) != 0 && combat.dealt[far_t] > 0.0f)
+        return fail("damaged something outside the radius");
+    if (combat.dealt[hidden] > 0.0f) return fail("the blast went through a wall");
+    if (!ptv::has_tag(world, self, "template")) return fail("a spent grenade is still drawn");
+    step(130);
+    if (ptv::has_tag(world, self, "template")) return fail("the grenade was not restocked");
+
+    // A flashbang stuns the NPC in sight and leaves the one behind the wall.
+    const auto flash_e = world.create_entity("flashbang");
+    {
+        ptv::Transform t{};
+        t.position = ptv::Vec3(0.0f, 0.05f, 0.0f);
+        world.registry().emplace<ptv::CTransform>(flash_e, ptv::CTransform{t});
+    }
+    const auto hidden_goblin =
+        add_blast_target(world, "hidden_goblin", ptv::Vec3(-3.0f, 0.9f, 1.0f), true);
+    auto flash = ptv::MechanicRegistry::get().make_mechanic("builtin.explosive");
+    const auto fself = static_cast<std::uint32_t>(flash_e);
+    flash->on_attach(world, fself,
+                     nlohmann::json{{"kind", "flash"}, {"fuse_s", 0.5}, {"stun_s", 3.0}}, ctx);
+    hands.held[0] = fself;
+    input.hands[0].trigger = 1.0f;
+    for (int i = 0; i < 5; ++i) {
+        flash->on_update(world, fself, dt, input, ctx);
+        input.hands[0].prev_trigger = input.hands[0].trigger;
+    }
+    hands.held[0] = 0xFFFFFFFFu;
+    for (int i = 0; i < 40; ++i) flash->on_update(world, fself, dt, input, ctx);
+    if (!world.has<ptv::CStun>(goblin)) return fail("a flashbang did not stun the NPC in sight");
+    if (world.has<ptv::CStun>(hidden_goblin)) return fail("a flashbang stunned through a wall");
+    physics.shutdown();
+    return ok("explosive: armed in the hand, fused on release, radial damage with falloff "
+              "stopped by walls, restocked; a flashbang stuns what it can see");
+}
+
+static int case_measured_colliders() {
+    ptv::World world;
+    add_floor(world);
+    // A 6 x 9 x 5 cm grenade standing on its origin, dropped from 0.5 m, and
+    // a 1.4 x 0.75 x 1.4 m table centred on its origin (Tripo style), placed
+    // with its bottom on the floor.
+    const auto grenade = add_measured_prop(world, "grenade", ptv::Vec3(0.0f, 0.5f, 0.0f),
+                                           ptv::Vec3(0.06f, 0.09f, 0.05f), 0.0f,
+                                           "dynamic", "mesh");
+    const auto table = add_measured_prop(world, "table", ptv::Vec3(3.0f, 0.375f, 0.0f),
+                                         ptv::Vec3(1.4f, 0.75f, 1.4f), 0.375f,
+                                         "static", "aabb");
+    // A pistol set on the table top, the way the layout resolver places it.
+    const auto pistol = add_measured_prop(world, "pistol", ptv::Vec3(3.2f, 0.76f, 0.1f),
+                                          ptv::Vec3(0.2f, 0.14f, 0.04f), 0.0f,
+                                          "dynamic", "mesh");
+    ptv::PhysicsWorld physics;
+    if (!physics.initialize()) return fail("physics failed to initialize");
+    physics.rebuild_from_world(world);
+    const float dt = 1.0f / 90.0f;
+    for (int i = 0; i < 270; ++i) {
+        physics.step(dt);
+        physics.sync_to_world(world);
+    }
+    const auto& tg = world.get<ptv::CTransform>(grenade).t;
+    const auto& tp = world.get<ptv::CTransform>(pistol).t;
+    const auto& tt = world.get<ptv::CTransform>(table).t;
+    std::fprintf(stderr, "  grenade y=%.3f (want 0), pistol y=%.3f (want 0.75), table y=%.3f\n",
+                 tg.position.y, tp.position.y, tt.position.y);
+    if (std::fabs(tg.position.y) > 0.01f)
+        return fail("the grenade did not come to rest with its mesh bottom on the floor");
+    if (std::fabs(tp.position.y - 0.75f) > 0.01f || std::fabs(tp.position.x - 3.2f) > 0.05f)
+        return fail("the pistol fell off (or through) the table top");
+    if (std::fabs(tt.position.y - 0.375f) > 1e-4f)
+        return fail("syncing a static offset collider moved its mesh");
+    // The grenade's collider is grenade-sized: 10 cm to the side is floor.
+    ptv::Vec3 hit(0.0f), n(0.0f);
+    std::uint32_t what = 0;
+    if (!physics.raycast(ptv::Vec3(0.1f, 1.0f, 0.0f), ptv::Vec3(0, -1, 0), 5.0f, hit, n, what))
+        return fail("no hit beside the grenade");
+    if (what == grenade) return fail("a ray 10 cm from a 6 cm grenade hit the grenade");
+    if (!physics.raycast(ptv::Vec3(0.0f, 1.0f, 0.0f), ptv::Vec3(0, -1, 0), 5.0f, hit, n, what) ||
+        what != grenade || std::fabs(hit.y - 0.09f) > 0.01f)
+        return fail("a ray straight down did not hit the grenade's top at 9 cm");
+    physics.shutdown();
+    return ok("measured colliders: props rest on their real bottoms, at their real size");
 }
 
 namespace {
@@ -5792,9 +6806,13 @@ int main(int argc, char** argv) {
     if (what == "arm_assist") return case_arm_assist();
     if (what == "teleport_pitch") return case_teleport_pitch();
     if (what == "physics_overlap") return case_physics_overlap();
+    if (what == "physics_kinematic_hitch") return case_physics_kinematic_hitch();
+    if (what == "weapon_bottomless") return case_weapon_bottomless();
+    if (what == "meshless_render_policy") return case_meshless_render_policy();
     if (what == "runtime_spawn") return case_runtime_spawn();
     if (what == "clone_tree") return case_clone_tree();
     if (what == "encounter_director") return case_encounter_director();
+    if (what == "encounter_zones") return case_encounter_zones();
     if (what == "npc_behaviors") return case_npc_behaviors();
     if (what == "character_locomotion") return case_character_locomotion();
     if (what == "locomotion_variants") return case_locomotion_variants();
@@ -5802,6 +6820,14 @@ int main(int argc, char** argv) {
     if (what == "combat_factions") return case_combat_factions();
     if (what == "nav_graph") return case_nav_graph();
     if (what == "npc_ground_snap") return case_npc_ground_snap_real_physics();
+    if (what == "measured_colliders") return case_measured_colliders();
+    if (what == "npc_held_item_floor") return case_npc_held_item_floor();
+    if (what == "player_never_pushes_props") return case_player_never_pushes_props();
+    if (what == "player_parts") return case_player_parts();
+    if (what == "press_button") return case_press_button();
+    if (what == "target_challenge") return case_target_challenge();
+    if (what == "destructible") return case_destructible();
+    if (what == "explosive") return case_explosive();
     if (what == "mechanic_host_npc") return case_mechanic_host_npc();
     if (what == "player_rig_adoption") return case_player_rig_adoption();
     if (what == "damage_log") return case_damage_log();
@@ -5817,6 +6843,7 @@ int main(int argc, char** argv) {
         return case_gallery_skinned_framing(argv[2]);
     }
     if (what == "facing_directions") return case_facing_directions();
+    if (what == "scene_npc_ground" && argc >= 3) return case_scene_npc_ground(argv[2]);
     if (what == "ground_motor") return case_ground_motor();
     if (what == "foot_planting") return case_foot_planting();
     if (what == "model_frame") {

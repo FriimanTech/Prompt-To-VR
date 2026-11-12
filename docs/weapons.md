@@ -53,8 +53,10 @@ socket_generation -> asset_contract -> code_generation -> asset_optimization
    whose plan has `ranged_attack`), removes generated shooting hubs, fire
    profiles, ammo / reload, recoil and projectile tasks plus `builtin.recoil`,
    and tells every task that depended on a removed one to read
-   `ctx.weapons` instead. `code_generation` runs the same reconcile, so an
-   older plan is fixed on resume.
+   `ctx.weapons` instead. An `ai` task is never removed as firing code,
+   however often it says "shoot": a goblin population whose description
+   mentions being shot is NPC behaviour, not a gun. `code_generation` runs
+   the same reconcile, so an older plan is fixed on resume.
 3. **`asset_optimization`** caps projectile meshes at the profile's
    `projectile_max_triangles` (Quest 300).
 4. **`scene_compile`** (`weapon_scene.apply_weapons`):
@@ -97,6 +99,10 @@ socket_generation -> asset_contract -> code_generation -> asset_optimization
 | `builtin.shield` | the shield | registers as a blocker; hits from its front are absorbed |
 | `builtin.item_source` | a mesh-less source entity | squeeze at a body slot to draw a copy of its template into the hand |
 | `builtin.npc.ranged_attack` | an NPC | keeps firing distance, faces, fires its weapon in bursts via `ctx.weapons` |
+
+Ammo `infinite: true` with `reload: "none"` is bottomless whatever
+`magazine` says: a blaster designed "infinite, magazine 1, no reload" used
+to spend its one round and never fire again (`ptv_smoke weapon_bottomless`).
 
 A shot: the holding hand's trigger (or an NPC's `ctx.weapons->trigger`)
 reaches `builtin.weapon`; it reads the `muzzle` socket (+Z forward); for
@@ -142,6 +148,18 @@ otherwise. A projectile makes one swept cast per tick (plus line-of-sight
 rays when it explodes). The 1 Hz `perf_fx:` telemetry line reports live
 projectiles, FX quads and casts next to frame time.
 
+## Explosives
+
+A thrown item with an `explosive` spec (a frag grenade, a flashbang, smoke,
+an impact charge) runs on `builtin.explosive`, mapped by the same reconcile:
+`weapon_plan.reconcile_weapon_items` adds an `explosive_<asset>` item with
+the design's numbers and removes generated grenade / fuse / detonation /
+"activation and throwing" tasks. The scene binds it with `builtin.grab` and
+`builtin.throw`; the trigger pulls the pin, the fuse starts when it leaves
+the hand, and the blast damages through `ctx.combat`, so it breaks a
+`builtin.destructible` target and hurts NPCs from any task. Details in
+[interactions.md](interactions.md).
+
 ## Generated code
 
 API contract v5 (`codegen_contracts.py`) rejects, with the reason fed back
@@ -149,7 +167,8 @@ to the agent: a `ctx.physics->raycast` from a muzzle socket (always), and in
 a project whose design hands weapons to the engine, firing from a muzzle on
 the trigger, a private ammo / magazine count, or a private projectile /
 bullet / tracer type. Game-specific reactions (a target that scores, a
-custom HUD) read `ctx.weapons->hits_since` and `state`.
+custom HUD) read `ctx.weapons->hits_since` and `state`. Contract v6 adds a
+private fuse with blast damage (explosives are `builtin.explosive`).
 
 ## Verification on the headset
 

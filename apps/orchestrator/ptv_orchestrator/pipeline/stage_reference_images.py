@@ -10,6 +10,7 @@ made. Delete an asset's image directory to force regeneration.
 from __future__ import annotations
 
 import json
+import shutil
 from pathlib import Path
 
 from ptv_providers import GoogleImageClient, GoogleImageConfig
@@ -57,6 +58,30 @@ def run(ctx: PipelineContext) -> StageResult:
             )
         return client
 
+    vision = None
+    vision_checked = False
+
+    def _vision():
+        """Gemini vision for the hand check, or None (no key / disabled)."""
+        nonlocal vision, vision_checked
+        if not vision_checked:
+            vision_checked = True
+            if ctx.settings.hand_qa_enabled and ctx.settings.google_api_key:
+                from ptv_providers.gemini_vision_client import (
+                    GeminiVisionClient,
+                    GeminiVisionConfig,
+                )
+
+                candidate = GeminiVisionClient(GeminiVisionConfig(
+                    api_key=ctx.settings.google_api_key,
+                    model=ctx.settings.socket_vision_model))
+                vision = candidate if candidate.is_available() else None
+            if vision is None:
+                ctx.emit(ProjectStage.reference_images, "info",
+                         "hand check unavailable (no Google key or disabled); "
+                         "character images are not checked for five fingers")
+        return vision
+
     for item in manifest.items:
         ctx.raise_if_cancelled()
         if item.strategy.value != "image_to_3d":
@@ -92,16 +117,23 @@ def run(ctx: PipelineContext) -> StageResult:
         # Kept beside the image: character routing reads the exact wording
         # Gemini was given when it judges a character's body shape.
         (item_dir / "reference_prompt.txt").write_text(prompt, encoding="utf-8")
+        size = image_size_for(item, pose, ctx.settings)
         try:
-            results = _client().generate(
-                prompt=prompt,
-                out_dir=item_dir,
-                number_of_images=item.reference.number_of_images,
-                aspect_ratio=item.reference.aspect_ratio,
-                negative_prompt=compose_negative_prompt(item, pose),
-                filename_prefix=f"{item.id}_ref",
-                prefer="gemini",
-            )
+            if pose == ReferencePose.t_pose and _vision() is not None:
+                results = _generate_with_hand_qa(
+                    ctx, item, item_dir, prompt, compose_negative_prompt(item, pose),
+                    size, _client(), _vision())
+            else:
+                results = _client().generate(
+                    prompt=prompt,
+                    out_dir=item_dir,
+                    number_of_images=item.reference.number_of_images,
+                    aspect_ratio=item.reference.aspect_ratio,
+                    negative_prompt=compose_negative_prompt(item, pose),
+                    filename_prefix=f"{item.id}_ref",
+                    prefer="gemini",
+                    image_size=size,
+                )
             for r in results:
                 produced.append(
                     str(r.path.relative_to(ctx.settings.repo_root)).replace("\\", "/")
@@ -132,6 +164,67 @@ def run(ctx: PipelineContext) -> StageResult:
     )
     ctx.emit(ProjectStage.reference_images, "succeeded", message)
     return StageResult(stage=ProjectStage.reference_images, artifacts=produced)
+
+
+def image_size_for(item, pose: ReferencePose, settings) -> str | None:
+    """2K for a posed character, 4K for the player's own avatar (its hands
+    are inches from the player's eyes), the model default for the rest."""
+    if pose == ReferencePose.natural:
+        return None
+    if item.character_role == CharacterRole.player_avatar:
+        return settings.reference_avatar_image_size or None
+    return settings.reference_character_image_size or None
+
+
+def _generate_with_hand_qa(ctx: PipelineContext, item, item_dir: Path, prompt: str,
+                           negative: str | None, size: str | None, client, vision) -> list:
+    """Generate, check the hands, regenerate with the critique up to
+    ``hand_qa_max_retries`` times; keep the first image that passes, else the
+    best one with a loud warning. Rejected attempts stay under ``attempts/``
+    (``_pick_reference_image`` only reads the top level)."""
+    from . import hand_qa
+
+    tries = 1 + max(0, int(ctx.settings.hand_qa_max_retries))
+    attempts: list[tuple[hand_qa.HandReport, Path]] = []
+    critique = ""
+    for n in range(tries):
+        ctx.raise_if_cancelled()
+        text = prompt if n == 0 else prompt + "\n" + hand_qa.retry_clause(critique)
+        out = client.generate(
+            prompt=text, out_dir=item_dir / "attempts" / f"try{n}", number_of_images=1,
+            aspect_ratio=item.reference.aspect_ratio, negative_prompt=negative,
+            filename_prefix=f"{item.id}_ref", prefer="gemini", image_size=size)
+        report = hand_qa.check_image(vision, out[0].path)
+        attempts.append((report, out[0].path))
+        ctx.emit(ProjectStage.reference_images, "info",
+                 f"{item.id}: hand check {n + 1}/{tries}: "
+                 + ("pass" if report.passed else f"score {report.score:.2f}")
+                 + (f" ({report.error})" if report.error else "")
+                 + (f" -- {report.critique[:120]}" if not report.passed and report.critique else ""))
+        if report.passed:
+            break
+        if report.error and not report.hands:
+            break  # the check itself failed; another image will not fix that
+        critique = report.critique
+    pick = hand_qa.best([a for a, _ in attempts])
+    chosen_report, chosen = attempts[pick]
+    final = item_dir / f"{item.id}_ref_00{chosen.suffix}"
+    shutil.copyfile(chosen, final)
+    (item_dir / "hand_qa.json").write_text(json.dumps({
+        "asset_id": item.id, "image_size": size, "chosen": pick,
+        "passed": chosen_report.passed,
+        "attempts": [dict(a.as_dict(), image=str(p.relative_to(item_dir)).replace("\\", "/"))
+                     for a, p in attempts],
+    }, indent=2), encoding="utf-8")
+    if not chosen_report.passed:
+        msg = (f"HANDS: {item.id}: no reference image passed the hand check after "
+               f"{len(attempts)} attempt(s); keeping the best (score "
+               f"{chosen_report.score:.2f}). {chosen_report.critique[:200]}")
+        ctx.emit(ProjectStage.reference_images, "warning", msg[:300])
+        ctx.store.append_log(ctx.project_id, "reference_images", msg)
+    from types import SimpleNamespace
+
+    return [SimpleNamespace(path=final)]
 
 
 def resolve_pose(item, npc_asset_ids: set[str]) -> ReferencePose:
@@ -196,12 +289,19 @@ _T_POSE_CLAUSE = (
     "Pose: strict T-pose. Both arms stretched straight out to the sides at "
     "shoulder height, elbows straight, legs straight and slightly apart, "
     "standing upright, facing the camera directly, orthographic front view, "
-    "full body in frame, isolated on a clean solid neutral background."
+    "full body in frame, isolated on a clean solid neutral background.\n"
+    "Hands: both hands fully in frame with a clear margin around them, open "
+    "flat with the palms facing the camera, all five fingers (thumb included) "
+    "extended and spread apart with clearly visible gaps between every "
+    "finger. Bare hands or full-finger gloves only -- every finger covered to "
+    "its tip and individually shaped."
 )
 _T_POSE_NEGATIVES = (
     "sitting, crouching, walking, running, flying, action pose, A-pose, "
     "arms down, crossed arms, hands on hips, side view, three-quarter view, "
-    "perspective distortion, cropped limbs, multiple characters"
+    "perspective distortion, cropped limbs, multiple characters, "
+    "fingerless gloves, mittens, fists, clenched hands, fingers pressed "
+    "together, fused fingers, hidden hands, cropped hands, hands out of frame"
 )
 
 _QUADRUPED_CLAUSE = (

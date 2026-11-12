@@ -48,6 +48,10 @@ class ItemUsage(str, Enum):
     ammo = "ammo"
     #: The object a weapon fires (bullet, rocket, arrow, bolt).
     projectile = "projectile"
+    #: Pressed in place: a button, a switch, a plunger (builtin.press_button).
+    pressable = "pressable"
+    #: A screen / scoreboard / sign that SHOWS live text (builtin.world_display).
+    display = "display"
     static_prop = "static_prop"
     not_interactive = "not_interactive"
 
@@ -115,6 +119,10 @@ class SocketKind(str, Enum):
     strike_tip = "strike_tip"
     strike_face = "strike_face"
     attach_point = "attach_point"
+    #: The cap a finger presses; +Z points OUT of the button (press = -Z).
+    press_surface = "press_surface"
+    #: Centre of a display's face; +Z points out of the screen.
+    screen = "screen"
 
 
 #: Kinds whose frame is the OpenXR grip frame rather than "+Z faces".
@@ -354,6 +362,88 @@ class BowSpec(StrictModel):
     provenance: Provenance = Field(default_factory=Provenance)
 
 
+class PressWith(str, Enum):
+    #: Index-fingertip poke through the cap (the natural VR button).
+    poke = "poke"
+    #: Grip or trigger while the hand is at the button.
+    grip = "grip"
+    trigger = "trigger"
+    #: Any of the above.
+    any = "any"
+
+
+class PressSpec(StrictModel):
+    """How a pressable is pressed (``builtin.press_button``)."""
+
+    press_with: PressWith = PressWith.any
+    #: Cap travel. Meta's poke guidance is ~7 mm.
+    travel_m: float = Field(default=0.007, ge=0.002, le=0.05)
+    #: The named signal a press raises (``ctx.signals``); empty =
+    #: ``<asset_id>.pressed``.
+    signal: str = Field(default="", max_length=96)
+    provenance: Provenance = Field(default_factory=Provenance)
+
+
+class DestructibleEffect(str, Enum):
+    #: Breaks into debris and disappears.
+    shatter = "shatter"
+    #: Explodes (fire + debris).
+    explode = "explode"
+    #: Falls over / drops (a knocked-down target).
+    knock_down = "knock_down"
+    #: Just disappears.
+    vanish = "vanish"
+
+
+class DestructibleSpec(StrictModel):
+    """Something shot / blown up that BREAKS (``builtin.destructible``)."""
+
+    max_health: float = Field(default=50.0, gt=0.0, le=100_000.0)
+    effect: DestructibleEffect = DestructibleEffect.shatter
+    #: Seconds until it is whole again; 0 = never.
+    respawn_after_s: float = Field(default=0.0, ge=0.0, le=3600.0)
+    #: Takes damage from explosions (grenades, rockets).
+    explosion_damage: bool = True
+    provenance: Provenance = Field(default_factory=Provenance)
+
+
+class ExplosiveKind(str, Enum):
+    frag = "frag"
+    flash = "flash"
+    smoke = "smoke"
+    impact = "impact"
+    sticky = "sticky"
+
+
+class ExplosiveActivation(str, Enum):
+    #: Trigger while held pulls the pin; it detonates ``fuse_s`` after release.
+    pull_pin_trigger = "pull_pin_trigger"
+    #: Armed by a face button.
+    button = "button"
+    #: Detonates when it hits something after being thrown.
+    on_impact = "on_impact"
+
+
+class ExplosiveSpec(StrictModel):
+    """A thrown explosive (``builtin.explosive``)."""
+
+    kind: ExplosiveKind = ExplosiveKind.frag
+    activation: ExplosiveActivation = ExplosiveActivation.pull_pin_trigger
+    fuse_s: float = Field(default=3.0, ge=0.0, le=30.0)
+    #: Full damage inside ``inner_radius_m``, falling to 0 at ``radius_m``.
+    radius_m: float = Field(default=6.0, gt=0.0, le=100.0)
+    inner_radius_m: float = Field(default=1.5, ge=0.0, le=100.0)
+    damage: float = Field(default=120.0, ge=0.0, le=100_000.0)
+    #: Impulse on dynamic bodies at the centre (N*s), falling off with distance.
+    impulse: float = Field(default=12.0, ge=0.0, le=10_000.0)
+    #: Flashbangs: blind radius and seconds of blindness / stun.
+    flash_radius_m: float = Field(default=10.0, ge=0.0, le=100.0)
+    stun_s: float = Field(default=4.0, ge=0.0, le=60.0)
+    #: Whether the blast can hurt the player who threw it.
+    hurts_player: bool = False
+    provenance: Provenance = Field(default_factory=Provenance)
+
+
 class RealWorldDimensions(StrictModel):
     """Measured dimensions of the real object this item depicts (or the
     prompt's own numbers). ``length_m`` is the longest extent."""
@@ -379,6 +469,12 @@ class ItemInteraction(StrictModel):
     bow: Optional[BowSpec] = None
     #: Spare copies the player draws from their body (magazines, arrows).
     item_source: Optional[ItemSourceSpec] = None
+    #: ``pressable`` items: how they are pressed.
+    press: Optional[PressSpec] = None
+    #: Shot / blown up and breaks (a range target, a crate, a bottle).
+    destructible: Optional[DestructibleSpec] = None
+    #: Thrown explosives (grenades, flashbangs); with ``usage: thrown``.
+    explosive: Optional[ExplosiveSpec] = None
     provenance: Provenance = Field(default_factory=Provenance)
 
     def socket(self, name: str) -> Optional[SocketSpec]:

@@ -43,7 +43,9 @@ from . import (
     stage_quest_build,
     stage_quest_verify,
     stage_reference_images,
+    stage_requirements,
     stage_scene_compile,
+    stage_scene_review,
     stage_scene_spec,
     stage_socket_generation,
     stage_tripo_models,
@@ -68,6 +70,9 @@ _SHARED_STAGES: list[tuple[ProjectStage, StageFn]] = [
     # The user's optimization overrides; asset_optimization turns them into
     # locks. Never shapes gameplay.
     (ProjectStage.optimization_preferences, stage_optimization_preferences.run),
+    # Every atomic requirement, quoted. The planning stages below claim them
+    # and fail when one they own is left unclaimed.
+    (ProjectStage.requirements, stage_requirements.run),
     (ProjectStage.asset_manifest, stage_asset_manifest.run),
     # How each item is held / fired. Directly after the manifest because it
     # appends projectile meshes before any image or Tripo money is spent,
@@ -140,6 +145,9 @@ _SHARED_STAGES: list[tuple[ProjectStage, StageFn]] = [
     # is then a cheap incremental target rather than a cold engine build.
     (ProjectStage.asset_optimization, stage_asset_optimize.run),
     (ProjectStage.scene_compile, stage_scene_compile.run),
+    # Look at the compiled layout (offline renders + vision) against the
+    # requirements before paying for a build. Report-only.
+    (ProjectStage.scene_review, stage_scene_review.run),
 ]
 
 # PC VR: build a Windows .exe with CMake/MSVC.
@@ -175,6 +183,7 @@ def _verify_with_memory_corrections(ctx: PipelineContext) -> StageResult:
                      "quest_build with the measured memory")
             stage_asset_optimize.run(ctx)
             stage_scene_compile.run(ctx)
+            stage_scene_review.reattach_viewpoints(ctx.project_dir)
             stage_quest_build.run(ctx)
 
 

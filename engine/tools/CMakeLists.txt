@@ -38,3 +38,10 @@ add_executable(ptv_glb_views glb_views.cpp)
 target_link_libraries(ptv_glb_views PRIVATE ptv_runtime)
 target_include_directories(ptv_glb_views PRIVATE "${Stb_INCLUDE_DIR}")
 set_target_properties(ptv_glb_views PROPERTIES FOLDER "ptv/tools")
+
+# scene_views: whole-scene renders (colour + entity-id buffer) of a compiled
+# scene.json for the scene_review stage. Same CPU rasteriser (cpu_raster.h).
+add_executable(ptv_scene_views scene_views.cpp)
+target_link_libraries(ptv_scene_views PRIVATE ptv_runtime)
+target_include_directories(ptv_scene_views PRIVATE "${Stb_INCLUDE_DIR}")
+set_target_properties(ptv_scene_views PROPERTIES FOLDER "ptv/tools")

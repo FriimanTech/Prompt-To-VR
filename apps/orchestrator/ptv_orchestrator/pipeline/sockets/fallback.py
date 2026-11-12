@@ -95,4 +95,20 @@ def heuristic_regions(vs: ViewSet, item: ItemInteraction) -> dict[str, Region]:
             t = -t
         out["front_tip"] = _region(fuser, "front_tip", t > t.max() - 0.08 * span)
         out["back_end"] = _region(fuser, "back_end", t < t.min() + 0.08 * span)
+    normals = getattr(mesh, "normals", None)
+    for s in item.sockets:
+        if s.kind == SocketKind.press_surface and normals is not None:
+            # A button's cap is on top: the up-facing triangles of the top
+            # tenth of the mesh.
+            y = c[:, 1]
+            top = (y > y.max() - 0.1 * (float(y.max() - y.min()) or 1.0)) & (normals[:, 1] > 0.5)
+            out[s.name] = _region(fuser, s.name, top)
+        elif s.kind == SocketKind.screen and normals is not None:
+            # A display's face looks along its thinnest axis: the triangles
+            # facing that way on the side with the most surface.
+            thin = vecs[2]
+            facing = normals @ thin
+            pos, neg = facing > 0.7, facing < -0.7
+            pick = pos if mesh.areas[pos].sum() >= mesh.areas[neg].sum() else neg
+            out[s.name] = _region(fuser, s.name, pick)
     return out

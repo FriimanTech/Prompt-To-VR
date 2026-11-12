@@ -2,6 +2,7 @@
 
 #include "ptv/core/Logger.h"
 #include "ptv/ecs/World.h"
+#include "ptv/render/GltfMeshLoad.h"
 
 // Jolt uses many macros that conflict with common names; keep the include set
 // narrow and local.
@@ -15,6 +16,8 @@
 #include <Jolt/Physics/Collision/Shape/SphereShape.h>
 #include <Jolt/Physics/Collision/Shape/CapsuleShape.h>
 #include <Jolt/Physics/Collision/Shape/MeshShape.h>
+#include <Jolt/Physics/Collision/Shape/ConvexHullShape.h>
+#include <Jolt/Physics/Collision/Shape/ScaledShape.h>
 #include <Jolt/Geometry/IndexedTriangle.h>
 #include <Jolt/Math/Float3.h>
 #include <Jolt/Physics/Body/AllowedDOFs.h>
@@ -29,6 +32,7 @@
 #include <Jolt/Physics/Collision/NarrowPhaseQuery.h>
 
 #include <Jolt/Physics/Collision/CollideShape.h>
+#include <Jolt/Physics/Collision/ContactListener.h>
 #include <Jolt/Physics/Collision/Shape/RotatedTranslatedShape.h>
 #include <Jolt/Physics/Collision/BroadPhase/BroadPhaseLayer.h>
 #include <Jolt/Physics/Collision/ObjectLayer.h>
@@ -39,17 +43,27 @@
 #include <cstdarg>
 #include <cstdint>
 #include <cstdio>
+#include <string>
+#include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace ptv {
 
 namespace {
 
-// Object/broadphase layers: two classes, static and moving.
+// Object layers: what a body IS decides what it may touch (see
+// ``layers_collide`` and docs/physics.md). Two broad-phase layers: the
+// static world, and everything that moves.
 namespace Layers {
-    static constexpr JPH::ObjectLayer STATIC = 0;
-    static constexpr JPH::ObjectLayer MOVING = 1;
-    static constexpr JPH::ObjectLayer NUM = 2;
+    static constexpr JPH::ObjectLayer STATIC = 0;       // level geometry
+    static constexpr JPH::ObjectLayer MOVING = 1;       // NPC capsules, kinematic world
+    static constexpr JPH::ObjectLayer PROP = 2;         // dynamic props
+    static constexpr JPH::ObjectLayer HELD = 3;         // held / worn / attached items
+    static constexpr JPH::ObjectLayer PLAYER_BODY = 4;  // the player's contact capsule
+    static constexpr JPH::ObjectLayer PLAYER_PART = 5;  // the player's hands, forearms, shins
+    static constexpr JPH::ObjectLayer DEBRIS = 6;       // shards, casings
+    static constexpr JPH::ObjectLayer NUM = 7;
 }  // namespace Layers
 namespace BPLayers {
     static constexpr JPH::BroadPhaseLayer STATIC{0};
@@ -57,11 +71,39 @@ namespace BPLayers {
     static constexpr uint32_t NUM = 2;
 }  // namespace BPLayers
 
+/** The pair table. Symmetric; ``true`` means the two may touch.
+ *
+ *  The player's BODY touches the world and NPCs, never a prop, a held
+ *  item or its own parts: an invisible capsule shoving a pistol off a table
+ *  as the player walks up to it is the bug this exists to prevent. The
+ *  player's PARTS (hands, forearms, shins) do touch props, which is what a
+ *  real hand nudging a can looks like. Held items never touch their holder's
+ *  body or parts. */
+bool layers_collide(JPH::ObjectLayer a, JPH::ObjectLayer b) {
+    if (a > b) std::swap(a, b);
+    using namespace Layers;
+    switch (a) {
+        case STATIC:
+            return b != STATIC && b != PLAYER_PART;
+        case MOVING:
+            return b == MOVING || b == PROP || b == HELD || b == PLAYER_BODY;
+        case PROP:
+            return b == PROP || b == HELD || b == PLAYER_PART || b == DEBRIS;
+        case HELD:
+            return b == HELD;
+        case PLAYER_BODY:
+        case PLAYER_PART:
+            return a == PLAYER_PART && b == DEBRIS;
+        default:
+            return false;
+    }
+}
+
 class BPLayerInterface final : public JPH::BroadPhaseLayerInterface {
 public:
     BPLayerInterface() {
+        for (JPH::ObjectLayer l = 0; l < Layers::NUM; ++l) map_[l] = BPLayers::MOVING;
         map_[Layers::STATIC] = BPLayers::STATIC;
-        map_[Layers::MOVING] = BPLayers::MOVING;
     }
     JPH::uint GetNumBroadPhaseLayers() const override { return BPLayers::NUM; }
     JPH::BroadPhaseLayer GetBroadPhaseLayer(JPH::ObjectLayer layer) const override {
@@ -78,7 +120,8 @@ private:
 
 class ObjectVsBPLayerFilter final : public JPH::ObjectVsBroadPhaseLayerFilter {
 public:
-    bool ShouldCollide(JPH::ObjectLayer, JPH::BroadPhaseLayer) const override {
+    bool ShouldCollide(JPH::ObjectLayer layer, JPH::BroadPhaseLayer bp) const override {
+        if (bp == BPLayers::STATIC) return layers_collide(layer, Layers::STATIC);
         return true;
     }
 };
@@ -86,11 +129,152 @@ public:
 class ObjectLayerPairFilter final : public JPH::ObjectLayerPairFilter {
 public:
     bool ShouldCollide(JPH::ObjectLayer a, JPH::ObjectLayer b) const override {
-        // Static <-> Static do not collide.
-        if (a == Layers::STATIC && b == Layers::STATIC) return false;
-        return true;
+        return layers_collide(a, b);
     }
 };
+
+/** What the player's CharacterVirtual sweeps against: the world, NPCs and
+ *  props. Light props are then rejected by its contact listener, heavy ones
+ *  block without being pushed. */
+class PlayerSweepLayerFilter final : public JPH::ObjectLayerFilter {
+public:
+    bool ShouldCollide(JPH::ObjectLayer l) const override {
+        return l == Layers::STATIC || l == Layers::MOVING || l == Layers::PROP;
+    }
+};
+
+/** Floor queries: level geometry, plus moving bodies explicitly tagged
+ *  ``walkable`` (a lift, a raft), checked per body. */
+class FloorLayerFilter final : public JPH::ObjectLayerFilter {
+public:
+    bool ShouldCollide(JPH::ObjectLayer l) const override {
+        return l == Layers::STATIC || l == Layers::MOVING;
+    }
+};
+
+/** Props lighter than this never stop the player's body; heavier ones
+ *  (a crate, a barrel) block it without being shoved. */
+constexpr float kPlayerBlockingPropKg = 25.0f;
+
+/** The player's body never pushes a prop by walking into it.
+ *
+ *  Jolt's defaults (``mCanReceiveImpulses = true``, ``mCanPushCharacter =
+ *  true``) let the swept capsule impart impulses to every dynamic body it
+ *  touches, which is what shoved a pistol off its table as the player
+ *  reached for it. Light props are not contacts at all; heavy ones are
+ *  solid but immovable to the body. Hands and forearms, which ARE allowed
+ *  to nudge props, are separate kinematic bodies (``PLAYER_PART``). */
+class PlayerContactListener final : public JPH::CharacterContactListener {
+public:
+    explicit PlayerContactListener(JPH::PhysicsSystem& system) : system_(system) {}
+
+    bool OnContactValidate(const JPH::CharacterVirtual*, const JPH::BodyID& body,
+                           const JPH::SubShapeID&) override {
+        const JPH::BodyInterface& bi = system_.GetBodyInterfaceNoLock();
+        const JPH::ObjectLayer l = bi.GetObjectLayer(body);
+        if (l == Layers::HELD || l == Layers::DEBRIS || l == Layers::PLAYER_PART ||
+            l == Layers::PLAYER_BODY) {
+            return false;
+        }
+        if (l == Layers::PROP) return mass_of(body) >= kPlayerBlockingPropKg;
+        return true;
+    }
+
+    void OnContactAdded(const JPH::CharacterVirtual*, const JPH::BodyID& body,
+                        const JPH::SubShapeID&, JPH::RVec3Arg, JPH::Vec3Arg,
+                        JPH::CharacterContactSettings& settings) override {
+        configure(body, settings);
+    }
+
+    void OnContactPersisted(const JPH::CharacterVirtual*, const JPH::BodyID& body,
+                            const JPH::SubShapeID&, JPH::RVec3Arg, JPH::Vec3Arg,
+                            JPH::CharacterContactSettings& settings) override {
+        configure(body, settings);
+    }
+
+private:
+    void configure(const JPH::BodyID& body, JPH::CharacterContactSettings& settings) const {
+        if (system_.GetBodyInterfaceNoLock().GetObjectLayer(body) == Layers::PROP) {
+            settings.mCanReceiveImpulses = false;
+            settings.mCanPushCharacter = false;
+        }
+    }
+
+    float mass_of(const JPH::BodyID& body) const {
+        JPH::BodyLockRead lock(system_.GetBodyLockInterfaceNoLock(), body);
+        if (!lock.Succeeded()) return 0.0f;
+        const JPH::MotionProperties* mp = lock.GetBody().GetMotionProperties();
+        if (mp == nullptr) return 0.0f;
+        const float inv = mp->GetInverseMass();
+        return inv > 1e-9f ? 1.0f / inv : 0.0f;
+    }
+
+    JPH::PhysicsSystem& system_;
+};
+
+/** Pairs the simulation must not resolve this frame: a player part and the
+ *  prop its hand is reaching to grab. Without this the fingers close in on
+ *  a pistol and push it away before the grip can take it. Read on Jolt's
+ *  job threads during ``step``; written only between steps. */
+class PartContactFilter final : public JPH::ContactListener {
+public:
+    const std::unordered_map<std::uint32_t, int>* part_group{nullptr};
+    const std::vector<std::unordered_set<std::uint32_t>>* part_ignore{nullptr};
+
+    JPH::ValidateResult OnContactValidate(const JPH::Body& a, const JPH::Body& b,
+                                          JPH::RVec3Arg, const JPH::CollideShapeResult&) override {
+        if (part_group == nullptr || part_ignore == nullptr) {
+            return JPH::ValidateResult::AcceptAllContactsForThisBodyPair;
+        }
+        const JPH::Body* part = nullptr;
+        const JPH::Body* other = nullptr;
+        if (a.GetObjectLayer() == Layers::PLAYER_PART) {
+            part = &a;
+            other = &b;
+        } else if (b.GetObjectLayer() == Layers::PLAYER_PART) {
+            part = &b;
+            other = &a;
+        } else {
+            return JPH::ValidateResult::AcceptAllContactsForThisBodyPair;
+        }
+        const auto g = part_group->find(part->GetID().GetIndexAndSequenceNumber());
+        if (g == part_group->end() || g->second < 0 ||
+            g->second >= static_cast<int>(part_ignore->size())) {
+            return JPH::ValidateResult::AcceptAllContactsForThisBodyPair;
+        }
+        const auto& ignore = (*part_ignore)[static_cast<std::size_t>(g->second)];
+        if (ignore.count(other->GetID().GetIndexAndSequenceNumber()) != 0) {
+            return JPH::ValidateResult::RejectAllContactsForThisBodyPair;
+        }
+        return JPH::ValidateResult::AcceptAllContactsForThisBodyPair;
+    }
+};
+
+/** Layer for a body class from the public header. */
+JPH::ObjectLayer layer_for(PhysicsWorld::BodyClass c) {
+    switch (c) {
+        case PhysicsWorld::BodyClass::Static: return Layers::STATIC;
+        case PhysicsWorld::BodyClass::Moving: return Layers::MOVING;
+        case PhysicsWorld::BodyClass::Prop: return Layers::PROP;
+        case PhysicsWorld::BodyClass::Held: return Layers::HELD;
+        case PhysicsWorld::BodyClass::PlayerBody: return Layers::PLAYER_BODY;
+        case PhysicsWorld::BodyClass::PlayerPart: return Layers::PLAYER_PART;
+        case PhysicsWorld::BodyClass::Debris: return Layers::DEBRIS;
+    }
+    return Layers::MOVING;
+}
+
+PhysicsWorld::BodyClass class_for(JPH::ObjectLayer l) {
+    switch (l) {
+        case Layers::STATIC: return PhysicsWorld::BodyClass::Static;
+        case Layers::PROP: return PhysicsWorld::BodyClass::Prop;
+        case Layers::HELD: return PhysicsWorld::BodyClass::Held;
+        case Layers::PLAYER_BODY: return PhysicsWorld::BodyClass::PlayerBody;
+        case Layers::PLAYER_PART: return PhysicsWorld::BodyClass::PlayerPart;
+        case Layers::DEBRIS: return PhysicsWorld::BodyClass::Debris;
+        default: return PhysicsWorld::BodyClass::Moving;
+    }
+}
 
 // Build a static triangle-mesh collision shape from an inline procedural mesh.
 // Returns a null ref on any problem (caller falls back to a box).
@@ -186,9 +370,10 @@ bool jolt_assert_failed(const char* expression, const char* message,
  *  body, which is driven by its transform rather than by forces. */
 constexpr float kFallbackMassKg = 1.0f;
 
-JPH::ShapeRefC build_capsule_shape(float height_m) {
+JPH::ShapeRefC build_capsule_shape(float height_m, float radius_m = 0.0f) {
     const float height = std::max(0.20f, height_m);
-    const float radius = std::clamp(0.17f * height, 0.05f, 0.45f * height);
+    const float radius = std::clamp(radius_m > 1e-3f ? radius_m : 0.17f * height, 0.05f,
+                                    0.45f * height);
     const float half_cylinder = std::max(0.02f, 0.5f * height - radius);
     return new JPH::CapsuleShape(half_cylinder, radius);
 }
@@ -222,6 +407,78 @@ JPH::ShapeRefC build_feet_capsule(float height, float radius) {
     return res.Get();
 }
 
+/** ``inner`` moved so its origin sits at ``offset`` in body space. */
+JPH::ShapeRefC offset_shape(JPH::ShapeRefC inner, const Vec3& offset) {
+    if (inner.GetPtr() == nullptr) return inner;
+    if (glm::length(offset) < 1.0e-4f) return inner;
+    JPH::RotatedTranslatedShapeSettings settings(
+        JPH::Vec3(offset.x, offset.y, offset.z), JPH::Quat::sIdentity(), inner);
+    JPH::ShapeSettings::ShapeResult res = settings.Create();
+    if (res.HasError()) return inner;
+    return res.Get();
+}
+
+/** A box whose convex radius never exceeds its thinnest half-extent (Jolt
+ *  asserts on that, and generated props are often thin). */
+JPH::ShapeRefC safe_box(const Vec3& half_in) {
+    const Vec3 half(std::max(0.005f, half_in.x), std::max(0.005f, half_in.y),
+                    std::max(0.005f, half_in.z));
+    const float r = std::min(0.05f, 0.5f * std::min({half.x, half.y, half.z}));
+    return new JPH::BoxShape(JPH::Vec3(half.x, half.y, half.z), r);
+}
+
+/** Convex hull from measured hull points, or null when they are degenerate
+ *  (a flat decal, a single line). */
+JPH::ShapeRefC build_hull_shape(const std::vector<Vec3>& points, const Vec3& half) {
+    if (points.size() < 4) return {};
+    JPH::Array<JPH::Vec3> pts;
+    pts.reserve(points.size());
+    for (const Vec3& p : points) {
+        if (!std::isfinite(p.x) || !std::isfinite(p.y) || !std::isfinite(p.z)) continue;
+        pts.push_back(JPH::Vec3(p.x, p.y, p.z));
+    }
+    if (pts.size() < 4) return {};
+    // A small convex radius keeps a 6 cm grenade the shape it is drawn.
+    const float min_half = std::min({half.x, half.y, half.z});
+    const float radius = std::clamp(0.2f * min_half, 0.0f, 0.02f);
+    JPH::ConvexHullShapeSettings settings(pts, radius);
+    JPH::ShapeSettings::ShapeResult res = settings.Create();
+    if (res.HasError()) return {};
+    return res.Get();
+}
+
+/** Static triangle collider from one of a GLB prop's LODs, in the same
+ *  metres the renderer draws it in (node transforms, ``unit_scale``). */
+JPH::ShapeRefC build_glb_mesh_shape(const std::string& path, float target_scale_meters,
+                                    float unit_scale) {
+    std::vector<gltf_mesh_load::LitVertex> verts;
+    std::vector<std::uint32_t> indices;
+    std::string err;
+    if (!gltf_mesh_load::load_glb_merged(path, target_scale_meters, verts, indices, err,
+                                         unit_scale)) {
+        PTV_WARN("Physics: could not load collision mesh {}: {}", path, err);
+        return {};
+    }
+    JPH::VertexList jverts;
+    jverts.reserve(static_cast<JPH::uint>(verts.size()));
+    for (const auto& v : verts) jverts.push_back(JPH::Float3(v.pos[0], v.pos[1], v.pos[2]));
+    JPH::IndexedTriangleList tris;
+    tris.reserve(static_cast<JPH::uint>(indices.size() / 3));
+    const std::size_t vcount = verts.size();
+    for (std::size_t i = 0; i + 2 < indices.size(); i += 3) {
+        const std::uint32_t a = indices[i], b = indices[i + 1], c = indices[i + 2];
+        if (a >= vcount || b >= vcount || c >= vcount) continue;
+        if (a == b || b == c || a == c) continue;
+        tris.push_back(JPH::IndexedTriangle(a, b, c, 0));
+    }
+    if (tris.empty()) return {};
+    JPH::MeshShapeSettings settings(jverts, tris);
+    settings.Sanitize();
+    JPH::ShapeSettings::ShapeResult res = settings.Create();
+    if (res.HasError()) return {};
+    return res.Get();
+}
+
 /** Height to build a character capsule from, or 0 when unknown. */
 float capsule_height_for(const World& world, entt::entity entity,
                          const Transform& t) {
@@ -250,8 +507,72 @@ struct PhysicsWorld::Impl {
     // mechanic that needs to know WHAT it shot. Keyed on the BodyID's packed
     // index+sequence rather than BodyID itself, which has no std::hash.
     std::unordered_map<std::uint32_t, std::uint32_t> body_to_entity{};
+    // Static GLB triangle colliders, keyed by file + scale: every copy of an
+    // asset shares one shape (fourteen range targets build it once).
+    std::unordered_map<std::string, JPH::ShapeRefC> glb_mesh_shapes{};
+    // Moving bodies floor probes may stand on (BodyID index+sequence).
+    std::unordered_set<std::uint32_t> walkable{};
+    // True while rebuild_from_world creates the scene's bodies.
+    bool building_scene{false};
+    // Kinematic poses requested since the last step, applied by step() with
+    // the step's own dt. Jolt derives a velocity from target and dt, so a
+    // target computed with one frame's dt and integrated over the next
+    // frame's overshoots by their ratio: a short frame before a load hitch
+    // turned a few centimetres of ground snap into 500 m/s.
+    struct KinematicTarget {
+        Vec3 position;
+        Quat rotation;
+    };
+    std::unordered_map<std::uint32_t, KinematicTarget> kinematic_targets{};
+    // Entities whose body a target moved in the last step; one that gets no
+    // new target is stopped instead of coasting on that velocity.
+    std::unordered_set<std::uint32_t> kinematic_moving{};
+    // The player's part bodies: which group (0 left hand, 1 right hand,
+    // 2 legs) each belongs to, and what each group passes through this frame.
+    std::unordered_map<std::uint32_t, int> part_group{};
+    std::vector<std::unordered_set<std::uint32_t>> part_ignore{3};
+    PartContactFilter contact_filter{};
+
+    /** The body shape for a GLB prop from its measured geometry:
+     *  triangles for a static ``"mesh"``, the convex hull for anything that
+     *  moves (Jolt mesh shapes cannot), an offset box for ``"aabb"``, an
+     *  offset sphere for ``"sphere"``. */
+    JPH::ShapeRefC measured_shape(const CCollisionGeom& g, const CMesh& cm,
+                                  const std::string& kind, JPH::EMotionType motion) {
+        const Vec3 half = 0.5f * (g.aabb_max - g.aabb_min);
+        const Vec3 center = 0.5f * (g.aabb_max + g.aabb_min);
+        if (kind == "mesh" && motion == JPH::EMotionType::Static && g.mesh_lod >= 0) {
+            const std::string& path =
+                g.mesh_lod < static_cast<int>(cm.lod_paths.size())
+                    ? cm.lod_paths[static_cast<std::size_t>(g.mesh_lod)]
+                    : cm.glb_path;
+            char key_scale[32];
+            std::snprintf(key_scale, sizeof(key_scale), "|%.7g|%.7g", cm.unit_scale,
+                          cm.target_scale_meters);
+            const std::string key = path + key_scale;
+            auto it = glb_mesh_shapes.find(key);
+            if (it == glb_mesh_shapes.end()) {
+                it = glb_mesh_shapes
+                         .emplace(key, build_glb_mesh_shape(path, cm.target_scale_meters,
+                                                            cm.unit_scale))
+                         .first;
+            }
+            if (it->second.GetPtr() != nullptr) return it->second;
+        }
+        if (kind == "mesh" || kind == "hull" || kind == "convex") {
+            JPH::ShapeRefC hull = build_hull_shape(g.hull, half);
+            if (hull.GetPtr() != nullptr) return hull;
+        }
+        if (kind == "sphere") {
+            const float r = std::max(0.005f, std::max({half.x, half.y, half.z}));
+            return offset_shape(new JPH::SphereShape(r), center);
+        }
+        return offset_shape(safe_box(half), center);
+    }
 
     // --- Player character ---
+    PlayerContactListener player_listener{system};
+    PlayerSweepLayerFilter player_sweep_layers{};
     JPH::Ref<JPH::CharacterVirtual> character;
     float character_height{1.7f};
     float character_radius{0.25f};
@@ -291,6 +612,9 @@ bool PhysicsWorld::initialize() {
         impl_->obj_vs_bp,
         impl_->obj_pair);
     impl_->system.SetGravity(JPH::Vec3{0.0f, -9.81f, 0.0f});
+    impl_->contact_filter.part_group = &impl_->part_group;
+    impl_->contact_filter.part_ignore = &impl_->part_ignore;
+    impl_->system.SetContactListener(&impl_->contact_filter);
     PTV_INFO("Jolt physics initialized");
     return true;
 }
@@ -309,16 +633,23 @@ void PhysicsWorld::rebuild_from_world(World& world) {
     if (!impl_) return;
     auto& bi = impl_->system.GetBodyInterface();
     for (auto [eid, body_id] : impl_->entity_to_body) {
-        bi.RemoveBody(body_id);
+        if (bi.IsAdded(body_id)) bi.RemoveBody(body_id);
         bi.DestroyBody(body_id);
     }
     impl_->entity_to_body.clear();
     impl_->body_to_entity.clear();
+    impl_->walkable.clear();
+    impl_->part_group.clear();
+    impl_->kinematic_targets.clear();
+    impl_->kinematic_moving.clear();
+    for (auto& s : impl_->part_ignore) s.clear();
 
     auto view = world.registry().view<CTransform, CPhysics>();
+    impl_->building_scene = true;
     for (auto entity : view) {
         add_body_for(world, static_cast<std::uint32_t>(entity));
     }
+    impl_->building_scene = false;
     impl_->system.OptimizeBroadPhase();
     PTV_INFO("Physics world rebuilt ({} bodies)", impl_->entity_to_body.size());
 }
@@ -341,7 +672,7 @@ bool PhysicsWorld::add_body_for(World& world, std::uint32_t entity_id) {
     JPH::ObjectLayer layer = Layers::STATIC;
     if (p.kind == "dynamic") {
         motion = JPH::EMotionType::Dynamic;
-        layer = Layers::MOVING;
+        layer = Layers::PROP;
     } else if (p.kind == "kinematic") {
         motion = JPH::EMotionType::Kinematic;
         layer = Layers::MOVING;
@@ -362,7 +693,8 @@ bool PhysicsWorld::add_body_for(World& world, std::uint32_t entity_id) {
     // 2) Capsule -> upright character collider. Checked before CPrimitive so
     //    an authored capsule wins over a primitive's box extents.
     if (shape_ref.GetPtr() == nullptr && p.collision_shape == "capsule") {
-        shape_ref = build_capsule_shape(capsule_height_for(world, entity, t));
+        shape_ref = build_capsule_shape(capsule_height_for(world, entity, t),
+                                        p.capsule_radius_m);
         is_capsule = shape_ref.GetPtr() != nullptr;
     }
 
@@ -382,15 +714,56 @@ bool PhysicsWorld::add_body_for(World& world, std::uint32_t entity_id) {
         }
     }
 
-    // 4) Fallback: legacy uniform-scale box / sphere (starter room etc.).
-    if (shape_ref.GetPtr() == nullptr) {
-        if (p.collision_shape == "sphere") {
-            shape_ref = new JPH::SphereShape(0.5f * t.scale);
+    // 4) A GLB prop: the collider measured from its own mesh (asset
+    //    pipeline), in entity space, then scaled by the transform exactly as
+    //    the drawn mesh is.
+    const CMesh* cm = world.registry().try_get<CMesh>(entity);
+    const bool glb = cm != nullptr && !cm->glb_path.empty();
+    if (shape_ref.GetPtr() == nullptr && glb) {
+        const CCollisionGeom* cg = world.registry().try_get<CCollisionGeom>(entity);
+        if (cg != nullptr) {
+            shape_ref = impl_->measured_shape(*cg, *cm, p.collision_shape, motion);
         } else {
-            JPH::Vec3 half{0.25f * t.scale, 0.25f * t.scale, 0.25f * t.scale};
-            shape_ref = new JPH::BoxShape(half);
+            // No measurement (a scene compiled before colliders were
+            // measured): a cube inscribed in the bounding sphere, so the
+            // collider is at least the object's size rather than a fixed 0.5 m.
+            const float r = cm->bounds_radius_m > 1e-4f
+                                ? cm->bounds_radius_m
+                                : 0.5f * std::max(0.05f, cm->target_scale_meters);
+            const float h = r * 0.57735f;
+            shape_ref = p.collision_shape == "sphere" ? JPH::ShapeRefC(new JPH::SphereShape(r))
+                                                      : safe_box(Vec3(h));
+            PTV_WARN("Physics: '{}' has no measured collider; using its bounds "
+                     "(re-run scene_compile to measure it)", cm->asset_id);
+        }
+        const float s = t.scale;
+        if (shape_ref.GetPtr() != nullptr && std::isfinite(s) && s > 1e-4f &&
+            std::abs(s - 1.0f) > 1e-4f) {
+            shape_ref = new JPH::ScaledShape(shape_ref, JPH::Vec3::sReplicate(s));
         }
     }
+
+    // 5) Fallback: legacy uniform-scale box / sphere (starter room etc.).
+    if (shape_ref.GetPtr() == nullptr) {
+        if (p.collision_shape == "sphere") {
+            shape_ref = new JPH::SphereShape(std::max(0.01f, 0.5f * t.scale));
+        } else {
+            shape_ref = safe_box(Vec3(0.25f * t.scale));
+        }
+    }
+    // What the body IS: carried by something, debris, a character, or a prop.
+    if (motion != JPH::EMotionType::Static) {
+        if (world.registry().all_of<CAttachment>(entity)) {
+            layer = Layers::HELD;
+        } else if (has_tag(world, entity_id, "debris")) {
+            layer = Layers::DEBRIS;
+        } else if (is_capsule && has_tag(world, entity_id, "player")) {
+            layer = Layers::PLAYER_BODY;
+        } else if (is_capsule) {
+            layer = Layers::MOVING;
+        }
+    }
+
     // Sanitize the transform before handing it to Jolt. Generated/authored
     // entities occasionally carry a non-normalized or zero quaternion, or a
     // non-finite position. Jolt asserts IsNormalized()/IsFinite() inside
@@ -453,10 +826,78 @@ bool PhysicsWorld::add_body_for(World& world, std::uint32_t entity_id) {
                            JPH::EAllowedDOFs::TranslationZ |
                            JPH::EAllowedDOFs::RotationY;
     }
-    JPH::BodyID id = bi.CreateAndAddBody(bcs, JPH::EActivation::Activate);
+    // A prop the layout resolver set down on a surface (tag ``settled``)
+    // starts ASLEEP: it stays exactly there until something touches it (a
+    // hand, a shot, a blast) instead of jittering on the first frames.
+    // Anything else -- spawned at runtime, or authored in the air -- falls.
+    const bool settle = impl_->building_scene && motion == JPH::EMotionType::Dynamic &&
+                        layer == Layers::PROP && has_tag(world, entity_id, "settled");
+    JPH::BodyID id = bi.CreateAndAddBody(
+        bcs, settle ? JPH::EActivation::DontActivate : JPH::EActivation::Activate);
+    if (id.IsInvalid()) {
+        PTV_WARN("Physics: Jolt refused a body for entity {} (body limit?)", entity_id);
+        return false;
+    }
     impl_->entity_to_body[entity_id] = id;
     impl_->body_to_entity[id.GetIndexAndSequenceNumber()] = entity_id;
+    if (motion != JPH::EMotionType::Static && has_tag(world, entity_id, "walkable")) {
+        impl_->walkable.insert(id.GetIndexAndSequenceNumber());
+    }
     return true;
+}
+
+void PhysicsWorld::set_body_class(std::uint32_t entity, BodyClass body_class) {
+    if (!impl_) return;
+    const auto it = impl_->entity_to_body.find(entity);
+    if (it == impl_->entity_to_body.end()) return;
+    auto& bi = impl_->system.GetBodyInterface();
+    // A static body cannot leave the static layer (it has no motion), and
+    // nothing movable may enter it.
+    const bool is_static = bi.GetMotionType(it->second) == JPH::EMotionType::Static;
+    if (is_static != (body_class == BodyClass::Static)) return;
+    bi.SetObjectLayer(it->second, layer_for(body_class));
+}
+
+PhysicsWorld::BodyClass PhysicsWorld::body_class(std::uint32_t entity) const {
+    if (!impl_) return BodyClass::Moving;
+    const auto it = impl_->entity_to_body.find(entity);
+    if (it == impl_->entity_to_body.end()) return BodyClass::Moving;
+    return class_for(impl_->system.GetBodyInterface().GetObjectLayer(it->second));
+}
+
+void PhysicsWorld::set_walkable(std::uint32_t entity, bool walkable) {
+    if (!impl_) return;
+    const auto it = impl_->entity_to_body.find(entity);
+    if (it == impl_->entity_to_body.end()) return;
+    const std::uint32_t key = it->second.GetIndexAndSequenceNumber();
+    if (walkable) impl_->walkable.insert(key);
+    else impl_->walkable.erase(key);
+}
+
+float PhysicsWorld::body_mass(std::uint32_t entity) const {
+    if (!impl_) return 0.0f;
+    const auto it = impl_->entity_to_body.find(entity);
+    if (it == impl_->entity_to_body.end()) return 0.0f;
+    JPH::BodyLockRead lock(impl_->system.GetBodyLockInterface(), it->second);
+    if (!lock.Succeeded()) return 0.0f;
+    const JPH::Body& body = lock.GetBody();
+    if (!body.IsDynamic() || body.GetMotionProperties() == nullptr) return 0.0f;
+    const float inv = body.GetMotionProperties()->GetInverseMass();
+    return inv > 1e-9f ? 1.0f / inv : 0.0f;
+}
+
+void PhysicsWorld::sleep_body(std::uint32_t entity) {
+    if (!impl_) return;
+    const auto it = impl_->entity_to_body.find(entity);
+    if (it == impl_->entity_to_body.end()) return;
+    impl_->system.GetBodyInterface().DeactivateBody(it->second);
+}
+
+bool PhysicsWorld::body_active(std::uint32_t entity) const {
+    if (!impl_) return false;
+    const auto it = impl_->entity_to_body.find(entity);
+    if (it == impl_->entity_to_body.end()) return false;
+    return impl_->system.GetBodyInterface().IsActive(it->second);
 }
 
 void PhysicsWorld::remove_body(std::uint32_t entity_id) {
@@ -464,10 +905,81 @@ void PhysicsWorld::remove_body(std::uint32_t entity_id) {
     auto it = impl_->entity_to_body.find(entity_id);
     if (it == impl_->entity_to_body.end()) return;
     auto& bi = impl_->system.GetBodyInterface();
-    bi.RemoveBody(it->second);
+    if (bi.IsAdded(it->second)) bi.RemoveBody(it->second);
     bi.DestroyBody(it->second);
     impl_->body_to_entity.erase(it->second.GetIndexAndSequenceNumber());
+    impl_->walkable.erase(it->second.GetIndexAndSequenceNumber());
+    impl_->part_group.erase(it->second.GetIndexAndSequenceNumber());
+    impl_->kinematic_targets.erase(entity_id);
+    impl_->kinematic_moving.erase(entity_id);
     impl_->entity_to_body.erase(it);
+}
+
+bool PhysicsWorld::create_part_body(std::uint32_t entity, const Vec3& pos, const Quat& rot,
+                                    float half_height, float radius, int group) {
+    if (!impl_) return false;
+    if (impl_->entity_to_body.count(entity) != 0) return true;
+    if (!is_finite_vec(pos)) return false;
+    const float r = std::clamp(radius, 0.004f, 0.2f);
+    const float hh = std::clamp(half_height, 0.002f, 1.0f);
+    JPH::ShapeRefC shape = new JPH::CapsuleShape(hh, r);
+    JPH::Quat q{rot.x, rot.y, rot.z, rot.w};
+    if (!std::isfinite(q.Length()) || q.Length() < 1e-6f) q = JPH::Quat::sIdentity();
+    q = q.Normalized();
+    JPH::BodyCreationSettings bcs(shape, JPH::RVec3{pos.x, pos.y, pos.z}, q,
+                                  JPH::EMotionType::Kinematic, Layers::PLAYER_PART);
+    bcs.mFriction = 0.8f;
+    bcs.mRestitution = 0.0f;
+    bcs.mMassPropertiesOverride.mMass = 0.3f;
+    bcs.mOverrideMassProperties = JPH::EOverrideMassProperties::CalculateInertia;
+    auto& bi = impl_->system.GetBodyInterface();
+    const JPH::BodyID id = bi.CreateAndAddBody(bcs, JPH::EActivation::Activate);
+    if (id.IsInvalid()) return false;
+    impl_->entity_to_body[entity] = id;
+    impl_->body_to_entity[id.GetIndexAndSequenceNumber()] = entity;
+    impl_->part_group[id.GetIndexAndSequenceNumber()] = group;
+    return true;
+}
+
+void PhysicsWorld::set_part_ignore(int group, const std::vector<std::uint32_t>& entities) {
+    if (!impl_ || group < 0 || group >= static_cast<int>(impl_->part_ignore.size())) return;
+    auto& set = impl_->part_ignore[static_cast<std::size_t>(group)];
+    set.clear();
+    for (const std::uint32_t e : entities) {
+        const auto it = impl_->entity_to_body.find(e);
+        if (it != impl_->entity_to_body.end()) set.insert(it->second.GetIndexAndSequenceNumber());
+    }
+}
+
+void PhysicsWorld::set_collision_enabled(std::uint32_t entity, bool enabled) {
+    if (!impl_) return;
+    const auto it = impl_->entity_to_body.find(entity);
+    if (it == impl_->entity_to_body.end()) return;
+    auto& bi = impl_->system.GetBodyInterface();
+    const bool added = bi.IsAdded(it->second);
+    if (enabled && !added) {
+        bi.AddBody(it->second, JPH::EActivation::Activate);
+    } else if (!enabled && added) {
+        bi.RemoveBody(it->second);
+    }
+}
+
+float PhysicsWorld::distance_to_body(std::uint32_t entity, const Vec3& point) const {
+    if (!impl_) return -1.0f;
+    const auto it = impl_->entity_to_body.find(entity);
+    if (it == impl_->entity_to_body.end()) return -1.0f;
+    JPH::BodyLockRead lock(impl_->system.GetBodyLockInterface(), it->second);
+    if (!lock.Succeeded()) return -1.0f;
+    const JPH::Body& body = lock.GetBody();
+    // The point in the shape's own (centre-of-mass) frame, against the
+    // shape's local bounds: an oriented box around the collider, so a long
+    // rifle is reachable at its stock as well as at its middle.
+    const JPH::RMat44 com = body.GetCenterOfMassTransform();
+    const JPH::Vec3 local = JPH::Vec3(com.InversedRotationTranslation() *
+                                      JPH::RVec3(point.x, point.y, point.z));
+    const JPH::AABox box = body.GetShape()->GetLocalBounds();
+    const JPH::Vec3 clamped = JPH::Vec3::sMin(JPH::Vec3::sMax(local, box.mMin), box.mMax);
+    return (local - clamped).Length();
 }
 
 void PhysicsWorld::overlapping(std::uint32_t entity_id,
@@ -518,6 +1030,32 @@ void PhysicsWorld::overlapping(std::uint32_t entity_id,
 
 void PhysicsWorld::step(float dt) {
     if (!impl_) return;
+    if (!(dt > 0.0f)) return;
+    auto& bi = impl_->system.GetBodyInterface();
+    const auto kinematic = [&](std::uint32_t entity, JPH::BodyID* out) {
+        const auto it = impl_->entity_to_body.find(entity);
+        if (it == impl_->entity_to_body.end()) return false;
+        if (bi.GetMotionType(it->second) != JPH::EMotionType::Kinematic) return false;
+        *out = it->second;
+        return true;
+    };
+    for (const std::uint32_t entity : impl_->kinematic_moving) {
+        JPH::BodyID id;
+        if (impl_->kinematic_targets.count(entity) == 0 && kinematic(entity, &id)) {
+            bi.SetLinearAndAngularVelocity(id, JPH::Vec3::sZero(), JPH::Vec3::sZero());
+        }
+    }
+    impl_->kinematic_moving.clear();
+    for (const auto& [entity, target] : impl_->kinematic_targets) {
+        JPH::BodyID id;
+        if (!kinematic(entity, &id)) continue;
+        bi.MoveKinematic(id, JPH::RVec3{target.position.x, target.position.y, target.position.z},
+                         JPH::Quat{target.rotation.x, target.rotation.y, target.rotation.z,
+                                   target.rotation.w},
+                         dt);
+        impl_->kinematic_moving.insert(entity);
+    }
+    impl_->kinematic_targets.clear();
     const int substeps = 1;
     impl_->system.Update(dt, substeps, &impl_->temp, &impl_->jobs);
 }
@@ -529,8 +1067,13 @@ void PhysicsWorld::sync_to_world(World& world) {
         auto entity = static_cast<entt::entity>(eid);
         if (!world.registry().valid(entity)) continue;
         auto& t = world.registry().get<CTransform>(entity).t;
-        JPH::RVec3 p = bi.GetCenterOfMassPosition(body_id);
-        JPH::Quat q = bi.GetRotation(body_id);
+        // The body's ORIGIN, not its centre of mass: a measured collider is
+        // offset from the mesh origin (a centred table, a hull whose
+        // centroid is not the pivot), and writing the COM back would shift
+        // the drawn mesh by that offset.
+        JPH::RVec3 p{};
+        JPH::Quat q{};
+        bi.GetPositionAndRotation(body_id, p, q);
         t.position = Vec3{(float)p.GetX(), (float)p.GetY(), (float)p.GetZ()};
         t.rotation = Quat(q.GetW(), q.GetX(), q.GetY(), q.GetZ());
     }
@@ -575,8 +1118,10 @@ bool PhysicsWorld::recreate_body_movable(std::uint32_t entity,
 
     remove_body(entity);
 
-    // MOVING layer, or the new body keeps colliding by static rules.
-    JPH::BodyCreationSettings bcs(shape, pos, rot, motion, Layers::MOVING);
+    // A movable layer, or the new body keeps colliding by static rules.
+    JPH::BodyCreationSettings bcs(
+        shape, pos, rot, motion,
+        motion == JPH::EMotionType::Dynamic ? Layers::PROP : Layers::MOVING);
     bcs.mFriction = friction;
     bcs.mRestitution = restitution;
     bcs.mMassPropertiesOverride.mMass = kFallbackMassKg;
@@ -620,6 +1165,13 @@ void PhysicsWorld::set_kinematic(std::uint32_t entity, bool kinematic) {
     }
 
     bi.SetMotionType(it->second, target, JPH::EActivation::Activate);
+    // Held while kinematic: a carried prop must not touch its holder.
+    const JPH::ObjectLayer layer = bi.GetObjectLayer(it->second);
+    if (kinematic && layer == Layers::PROP) {
+        bi.SetObjectLayer(it->second, Layers::HELD);
+    } else if (!kinematic && layer == Layers::HELD) {
+        bi.SetObjectLayer(it->second, Layers::PROP);
+    }
     if (!kinematic) {
         // When returning to Dynamic after a grab, zero any residual
         // kinematic velocity so the body is "dropped" cleanly (callers
@@ -653,10 +1205,9 @@ void PhysicsWorld::move_kinematic(std::uint32_t entity, const Vec3& pos,
         it = impl_->entity_to_body.find(entity);
         if (it == impl_->entity_to_body.end()) return;
     }
-    bi.MoveKinematic(it->second,
-                     JPH::RVec3{pos.x, pos.y, pos.z},
-                     JPH::Quat{rot.x, rot.y, rot.z, rot.w},
-                     dt);
+    (void)dt;
+    if (!std::isfinite(pos.x) || !std::isfinite(pos.y) || !std::isfinite(pos.z)) return;
+    impl_->kinematic_targets[entity] = Impl::KinematicTarget{pos, rot};
 }
 
 void PhysicsWorld::teleport(std::uint32_t entity, const Vec3& pos,
@@ -665,10 +1216,14 @@ void PhysicsWorld::teleport(std::uint32_t entity, const Vec3& pos,
     auto it = impl_->entity_to_body.find(entity);
     if (it == impl_->entity_to_body.end()) return;
     auto& bi = impl_->system.GetBodyInterface();
+    impl_->kinematic_targets.erase(entity);
     bi.SetPositionAndRotation(it->second,
                               JPH::RVec3{pos.x, pos.y, pos.z},
                               JPH::Quat{rot.x, rot.y, rot.z, rot.w},
                               JPH::EActivation::Activate);
+    if (bi.GetMotionType(it->second) != JPH::EMotionType::Static) {
+        bi.SetLinearAndAngularVelocity(it->second, JPH::Vec3::sZero(), JPH::Vec3::sZero());
+    }
 }
 
 void PhysicsWorld::apply_impulse(std::uint32_t entity, const Vec3& impulse) {
@@ -808,6 +1363,7 @@ void PhysicsWorld::create_player_character(const Vec3& feet, float height,
     impl_->character = new JPH::CharacterVirtual(
         settings, JPH::RVec3(feet.x, feet.y, feet.z), JPH::Quat::sIdentity(),
         0, &impl_->system);
+    impl_->character->SetListener(&impl_->player_listener);
 }
 
 void PhysicsWorld::destroy_player_character() {
@@ -868,10 +1424,8 @@ Vec3 PhysicsWorld::move_player_character(const Vec3& displacement,
         grounded ? JPH::Vec3(0.0f, 0.35f, 0.0f) : JPH::Vec3::sZero();
 
     ch.ExtendedUpdate(
-        dt, grounded ? gravity : JPH::Vec3::sZero(), ext,
-        impl_->system.GetDefaultBroadPhaseLayerFilter(Layers::MOVING),
-        impl_->system.GetDefaultLayerFilter(Layers::MOVING),
-        impl_->character_filter, {}, impl_->temp);
+        dt, grounded ? gravity : JPH::Vec3::sZero(), ext, {},
+        impl_->player_sweep_layers, impl_->character_filter, {}, impl_->temp);
 
     if (grounded && !apply_gravity) {
         // Leave the integrated vertical speed alone.
@@ -924,10 +1478,8 @@ bool PhysicsWorld::resize_player_character(float height) {
     if (shape.GetPtr() == nullptr) return false;
     impl_->refresh_character_filter();
     const bool ok = impl_->character->SetShape(
-        shape, 1.5f * impl_->character->GetCharacterPadding(),
-        impl_->system.GetDefaultBroadPhaseLayerFilter(Layers::MOVING),
-        impl_->system.GetDefaultLayerFilter(Layers::MOVING),
-        impl_->character_filter, {}, impl_->temp);
+        shape, 1.5f * impl_->character->GetCharacterPadding(), {},
+        impl_->player_sweep_layers, impl_->character_filter, {}, impl_->temp);
     if (ok) impl_->character_height = h;
     return ok;
 }
@@ -1043,14 +1595,26 @@ class RayBodyFilter final : public JPH::BodyFilter {
 public:
     std::vector<JPH::BodyID> ids;
     bool skip_characters{false};
+    bool floor_only{false};
+    const std::unordered_set<std::uint32_t>* walkable{nullptr};
     bool ShouldCollide(const JPH::BodyID& id) const override {
         return std::find(ids.begin(), ids.end(), id) == ids.end();
     }
     bool ShouldCollideLocked(const JPH::Body& body) const override {
         if (body.IsSensor()) return false;
-        if (skip_characters && body.GetShape() != nullptr &&
-            body.GetShape()->GetSubType() == JPH::EShapeSubType::Capsule) {
-            return false;
+        if (floor_only && !body.IsStatic()) {
+            return walkable != nullptr &&
+                   walkable->count(body.GetID().GetIndexAndSequenceNumber()) != 0;
+        }
+        if (skip_characters) {
+            if (body.GetShape() != nullptr &&
+                body.GetShape()->GetSubType() == JPH::EShapeSubType::Capsule) {
+                return false;
+            }
+            const JPH::ObjectLayer l = body.GetObjectLayer();
+            if (l == Layers::HELD || l == Layers::PLAYER_BODY || l == Layers::PLAYER_PART) {
+                return false;
+            }
         }
         return true;
     }
@@ -1072,6 +1636,8 @@ bool PhysicsWorld::raycast(const Vec3& origin, const Vec3& dir, float max_dist,
 
     RayBodyFilter body_filter;
     body_filter.skip_characters = filter.skip_characters;
+    body_filter.floor_only = filter.floor_only;
+    body_filter.walkable = &impl_->walkable;
     for (const std::uint32_t e : filter.ignore) {
         if (auto it = impl_->entity_to_body.find(e);
             it != impl_->entity_to_body.end()) {
@@ -1084,6 +1650,10 @@ bool PhysicsWorld::raycast(const Vec3& origin, const Vec3& dir, float max_dist,
         const JPH::SpecifiedObjectLayerFilter obj_filter(Layers::STATIC);
         any_hit = impl_->system.GetNarrowPhaseQuery().CastRay(
             ray, hit, bp_filter, obj_filter, body_filter);
+    } else if (filter.floor_only) {
+        const FloorLayerFilter obj_filter;
+        any_hit = impl_->system.GetNarrowPhaseQuery().CastRay(
+            ray, hit, {}, obj_filter, body_filter);
     } else {
         any_hit = impl_->system.GetNarrowPhaseQuery().CastRay(
             ray, hit, {}, {}, body_filter);
@@ -1129,6 +1699,8 @@ bool PhysicsWorld::sphere_cast(const Vec3& origin, const Vec3& dir, float radius
     settings.mBackFaceModeConvex = JPH::EBackFaceMode::IgnoreBackFaces;
     RayBodyFilter body_filter;
     body_filter.skip_characters = filter.skip_characters;
+    body_filter.floor_only = filter.floor_only;
+    body_filter.walkable = &impl_->walkable;
     for (const std::uint32_t e : filter.ignore) {
         if (auto it = impl_->entity_to_body.find(e); it != impl_->entity_to_body.end()) {
             body_filter.ids.push_back(it->second);
@@ -1140,6 +1712,11 @@ bool PhysicsWorld::sphere_cast(const Vec3& origin, const Vec3& dir, float radius
         const JPH::SpecifiedObjectLayerFilter obj_filter(Layers::STATIC);
         impl_->system.GetNarrowPhaseQuery().CastShape(
             cast, settings, JPH::RVec3(origin.x, origin.y, origin.z), collector, bp_filter,
+            obj_filter, body_filter);
+    } else if (filter.floor_only) {
+        const FloorLayerFilter obj_filter;
+        impl_->system.GetNarrowPhaseQuery().CastShape(
+            cast, settings, JPH::RVec3(origin.x, origin.y, origin.z), collector, {},
             obj_filter, body_filter);
     } else {
         impl_->system.GetNarrowPhaseQuery().CastShape(

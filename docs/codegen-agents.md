@@ -276,11 +276,24 @@ let it include -- code that compiles, links, ships and silently does nothing:
   are `builtin.weapon` / `bow` / `melee_weapon` / `shield`; generated code
   reacts through `ctx.weapons`, and abilities that launch something use
   `ctx.projectiles` / `ctx.vfx`. See [weapons.md](weapons.md).
+- (contract v6) in a project with an interaction design: a button pressed
+  by `ctx.contacts->began/touching` (buttons are `builtin.press_button`;
+  react to its signal with `ctx.signals->fired_since`), or a private fuse
+  with blast damage (`builtin.explosive`); when the world declares anchors,
+  `ctx.spawn->instance(..., Vec3(<literal>, ...))` without reading
+  `ctx.anchors`; when the design has an in-world display, scoreboard /
+  timer text drawn with `ctx.text` without publishing to `ctx.vars`
+  (`builtin.world_display` shows it). See [interactions.md](interactions.md).
 
 The weapon reconcile (`weapon_plan.reconcile_weapon_items`) also runs at the
 start of code generation: shooting hubs, fire profiles, ammo / reload,
 recoil and projectile tasks are removed (named) in favour of the weapon
-built-ins, and tasks that depended on them are told to read `ctx.weapons`.
+built-ins, generated grenade / fuse / detonation tasks in favour of
+`builtin.explosive`, and tasks that depended on them are told to read
+`ctx.weapons` / the detonation signals. The interaction reconcile
+(`interaction_plan.reconcile_interaction_items`) follows it: timed target
+challenges become `builtin.target_challenge`, displays
+`builtin.world_display`.
 
 The game-loop reconcile (`reconcile_game_flow_items`, see
 [game-flow.md](game-flow.md#2-planning-and-codegen)) also runs at the start of

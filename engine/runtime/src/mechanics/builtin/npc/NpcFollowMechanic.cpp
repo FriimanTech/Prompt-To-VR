@@ -70,14 +70,22 @@ public:
         Vec3 flat = them - me;
         flat.y = 0.0f;
         const float d = glm::length(flat);
+        const float moved = has_last_ ? glm::length(Vec3(me.x - last_.x, 0.0f, me.z - last_.z))
+                                      : 0.0f;
+        last_ = me;
+        has_last_ = true;
 
-        // Lost: too far, or no progress while it should be closing in.
+        // Lost: too far, or held in place while it should be closing in. A
+        // follower walking freely behind a leader who walks away is
+        // trailing, not lost (catchup_distance_m handles a big gap).
         if (d > max_d_) {
             if (d < best_d_ - 0.25f) {
                 best_d_ = d;
                 stuck_t_ = 0.0f;
-            } else {
+            } else if (!moving_ || moved < 0.25f * walk_ * dt) {
                 stuck_t_ += dt;
+            } else {
+                stuck_t_ = std::max(0.0f, stuck_t_ - dt);
             }
         } else {
             best_d_ = d;
@@ -150,7 +158,12 @@ private:
         if (glm::length(fwd) < 1e-3f) fwd = Vec3(0.0f, 0.0f, -1.0f);
         fwd = glm::normalize(fwd);
         const float trail = 0.5f * (min_d_ + max_d_);
-        Vec3 spot = leader - fwd * trail;
+        // No reachable spot behind: right behind the leader, who is on
+        // walkable floor (an unchecked point beside them was off the map).
+        Vec3 spot = leader - fwd * 0.8f;
+        if (ctx.nav != nullptr) {
+            spot = ctx.nav->project_to_ground(ctx.nav->nearest_walkable(spot));
+        }
         for (int k = 0; k < 8; ++k) {
             // Fan out behind the leader until a reachable spot turns up.
             const float a = (k % 2 == 0 ? 1.0f : -1.0f) * 0.35f * static_cast<float>((k + 1) / 2);
@@ -158,15 +171,32 @@ private:
                             -fwd.z * std::cos(a) - fwd.x * std::sin(a));
             Vec3 p = leader + back * trail;
             if (ctx.nav != nullptr) {
-                p = ctx.nav->project_to_ground(p);
+                // Inside the declared walkable space: "behind" a player at
+                // the edge of a yard is past its fence.
+                const Vec3 inside = ctx.nav->nearest_walkable(p);
+                const Vec3 d(inside.x - p.x, 0.0f, inside.z - p.z);
+                if (glm::length(d) > 0.5f * trail) continue;
+                p = ctx.nav->project_to_ground(inside);
                 if (!ctx.nav->is_reachable(leader, p)) continue;
             }
             spot = p;
             break;
         }
         auto& t = world.get<CTransform>(self).t;
-        spot.y = std::max(spot.y, leader.y);
+        // ``spot`` is a point on the floor; the origin sits the measured foot
+        // offset above the soles (it was put AT the floor, sunk by half its
+        // height).
+        float foot = 0.0f;
+        if (world.has<CMesh>(self)) {
+            const auto& m = world.get<CMesh>(self);
+            foot = m.foot_offset_m > 1e-4f ? m.foot_offset_m
+                                           : 0.5f * std::max(0.0f, m.target_scale_meters);
+        }
+        spot.y = std::max(spot.y, leader.y) + foot;
         t.position = spot;
+        if (ctx.physics != nullptr && ctx.physics->has_body(self)) {
+            ctx.physics->teleport_body(self, t.position, t.rotation);
+        }
         PTV_INFO("builtin.npc.follow: entity {} was lost; re-placed behind "
                  "its leader",
                  self);
@@ -180,6 +210,8 @@ private:
     bool moving_{false};
     float best_d_{1e9f};
     float stuck_t_{0.0f};
+    Vec3 last_{0.0f};
+    bool has_last_{false};
 };
 
 }  // namespace

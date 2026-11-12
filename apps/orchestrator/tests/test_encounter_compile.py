@@ -164,6 +164,27 @@ def test_zones_from_world_or_nav_regions():
         assert math.hypot(z["position"][0], z["position"][2]) >= 12.0
 
 
+def test_stationary_npc_still_gets_the_ground_writer():
+    """A stationary range target is a capsule, stood on the floor and turned
+    toward the player by builtin.character_locomotion -- it just never
+    travels. Without it a goblin spawned at the floor stayed sunk by half its
+    height."""
+    plan = NpcPlan.model_validate({"prompt_id": "p", "npcs": [
+        _npc("goblin", "enemy", [], movement_style="stationary")]})
+    plan = plan.model_copy(update={"encounters": EncounterPlan(waves=[
+        EncounterWave(groups=[EncounterGroup(asset_id="goblin", count=3)])])})
+    doc = _doc()
+    doc["entities"][0]["physics"] = {"kind": "static", "collision_shape": "aabb"}
+    apply_npc_population(doc, plan, spec_yaw=0.0)
+    goblin = next(e for e in doc["entities"] if e["id"] == "goblin")
+    loco = next(b for b in goblin["mechanic_bindings"]
+                if b["id"] == "builtin.character_locomotion")
+    assert loco["params"]["stationary"] is True
+    assert loco["params"]["face_player"] is True
+    assert goblin["physics"]["kind"] == "kinematic"
+    assert goblin["physics"]["collision_shape"] == "capsule"
+
+
 def test_mechanic_plan_gains_npc_builtins_once():
     plan = MechanicPlan(prompt_id="p", items=[MechanicPlanItem(
         id="npc_follow", classification=MechanicClassification.builtin,

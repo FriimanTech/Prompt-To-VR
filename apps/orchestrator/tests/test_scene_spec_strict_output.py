@@ -349,3 +349,29 @@ def test_equip_slots_are_in_the_strict_wire_schema() -> None:
     text = json.dumps(rendered)
     assert "equip_slots" in text
     assert "EquipSlotSpec" in text
+
+
+def test_every_entity_field_is_on_the_wire() -> None:
+    """Anything WireEntity lacks the composer CANNOT emit: placement and
+    satisfies were missing, so no shooting-range item could be placed on a
+    table and every placement requirement read as unmet, repair after
+    repair."""
+    from ptv_schemas.scene_spec import EntitySpec
+    from ptv_orchestrator.pipeline.scene_spec_wire import WireEntity
+
+    assert set(EntitySpec.model_fields) - set(WireEntity.model_fields) == set()
+
+
+def test_placement_and_satisfies_survive_the_wire_round_trip() -> None:
+    payload = _wearer_payload()
+    payload["entities"][0]["placement"] = {
+        "relation": "on_surface", "anchor": "table_glock", "anchor_set": "", "count": 0,
+        "group": "firearms_table", "description": "left end of the firearms table"}
+    payload["entities"][0]["satisfies"] = ["req_glock_on_table"]
+    spec = to_scene_spec(WireSceneSpec.model_validate(payload))
+    e = spec.entities[0]
+    assert e.placement is not None and e.placement.relation.value == "on_surface"
+    assert e.placement.anchor == "table_glock" and e.satisfies == ["req_glock_on_table"]
+    agents = pytest.importorskip("agents")
+    text = json.dumps(agents.AgentOutputSchema(WireSceneSpec, strict_json_schema=True).json_schema())
+    assert "PlacementSpec" in text and "satisfies" in text

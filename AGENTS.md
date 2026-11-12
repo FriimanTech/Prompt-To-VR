@@ -84,6 +84,21 @@ orchestrator and a reusable Vulkan + OpenXR engine core.
  `state`, `held_weapon`), and abilities that launch something use
  `ctx.projectiles` / `ctx.vfx`. API contract v5 enforces it. See
  `docs/weapons.md`.
+ INTERACTIONS are the engine's too: buttons `builtin.press_button`
+ (index-fingertip poke / trigger; emits a named signal), in-world screens
+ `builtin.world_display` (lines templated from `ctx.vars`), timed / score
+ challenges `builtin.target_challenge` (spawns at world anchor sets),
+ things that break `builtin.destructible`, grenades / flashbangs
+ `builtin.explosive` (bound with grab + throw). Generated code wires them
+ with `ctx.signals` / `ctx.vars` and places things at `ctx.anchors`; API
+ contract v6 rejects hand-contact presses, private fuses and blasts,
+ typed-in spawn coordinates when the world declares anchors, and private
+ scoreboard text beside a world display. See `docs/interactions.md`.
+ PHYSICS: every GLB gets a measured collider (AABB / hull / collision
+ mesh); the player's body (`PLAYER_BODY`, radius from the avatar's torso,
+ 0.18 m Hands Only) never pushes props, while hand / forearm / shin
+ colliders (`PLAYER_PART`) do and ignore the item an open hand reaches
+ for; held items are `HELD` and never a floor. See `docs/physics.md`.
    Health, factions, damage, death, perception, navigation, attachment and
    runtime spawning are engine services (`ctx.combat`, `ctx.perception`,
    `ctx.nav`, `ctx.attach`, `ctx.spawn`, `ctx.contacts`), not per-game
@@ -127,6 +142,12 @@ orchestrator and a reusable Vulkan + OpenXR engine core.
  stands) -- but never spawns, names or counts NPCs: the NPC plan decides
  who exists, `scene_compile` places them and validates the placement
  against the merged world, and the runtime director spawns.
+ It also owns static furniture (`world_builds_it`), places objects by
+ their BASE (`align`, `asset_size`), and declares a `gameplay_anchor` /
+ `anchor_set` for every gameplay placement request and the zone tags the
+ NPC plan spawns groups in; `scene_compile` resolves gameplay entities onto
+ those anchors and fails on sunk / floating / unsupported /
+ interpenetrating items. See `docs/placement.md`.
 7. Use Claude for the hardest gameplay planning and hardest C++ generation
    (`claude-opus-4-7`). Use `claude-sonnet-4-6` for lighter work. If Claude
    is unavailable (missing key or API error) the pipeline transparently
@@ -134,7 +155,8 @@ orchestrator and a reusable Vulkan + OpenXR engine core.
    (both tiers `gpt-5.6-sol`, separated by reasoning effort).
 8. Tripo image-to-3D calls MUST enable textured, PBR output with image-aligned
    textures (`texture=True`, `pbr=True`, `texture_alignment="original_image"`)
-   and MUST target the **V3** API; V2 is retired 2026-11-01.
+   and MUST target the **V3** API; V2 is retired 2026-11-01. The same holds
+   for `multiview-to-model` (humanoid characters).
 9. Verify provider SDK signatures and model names with live docs before
    changing provider client code.
 10. When code structure changes, update `/docs/` in the same change.
@@ -182,6 +204,16 @@ orchestrator and a reusable Vulkan + OpenXR engine core.
    frame rate are user-controllable; memory safety never is. Each override
    becomes a LOCK in `performance.locks` the runtime governor never moves.
    Warnings never block. See `docs/quest-optimization.md`.
+1b. Prompt + BuildSpec → **RequirementsLedger** (`requirements`, hard tier
+   through `LlmClient`, structured output): every atomic thing the prompt
+   asks for (`asset`, `visual`, `placement`, `layout`, `interaction`,
+   `mechanic`, `rule`, `npc`), each with a VERBATIM quote (checked). Planning
+   artifacts claim requirements with `satisfies` (asset items, mechanic-plan
+   items, scene entities, `w.satisfies` in a world builder); after each
+   owning stage a deterministic coverage gate gives ONE repair round, then
+   fails with `RequirementGateError` listing what is unclaimed. Scene review
+   and the headset record outcomes in `requirements_report.json` (shown on
+   the project page). See `docs/requirements.md`.
 2. BuildSpec → **AssetManifest** (Claude Sonnet, structured output). Only
    OBJECTS (characters, props, fx, ui) — the environment is not a GLB, and
    neither is a SOUND. Every item costs a reference image plus a paid Tripo
@@ -204,7 +236,11 @@ orchestrator and a reusable Vulkan + OpenXR engine core.
    their real size and applies real-world dimensions. Scenery gets nothing.
    Feeds npc_plan, game_design, mechanic_plan (weapons map onto the weapon
    built-ins), socket_generation and scene_compile. See `docs/sockets.md`,
-   `docs/weapons.md`.
+   `docs/weapons.md`. It also marks `pressable` items (a `press` spec +
+   `press_surface` socket), `display` items (`screen` socket), a
+   `destructible` spec on things that break and an `explosive` spec on
+   thrown explosives; a held or thrown item is never under
+   `vr_min_handheld_size_m` (12 cm). See `docs/interactions.md`.
 2b. Prompt + BuildSpec + AssetManifest → **NpcPlan** (`npc_plan`, OpenAI
    Agents SDK agent, `gpt-5.6-sol` @ reasoning `high`, no tools). Decides per character: role,
    faction and who it fights, `movement_style`, behaviours, and which
@@ -226,6 +262,11 @@ orchestrator and a reusable Vulkan + OpenXR engine core.
    type into world-declared `npc_spawn_zones`; `builtin.npc.follow` and
    `builtin.npc.melee_chase` carry per-type stats from the plan. Generated
    code never spawns or pools NPCs; HUDs read `ctx.encounters`.
+   WHERE: a group the prompt places ("regular goblins at the front of the
+   lane") gets `zone_tags` (+ verbatim `zone_quote`, `zone_visibility`);
+   the director spawns it only in world zones with that tag, and the world
+   is required to declare them. "They all respawn once all are dead" is
+   `waves` with `repeat: true`.
 2c. Prompt + BuildSpec + NpcPlan + AssetManifest → **GameDesign**
    (`game_design`, OpenAI Agents SDK agent, `gpt-5.6-sol` @ reasoning
    `high`, no tools): the rules of the loop -- experience kind, player
@@ -257,18 +298,38 @@ orchestrator and a reusable Vulkan + OpenXR engine core.
    designed weapon `builtin+config` of `builtin.weapon` / `bow` /
    `melee_weapon` / `shield` (+ `item_source`, `npc.ranged_attack`),
    removing generated shooting hubs, fire profiles, ammo / reload / recoil
-   tasks and `builtin.recoil`, named.
+   tasks and `builtin.recoil`, named; designed explosives become
+   `builtin.explosive` (generated fuse / detonation tasks removed). The
+   interaction reconcile (`interaction_plan.py`, also at codegen start)
+   maps timed target challenges onto `builtin.target_challenge`, in-world
+   displays onto `builtin.world_display`, and adds `press_button` /
+   `destructible` items from the design.
 4. All above → **SceneSpec**, one per scene (OpenAI Agents SDK agent,
    `gpt-5.6-sol` @ reasoning `medium`, no tools) with a deterministic validate-and-repair loop
    (asset coverage, environment presence, valid mechanic-binding ids);
    problems are fed back into the same agent session up to
    `scene_spec_max_repair_rounds`. Scenes fan out across
-   `scene_spec_max_parallel_workers` agents.
+   `scene_spec_max_parallel_workers` agents. Entities carry a `placement`
+   intent (`on_surface`, `on_floor`, `hang_from`, `mount_on_wall`,
+   `at_anchor` + anchor / anchor_set id) instead of coordinates for things
+   that rest on world furniture; world-owned furniture is not placed here.
+   See `docs/placement.md`.
 5. Reference images for each object `AssetItem` → Gemini
-   (`gemini-3.1-flash-image`).
+   (`gemini-3.1-flash-image`). T-posed characters get a hand clause (open
+   hands, five spread fingers, bare or full-finger gloves) and
+   `image_config.image_size` 2K (4K for the player avatar); a Gemini vision
+   hand check (`gemini-3.8-flash`, Interactions API) regenerates with its
+   critique up to `hand_qa_max_retries` (2) times, then keeps the best
+   image with a loud `HANDS:` warning (`images/<id>/hand_qa.json`).
 6. Reference images → Tripo image-to-3D (textured, PBR). The generation
    `task_id` is recorded as `assets/<id>/tripo_task.json` so rigging can
-   reference it instead of re-uploading the mesh.
+   reference it instead of re-uploading the mesh. Humanoid characters go
+   multiview (`tripo_multiview_humanoids`): `POST
+   /v3/generation/image-to-multiview` (four views, hands checked) then
+   `POST /v3/generation/multiview-to-model` with `inputs=[{"task_id"}]`;
+   the finished mesh's hands are rendered close up (`ptv_glb_views
+   --focus`) and checked; each check retries up to 2 times, then the best
+   attempt is kept with a warning (`assets/<id>/hand_qa.json`).
 6a. **Character routing** (`character_routing`): per character, Tripo or
    Uthana rigs and animates it, written to `character_routing.json`. The
    player avatar always goes to Uthana (finger joints). A biped humanoid Tripo's
@@ -392,7 +453,12 @@ orchestrator and a reusable Vulkan + OpenXR engine core.
    builder also declares the walkable space via `nav_region` / `nav_link`,
    which a deterministic validator checks against itself (links naming real
    regions, crossing points inside the rooms they join, spawn inside a
-   region, every region reachable) before the world is accepted.
+   region, every region reachable) before the world is accepted. It places
+   world-owned furniture by its BASE, declares a `gameplay_anchor` /
+   `anchor_set` for every gameplay placement request, the zone tags the NPC
+   plan spawns groups in, and claims its layout requirements
+   (`w.satisfies`); a contract check sends missing or unsupported anchors
+   back into the repair loop. See `docs/placement.md`.
 8b. CodeTasks from MechanicPlan → OpenAI Agents SDK (`gpt-5.6-sol` @ `high`)
    → C++ files (`.cpp` + optional `.h`/`.hpp` headers) in
    `engine/generated/{mechanics,ai,dialogue}/`. After all tasks are
@@ -489,6 +555,19 @@ orchestrator and a reusable Vulkan + OpenXR engine core.
    `performance.memory_estimate` and `resident_memory_budget_mb`, plus
    `scene_complexity.json` and a provisional `memory_status.json`
    (`estimated_safe_not_device_tested` / `at_risk`, never "verified").
+   It also writes every unskinned asset's measured collider
+   (`mesh.collision`), the player's `body_radius_m`, binds the interaction
+   built-ins (`interaction_scene.py`), and resolves gameplay entities onto
+   the world's anchors (`placement.resolve` → `settle` → `violations`,
+   failing with `PlacementContractError`; `placement_report.<scene>.json`).
+9b. **Scene review** (`scene_review`, report-only): `ptv_scene_views` (the
+   `ptv_glb_views` CPU rasteriser over the whole `scene.json`, with an
+   entity-id buffer) renders the spawn view, an overview with the roof cut
+   away and an eye-level + above view per requirement; deterministic checks
+   (claimed asset missing, requirement entities nobody can see, spawn facing
+   a wall), then a Gemini vision check per placement / layout / visual
+   requirement. Outcomes go to the ledger and `scene_review.json`; the
+   viewpoints are written into the shipped scene as `verify_viewpoints`.
 10. Build (branches on `ProjectState.target_device`, the create-time UI toggle
    that is the single source of truth and is mirrored into
    `BuildSpec.target_device`; every planning prompt names the target too, so a
@@ -530,7 +609,17 @@ orchestrator and a reusable Vulkan + OpenXR engine core.
  targets. `memory_status` is `verified_safe` only from those measurements;
  a memory failure re-runs asset_optimization → scene_compile → quest_build
  → verify with the measured calibration, at most
- `quest_memory_max_correction_rounds` times. Writes
+ `quest_memory_max_correction_rounds` times. With interactive things or
+ review viewpoints it runs a fifth launch (`debug.ptv.verify_interactions`:
+ the engine's `InteractionVerifier` drives the player and right hand -- its
+ pose replaces the tracked pose at the source): every loose prop settles
+ (< 3 cm), walking into a grabbable resting above the legs moves it < 1 cm,
+ an open hand reaching for it moves it < 3 cm and it is then held, every
+ button presses (fingertip poke, else trigger), a pressed button's
+ challenge starts, spawns and runs its clock, every explosive detonates,
+ and a Quest screenshot is taken at each review viewpoint; zone-tagged NPC
+ types must first appear inside their zones. Results also go into the
+ requirements ledger / `requirements_report.json`. Writes
  `runtime_verification.json`. SKIPPED, never failed, when no headset is
  connected (memory then reads `estimated_safe_not_device_tested` or
  `at_risk`). See `docs/quest-build.md`, `docs/quest-optimization.md`.
@@ -568,7 +657,9 @@ orchestrator and a reusable Vulkan + OpenXR engine core.
 - Google GenAI: Python package `google-genai`. Reference images use
   `gemini-3.1-flash-image` with `generate_content` and
   `response_modalities=["IMAGE"]` (Imagen 4 endpoints discontinued
-  2026-08-17). Socket segmentation and verification use
+  2026-08-17); `ImageConfig(aspect_ratio, image_size)` takes `image_size`
+  `"1K"` (default) / `"2K"` / `"4K"` (google-genai 2.18.1). Socket
+  segmentation and verification, the hand checks and the scene review use
   `gemini-3.8-flash` through the Interactions API
   (`client.interactions.create(model, input, response_format,
   generation_config)`); it rejects `thinking_level: "minimal"` with a 400,
@@ -581,7 +672,11 @@ orchestrator and a reusable Vulkan + OpenXR engine core.
   `POST /v3/files` → `POST /v3/generation/image-to-model` →
   `GET /v3/tasks/{id}` → download `output.model_url`. `model` is REQUIRED
   (no server default); allowed values are `v3.1-20260211`, `v3.0-20250812`,
-  `v2.5-20250123`, `P1-20260311`.
+  `v2.5-20250123`, `P1-20260311`. Multiview (verified 2026-11-10):
+  `POST /v3/generation/image-to-multiview` (`input` = file token; output
+  `generate_multiview_image.{front,left,back,right}_view_url`) →
+  `POST /v3/generation/multiview-to-model` with `inputs=[{"task_id": ...}]`
+  (single element; source must be a successful `image_to_multiview`).
 - Vulkan SDK 1.4.341.x on Windows. Requires VS 2022 or 2026 toolchain.
 - OpenXR Khronos loader via vcpkg. On Windows + Quest Link, Oculus OpenXR
   runtime is registered automatically.

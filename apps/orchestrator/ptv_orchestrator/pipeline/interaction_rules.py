@@ -30,6 +30,9 @@ from ptv_schemas import (
     BeamSpec,
     BowSpec,
     DecisionSource,
+    ExplosiveKind,
+    ExplosiveSpec,
+    PressSpec,
     FingerPose,
     FireMode,
     FireSystem,
@@ -336,6 +339,8 @@ def repair_interaction_design(design: InteractionDesign, *, prompt: str,
                 _ensure_socket(it, "strike_tip", SocketKind.strike_tip,
                                f"the point of the {label}'s blade", notes)
 
+        _repair_interactive(it, label, notes)
+
     # Arrows and other mesh projectiles the player holds get an entry so
     # socket_generation finds their nock / nose.
     for proj in d.projectiles:
@@ -351,6 +356,52 @@ def repair_interaction_design(design: InteractionDesign, *, prompt: str,
                          "it gets a mesh")
 
     return d, notes
+
+
+_FLASH_WORDS = ("flashbang", "flash bang", "stun grenade", "flash grenade", "m84")
+_SMOKE_WORDS = ("smoke grenade", "smoke bomb")
+_GRENADE_WORDS = ("grenade", "flashbang", "explosive", "bomb", "dynamite", "molotov",
+                  "c4", "mine")
+
+
+def _repair_interactive(it: ItemInteraction, label: str, notes: list[str]) -> None:
+    """Pressables press, displays show, thrown explosives explode."""
+    if it.usage == ItemUsage.pressable:
+        if it.press is None:
+            it.press = PressSpec(provenance=Provenance(rationale="pressable default"))
+            notes.append(f"{it.asset_id}: press defaulted (poke or trigger)")
+        _ensure_socket(it, "press_surface", SocketKind.press_surface,
+                       f"the cap / face of the {label} that a fingertip pushes in", notes)
+        it.hold = HoldProfile(provenance=it.hold.provenance)
+    if it.usage == ItemUsage.display:
+        _ensure_socket(it, "screen", SocketKind.screen,
+                       f"the centre of the {label}'s screen / face where text is shown",
+                       notes)
+        it.hold = HoldProfile(provenance=it.hold.provenance)
+    text = _norm(f"{it.asset_id.replace('_', ' ')} {it.real_world_reference}")
+    thrown = it.usage == ItemUsage.thrown or (
+        it.weapon is not None and it.weapon.fire_system == FireSystem.thrown)
+    if thrown and it.explosive is None and _has(_GRENADE_WORDS, text):
+        kind = (ExplosiveKind.flash if any(w in text for w in _FLASH_WORDS)
+                else ExplosiveKind.smoke if any(w in text for w in _SMOKE_WORDS)
+                else ExplosiveKind.frag)
+        it.explosive = ExplosiveSpec(
+            kind=kind, damage=0.0 if kind != ExplosiveKind.frag else 120.0,
+            provenance=Provenance(rationale=f"a thrown {kind.value} explosive"))
+        notes.append(f"{it.asset_id}: thrown explosive defaulted ({kind.value})")
+    if it.explosive is not None:
+        if it.usage != ItemUsage.thrown:
+            it.usage = ItemUsage.thrown
+        if it.hold.kind == HoldKind.none:
+            it.hold.kind = HoldKind.one_hand
+        it.hold.primary_socket = _ensure_socket(
+            it, it.hold.primary_socket or "grip", SocketKind.hand_grip,
+            f"the body of the {label} where the palm wraps it", notes)
+        it.hold.aim_aligned = False
+        if it.weapon is not None and it.weapon.fire_system != FireSystem.thrown:
+            it.weapon = None
+        if Wielder.player not in it.wielders:
+            it.wielders = [Wielder.player]
 
 
 def _repair_weapon(d: InteractionDesign, it: ItemInteraction, label: str,
@@ -586,7 +637,12 @@ def _projectile_asset_id(proj: ProjectileSpec, taken: set[str]) -> str:
     return aid
 
 
-def reconcile_manifest(manifest: AssetManifest, design: InteractionDesign
+#: Default floor for the longest axis of a held or thrown item, metres.
+VR_MIN_HANDHELD_M = 0.12
+
+
+def reconcile_manifest(manifest: AssetManifest, design: InteractionDesign,
+                       min_handheld_m: float = VR_MIN_HANDHELD_M,
                        ) -> tuple[AssetManifest, InteractionDesign, list[str]]:
     """Make the manifest agree with the design. Returns the new manifest, the
     design (with projectile ``asset_id`` / bow ``arrow_asset_id`` filled) and
@@ -611,6 +667,15 @@ def reconcile_manifest(manifest: AssetManifest, design: InteractionDesign
                 notes.append(f"{a.id}: scale {a.target_scale_meters:.3f} m -> "
                              f"{dims.length_m:.3f} m ({it.real_world_reference or 'researched'})")
                 a.target_scale_meters = round(dims.length_m, 4)
+        # Smaller than a VR hand can comfortably find and close on: a real
+        # 9 cm grenade reads as a pebble in the headset and slips through the
+        # fingers. Held and thrown items get at least ``min_handheld_m``
+        # (their real size stays in real_world_dimensions).
+        if it.usage in (ItemUsage.held_weapon, ItemUsage.held_tool, ItemUsage.thrown) \
+                and 0.0 < a.target_scale_meters < min_handheld_m:
+            notes.append(f"{a.id}: {a.target_scale_meters:.3f} m is too small to handle in "
+                         f"VR; scaled to {min_handheld_m:.2f} m")
+            a.target_scale_meters = round(min_handheld_m, 4)
         if it.usage in (ItemUsage.held_weapon, ItemUsage.held_tool,
                         ItemUsage.held_shield) and a.importance is None:
             a.importance = AssetImportance.hero

@@ -60,6 +60,7 @@ from ptv_schemas import (
 )
 
 from . import texture_policy as tp
+from .collision_shapes import try_measure as try_measure_collision
 from .context import PipelineContext, StageResult
 from .proc import proc_hooks
 from .stage_asset_normalize import (
@@ -408,6 +409,17 @@ def run(ctx: PipelineContext) -> StageResult:
         info["decimated"] = True
         info["skinned"] = bool(lod_info.get("skinned") or False)
         info["joint_count"] = int(lod_info.get("joint_count") or 0)
+        # Characters collide as capsules; everything else gets a collider
+        # measured from its own mesh (see collision_shapes).
+        if not info["skinned"]:
+            collision = try_measure_collision(
+                info["lod_paths"], info["lod_errors_rel"], ctx.settings.repo_root)
+            if collision is not None:
+                info["collision"] = collision
+            else:
+                info.pop("collision", None)
+                ctx.emit(stage, "warning",
+                         f"{asset_id}: could not measure a collider from its LODs")
         info["optimization"] = {
             "status": "ok",
             "tier": profile.tier.value,

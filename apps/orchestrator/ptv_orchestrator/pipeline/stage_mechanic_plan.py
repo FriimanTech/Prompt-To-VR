@@ -38,6 +38,8 @@ from .context import PipelineContext, StageResult
 from .game_flow_plan import reconcile_game_flow_items
 from .interaction_rules import design_excerpt
 from .weapon_plan import reconcile_weapon_items
+from . import requirements_ledger as rl
+from .interaction_plan import INTERACTION_BUILTINS_RULE, reconcile_interaction_items
 from .mechanic_plan_agent import (
     MechanicPlanAgentInput,
     MechanicPlanner,
@@ -121,6 +123,8 @@ def run_with_planner(
         if excerpt else
         "WEAPONS: no interaction design; no weapons are designed."
     )
+    ledger = rl.load(ctx.project_dir)
+    ledger_text = rl.brief(ledger, "mechanic_plan")
     inp = MechanicPlanAgentInput(
         build_spec_json=build_spec.model_dump_json(indent=2),
         asset_manifest_json=manifest.model_dump_json(indent=2),
@@ -129,7 +133,8 @@ def run_with_planner(
         ),
         catalog_text=catalog_text,
         editable_builtins_note=editable_builtins_note(),
-        extra_instructions=[
+        extra_instructions=([ledger_text] if ledger_text else []) + [
+            INTERACTION_BUILTINS_RULE,
             "Emit one MechanicPlanItem per BuildSpec mechanic (1:1 by id).",
             "Reuse catalog entries (built-in OR promoted) whenever the request"
             " is covered; escalate params -> code_edit -> generate only as"
@@ -155,7 +160,80 @@ def run_with_planner(
     )
 
     message = build_planner_message(inp)
+    known = {r.id for r in ledger.requirements} if ledger is not None else set()
     plan: MechanicPlan = planner.run(message)
+    for attempt in range(2):
+        # Claims from what the planner wrote AND what the reconciles left:
+        # a generated fire profile replaced by builtin.weapon still delivered
+        # the requirement it claimed.
+        claims = rl.claims_from_mechanic_plan(plan, known)
+        plan = _finish_plan(ctx, state, plan, build_spec, npc_plan, design, interaction)
+        for rid, cs in rl.claims_from_mechanic_plan(plan, known).items():
+            have = {c.item for c in claims.get(rid, [])}
+            claims.setdefault(rid, []).extend(c for c in cs if c.item not in have)
+        missing = rl.gate(ledger, "mechanic_plan", claims)
+        if not missing:
+            break
+        if attempt == 1:
+            rl.save(ctx.project_dir, ledger)
+            msg = ("the mechanic plan delivers no mechanic for these requirements:\n"
+                   + rl.uncovered_text(missing))
+            ctx.store.record_stage(state, ProjectStage.mechanic_plan, ProjectStatus.failed,
+                                   message=msg[:400])
+            ctx.emit(ProjectStage.mechanic_plan, "failed", msg[:400])
+            raise rl.RequirementGateError(msg)
+        ctx.emit(ProjectStage.mechanic_plan, "warning",
+                 f"{len(missing)} requirement(s) unclaimed; asking the planner again")
+        plan = planner.run(
+            message
+            + "\n\nYOUR PREVIOUS PLAN (below) left these requirements with no mechanic "
+              "claiming them in `satisfies`. Add or extend mechanics so EVERY one is "
+              "delivered (a built-in with config when one covers it), and list the ids "
+              "in `satisfies`:\n" + rl.uncovered_text(missing)
+            + "\n\nPrevious plan:\n" + plan.model_dump_json(indent=1)[:60000])
+    if ledger is not None:
+        rl.save(ctx.project_dir, ledger)
+
+    ctx.mechanic_plan = plan
+    art = ctx.store.save_mechanic_plan(ctx.project_id, plan)
+
+    # Emit a reuse-vs-generate summary so the UI can highlight engine growth.
+    counts: dict[str, int] = {}
+    for it in plan.items:
+        key = it.classification.value
+        counts[key] = counts.get(key, 0) + 1
+    gen_count = counts.get("generate", 0)
+    code_edit_count = counts.get(
+        MechanicClassification.builtin_config_code_edit.value, 0
+    )
+    reuse_count = counts.get("builtin", 0) + counts.get("builtin+config", 0)
+    # code_edit and generate both produce a CodeTask.
+    codegen_count = gen_count + code_edit_count
+    summary = (
+        f"reuse={reuse_count} (builtin/builtin+config), "
+        f"code_edit={code_edit_count}, generate={gen_count}"
+    )
+    ctx.emit(ProjectStage.mechanic_plan, "info", summary)
+
+    ctx.store.record_stage(
+        state,
+        ProjectStage.mechanic_plan,
+        ProjectStatus.succeeded,
+        message=f"{codegen_count} mechanics require generated C++ ({summary})",
+        artifacts=[art.path],
+    )
+    ctx.emit(
+        ProjectStage.mechanic_plan,
+        "succeeded",
+        f"{codegen_count} to generate, {reuse_count} reused",
+    )
+    return StageResult(stage=ProjectStage.mechanic_plan, artifacts=[art.path], data=plan)
+
+
+def _finish_plan(ctx: PipelineContext, state, plan: MechanicPlan, build_spec, npc_plan,
+                 design, interaction) -> MechanicPlan:
+    """The deterministic half of the stage: binding normalization and every
+    reconcile, applied to whatever the planner returned."""
 
     # Deterministic controller-binding normalization (normalizes face-button
     # hands in place; emits advisory warnings only -- sharing a control is
@@ -207,37 +285,10 @@ def run_with_planner(
         ctx.emit(ProjectStage.mechanic_plan, "info", f"weapons: {note}"[:240])
         ctx.store.append_log(ctx.project_id, "mechanic_plan", f"weapons: {note}")
 
-    ctx.mechanic_plan = plan
-    art = ctx.store.save_mechanic_plan(ctx.project_id, plan)
-
-    # Emit a reuse-vs-generate summary so the UI can highlight engine growth.
-    counts: dict[str, int] = {}
-    for it in plan.items:
-        key = it.classification.value
-        counts[key] = counts.get(key, 0) + 1
-    gen_count = counts.get("generate", 0)
-    code_edit_count = counts.get(
-        MechanicClassification.builtin_config_code_edit.value, 0
-    )
-    reuse_count = counts.get("builtin", 0) + counts.get("builtin+config", 0)
-    # code_edit and generate both produce a CodeTask.
-    codegen_count = gen_count + code_edit_count
-    summary = (
-        f"reuse={reuse_count} (builtin/builtin+config), "
-        f"code_edit={code_edit_count}, generate={gen_count}"
-    )
-    ctx.emit(ProjectStage.mechanic_plan, "info", summary)
-
-    ctx.store.record_stage(
-        state,
-        ProjectStage.mechanic_plan,
-        ProjectStatus.succeeded,
-        message=f"{codegen_count} mechanics require generated C++ ({summary})",
-        artifacts=[art.path],
-    )
-    ctx.emit(
-        ProjectStage.mechanic_plan,
-        "succeeded",
-        f"{codegen_count} to generate, {reuse_count} reused",
-    )
-    return StageResult(stage=ProjectStage.mechanic_plan, artifacts=[art.path], data=plan)
+    # Buttons, timed challenges, world displays, destructibles and
+    # explosives run on their built-ins too.
+    plan, interaction_notes = reconcile_interaction_items(plan, interaction)
+    for note in interaction_notes:
+        ctx.emit(ProjectStage.mechanic_plan, "info", f"interactions: {note}"[:240])
+        ctx.store.append_log(ctx.project_id, "mechanic_plan", f"interactions: {note}")
+    return plan

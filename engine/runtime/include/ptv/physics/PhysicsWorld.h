@@ -74,8 +74,62 @@ public:
     /** Centre of the body's world-space bounds (what a shot should aim at). */
     bool body_center(std::uint32_t entity, Vec3* out) const;
 
-    /** Toggle a body between Dynamic and Kinematic (useful for grab). */
+    /** Toggle a body between Dynamic and Kinematic (useful for grab).
+     *
+     *  A prop made kinematic is being held or attached, so it moves to the
+     *  ``Held`` class (it no longer touches its holder); made dynamic again
+     *  it returns to ``Prop``. */
     void set_kinematic(std::uint32_t entity, bool kinematic);
+
+    /** What a body is, which decides what it may touch (docs/physics.md).
+     *  The scene sets it from the entity on creation: static geometry,
+     *  NPC capsules and kinematic world pieces (``Moving``), dynamic props,
+     *  attached items (``Held``). The player's own bodies are set by the
+     *  engine. */
+    enum class BodyClass : std::uint8_t {
+        Static,
+        Moving,
+        Prop,
+        Held,
+        PlayerBody,
+        PlayerPart,
+        Debris,
+    };
+    void set_body_class(std::uint32_t entity, BodyClass body_class);
+    BodyClass body_class(std::uint32_t entity) const;
+
+    /** Mark a moving body as floor (a lift, a raft): floor probes stand on
+     *  it. Static geometry is always floor; nothing else ever is. */
+    void set_walkable(std::uint32_t entity, bool walkable);
+
+    /** Mass of a dynamic body in kg, or 0 for anything else. */
+    float body_mass(std::uint32_t entity) const;
+
+    /** A kinematic capsule (axis = local +Y) for one of the player's body
+     *  parts -- a finger, a palm, a forearm, a shin. It is on the PlayerPart
+     *  layer: it nudges props as a real hand would, never touches the
+     *  player's own body, an NPC or anything held. ``group`` is the hand
+     *  (0 left, 1 right) or 2 for the legs (see ``set_part_ignore``). */
+    bool create_part_body(std::uint32_t entity, const Vec3& pos, const Quat& rot,
+                          float half_height, float radius, int group);
+
+    /** The bodies a part group passes through this frame: the prop its hand
+     *  is reaching to grab, so the fingers do not push it away first. */
+    void set_part_ignore(int group, const std::vector<std::uint32_t>& entities);
+
+    /** Remove ``entity``'s body from the simulation without destroying it
+     *  (``false``), or add it back (``true``). */
+    void set_collision_enabled(std::uint32_t entity, bool enabled);
+
+    /** Distance from ``point`` to the entity's collider (its oriented local
+     *  bounds): 0 inside, negative when the entity has no body. */
+    float distance_to_body(std::uint32_t entity, const Vec3& point) const;
+
+    /** Put a dynamic body to sleep (a prop settled at load: it stays where
+     *  the layout put it until something touches it). */
+    void sleep_body(std::uint32_t entity);
+    /** True when the body is currently simulated. */
+    bool body_active(std::uint32_t entity) const;
 
     /** Sweep a kinematic body toward the target pose. Must be called each
      *  frame between ``set_kinematic(true)`` and ``set_kinematic(false)``;
@@ -208,9 +262,16 @@ public:
         std::vector<std::uint32_t> ignore{};
         /** Only STATIC-layer bodies (level geometry). */
         bool static_only{false};
-        /** Skip every capsule body: NPCs and the player's contact capsule.
-         *  Ground probes want the floor, not a character standing on it. */
+        /** Skip every capsule body (NPCs, the player's contact capsule) and
+         *  everything a character carries: held items and the player's
+         *  parts. A sight line from an NPC's eye must not be blocked by the
+         *  rifle in its own hands. */
         bool skip_characters{false};
+        /** FLOOR only: static geometry plus bodies marked walkable. Never a
+         *  prop, an NPC or anything held -- a rifle carried at hip height is
+         *  not something to stand on, and the floor probe that thought it
+         *  was lifted an NPC 0.35 m every frame until it reached the sky. */
+        bool floor_only{false};
     };
 
     bool raycast(const Vec3& origin, const Vec3& dir, float max_dist,

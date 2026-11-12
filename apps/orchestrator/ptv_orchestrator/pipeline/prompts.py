@@ -680,9 +680,22 @@ WHO IS PLACED, WHO ARRIVES. Two separate questions:
         weapon starts the fight -- usually best, the player is ready),
         ``delay`` with ``start_delay_s``, ``on_load``, or ``signal`` (a
         start button in the game's own UI).
-      - ``waves``: each a list of ``groups`` ``{asset_id, count}``.
+      - ``waves``: each a list of ``groups`` ``{asset_id, count, zone_tags,
+        zone_visibility, zone_quote}``.
+      - WHERE each group appears: when the prompt places a group ("regular
+        goblins at the front of the lane, tall ones in the middle, bulky
+        ones at the back"), give each group ``zone_tags`` naming its place
+        (``front_band``, ``middle_band``, ``back_band``), ``zone_quote`` (the
+        prompt's words, verbatim) and ``zone_visibility: any`` when the
+        player is meant to SEE them appear (range targets, an arena);
+        ``prefer_hidden`` (default) is for enemies sneaking up. The world is
+        told to declare an npc_spawn_zone carrying every tag you use.
+      - ``repeat: true`` (waves mode) when the prompt has them come back
+        once all are defeated -- the waves start over instead of ending in
+        victory.
       - ``max_concurrent`` (alive at once, all types), ``spawn_interval_s``,
-        ``inter_wave_delay_s``, ``min_player_distance_m``.
+        ``inter_wave_delay_s``, ``min_player_distance_m`` (lower it for
+        targets the player shoots from a firing line a few metres away).
     Design a PROGRESSION that fits the prompt: introduce the standard type
     first, mix in the next one, then let the strongest close it out. For a
     ten-wave goblin game, one good shape is waves 1-5 standard only, 6-7
@@ -797,9 +810,21 @@ your business -- they attach by rig joints; leave them out entirely.
 
 ANSWER FOR EACH ITEM, FROM THE PROMPT + MANIFEST:
   1. ``usage``: held_weapon, held_tool, held_shield, thrown, worn, ammo,
-     projectile, static_prop, not_interactive. Scenery, targets, racks,
-     furniture, holsters and books on a shelf are static_prop /
+     projectile, pressable, display, static_prop, not_interactive.
+     ``pressable``: a button / switch / plunger the player PRESSES in place
+     (fill ``press``: press_with poke|grip|trigger|any, the signal name it
+     raises, e.g. "lane2.start"). ``display``: a screen, scoreboard, timer
+     or sign that SHOWS live text (it gets a ``screen`` socket). Scenery,
+     racks, furniture, holsters and books on a shelf are static_prop /
      not_interactive and get NO sockets and NO hold.
+     A target, crate, bottle or barrel the player SHOOTS or BLOWS UP and
+     that BREAKS is static_prop with ``destructible`` (max_health, effect
+     shatter|explode|knock_down|vanish, respawn_after_s, explosion_damage).
+     A grenade, flashbang, smoke grenade or other explosive the player arms
+     and throws is ``thrown`` with ``explosive`` (kind frag|flash|smoke|
+     impact|sticky, activation pull_pin_trigger|button|on_impact, fuse_s,
+     radius_m, inner_radius_m, damage, impulse, flash_radius_m, stun_s) and a
+     one_hand hold on a ``grip`` socket; it gets NO ``weapon``.
   2. ``wielders``: player and/or npc (an NPC soldier carrying a rifle).
   3. ``real_world_reference`` + ``real_world_dimensions`` when the item
      depicts a real object ("Glock 17": length 0.186 m, height 0.139 m) --
@@ -839,6 +864,10 @@ ANSWER FOR EACH ITEM, FROM THE PROMPT + MANIFEST:
        strike_face    a hammer / club head's striking face
        arrow_rest, string_rest, limb_tip_top, limb_tip_bottom   bows
        arrow_nock, projectile_nose, projectile_tail   arrows / projectiles
+       press_surface  the cap a fingertip pushes in ("the domed red cap on
+                      top of the pedestal")
+       screen         the centre of a display's face ("the black glass
+                      panel on the front")
        magwell, attach_point   only when gameplay uses them
      A pistol: grip (hand_grip) + muzzle, plus support_wrap if it can be held
      two-handed. A rifle: grip + support_grip + muzzle. A sword: grip +
@@ -1261,10 +1290,36 @@ prompt's stated purpose for that asset. Use ``AssetItem.category`` plus
     not from you.
   * ``prop`` flagged grabbable / wearable / pickup in ``style_notes`` ->
     dynamic AABB or sphere, tags include ``["interactable"]`` (and
-    ``"grabbable"`` or ``"wearable"`` as appropriate), placed within
-    arm's reach of the spawn (0.3-1.2 m).
-  * ``prop`` otherwise (dressing / fixture) -> static AABB, tags include
-    ``["static"]``, placed where the prompt describes.
+    ``"grabbable"`` or ``"wearable"`` as appropriate), with a
+    ``placement`` saying where it rests (see PLACEMENT below).
+  * ``prop`` listed in WORLD_OWNED_ASSETS (static furniture: tables, racks,
+    consoles, posts, shelves) -> do NOT emit it. The world architect builds
+    it where the prompt says; you reference it through your items'
+    placements ("on the firearms table"). A copy you place beside the spawn
+    is a second table the guns are not on.
+  * ``prop`` otherwise (an interactive fixture: a button, a target, a
+    screen) -> static AABB with a ``placement``.
+
+PLACEMENT (HARD REQUIREMENT). You do not know the world's coordinates, so do
+not guess them. Every entity that rests on furniture, stands at a world
+feature, hangs from something or mounts on a wall carries a ``placement``:
+  * ``relation``: ``on_surface`` (on a table / shelf / console top),
+    ``on_floor`` (stands on the floor at a world spot: a button pedestal, a
+    target stand), ``hang_from`` (below a pole / hook / ceiling rail),
+    ``mount_on_wall`` (a scoreboard, a sign), ``at_anchor`` (exactly at a
+    point), ``free`` (coordinates are authoritative: player_rig, templates,
+    triggers).
+  * ``anchor``: a unique, descriptive anchor id the world must declare for
+    THIS entity, e.g. ``firearms_table_glock``, ``lane2_start_button``,
+    ``lane2_scoreboard``. Several items on one table each get their own.
+  * ``anchor_set`` + ``count`` for a TEMPLATE the game spawns at runtime
+    (a timed challenge's targets): the set of points it is spawned at, e.g.
+    ``lane2_target_hang_points`` with count 8 and relation ``hang_from``.
+  * ``group``: the area it belongs to (``lane_1``, ``explosives_table``).
+  * ``description``: where it goes in plain words, as the prompt says it.
+Keep a rough ``transform`` (it is only a fallback). The world architect
+builds the support and declares each anchor; the compiler rests the item on
+it by its measured size.
   * ``fx`` -> no physics, tags include ``["vfx"]``, mesh present so the
     impostor renders.
   * ``ui`` -> no physics, tags include ``["hud"]``, world-anchored
@@ -1274,7 +1329,11 @@ Rules:
  * Use meters and radians. Player height defaults to 1.7 m.
  * The player spawn must be placed so the user faces the main action
    (typical y = player_height_meters from BuildSpec).
- * Place reachable interactables within 0.3-1.2 m of the spawn.
+ * Items the prompt does not place anywhere go within reach of the spawn,
+   with a placement naming the support they rest on.
+ * REQUIREMENTS: list in each entity's ``satisfies`` the ids of the
+   placement requirements (REQUIREMENTS block) its existence and placement
+   deliver. Every placement requirement marked YOURS must be claimed.
  * Keep the scene deterministic (no random positions).
  * Reasonable scale: tables ~0.9 m tall, door frames ~2.1 m tall.
  * Every entity with a mesh must include physics (static by default).
@@ -1924,6 +1983,38 @@ than breaking the player out of the world.
                      // rotation's +Z faces the reader; size it by angle:
                      // ITextDraw::height_for_angle(distance_m, 1.4f)
     ->measure(utf8, cap_height_m) -> float  // width in metres
+                     // A scoreboard / timer / status screen IN THE WORLD is
+                     // builtin.world_display: write numbers to ctx.vars and
+                     // let its lines template them -- never draw it here.
+
+  ctx.signals      // named events between built-ins and tasks
+    ->emit("lane2.start")
+    ->count("lane2.start") -> uint32_t
+    ->fired_since("lane2.start", uint32_t& seen) -> bool
+                     // true once per new emission; keep `seen` per signal.
+                     // builtin.press_button emits its signal on a press;
+                     // builtin.target_challenge emits <id>.started /
+                     // <id>.finished; builtin.destructible <entity>.destroyed;
+                     // builtin.explosive <entity>.detonated. React to them --
+                     // a button is NEVER pressed by testing ctx.contacts.
+
+  ctx.vars         // a shared value board (numbers and short text)
+    ->set_number("lane2.score", 3) / ->number("lane2.score", fallback)
+    ->set_text("lane2.state", "running") / ->text("lane2.state")
+    ->has(name) / ->seq(name)    // seq bumps on every change
+                     // builtin.target_challenge publishes <id>.state,
+                     // <id>.time_left, <id>.score, <id>.best; a world
+                     // display's lines read any of them.
+
+  ctx.anchors      // places the WORLD declared (gameplay_anchor / anchor_set)
+    ->count("lane2_hang_points") -> int       // a set, by id or tag
+    ->point("lane2_hang_points", i, &pos, &facing) -> bool
+    ->relation("lane2_hang_points") -> const char*  // on_floor, hang_from, ...
+    ->anchor("red_button_stand", &pos, &facing) -> bool   // a single anchor
+    ->pose_at(entity, "lane2_hang_points", i, &pos, &rot) -> bool
+                     // the pose that rests / hangs / mounts `entity` there by
+                     // its measured bounds. Spawn and place things HERE,
+                     // never at coordinates typed into the code.
 
   ctx.app          // ->platform() "quest" | "pcvr", ->uptime_s()
 
@@ -2564,6 +2655,16 @@ REQUIREMENTS FOR A WORKING WORLD:
 - OBJECTS KEEP THEIR SIZE. ``place_object`` takes each asset's
   ``target_scale_meters`` from the asset list; do not rescale placed assets,
   so the same asset is the same size wherever it appears.
+- OBJECTS REST ON THEIR BASE. ``place_object`` puts an object's LOWEST point
+  at ``transform.position.y`` (``Align::Base``, the default): a table goes at
+  the floor's height, not its centre. ``w.asset_size(id)`` gives the real
+  size, so a table top is at floor + its height.
+- FURNITURE THE GAME NEEDS IS YOURS. Assets listed with
+  ``world_builds_it: true`` (tables, racks, consoles, posts) are placed ONLY
+  by you, where the prompt puts them. Gameplay items rest on them through
+  the anchors in your GAMEPLAY PLACEMENT REQUESTS: declare every one with
+  ``w.gameplay_anchor`` / ``w.anchor_set`` using the exact id given, ON the
+  support's real top (or under a pole for ``hang_from``).
 - GAMEPLAY-OWNED ASSETS ARE NOT YOURS TO PLACE. An asset listed with
   ``gameplay_owned: true`` is already placed by the gameplay scene as
   something the player uses (the pistols they pick up, the targets they

@@ -29,6 +29,7 @@ from . import (
     OptimizationPreferences,
     PerformanceProfile,
     ProjectState,
+    RequirementsLedger,
     RuntimeVerification,
     SceneSpec,
     UthanaMotionPlan,
@@ -52,6 +53,7 @@ _EXPORTS: dict[str, Type[BaseModel]] = {
     "acceptance_test_plan": AcceptanceTestPlan,
     "performance_profile": PerformanceProfile,
     "optimization_preferences": OptimizationPreferences,
+    "requirements": RequirementsLedger,
     "runtime_verification": RuntimeVerification,
 }
 

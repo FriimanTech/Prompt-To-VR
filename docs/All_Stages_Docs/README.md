@@ -9,7 +9,7 @@ Authoritative pipeline order: `_SHARED_STAGES`, `_PCVR_TAIL` and `_QUEST_TAIL` i
 ```mermaid
 flowchart TD
   subgraph planning [Planning]
-    S1[1 build_spec] --> S1b[1b optimization_preferences] --> S2[2 asset_manifest]
+    S1[1 build_spec] --> S1b[1b optimization_preferences] --> S1c[1c requirements] --> S2[2 asset_manifest]
     S2 --> S2b[2b interaction_design] --> S3[3 npc_plan] --> S3b[3b game_design]
     S3b --> S4[4 mechanic_plan] --> S5[5 scene_spec]
   end
@@ -21,17 +21,17 @@ flowchart TD
   end
   subgraph gen [World, code, compile]
     S11 --> S12[12 world_generation] --> S13[13 code_generation]
-    S13 --> S14[14 asset_optimization] --> S15[15 scene_compile]
+    S13 --> S14[14 asset_optimization] --> S15[15 scene_compile] --> S15b[15b scene_review]
   end
-  S15 --> S16pc[16 cmake_build PC VR]
-  S15 --> S16q[16 quest_build Quest]
+  S15b --> S16pc[16 cmake_build PC VR]
+  S15b --> S16q[16 quest_build Quest]
   S16q --> S16b[16b quest_runtime_verify Quest]
   S16b -. memory failure: re-run 14, 15, 16 .-> S14
   S16pc --> S17[17 engine_promotion]
   S16b --> S17
 ```
 
-Stages **1–15** and **17** are identical for PC VR and Quest. The build tail branches on `ProjectState.target_device` (mirrored into `BuildSpec.target_device`): PC VR runs **16 `cmake_build`**; Quest runs **16 `quest_build`** then **16b `quest_runtime_verify`**.
+Stages **1–15b** and **17** are identical for PC VR and Quest. The build tail branches on `ProjectState.target_device` (mirrored into `BuildSpec.target_device`): PC VR runs **16 `cmake_build`**; Quest runs **16 `quest_build`** then **16b `quest_runtime_verify`**.
 
 Two ordering facts that matter when reading older notes:
 
@@ -44,6 +44,7 @@ Two ordering facts that matter when reading older notes:
 |---|----------|------------------|------------|
 | 1 | `build_spec` | Prompt → structured BuildSpec | [PC](PC_VR_Stages/01_build_spec/README.md) · [Quest](Quest_Stages/01_build_spec/README.md) |
 | 1b | `optimization_preferences` | User's optimization requests → validated locks | [PC](PC_VR_Stages/01b_optimization_preferences/README.md) · [Quest](Quest_Stages/01b_optimization_preferences/README.md) |
+| 1c | `requirements` | Every atomic requirement, quoted; claimed and gated downstream | [PC](PC_VR_Stages/01c_requirements/README.md) · [Quest](Quest_Stages/01c_requirements/README.md) |
 | 2 | `asset_manifest` | Plan 3D objects (not environment, not audio) | [PC](PC_VR_Stages/02_asset_manifest/README.md) · [Quest](Quest_Stages/02_asset_manifest/README.md) |
 | 2b | `interaction_design` | How every item is held, its sockets, how weapons fire | [PC](PC_VR_Stages/02b_interaction_design/README.md) · [Quest](Quest_Stages/02b_interaction_design/README.md) |
 | 3 | `npc_plan` | NPC roles, factions, animate vs slide, population | [PC](PC_VR_Stages/03_npc_plan/README.md) · [Quest](Quest_Stages/03_npc_plan/README.md) |
@@ -65,6 +66,7 @@ Two ordering facts that matter when reading older notes:
 | 13 | `code_generation` | Multi-agent C++ gameplay + compile-verify | [PC](PC_VR_Stages/13_code_generation/README.md) · [Quest](Quest_Stages/13_code_generation/README.md) |
 | 14 | `asset_optimization` | LODs, KTX2 textures, performance profile, memory fit | [PC](PC_VR_Stages/14_asset_optimization/README.md) · [Quest](Quest_Stages/14_asset_optimization/README.md) |
 | 15 | `scene_compile` | Merge world + gameplay + weapons → `scene.json` | [PC](PC_VR_Stages/15_scene_compile/README.md) · [Quest](Quest_Stages/15_scene_compile/README.md) |
+| 15b | `scene_review` | Offline renders + vision vs the requirements, viewpoints for the headset | [PC](PC_VR_Stages/15b_scene_review/README.md) · [Quest](Quest_Stages/15b_scene_review/README.md) |
 | 16 | `cmake_build` / `quest_build` | **PC:** Windows exe · **Quest:** Android APK | [PC](PC_VR_Stages/16_cmake_build/README.md) · [Quest](Quest_Stages/16_quest_build/README.md) |
 | 16b | `quest_runtime_verify` | Quest only: on-headset checks + memory correction loop (skipped without a headset) | [Quest](Quest_Stages/16b_quest_runtime_verify/README.md) |
 | 17 | `engine_promotion` | Index generated modules for reuse | [PC](PC_VR_Stages/17_engine_promotion/README.md) · [Quest](Quest_Stages/17_engine_promotion/README.md) |

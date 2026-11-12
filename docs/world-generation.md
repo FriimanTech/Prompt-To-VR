@@ -186,7 +186,10 @@ inside `namespace ptv::world` in a `.cpp`.
 
 `WorldContext` (pure data builder): `sky`, `ground`, `light`, `player_spawn`,
 `spawn_primitive` (box/plane/cylinder/sphere/ramp), `add_mesh` (arbitrary
-procedural triangles), `place_object` (anchor a prop GLB), `nav_region` /
+procedural triangles), `place_object` (a prop GLB, base-aligned),
+`asset_size` (an asset's real size), `gameplay_anchor` / `anchor_set`
+(where gameplay items rest, hang or spawn), `satisfies` (claim a
+requirement), `nav_region` /
 `nav_link` (declare the walkable space), `interactive` (something whose state
 changes, e.g. a door), `spawn_point` (extra named arrival points),
 `portal` (a way into another environment), `npc_spawn_zone` (declare where
@@ -240,10 +243,28 @@ against the merged world (walkable floor, floor height + foot offset); the
 runtime encounter director spawns arrivals into the zones. See
 [npc-and-ai.md](npc-and-ai.md#placing-npcs-in-the-world).
 
+**Placement contract.** `place_object` rests an object's BASE at
+`position.y` by default (`align: Base | Center | Top`, by the asset's
+measured bounds -- Tripo GLBs are centred on their origin, so origin-at-floor
+sank every table), and `asset_size(id)` returns its real size. Furniture the
+game needs (tables, posts, stands -- `world_builds_it: true` in the asset
+list) is the WORLD's to place, at its real size. For every placement request
+gameplay sends (an item on a table, targets hanging under a rod) the builder
+declares `gameplay_anchor({id, position, facing, normal, relation,
+support})` or `anchor_set({id, relation, points, facing})` with exactly the
+requested id, and claims the layout requirements it builds with
+`satisfies(id, how)`. When the NPC plan places encounter groups, the brief
+lists the zone tags each `npc_spawn_zone` must carry. A contract check
+(`placement.validate_anchors`, requirement claims, `_zone_tag_problems`) runs
+after the world is valid and sends problems back into the repair loop; the
+last attempt is kept with warnings. See [placement.md](placement.md).
+
 The gameplay layer the SceneSpec composed (weapons, panels, companions) is
-authored around the origin. The scene compiler moves it rigidly to the world's
-`player_spawn`, position and yaw together, and nudges anything that lands
-inside a static collider out of it.
+authored around the origin. For a spec with placement intents the scene
+compiler places each entity on its world anchor (`placement.resolve`, then
+`settle` and a validator that fails on sunk / floating / unsupported /
+interpenetrating items); legacy specs are moved rigidly to the world's
+`player_spawn`, position and yaw together, and nudged out of static colliders.
 
 `MeshDesc` (for `add_mesh`) uses FLAT float buffers: `positions` and `normals`
 are `std::vector<float>` xyz triples (`{x0,y0,z0, x1,y1,z1, ...}`), NOT
@@ -269,6 +290,10 @@ values read on screen.
 - `ptv_worldgen --out <scene.json> [--builder <id>] [--seed <n>] [--assets <map.json>] [--list]`
   (`--seed` defaults to 1).
 - Always ships a `builtin.world.fallback` builder (the deterministic fallback).
+- `-DPTV_WORLDGEN_SAMPLES=ON` adds the hand-authored samples:
+  `sample.starter_city` and `sample.anchor_range` (the placement contract:
+  base alignment, `asset_size`, anchors, an anchor set, tagged spawn zones,
+  `satisfies`), which `tests/test_worldgen_anchors.py` builds and runs.
 
 ## scene.json additions (version 2)
 

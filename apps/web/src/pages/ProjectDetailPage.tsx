@@ -120,6 +120,70 @@ function QuestStatusPanel({ id, hasApk }: { id: string; hasApk: boolean }) {
   );
 }
 
+interface RequirementRow {
+  id: string;
+  kind: string;
+  priority: string;
+  statement: string;
+  quote: string;
+  outcome: "pass" | "fail" | "unverified";
+  evidence: string[];
+  source: string;
+  claimed_by: { stage: string; item: string }[];
+}
+
+const OUTCOME_TONE: Record<string, string> = {
+  pass: "border-ok/40 bg-ok/10 text-ok",
+  fail: "border-err/40 bg-err/10 text-err",
+  unverified: "border-white/10 bg-white/5 text-muted",
+};
+
+/** Every requirement the prompt states, with what the scene review and the
+ *  headset actually saw (requirements_report.json). */
+function RequirementsPanel({ id }: { id: string }) {
+  const report = useQuery({
+    queryKey: ["requirements_report", id],
+    queryFn: () =>
+      api.projectJson<{
+        summary?: Record<string, number>;
+        requirements?: RequirementRow[];
+      }>(id, "requirements_report.json"),
+    refetchInterval: 15_000,
+  });
+  const rows = report.data?.requirements ?? [];
+  if (rows.length === 0) return null;
+  const s = report.data?.summary ?? {};
+  return (
+    <details className="ptv-card p-3 text-sm" data-testid="requirements-report">
+      <summary className="cursor-pointer">
+        Prompt requirements: <span className="text-ok">{s.pass ?? 0} met</span>,{" "}
+        <span className="text-err">{s.fail ?? 0} unmet</span>,{" "}
+        <span className="text-muted">{s.unverified ?? 0} unverified</span>
+        {(s.unclaimed ?? 0) > 0 && (
+          <span className="text-warn">, {s.unclaimed} unclaimed by any stage</span>
+        )}
+      </summary>
+      <ul className="mt-2 space-y-1">
+        {rows.map((r) => (
+          <li key={r.id} className="flex items-start gap-2 text-xs">
+            <span className={"ptv-pill shrink-0 " + (OUTCOME_TONE[r.outcome] ?? "")}>
+              {r.outcome}
+            </span>
+            <span className="min-w-0 flex-1">
+              <span className="mono text-muted">{r.kind}</span> {r.statement}
+              {r.evidence.length > 0 && (
+                <span className="block text-muted" title={r.evidence.join("\n")}>
+                  {r.source}: {r.evidence[0]}
+                </span>
+              )}
+            </span>
+          </li>
+        ))}
+      </ul>
+    </details>
+  );
+}
+
 /** Pick a stage: either resume from it (it and everything after re-runs) or
  *  run only it.
  *
@@ -514,6 +578,7 @@ export default function ProjectDetailPage() {
         </div>
       )}
       {isQuest && <QuestStatusPanel id={id} hasApk={Boolean(p.latest_build_apk)} />}
+      <RequirementsPanel id={id} />
       <ProviderHealth />
 
       <div className="flex gap-1 border-b border-white/5">

@@ -243,6 +243,15 @@
           "pattern": "^[a-z0-9][a-z0-9_.\\-]{0,63}$",
           "title": "Id",
           "type": "string"
+        },
+        "satisfies": {
+          "description": "Ids of the requirements (requirements.json) this mechanic delivers.",
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 24,
+          "title": "Satisfies",
+          "type": "array"
         }
       },
       "required": [

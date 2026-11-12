@@ -109,6 +109,12 @@ public:
         heat_per_shot_ = std::clamp(ammo.value("heat_per_shot", 0.08f), 0.0f, 1.0f);
         heat_vent_per_s_ = std::clamp(ammo.value("heat_vent_per_s", 0.35f), 0.0f, 10.0f);
         if (reload_ == Reload::Overheat) infinite_ = true;
+        // Infinite with no way to reload is bottomless. A one-round
+        // "magazine" with it fired once and never again (the rerun's blaster).
+        if (infinite_ && reload_ == Reload::None) {
+            magazine_size_ = 0;
+            ammo_ = 0;
+        }
 
         const auto pj = p.value("projectile", nlohmann::json::object());
         proj_.gravity_scale = pj.value("gravity_scale", 1.0f);

@@ -304,9 +304,10 @@ public:
      *
      *  Use this for any probe that starts on or inside the caster: convex
      *  shapes are solid, so a plain ``raycast`` from an NPC's chest or head
-     *  hits that NPC's own capsule at distance zero. ``floor_only`` also
-     *  skips every character capsule (NPCs and the player), which is what a
-     *  ground probe wants -- the floor, not someone standing on it. */
+     *  hits that NPC's own capsule at distance zero. ``floor_only`` (a
+     *  historical name) skips every character and everything characters
+     *  carry -- capsules, held items, the player's hands -- which is what a
+     *  sight line or a whisker wants. For the FLOOR use ``raycast_floor``. */
     virtual bool raycast_excluding(std::uint32_t self, const Vec3& origin,
                                    const Vec3& dir, float max_dist,
                                    PhysicsRayHit& out,
@@ -314,6 +315,16 @@ public:
         (void)self;
         (void)floor_only;
         return raycast(origin, dir, max_dist, out);
+    }
+
+    /** The FLOOR along a ray: static level geometry plus bodies the scene
+     *  marked walkable, never a prop, a character or anything carried.
+     *  Every ground probe uses this; a probe that could hit the rifle in an
+     *  NPC's hands stood the NPC on it, every frame, all the way to the
+     *  sky. */
+    virtual bool raycast_floor(std::uint32_t self, const Vec3& origin, const Vec3& dir,
+                               float max_dist, PhysicsRayHit& out) const {
+        return raycast_excluding(self, origin, dir, max_dist, out, true);
     }
 
     /** True when this entity has a physics body at all. */
@@ -341,6 +352,23 @@ public:
 
     virtual bool has_body(std::uint32_t entity) const = 0;
 
+    /** Distance from ``point`` to ``entity``'s collider (an oriented box
+     *  around it): 0 when inside, negative when it has no body. Grab reach
+     *  is measured to this, so a long rifle can be taken by its stock. */
+    virtual float distance_to_body(std::uint32_t entity, const Vec3& point) const {
+        (void)entity;
+        (void)point;
+        return -1.0f;
+    }
+
+    /** Take ``entity``'s body out of the simulation (``false``) or put it
+     *  back (``true``): a destroyed target that will respawn, a door that
+     *  opens a gap. Nothing touches or hits a disabled body. */
+    virtual void set_collision_enabled(std::uint32_t entity, bool enabled) {
+        (void)entity;
+        (void)enabled;
+    }
+
     /** Centre of the entity's collider in world space -- where to aim at it,
      *  whatever its mesh origin is (feet, middle or wherever the GLB put
      *  it). False when it has no body. */
@@ -360,6 +388,17 @@ public:
      *  CLAMPED: non-finite poses are rejected. */
     virtual void move_kinematic(std::uint32_t entity, const Vec3& pos,
                                 const Quat& rot, float dt) = 0;
+
+    /** Put a body at a pose instantly, at rest: a restocked grenade back
+     *  on its table, a reset target. Not for carrying -- that is
+     *  move_kinematic, which keeps contacts honest.
+     *
+     *  CLAMPED: non-finite poses are rejected. */
+    virtual void teleport_body(std::uint32_t entity, const Vec3& pos, const Quat& rot) {
+        (void)entity;
+        (void)pos;
+        (void)rot;
+    }
 
     /** Apply a world-space linear impulse at the centre of mass.
      *
@@ -484,6 +523,18 @@ public:
      *  visible fingers stay frozen. */
     virtual std::uint32_t finger_target(int hand) const = 0;
     virtual void set_finger_target(int hand, std::uint32_t entity) = 0;
+
+    /** World position of a fingertip of ``hand`` as DRAWN: "thumb", "index",
+     *  "middle", "ring" or "pinky". From the visible skeleton's last finger
+     *  joint, extended by the distal segment; with no posable fingers it is
+     *  estimated from the controller pose. Poke buttons read the index tip.
+     *  False only when the hand is not tracked. */
+    virtual bool fingertip_world(int hand, const char* finger, Vec3* out) const {
+        (void)hand;
+        (void)finger;
+        (void)out;
+        return false;
+    }
 
     /** Draw ``hand`` at this GRIP pose instead of the controller's, blended
      *  by ``weight`` (0..1). ``builtin.grab`` sets it every frame a hand
@@ -977,6 +1028,15 @@ public:
 
     /** Drop a point onto whatever surface is under it. */
     virtual Vec3 project_to_ground(const Vec3& position) const = 0;
+
+    /** The closest point to ``position`` INSIDE the walkable space the world
+     *  declared, kept ``margin_m`` from its edge; ``position`` itself when it
+     *  is already inside or the world declared none. A spot "2 m behind the
+     *  player" at the edge of a yard is past the fence. */
+    virtual Vec3 nearest_walkable(const Vec3& position, float margin_m = 0.4f) const {
+        (void)margin_m;
+        return position;
+    }
 
     /** Clear straight line between two points, ignoring who is at each end. */
     virtual bool line_of_sight(const Vec3& from, const Vec3& to) const = 0;
@@ -1685,6 +1745,86 @@ public:
 };
 
 /**
+ * Where the world says gameplay things go.
+ *
+ * The world architect declares an ANCHOR for every placed gameplay item and
+ * an anchor SET for things the game spawns at runtime -- the hang points
+ * under a lane's poles, pickup pads, spawn spots. Spawning code reads them
+ * here instead of hard-coding coordinates (which put a timed challenge's
+ * targets on the floor outside its lane). Sets are looked up by id or by a
+ * tag the set carries.
+ */
+class IAnchors {
+public:
+    virtual ~IAnchors() = default;
+
+    /** Points in anchor set ``set_id`` (id or tag), 0 when it does not exist. */
+    virtual int count(const char* set_id) const = 0;
+
+    /** Point ``index`` of the set and the direction items there face. */
+    virtual bool point(const char* set_id, int index, Vec3* position,
+                       Vec3* facing) const = 0;
+
+    /** The set's relation: "on_floor", "on_surface", "hang_from",
+     *  "mount_on_wall" or "at_point"; "" when the set does not exist. */
+    virtual const char* relation(const char* set_id) const = 0;
+
+    /** A single named anchor. */
+    virtual bool anchor(const char* id, Vec3* position, Vec3* facing) const = 0;
+
+    /** The pose that puts ``entity`` at point ``index`` of the set by the
+     *  set's relation, from the entity's measured collider: its BASE on the
+     *  point for on_floor / on_surface, its TOP at it for hang_from, its
+     *  origin there for at_point -- facing the set's facing. */
+    virtual bool pose_at(std::uint32_t entity, const char* set_id, int index,
+                         Vec3* position, Quat* rotation) const = 0;
+};
+
+/**
+ * Named events, so built-ins and generated code can be wired together
+ * without glue code: a button raises "lane2.start", a challenge waits for it.
+ */
+class ISignals {
+public:
+    virtual ~ISignals() = default;
+
+    /** Raise ``name``. */
+    virtual void emit(const char* name) = 0;
+
+    /** How many times ``name`` has been raised since the scene loaded. */
+    virtual std::uint32_t count(const char* name) const = 0;
+
+    /** True when ``name`` was raised since ``seen`` was last updated (and
+     *  updates it). Start ``seen`` at ``count(name)`` in on_attach. */
+    bool fired_since(const char* name, std::uint32_t& seen) const {
+        const std::uint32_t c = count(name);
+        const bool fired = c != seen;
+        seen = c;
+        return fired;
+    }
+};
+
+/**
+ * Live, named values for the scene: a challenge's time left and score, a
+ * wave counter. Not saved (persistent facts go through IPersistence). A
+ * world display shows them with templates like "{lane2.time_left:0.0}s".
+ */
+class IVars {
+public:
+    virtual ~IVars() = default;
+    virtual void set_number(const char* name, float value) = 0;
+    virtual void set_text(const char* name, const char* value) = 0;
+    /** The value, or ``fallback`` when unset or not a number. */
+    virtual float number(const char* name, float fallback = 0.0f) const = 0;
+    /** The value as text ("" when unset; numbers formatted with up to 2
+     *  decimals). Valid until the next call. */
+    virtual const char* text(const char* name) const = 0;
+    virtual bool has(const char* name) const = 0;
+    /** Bumps every time the value changes. */
+    virtual std::uint32_t seq(const char* name) const = 0;
+};
+
+/**
  * Bundle of engine services passed to every mechanic call.
  *
  * Pointers are owned by the engine and remain valid for the lifetime of the
@@ -1730,6 +1870,12 @@ struct MechanicContext {
     IProjectiles* projectiles{nullptr};
     /** Weapon state, hits and NPC triggers (ptv/api/Weapons.h). */
     IWeapons* weapons{nullptr};
+    /** World-declared anchors and spawn-point sets (see IAnchors). */
+    IAnchors* anchors{nullptr};
+    /** Named events (see ISignals). */
+    ISignals* signals{nullptr};
+    /** Live named values (see IVars). */
+    IVars* vars{nullptr};
 };
 
 }  // namespace ptv

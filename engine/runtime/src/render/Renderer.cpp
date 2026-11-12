@@ -2273,7 +2273,7 @@ void Renderer::draw_frame(const std::array<EyeTarget, 2>& eyes,
             vpc.view_base = pcs.view_base;
             vpc.p0 = Vec4(vignette_clear_deg_ * kDeg, vignette_feather_deg_ * kDeg,
                           std::clamp(vignette_opacity_, 0.0f, 1.0f), 0.0f);
-            vpc.p1 = Vec4(0.0f, 0.0f, 0.0f, 1.0f);
+            vpc.p1 = Vec4(vignette_color_, 1.0f);
             vkCmdBindDescriptorSets(cmd_, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_layout_,
                                     0, 1, &frame_set_, 0, nullptr);
             vkCmdPushConstants(cmd_, pipeline_layout_,
@@ -2804,6 +2804,45 @@ float max_axis_scale(const Mat4& m) {
 
 }  // namespace
 
+void Renderer::note_player_draw(World& world, std::uint32_t entity, const Vec3& pos) {
+    if (player_points_.empty()) return;
+    bool near = false;
+    for (const Vec3& p : player_points_) {
+        if (glm::length(pos - p) <= player_radius_) {
+            near = true;
+            break;
+        }
+    }
+    if (!near) return;
+    const auto is_allowed = [&](std::uint32_t id) {
+        return std::find(player_allowed_.begin(), player_allowed_.end(), id) !=
+               player_allowed_.end();
+    };
+    if (is_allowed(entity)) return;
+    const auto e = static_cast<entt::entity>(entity);
+    // Characters (a companion's hand brushing yours) and what the player can
+    // pick up legitimately sit at a hand.
+    if (world.registry().all_of<CSkeleton>(e)) return;
+    if (const auto* tag = world.registry().try_get<CTag>(e)) {
+        for (const auto& t : tag->tags) {
+            if (t == "grabbable" || t == "player_avatar" || t == "player_hand") return;
+        }
+    }
+    // Worn or carried by something the player owns (a holstered pistol).
+    std::uint32_t parent = entity;
+    for (int depth = 0; depth < 3; ++depth) {
+        const auto* att = world.registry().try_get<CAttachment>(static_cast<entt::entity>(parent));
+        if (att == nullptr) break;
+        parent = static_cast<std::uint32_t>(att->parent);
+        if (is_allowed(parent)) return;
+    }
+    ++stats_.player_draws;
+    if (player_draw_names_.size() < 4) {
+        const std::string* id = world.id_of(e);
+        player_draw_names_.push_back(id != nullptr ? *id : std::to_string(entity));
+    }
+}
+
 void Renderer::build_items_from_world(World& world, std::vector<DrawItem>& out,
                                       const ViewInfo& view_info) {
     out.clear();
@@ -2876,10 +2915,27 @@ void Renderer::build_items_from_world(World& world, std::vector<DrawItem>& out,
         }
     }
 
+    player_draw_names_.clear();
+    // Notes, whichever path below drew this entity (they all ``continue``),
+    // a draw sitting at the player's hands or feet that is not theirs.
+    struct PlayerDrawWatch {
+        Renderer& r;
+        World& w;
+        std::uint32_t e;
+        Vec3 pos;
+        const std::vector<DrawItem>& out;
+        std::size_t before;
+        ~PlayerDrawWatch() {
+            if (out.size() > before) r.note_player_draw(w, e, pos);
+        }
+    };
+
     auto view = world.registry().view<const CTransform>();
     for (auto entity : view) {
         const auto& ct = view.get<const CTransform>(entity).t;
         ++stats_.entities_considered;
+        PlayerDrawWatch watch{*this, world, static_cast<std::uint32_t>(entity), ct.position,
+                              out, out.size()};
 
         // Draw-time pose = physics-owned CTransform + any active visual
         // offset (recoil kick, flinch). Resolved once here so every DrawItem
@@ -3253,6 +3309,28 @@ void Renderer::build_items_from_world(World& world, std::vector<DrawItem>& out,
                 stats_.visible_triangles +=
                     gltf_meshes_[static_cast<size_t>(slot)].triangle_count;
                 continue;
+            }
+        }
+
+        // Nothing to draw. Only a tag that ASKS for a placeholder gets one;
+        // the default grey cube drew every logic host and collider proxy
+        // (the player's finger colliders as boxes over their hands).
+        if (!render_tags::draws_meshless(visuals)) {
+            ++stats_.meshless_hidden;
+            if (reported_meshless_.insert(static_cast<std::uint32_t>(entity)).second) {
+                const std::string* id = world.id_of(entity);
+                PTV_INFO("render: '{}' has nothing to draw (no mesh, primitive or "
+                         "placeholder tag); not drawn",
+                         id != nullptr ? *id : std::to_string(static_cast<std::uint32_t>(entity)));
+            }
+            continue;
+        }
+        if (!visuals.is_ground) {
+            ++stats_.placeholders;
+            if (reported_meshless_.insert(static_cast<std::uint32_t>(entity)).second) {
+                const std::string* id = world.id_of(entity);
+                PTV_WARN("render: '{}' has no mesh; drawn as a placeholder box",
+                         id != nullptr ? *id : std::to_string(static_cast<std::uint32_t>(entity)));
             }
         }
 

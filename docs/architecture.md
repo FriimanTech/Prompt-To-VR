@@ -49,6 +49,11 @@ flowchart TD
   Prompt[prompt.txt] --> BuildSpec[build_spec.json]
   Prompt --> OptPrefs["optimization_preferences.json (Custom Quest Optimizations)"]
   OptPrefs --> Optimize
+  Prompt --> Reqs["requirements.json (ledger; claimed by every planning stage)"]
+  Reqs --> AssetManifest
+  Reqs --> MechanicPlan
+  Reqs --> SceneSpec
+  Reqs --> WorldGen
   BuildSpec --> AssetManifest[asset_manifest.json]
   AssetManifest --> Interaction[interaction_design.json]
   Interaction --> AssetManifest
@@ -99,7 +104,9 @@ flowchart TD
   Contract --> SceneCompile
   MechanicPlan --> SceneCompile
   SceneSpec --> SceneCompile
-  SceneCompile --> BuildTail{target_device}
+  SceneCompile --> Review["scene_review: offline renders + vision → scene_review.json"]
+  Reqs --> Review
+  Review --> BuildTail{target_device}
   BuildTail -->|pcvr| CMake[cmake_build → .exe]
   BuildTail -->|quest| QuestApk[quest_build → APK]
   CppGen --> CMake

@@ -82,8 +82,16 @@ class GoogleImageClient:
         filename_prefix: str = "ref",
         aspect_ratio: str = "1:1",
         negative_prompt: Optional[str] = None,
+        image_size: Optional[str] = None,
     ) -> list[ImageResult]:
-        """Text-to-image via ``generate_content`` on a Gemini image model."""
+        """Text-to-image via ``generate_content`` on a Gemini image model.
+
+        ``image_size`` is ``ImageConfig.image_size``: ``"1K"`` (the model's
+        default), ``"2K"`` or ``"4K"`` (google-genai 2.18.1 field docs). A
+        T-posed character's hands sit at the edge of the frame, a few
+        percent of its width each -- at 1K that is ~60 px per hand, too few
+        for image-to-3D to see five fingers.
+        """
 
         self._ensure_sdk()
         client = self._get_client()
@@ -94,11 +102,16 @@ class GoogleImageClient:
         out = Path(out_dir)
         out.mkdir(parents=True, exist_ok=True)
         results: list[ImageResult] = []
+        size = (image_size or "").strip().upper() or None
+        if size is not None and size not in ("1K", "2K", "4K"):
+            raise ValueError(f"image_size must be 1K, 2K or 4K, not {image_size!r}")
 
         for i in range(count):
+            image_cfg = (types.ImageConfig(aspect_ratio=aspect_ratio, image_size=size)
+                         if size else types.ImageConfig(aspect_ratio=aspect_ratio))
             cfg = types.GenerateContentConfig(
                 response_modalities=["IMAGE"],
-                image_config=types.ImageConfig(aspect_ratio=aspect_ratio),
+                image_config=image_cfg,
             )
             try:
                 resp = client.models.generate_content(
@@ -144,6 +157,7 @@ class GoogleImageClient:
         negative_prompt: Optional[str] = None,
         filename_prefix: str = "ref",
         prefer: str = "gemini",
+        image_size: Optional[str] = None,
     ) -> list[ImageResult]:
         """Generate reference images using the Gemini native image model.
 
@@ -168,6 +182,7 @@ class GoogleImageClient:
             aspect_ratio=aspect_ratio,
             negative_prompt=negative_prompt,
             filename_prefix=filename_prefix,
+            image_size=image_size,
         )
 
     # ------------------------------------------------------------------

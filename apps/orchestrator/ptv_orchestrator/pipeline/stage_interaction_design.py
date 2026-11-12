@@ -89,7 +89,9 @@ def run_with_designer(ctx: PipelineContext,
         ctx.emit(_STAGE, "failed", msg[:400])
         raise InteractionDesignError(msg)
 
-    new_manifest, design, rec_notes = reconcile_manifest(manifest, design)
+    new_manifest, design, rec_notes = reconcile_manifest(
+        manifest, design,
+        min_handheld_m=float(getattr(ctx.settings, "vr_min_handheld_size_m", 0.12)))
     for note in rec_notes:
         ctx.emit(_STAGE, "info", note[:240])
         ctx.store.append_log(ctx.project_id, "interaction_design", note)

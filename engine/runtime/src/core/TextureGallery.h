@@ -3,9 +3,11 @@
 // On-headset texture verification (debug.ptv.verify_textures).
 //
 // Shows every textured mesh asset the scene places, one at a time, 1.1 m in
-// front of the player's eyes on the scene's own sky, lit by the scene's own
-// lights and drawn through the real Quest pipeline (ASTC from KTX2, the
-// shipped shaders, MSAA, the compositor). quest_runtime_verify takes a Quest
+// front of the player's eyes on the scene's own sky, lit by a neutral key
+// light from behind the eyes (Application swaps the frame's RenderEnv while
+// the gallery runs: a night scene lit the asset from behind and the check
+// measured the darkness) and drawn through the real Quest pipeline (ASTC
+// from KTX2, the shipped shaders, tone mapping, MSAA, the compositor). quest_runtime_verify takes a Quest
 // screenshot during each slot and compares it with an offline render of the
 // same asset, so "the texture is bound" and "the texture is visible and
 // mapped right on the device" are both checked.

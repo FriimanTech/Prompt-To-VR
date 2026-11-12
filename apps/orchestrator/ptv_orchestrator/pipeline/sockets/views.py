@@ -102,7 +102,9 @@ def _mat(values: list[float]) -> np.ndarray:
 def render_views(tool: Path, glb: Path, out_dir: Path, size: int,
                  overlay: Optional[Path] = None, timeout_s: float = 600.0,
                  up: Optional[np.ndarray] = None,
-                 forward: Optional[np.ndarray] = None) -> None:
+                 forward: Optional[np.ndarray] = None,
+                 focus: Optional[np.ndarray] = None,
+                 focus_radius: float = 0.0) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     cmd = [str(tool), "--input", str(glb), "--out-dir", str(out_dir), "--size", str(size)]
     if overlay is not None:
@@ -111,6 +113,9 @@ def render_views(tool: Path, glb: Path, out_dir: Path, size: int,
         cmd += ["--up", ",".join(f"{float(v):.6f}" for v in up)]
         if forward is not None:
             cmd += ["--forward", ",".join(f"{float(v):.6f}" for v in forward)]
+    if focus is not None and focus_radius > 0.0:
+        cmd += ["--focus", ",".join(f"{float(v):.6f}" for v in focus),
+                "--focus-radius", f"{float(focus_radius):.6f}"]
     proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_s)
     if proc.returncode != 0:
         raise RuntimeError((proc.stderr or proc.stdout or "ptv_glb_views failed").strip()[:400])

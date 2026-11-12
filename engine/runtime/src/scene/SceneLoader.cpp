@@ -1,5 +1,6 @@
 #include "ptv/scene/SceneLoader.h"
 
+#include <cmath>
 #include <fstream>
 #include <sstream>
 
@@ -82,6 +83,7 @@ SceneDoc LoadSceneJson(const std::string& path) {
     if (j.contains("player")) {
         const auto& p = j["player"];
         d.player_height_meters = p.value("height_meters", 1.7f);
+        d.player_body_radius_m = std::clamp(p.value("body_radius_m", 0.0f), 0.0f, 0.4f);
         d.locomotion = p.value("locomotion", std::string("teleport"));
         d.comfort = p.value("comfort", std::string("comfort"));
         d.locomotion_menu_enabled = p.value("locomotion_menu", false);
@@ -414,6 +416,46 @@ SceneDoc LoadSceneJson(const std::string& path) {
         d.portals.push_back(std::move(ps));
     }
 
+    auto read_tags = [](const Json& arr) {
+        std::vector<std::string> out;
+        if (!arr.is_array()) return out;
+        for (const auto& t : arr) {
+            if (t.is_string()) out.push_back(t.get<std::string>());
+        }
+        return out;
+    };
+    for (const auto& a : j.value("anchors", Json::array())) {
+        if (!a.is_object() || a.value("id", "").empty()) continue;
+        AnchorSpec as{};
+        as.id = a.value("id", "");
+        as.relation = a.value("relation", std::string("on_surface"));
+        as.position = read_vec3(a.value("position", Json::array()), Vec3(0.0f));
+        as.facing = read_vec3(a.value("facing", Json::array()), Vec3(0.0f, 0.0f, -1.0f));
+        as.normal = read_vec3(a.value("normal", Json::array()), Vec3(0.0f, 1.0f, 0.0f));
+        as.tags = read_tags(a.value("tags", Json::array()));
+        d.anchors.push_back(std::move(as));
+    }
+    for (const auto& s : j.value("anchor_sets", Json::array())) {
+        if (!s.is_object() || s.value("id", "").empty()) continue;
+        AnchorSetSpec ss{};
+        ss.id = s.value("id", "");
+        ss.relation = s.value("relation", std::string("on_floor"));
+        ss.facing = read_vec3(s.value("facing", Json::array()), Vec3(0.0f, 0.0f, -1.0f));
+        ss.tags = read_tags(s.value("tags", Json::array()));
+        for (const auto& p : s.value("points", Json::array())) {
+            if (p.is_array() && p.size() == 3) ss.points.push_back(read_vec3(p, Vec3(0.0f)));
+        }
+        d.anchor_sets.push_back(std::move(ss));
+    }
+    for (const auto& v : j.value("verify_viewpoints", Json::array())) {
+        if (!v.is_object() || v.value("id", "").empty()) continue;
+        VerifyViewpoint vp{};
+        vp.id = v.value("id", "");
+        vp.eye = read_vec3(v.value("eye", Json::array()), Vec3(0.0f, 1.6f, 0.0f));
+        vp.target = read_vec3(v.value("target", Json::array()), vp.eye + Vec3(0.0f, 0.0f, -1.0f));
+        d.verify_viewpoints.push_back(std::move(vp));
+    }
+
     const auto& index = j.value("scene_index", Json::object());
     if (index.is_object()) {
         for (auto it = index.begin(); it != index.end(); ++it) {
@@ -444,6 +486,23 @@ SceneDoc LoadSceneJson(const std::string& path) {
                 m.model_yaw_offset_rad = frame.value("yaw_offset_rad", 0.0f);
             }
             m.collision_shape = e["mesh"].value("collision_shape", "aabb");
+            const auto& coll = e["mesh"].value("collision", Json::object());
+            if (coll.is_object() && coll.contains("aabb_min") &&
+                coll.contains("aabb_max")) {
+                m.collision_aabb_min = read_vec3(coll["aabb_min"], Vec3(0.0f));
+                m.collision_aabb_max = read_vec3(coll["aabb_max"], Vec3(0.0f));
+                const Vec3 ext = m.collision_aabb_max - m.collision_aabb_min;
+                m.has_collision = std::isfinite(ext.x) && std::isfinite(ext.y) &&
+                                  std::isfinite(ext.z) && ext.x >= 0.0f &&
+                                  ext.y >= 0.0f && ext.z >= 0.0f &&
+                                  (ext.x + ext.y + ext.z) > 1e-5f;
+                for (const auto& hp : coll.value("hull", Json::array())) {
+                    if (hp.is_array() && hp.size() == 3) {
+                        m.collision_hull.push_back(read_vec3(hp, Vec3(0.0f)));
+                    }
+                }
+                m.collision_mesh_lod = coll.value("mesh_lod", -1);
+            }
             // Decimated LOD chain + culling radius from asset_optimization.
             // Absent on scenes compiled before that stage: the renderer then
             // just draws glb_path with a conservative radius.
@@ -664,6 +723,13 @@ void ApplySceneToWorld(const SceneDoc& doc, World& world,
                          es.mesh->foot_offset_m, es.mesh->has_model_frame,
                          es.mesh->model_yaw_offset_rad, es.mesh->model_sole_y,
                          es.mesh->model_height, es.mesh->lod_errors_rel});
+            if (es.mesh->has_collision) {
+                world.registry().emplace<CCollisionGeom>(
+                    e, CCollisionGeom{es.mesh->collision_aabb_min,
+                                      es.mesh->collision_aabb_max,
+                                      es.mesh->collision_hull,
+                                      es.mesh->collision_mesh_lod});
+            }
             if (!es.mesh->socket_info.empty()) {
                 CSocketInfo info{};
                 for (const auto& [name, si] : es.mesh->socket_info) {

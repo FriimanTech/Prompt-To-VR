@@ -15,8 +15,13 @@
 // Params (see EncounterPlan.h): mode (waves | continuous | fixed), start
 // {kind: on_load | delay | player_grabs_tag | signal, delay_s, tag},
 // max_concurrent, spawn_interval_s, inter_wave_delay_s,
-// min_player_distance_m, max_player_distance_m,
-// waves [{groups: [{template, count}]}], zones [{id, position, radius, tags}].
+// min_player_distance_m, max_player_distance_m, repeat,
+// waves [{groups: [{template, count, zone_tags, zone_visibility}]}],
+// zones [{id, position, radius, tags}].
+//
+// A group with zone_tags arrives only in zones carrying one of them -- the
+// regular goblins in the front band, the bulky ones at the back -- even
+// inside min_player_distance_m when that is where the prompt put them.
 
 #include <algorithm>
 #include <cmath>
@@ -45,6 +50,15 @@ bool has_tag(const World& world, std::uint32_t e, const std::string& tag) {
         if (t == tag) return true;
     }
     return false;
+}
+
+/** Origin-to-sole distance of a template, in metres: the measured value,
+ *  else half the in-scene height (the model-frame contract). */
+float foot_offset_of(const World& world, std::uint32_t tmpl) {
+    if (!world.valid(tmpl) || !world.has<CMesh>(tmpl)) return 0.0f;
+    const auto& m = world.get<CMesh>(tmpl);
+    if (m.foot_offset_m > 1e-4f) return m.foot_offset_m;
+    return 0.5f * std::max(0.0f, m.target_scale_meters);
 }
 
 class EncounterDirectorMechanic final
@@ -157,6 +171,7 @@ private:
         spawn_timer_s_ = 0.0f;
         start_timer_s_ = 0.0f;
         spawn_counter_ = 0;
+        zone_spawns_.assign(plan_.zones.size(), 0);
     }
 
     void resolve(World& world) {
@@ -244,6 +259,9 @@ private:
         if (wave >= n) {
             if (plan_.mode == encounter::Mode::Continuous && n > 0) {
                 wave = n - 1;  // endless: the last wave repeats
+            } else if (plan_.repeat && n > 0) {
+                wave = 0;  // they all come back
+                PTV_INFO("encounter: every wave cleared -- starting over");
             } else {
                 s.phase = EncounterPhase::Victory;
                 ++s.victory_seq;
@@ -252,7 +270,7 @@ private:
             }
         }
         s.wave_index = wave;
-        queue_ = encounter::spawn_order(plan_.waves[static_cast<std::size_t>(wave)]);
+        queue_ = encounter::arrivals(plan_.waves[static_cast<std::size_t>(wave)]);
         next_ = 0;
         spawn_timer_s_ = 0.0f;
         s.countdown_s = 0.0f;
@@ -267,13 +285,18 @@ private:
         spawn_timer_s_ = std::max(0.0f, spawn_timer_s_ - dt);
         while (next_ < queue_.size() && spawn_timer_s_ <= 0.0f &&
                static_cast<int>(live_.size()) < plan_.max_concurrent) {
-            const std::string& tid = queue_[next_];
-            const auto it = templates_.find(tid);
+            const encounter::Arrival& arrival = queue_[next_];
+            const auto it = templates_.find(arrival.template_id);
             if (it == templates_.end()) {
                 ++next_;  // unknown type: skip rather than stall the wave
                 continue;
             }
-            const std::uint32_t made = spawn_one(world, ctx, it->second, player);
+            const auto& groups = plan_.waves[static_cast<std::size_t>(s.wave_index)].groups;
+            const encounter::Group* group =
+                arrival.group >= 0 && arrival.group < static_cast<int>(groups.size())
+                    ? &groups[static_cast<std::size_t>(arrival.group)]
+                    : nullptr;
+            const std::uint32_t made = spawn_one(world, ctx, it->second, player, group);
             if (made == kInvalid) {
                 spawn_timer_s_ = kRetryS;
                 break;
@@ -290,7 +313,7 @@ private:
             const bool last =
                 s.wave_index + 1 >= static_cast<int>(plan_.waves.size());
             if (plan_.mode == encounter::Mode::Fixed ||
-                (last && plan_.mode == encounter::Mode::Waves)) {
+                (last && plan_.mode == encounter::Mode::Waves && !plan_.repeat)) {
                 s.phase = EncounterPhase::Victory;
                 ++s.victory_seq;
                 PTV_INFO("encounter: every wave cleared");
@@ -317,19 +340,21 @@ private:
         }
     }
 
-    std::uint32_t spawn_one(World& world, MechanicContext& ctx,
-                            std::uint32_t tmpl, std::uint32_t player) {
+    std::uint32_t spawn_one(World& world, MechanicContext& ctx, std::uint32_t tmpl,
+                            std::uint32_t player, const encounter::Group* group) {
         if (ctx.spawn == nullptr || !world.valid(tmpl)) return kInvalid;
         Vec3 player_pos(0.0f);
         if (player != kInvalid && world.has<CTransform>(player)) {
             player_pos = world.get<CTransform>(player).t.position;
         }
         Vec3 pos;
-        if (!choose_spot(ctx, player_pos, pos)) return kInvalid;
+        if (!choose_spot(ctx, player_pos, group, pos)) return kInvalid;
 
-        // Arrive facing the player. The spot is on the floor; the body's own
-        // ground snap (character locomotion, using the measured foot offset)
-        // lifts it to stand on it.
+        // Arrive standing ON the spot: the spot is the floor, and an NPC's
+        // origin sits its measured foot offset above its soles. Relying on
+        // the body's ground snap to lift it left every NPC without one (a
+        // stationary range target) sunk by exactly that offset.
+        pos.y += foot_offset_of(world, tmpl);
         Vec3 to = player_pos - pos;
         to.y = 0.0f;
         Quat facing(1.0f, 0.0f, 0.0f, 0.0f);
@@ -341,18 +366,46 @@ private:
         return e;
     }
 
-    /** A spawn point: a declared zone far enough from the player and,
-     *  preferably, out of their sight; else a ring around the player. */
-    bool choose_spot(MechanicContext& ctx, const Vec3& player, Vec3& out) {
+    /** A spawn point: a declared zone (one of the group's own, when it has
+     *  zone tags) far enough from the player and, unless the group is meant
+     *  to be seen arriving, out of their sight; else a ring around the
+     *  player. */
+    bool choose_spot(MechanicContext& ctx, const Vec3& player, const encounter::Group* group,
+                     Vec3& out) {
         const Vec3 eye = player + Vec3(0.0f, 0.7f, 0.0f);
-        std::vector<int> hidden, visible, far_ok;
+        const bool any_vis = group != nullptr && group->visibility == encounter::Visibility::Any;
+        std::vector<int> tagged;
         for (int i = 0; i < static_cast<int>(plan_.zones.size()); ++i) {
+            if (group == nullptr ||
+                encounter::zone_matches(plan_.zones[static_cast<std::size_t>(i)],
+                                        group->zone_tags)) {
+                tagged.push_back(i);
+            }
+        }
+        bool placed_by_prompt = group != nullptr && !group->zone_tags.empty();
+        if (tagged.empty()) {
+            if (placed_by_prompt && warned_.insert(group->template_id).second) {
+                PTV_WARN("encounter: no spawn zone carries the tag(s) of group '{}'; "
+                         "using any zone", group->template_id);
+            }
+            placed_by_prompt = false;
+            for (int i = 0; i < static_cast<int>(plan_.zones.size()); ++i) tagged.push_back(i);
+        }
+        std::vector<int> hidden, visible, far_ok, near;
+        for (const int i : tagged) {
             const auto& z = plan_.zones[static_cast<std::size_t>(i)];
             const float d = glm::length(Vec3(z.position.x - player.x, 0.0f,
                                              z.position.z - player.z));
-            if (d < plan_.min_player_distance_m) continue;
+            if (d < plan_.min_player_distance_m) {
+                near.push_back(i);
+                continue;
+            }
             if (d > plan_.max_player_distance_m) {
                 far_ok.push_back(i);
+                continue;
+            }
+            if (any_vis) {
+                visible.push_back(i);
                 continue;
             }
             const bool seen =
@@ -360,12 +413,16 @@ private:
                 ctx.nav->line_of_sight(eye, z.position + Vec3(0.0f, 1.0f, 0.0f));
             (seen ? visible : hidden).push_back(i);
         }
-        const std::vector<int>& pick =
-            !hidden.empty() ? hidden : (!visible.empty() ? visible : far_ok);
-        if (!pick.empty()) {
-            const int zi = pick[static_cast<std::size_t>(spawn_counter_) % pick.size()];
+        const std::vector<int>* pick =
+            !hidden.empty() ? &hidden : (!visible.empty() ? &visible : &far_ok);
+        // The prompt put them there: a front band a few metres from the
+        // firing line is still where the front group stands.
+        if (pick->empty() && placed_by_prompt) pick = &near;
+        if (!pick->empty()) {
+            const int zi = (*pick)[static_cast<std::size_t>(spawn_counter_) % pick->size()];
             const auto& z = plan_.zones[static_cast<std::size_t>(zi)];
-            out = encounter::point_in_zone(z, spawn_counter_ / static_cast<int>(pick.size()));
+            if (zone_spawns_.size() != plan_.zones.size()) zone_spawns_.assign(plan_.zones.size(), 0);
+            out = encounter::point_in_zone(z, zone_spawns_[static_cast<std::size_t>(zi)]++);
             if (ctx.nav != nullptr) out = ctx.nav->project_to_ground(out);
             return true;
         }
@@ -396,11 +453,13 @@ private:
     std::unordered_map<std::string, std::uint32_t> templates_;
     std::vector<std::uint32_t> live_;
     std::unordered_set<std::uint32_t> counted_;
-    std::vector<std::string> queue_;
+    std::vector<encounter::Arrival> queue_;
     std::size_t next_{0};
     float spawn_timer_s_{0.0f};
     float start_timer_s_{0.0f};
     int spawn_counter_{0};
+    std::vector<int> zone_spawns_;
+    std::unordered_set<std::string> warned_;
     EncounterState local_state_{};
 };
 

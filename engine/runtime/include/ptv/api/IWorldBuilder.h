@@ -294,11 +294,69 @@ struct InteractiveDesc {
     std::vector<std::string> tags{};
 };
 
+/** What ``ObjectPlacement::transform.position`` means. A generated GLB is
+ *  usually CENTRED on its origin, so putting its origin "on the floor" sank
+ *  every table halfway into it. ``Base`` (the default) puts the object's
+ *  lowest point at ``position.y``: place a table at the floor height, a lamp
+ *  on a desk at the desk's top. */
+enum class Align : std::uint8_t { Base, Center, Top };
+
 struct ObjectPlacement {
     std::string asset_id;
     Transform transform{};
     std::vector<std::string> tags{};
     std::string name{};
+    Align align{Align::Base};
+};
+
+/** An asset's size as it will appear in the world (metres), so you can build
+ *  around it: a table top's height, how much room a rifle needs, how high a
+ *  shelf must be. ``known`` is false for an asset the host has no bounds for. */
+struct AssetSize {
+    Vec3 size{};
+    /** Distance from the asset's origin DOWN to its lowest point. */
+    float bottom{0.0f};
+    /** Distance from the origin UP to its highest point. */
+    float top{0.0f};
+    bool known{false};
+};
+
+/** A point gameplay needs: where a requested item rests, hangs or mounts.
+ *
+ *  The scene composer decides WHAT goes where in words ("the pistol on the
+ *  firearms table", "a target hanging from each red pole in lane 2") and
+ *  names an anchor id for each; you build the furniture and declare the
+ *  anchor with exactly that id. The scene compiler then rests the item on it
+ *  using the mesh's measured size -- so get the POINT right, not the item.
+ *
+ *  ``relation``:
+ *    "on_surface"    position is ON the top face of the support (y = its top)
+ *    "on_floor"      position is on the floor
+ *    "hang_from"     position is the bottom end of the pole / hook it hangs from
+ *    "mount_on_wall" position is on the wall face; ``normal`` points away from it
+ *    "at_point"      position is exactly where its origin goes */
+struct GameplayAnchorDesc {
+    std::string id;
+    Vec3 position{};
+    /** Which way the item's front should face. */
+    Vec3 facing{0.0f, 0.0f, -1.0f};
+    /** Surface normal: up for a table top, out of the wall for a wall mount. */
+    Vec3 normal{0.0f, 1.0f, 0.0f};
+    std::string relation{"on_surface"};
+    /** Name of the geometry it rests on / hangs from (checked). */
+    std::string support{};
+    std::vector<std::string> tags{};
+};
+
+/** Many points of one kind, for things the game SPAWNS at runtime: the hang
+ *  points for a timed challenge's targets, pickup spots, spawn pads. Each
+ *  point satisfies ``relation`` exactly as a GameplayAnchorDesc would. */
+struct AnchorSetDesc {
+    std::string id;
+    std::string relation{"on_floor"};
+    std::vector<Vec3> points{};
+    Vec3 facing{0.0f, 0.0f, -1.0f};
+    std::vector<std::string> tags{};
 };
 
 /** A named place to arrive at.
@@ -376,7 +434,28 @@ public:
     virtual void add_mesh(const MeshDesc& desc) = 0;
 
     // Optional: place an existing generated object (prop/character) GLB.
+    // By default ``transform.position.y`` is where its BASE rests (Align).
     virtual void place_object(const ObjectPlacement& desc) = 0;
+
+    // How big an asset will be in the world (see AssetSize).
+    virtual AssetSize asset_size(const std::string& asset_id) const {
+        (void)asset_id;
+        return AssetSize{};
+    }
+
+    // Declare the anchor a gameplay item needs (see GameplayAnchorDesc).
+    // Every placement request in your brief needs one, with its exact id.
+    virtual void gameplay_anchor(const GameplayAnchorDesc& desc) { (void)desc; }
+
+    // Declare a set of runtime spawn points (see AnchorSetDesc).
+    virtual void anchor_set(const AnchorSetDesc& desc) { (void)desc; }
+
+    // Say how this world meets a layout requirement from the brief
+    // ("req_lane3_wider", "lane 3 is 18 m wide, lanes 1-2 are 12 m").
+    virtual void satisfies(const std::string& requirement_id, const std::string& how) {
+        (void)requirement_id;
+        (void)how;
+    }
 
     // Navigation. Declare the walkable floor and the openings between the
     // parts of it, so NPCs can route through doorways and around walls

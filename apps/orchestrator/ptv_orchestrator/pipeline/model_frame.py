@@ -227,6 +227,8 @@ def measure(glb_path: Path, *, rigged: bool, forward_hint: Optional[str] = None)
         level = max(abs(hands[i][1] - arms[i][1]) for i in (0, 1))
         t_posed = span > 0.7 * height and level < 0.15 * height
 
+    torso_radius = _torso_radius(points, shoulders, sole_y, height)
+
     return {
         "status": "measured" if method not in ("hint", "default") else method,
         "units": "glb",
@@ -242,9 +244,45 @@ def measure(glb_path: Path, *, rigged: bool, forward_hint: Optional[str] = None)
         "raw_longest_axis": round(raw_longest, 6),
         "biped": is_biped,
         "t_posed": t_posed,
+        "torso_radius": None if torso_radius is None else round(torso_radius, 6),
         "warnings": warnings,
         "source_glb": str(glb_path).replace("\\", "/"),
     }
+
+
+def _torso_radius(points: list, shoulders, sole_y: float, height: float) -> Optional[float]:
+    """Half the torso's front-to-back thickness, in GLB units: the radius the
+    player's body capsule should have for this avatar.
+
+    Depth, not width or the circle around the chest's corners: what stops a
+    player short of a table they are reaching across is how far the chest
+    sticks out in front of the body's centre line. Taken from the bind-pose
+    vertices between 45 % and 72 % of the height, keeping only those between
+    the shoulder joints along the shoulder line so T-posed arms never count,
+    as the 3rd..97th percentile spread so a stray pouch vertex does not
+    thicken the body."""
+    if shoulders is None or not points:
+        return None
+    (lx, _, lz), (rx, _, rz) = shoulders
+    half = 0.5 * math.hypot(rx - lx, rz - lz)
+    if half < 1e-6:
+        return None
+    cx, cz = 0.5 * (lx + rx), 0.5 * (lz + rz)
+    ux, uz = (rx - lx) / (2.0 * half), (rz - lz) / (2.0 * half)
+    lo_y, hi_y = sole_y + 0.45 * height, sole_y + 0.72 * height
+    depths = []
+    for p in points:
+        if not (lo_y <= p[1] <= hi_y):
+            continue
+        dx, dz = p[0] - cx, p[2] - cz
+        if abs(dx * ux + dz * uz) > half:
+            continue
+        depths.append(dx * uz - dz * ux)
+    if len(depths) < 8:
+        return None
+    depths.sort()
+    n = len(depths) - 1
+    return 0.5 * (depths[int(0.97 * n)] - depths[int(0.03 * n)])
 
 
 def try_measure(glb_path: Path, *, rigged: bool, forward_hint: Optional[str] = None) -> dict[str, Any]:

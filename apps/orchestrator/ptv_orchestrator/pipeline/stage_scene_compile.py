@@ -27,6 +27,7 @@ glb is never silently dropped.
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
@@ -45,6 +46,9 @@ from ptv_schemas import (
 from ptv_schemas.asset_manifest import AssetCategory
 
 from ..engine_catalog import role_of
+from . import placement
+from .collision_shapes import ensure_records as ensure_collision_records
+from .collision_shapes import to_meters as collision_to_meters
 from .context import PipelineContext, StageResult
 from ..fsutil import atomic_write_text
 from .binding_resolution import (
@@ -59,6 +63,7 @@ from .encounters import (
 )
 from .game_flow_scene import apply_game_flow, game_flow_violations
 from .interaction_rules import engine_drawn_fx_assets
+from .interaction_scene import apply_interactions
 from .projectile_scale import apply_scales, projectile_scale_corrections
 from .weapon_scene import apply_weapons, weapon_violations
 from .npc_population import repair_npc_plan
@@ -68,7 +73,7 @@ from .gameplay_relocation import (
     spawn_pose,
     yaw_from_direction,
 )
-from .player_bindings import bind_player_roles, player_block_fields
+from .player_bindings import bind_player_roles, player_block_fields, player_body_radius
 
 
 SCENE_JSON_VERSION = 1
@@ -193,6 +198,34 @@ def _check_scene_textures(ctx: PipelineContext, compiled: list, state) -> list[s
     return problems
 
 
+#: Tags that give a meshless entity a placeholder look or already hide it
+#: (engine/runtime/src/render/VisualTagTable.cpp).
+_VISUAL_TAGS = frozenset({
+    "ground", "teleport_target", "grabbable", "door", "container", "switchable", "mover",
+    "breakable", "harvestable", "trigger", "placeholder",
+    "template", "player_system", "player", "player_rig", "player_hand", "player_locomotion",
+    "mechanic_host", "tutorial", "checkpoint", "spawn_point", "collider_only", "player_part",
+})
+
+
+def tag_meshless_logic(doc: dict) -> list[str]:
+    """Tag ``mechanic_host`` every entity with nothing to draw (no mesh,
+    primitive or inline mesh) and no visual tag: a mission controller, a HUD
+    anchor, a weapon hub. The renderer no longer draws such entities, but
+    the scene document says what they are for every tool that reads it.
+    Returns the ids tagged."""
+    out: list[str] = []
+    for e in doc.get("entities") or []:
+        if not isinstance(e, dict) or e.get("mesh") or e.get("primitive") or e.get("mesh_inline"):
+            continue
+        tags = e.setdefault("tags", [])
+        if any(t in _VISUAL_TAGS for t in tags):
+            continue
+        tags.append("mechanic_host")
+        out.append(str(e.get("id")))
+    return out
+
+
 def _apply_scene_complexity(ctx: PipelineContext, compiled: list) -> None:
     from . import memory_model as mm
     from .scene_complexity import analyse, apply_static_batch_flags, decide_initial_settings
@@ -300,6 +333,12 @@ class WeaponContractError(RuntimeError):
 
 class ModelFrameContractError(RuntimeError):
     """A skinned character reached scene_compile without a measured frame."""
+
+
+class PlacementContractError(RuntimeError):
+    """An entity that declared where it belongs is sunk, floating, unsupported
+    or interpenetrating once the world is merged (or its anchor was never
+    declared)."""
 
 
 class MissingNpcError(RuntimeError):
@@ -853,6 +892,12 @@ def _mesh_render_fields(
             " re-run asset_contract (it measures the sole, height and forward"
             " axis the runtime needs to stand and face the character)"
         )
+    # The collider measured from the mesh itself, in metres in entity space.
+    # Characters (framed or skinned) collide as capsules instead.
+    coll = norm.get("collision")
+    if (isinstance(coll, dict) and not framed and not norm.get("skinned")
+            and float(out.get("unit_scale") or 0.0) > 0.0):
+        out["collision"] = collision_to_meters(coll, float(out["unit_scale"]))
     sockets = _sockets_in_meters(contract, socket_scale)
     if sockets:
         out["sockets"] = sockets
@@ -1224,6 +1269,14 @@ def compile_scene_json(
                 ),
                 "mechanic_bindings": bindings,
                 "tags": list(e.tags),
+                # Where it belongs in the world; the placement resolver reads
+                # it after the world is merged (the runtime ignores it).
+                **(
+                    {"placement": e.placement.model_dump(mode="json")}
+                    if e.placement is not None
+                    and e.placement.relation.value != "free"
+                    else {}
+                ),
                 **(
                     {"health": e.health.model_dump(mode="json")}
                     if e.health is not None
@@ -1341,6 +1394,8 @@ def compile_scene_json(
         "name": scene.name,
         "player": {
             "height_meters": build_spec.player_height_meters,
+            "body_radius_m": player_body_radius(build_spec, entities_out, contracts,
+                                                on_warning),
             "locomotion": build_spec.locomotion.value,
             "comfort": build_spec.comfort.value,
             **player_block_fields(build_spec, entities_out, plan),
@@ -1658,6 +1713,29 @@ def _interaction_denied(
     return False
 
 
+_BREAKABLE_STATE_SYNONYMS = ("broken", "shattered", "smashed", "is_broken", "is_destroyed",
+                             "destroyed_state")
+
+
+def _normalize_breakable_state(spec: dict) -> list[str]:
+    """builtin.breakable and builtin.destructible read ``destroyed``; a world
+    that wrote ``broken`` (the shooting range did) declared a state nothing
+    reads. Rename the synonyms; returns a note per rename."""
+    state = spec.get("initial_state")
+    if not isinstance(state, dict):
+        return []
+    notes = []
+    for key in _BREAKABLE_STATE_SYNONYMS:
+        if key in state and "destroyed" not in state:
+            state["destroyed"] = state.pop(key)
+            notes.append(f"{spec.get('id')}: breakable state '{key}' -> 'destroyed'")
+        elif key in state:
+            state.pop(key)
+    if "destroyed" not in state:
+        state["destroyed"] = {"type": "bool", "value": False}
+    return notes
+
+
 def bind_affordances(
     doc: dict, build_spec: Any, scene_id: str
 ) -> tuple[int, list[str]]:
@@ -1727,6 +1805,22 @@ def bind_affordances(
         # string and cannot carry a hinge axis.
         if kind == "harvestable":
             params["reach_m"] = 0.5
+        if kind == "breakable":
+            notes.extend(_normalize_breakable_state(spec))
+            # A range target or a destructible breaks from damage
+            # (builtin.destructible), not from the player's hand brushing it.
+            if re.search(r"target|destructible", " ".join([interactive_id, *tags]),
+                         re.IGNORECASE):
+                params["breaks_by_hand"] = False
+                if not any(isinstance(b, dict) and
+                           (b.get("builtin_id") or b.get("id")) == "builtin.destructible"
+                           for b in bindings):
+                    bindings.append({"id": "builtin.destructible",
+                                     "builtin_id": "builtin.destructible",
+                                     "params": {"effect": "shatter", "respawn_after_s": 0.0}})
+                    entity.setdefault("health", {"max": 30.0, "invuln_after_hit_s": 0.0})
+                    entity["static_batch"] = False
+                    notes.append(f"{interactive_id}: breakable target -> builtin.destructible")
         bindings.append(
             {"id": mechanic_id, "builtin_id": mechanic_id, "params": params}
         )
@@ -1810,7 +1904,7 @@ def _merge_world_into_scene(
     # Declared state, exits and named arrival points travel with the
     # environment that declared them.
     for key in ("interactives", "spawn_points", "portals", "npc_spawn_zones",
-                "npc_anchors"):
+                "npc_anchors", "anchors", "anchor_sets"):
         if world_doc.get(key):
             doc[key] = world_doc[key]
 
@@ -1838,6 +1932,14 @@ def run(ctx: PipelineContext) -> StageResult:
         if norm_path.exists()
         else {}
     )
+    # Colliders for assets optimized before they were measured; persisted so
+    # the next compile does not re-measure.
+    measured = ensure_collision_records(normalization, ctx.settings.repo_root)
+    if measured:
+        norm_path.write_text(json.dumps(normalization, indent=2, sort_keys=True),
+                             encoding="utf-8")
+        ctx.emit(ProjectStage.scene_compile, "info",
+                 f"measured colliders for {len(measured)} asset(s)")
 
     # Named sockets derived from geometry by the asset_contract stage. Absent
     # for projects generated before that stage existed, in which case every
@@ -1912,6 +2014,8 @@ def run(ctx: PipelineContext) -> StageResult:
     # weapons stay as they were.
     interaction_design = (ctx.interaction_design
                           or ctx.store.load_interaction_design(ctx.project_id))
+    world_owned = placement.world_owned_assets(manifest, interaction_design, plan,
+                                               npc_plan, build_spec)
     known_generated = {
         x for it in plan.items if it.code_task is not None
         for x in (it.id, it.code_task.id)
@@ -2029,6 +2133,42 @@ def run(ctx: PipelineContext) -> StageResult:
                 ),
                 spec_yaw=spec_yaw,
             )
+        # Gameplay rests on what the world built: every declared placement on
+        # its anchor, then any prop still sunk into its support lifted onto
+        # it, then a hard check that nothing declared is sunk, floating or
+        # interpenetrating.
+        if world_doc is not None:
+            uses_placement = any(isinstance(e.get("placement"), dict)
+                                 for e in doc.get("entities") or [] if isinstance(e, dict))
+            if uses_placement:
+                placement.drop_world_owned_copies(
+                    doc, list(world_doc.get("entities") or []), world_owned,
+                    on_warning=lambda m, sid=scene_entry.id: ctx.emit(
+                        ProjectStage.scene_compile, "warning", f"{sid}: {m}"))
+            p_report = placement.resolve(
+                doc, on_warning=lambda m, sid=scene_entry.id: ctx.emit(
+                    ProjectStage.scene_compile, "warning", f"{sid}: {m}"))
+            settled = placement.settle(
+                doc, on_warning=lambda m, sid=scene_entry.id: ctx.store.append_log(
+                    ctx.project_id, "scene_compile", f"{sid}: {m}"))
+            p_errors, p_warnings = placement.violations(doc)
+            placement.write_report(
+                builds_dir / f"placement_report.{scene_entry.id}.json",
+                p_report, p_errors, p_warnings, settled)
+            for w in p_warnings[:20]:
+                ctx.store.append_log(ctx.project_id, "scene_compile",
+                                     f"{scene_entry.id}: placement: {w}")
+            ctx.emit(ProjectStage.scene_compile, "info",
+                     f"{scene_entry.id}: placed {len(p_report['resolved'])} on anchors, "
+                     f"rested {settled} sunk prop(s), {len(p_warnings)} placement warning(s)")
+            if p_errors:
+                msg = (f"{scene_entry.id}: placement is wrong: " + "; ".join(p_errors[:12]))
+                ctx.store.append_log(ctx.project_id, "scene_compile", msg)
+                ctx.store.record_stage(state, ProjectStage.scene_compile,
+                                       ProjectStatus.failed, message=msg[:400])
+                ctx.emit(ProjectStage.scene_compile, "failed", msg[:400])
+                raise PlacementContractError(msg)
+
         # Placed-at-load NPCs, checked against the merged world itself.
         if npc_plan is not None and pop.get("persistent"):
             for note in place_persistent_npcs(
@@ -2090,6 +2230,15 @@ def run(ctx: PipelineContext) -> StageResult:
                                    ProjectStatus.failed, message=msg[:400])
             ctx.emit(ProjectStage.scene_compile, "failed", msg[:400])
             raise WeaponContractError(msg)
+        inter = apply_interactions(
+            doc, interaction_design, plan,
+            on_warning=lambda m, sid=scene_entry.id: ctx.emit(
+                ProjectStage.scene_compile, "warning", f"{sid}: {m}"))
+        if any(inter.values()):
+            note = f"{scene_entry.id}: interactions " + "; ".join(
+                f"{k} {v}" for k, v in inter.items() if v)
+            ctx.emit(ProjectStage.scene_compile, "info", note[:400])
+            ctx.store.append_log(ctx.project_id, "scene_compile", note)
         if weapons.get("weapons") or weapons.get("npc_ranged"):
             note = (f"{scene_entry.id}: weapons {weapons.get('weapons', [])}, templates "
                     f"{weapons.get('templates', [])}, sources {weapons.get('sources', [])}, "
@@ -2147,6 +2296,11 @@ def run(ctx: PipelineContext) -> StageResult:
             unresolved_all.extend(
                 f"{scene_entry.id}/{p}"
                 for p in unresolved_bindings(doc.get("entities") or [], registered))
+        logic = tag_meshless_logic(doc)
+        if logic:
+            ctx.store.append_log(ctx.project_id, "scene_compile",
+                                 f"{scene_entry.id}: meshless logic entities tagged "
+                                 f"mechanic_host (never drawn): {', '.join(logic)}")
         compiled.append((scene_entry.id, doc))
         if scene_entry.entry_point or entry_id_written is None:
             entry_id_written = scene_entry.id

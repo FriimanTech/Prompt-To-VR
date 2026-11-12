@@ -27,7 +27,7 @@ from typing import Mapping
 
 #: Bumped whenever a rule below changes what counts as valid. The codegen
 #: board stores it and re-checks every finished task when it moves.
-API_CONTRACT_VERSION = 5
+API_CONTRACT_VERSION = 6
 
 # --- Weapons (projects with an interaction_design.json) ---------------------
 # builtin.weapon / bow / melee_weapon / shield run every designed weapon. A
@@ -79,6 +79,29 @@ _DAMAGES_OWN_POOL = re.compile(
     r"current_health\s*(?:-=|=\s*std::max\s*\(\s*0(?:\.0)?f?\s*,)")
 _READS_COMBAT = re.compile(
     r"\bcombat\s*->\s*(?:damage_seq|damage_events_since|health|max_health|is_alive)\s*\(")
+# --- Interactions (v6) -------------------------------------------------------
+# builtin.press_button / world_display / target_challenge / destructible /
+# explosive run these. The shooting range's red button waited for
+# ctx.contacts->began(button, hand) -- the hands were never colliders, so it
+# never pressed; its grenade hub ran a fuse and never exploded; its timer HUD
+# drew nothing anyone saw.
+_CONTACT_TEST = re.compile(r"\bcontacts\s*->\s*(?:began|touching)\s*\(")
+_BUTTONISH = re.compile(r"\b\w*(?:button|press|switch|lever)\w*\b", re.IGNORECASE)
+_FUSE = re.compile(r"\b\w*fuse\w*\b", re.IGNORECASE)
+_BLAST_DAMAGE = re.compile(
+    r"(?:blast|explo\w*|radius)[^;]*;[\s\S]{0,600}?combat\s*->\s*apply_(?:weapon_)?damage"
+    r"|combat\s*->\s*apply_(?:weapon_)?damage[^;]*(?:blast|explo|radius|falloff)",
+    re.IGNORECASE)
+# ctx.spawn->instance(template, Vec3(12.0f, 0.0f, -4.5f), ...): a place typed
+# into the code instead of one the world declared.
+_LITERAL_SPAWN = re.compile(
+    r"spawn\s*->\s*instance\s*\([^;]*?Vec3\s*\(\s*-?\d+(?:\.\d*)?f?\s*,\s*-?\d", re.S)
+_READS_ANCHORS = re.compile(r"\banchors\s*->\s*(?:point|pose_at|count|anchor)\s*\(")
+_DRAWS_TEXT = re.compile(r"\btext\s*->\s*text\s*\(")
+_SCOREBOARD_TEXT = re.compile(
+    r'"[^"\n]*(?:time|timer|score|hits|best|seconds|left)[^"\n]*"', re.IGNORECASE)
+_WRITES_VARS = re.compile(r"\bvars\s*->\s*set_(?:number|text)\s*\(")
+
 # Functions a header offers other tasks to call: "submit_hit", "push_damage".
 _OFFERED_ENTRY = re.compile(
     r"\b(?:inline\s+)?[\w:<>]+\s+((?:submit|push|enqueue|report|post|send|apply|receive)_\w+)\s*\("
@@ -86,17 +109,48 @@ _OFFERED_ENTRY = re.compile(
 
 
 def lint_task_sources(kind: str, files: Mapping[str, str], *,
-                      game_flow: bool = False, weapons: bool = False) -> list[str]:
+                      game_flow: bool = False, weapons: bool = False,
+                      interactions: bool = False, anchors: bool = False,
+                      displays: bool = False) -> list[str]:
     """Problems with ONE task's files, phrased for the agent that wrote them.
 
     ``kind`` is the CodeTask kind (``ai``, ``mechanic``, ``dialogue``);
     ``files`` maps file name -> contents. ``game_flow`` is true when the
     project has a game design, i.e. ``builtin.game_flow`` runs the loop;
     ``weapons`` when its interaction design hands weapons to the engine's
-    weapon built-ins."""
+    weapon built-ins; ``interactions`` when it has an interaction design at
+    all (buttons, explosives and destructibles are built-ins); ``anchors``
+    when the world declares gameplay anchors / anchor sets; ``displays``
+    when the design has an in-world display."""
 
     problems: list[str] = []
     joined = "\n".join(files.values())
+
+    if interactions:
+        if _CONTACT_TEST.search(joined) and _BUTTONISH.search(joined):
+            problems.append(
+                "presses a button by testing contacts with the hand. Buttons are "
+                "builtin.press_button (index-finger poke through the cap, or the "
+                "trigger beside it); it raises a named signal. React to it with "
+                "ctx.signals->fired_since(\"<signal>\", seen) -- never by contact.")
+        if _FUSE.search(joined) and _BLAST_DAMAGE.search(joined):
+            problems.append(
+                "runs its own fuse and blast damage. Explosives are builtin.explosive "
+                "(arming, fuse, radial damage through ctx.combat, flash, restock); "
+                "react to the '<entity>.detonated' / 'explosive.detonated' signals "
+                "on ctx.signals and to the damage through ctx.combat.")
+    if anchors and _LITERAL_SPAWN.search(joined) and not _READS_ANCHORS.search(joined):
+        problems.append(
+            "spawns at coordinates typed into the code. The world declares where "
+            "things go: read them with ctx.anchors->count(set) / point(set, i) / "
+            "pose_at(set, i, &pos, &rot) and spawn there.")
+    if displays and _DRAWS_TEXT.search(joined) and _SCOREBOARD_TEXT.search(joined) \
+            and not _WRITES_VARS.search(joined):
+        problems.append(
+            "draws its own scoreboard / timer text. Screens in the world are "
+            "builtin.world_display: publish the numbers with "
+            "ctx.vars->set_number(\"<id>.<key>\", v) and let the display's lines "
+            "template them (\"TIME {<id>.time_left:0.0}\").")
 
     if _READS_MUZZLE.search(joined) and _UNFILTERED_RAY.search(joined):
         problems.append(
@@ -183,11 +237,14 @@ def lint_task_sources(kind: str, files: Mapping[str, str], *,
 
 
 def stale_contract_reasons(files: Mapping[str, str], *,
-                           game_flow: bool = False, weapons: bool = False) -> list[str]:
+                           game_flow: bool = False, weapons: bool = False,
+                           interactions: bool = False, anchors: bool = False,
+                           displays: bool = False) -> list[str]:
     """Why already-generated code no longer satisfies the contract (empty =
     still fine). Same rules as :func:`lint_task_sources`."""
 
-    return lint_task_sources("", files, game_flow=game_flow, weapons=weapons)
+    return lint_task_sources("", files, game_flow=game_flow, weapons=weapons,
+                             interactions=interactions, anchors=anchors, displays=displays)
 
 
 def find_dead_contracts(task_sources: Mapping[str, Mapping[str, str]]) -> list[str]:

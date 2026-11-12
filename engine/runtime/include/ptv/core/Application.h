@@ -29,10 +29,15 @@
 
 namespace ptv {
 
+class AnchorBoard;
 class EffectsSystem;
+class PlayerParts;
+class SignalBoard;
+class VarBoard;
 class ProjectileSystem;
 class WeaponBoard;
 class WeaponVerifier;
+class InteractionVerifier;
 class TextureGallery;
 
 /** Top-level application class.
@@ -195,6 +200,8 @@ private:
      *  Making the player an ordinary kinematic capsule entity means contacts,
      *  damage and factions all treat them like any other actor. */
     void create_player_body();
+    /** Radius of the player's walking body and contact capsule (metres). */
+    float player_body_radius() const;
 
     /** Keep the player capsule under the headset and at rig height. */
     void update_player_body(const Vec3& head_world_position, float dt);
@@ -509,6 +516,10 @@ private:
     // IApp::request_fade: strongest request this frame, and what is drawn.
     float fade_request_{0.0f};
     float fade_level_{0.0f};
+    // IApp::request_flash: a coloured whole-view flood (flashbangs).
+    float flash_request_{0.0f};
+    float flash_level_{0.0f};
+    Vec3 flash_color_{1.0f};
     // Verification of the game flow (``debug.ptv.verify_flow`` = 1): the
     // player is NOT protected, and builtin.game_flow scripts its own
     // end-screen clicks so one unattended run walks death, Game Over, Try
@@ -664,6 +675,11 @@ private:
     std::unordered_set<std::uint32_t> clone_children_;
     // The scene's NPC waves, written by builtin.encounter_director.
     EncounterBoard encounter_board_;
+    // Named signals, live values and the world's anchors (ctx.signals /
+    // ctx.vars / ctx.anchors), reset on every scene load.
+    std::unique_ptr<SignalBoard> signal_board_;
+    std::unique_ptr<VarBoard> var_board_;
+    std::unique_ptr<AnchorBoard> anchor_board_;
     std::unique_ptr<AttachService> attach_svc_;
     std::unique_ptr<CombatService> combat_svc_;
     std::unique_ptr<PerceptionService> perception_svc_;
@@ -674,6 +690,8 @@ private:
     std::unique_ptr<HapticsService> haptics_svc_;
     std::unique_ptr<SocketsService> sockets_svc_;
     std::unique_ptr<SkeletonService> skeleton_svc_;
+    /** The player's hands (and avatar limbs) as colliders that nudge props. */
+    std::unique_ptr<PlayerParts> player_parts_;
     std::unique_ptr<EquipService> equip_svc_;
     std::unique_ptr<InteractiveService> interactive_svc_;
     std::unique_ptr<PersistenceService> persistence_svc_;
@@ -746,6 +764,14 @@ private:
     std::unordered_map<std::uint32_t, Vec3> npc_last_pos_{};
     void log_npc_manifest();
     void tick_npc_telemetry(float dt);
+    void watch_npc_heights(const char* phase);
+    std::unordered_map<std::uint32_t, float> npc_watch_y_;
+    int npc_watch_warnings_{0};
+    // render_body telemetry (max over the 1 Hz window).
+    std::uint32_t body_draws_max_{0};
+    std::uint32_t placeholders_max_{0};
+    std::uint32_t meshless_hidden_last_{0};
+    std::string body_draw_names_;
     // Verification mode (Android system property ``debug.ptv.verify`` = 1,
     // or env ``PTV_VERIFY`` = 1 on desktop): the player walks a scripted loop
     // so followers and chasers have something to react to, and cannot die,
@@ -755,6 +781,8 @@ private:
     // still and a scripted hand holds and fires every weapon in turn.
     bool verify_weapons_{false};
     std::unique_ptr<WeaponVerifier> weapon_verifier_;
+    bool verify_interactions_{false};
+    std::unique_ptr<InteractionVerifier> interaction_verifier_;
     // debug.ptv.verify_textures: the on-headset texture gallery.
     bool verify_textures_{false};
     std::unique_ptr<TextureGallery> texture_gallery_;

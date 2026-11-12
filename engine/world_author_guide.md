@@ -87,8 +87,32 @@ Core (implemented by the host):
   tags})` - ARBITRARY procedural geometry. Build any shape you want in C++
   (towers, arches, terrain, organic forms) by emitting triangles. `normals` may
   be empty (computed for you). `collision: Mesh` makes it solid.
-- `w.place_object(ObjectPlacement{asset_id, transform, tags})` - OPTIONAL: anchor
-  an existing pipeline-generated prop/character GLB by its asset_id.
+- `w.place_object(ObjectPlacement{asset_id, transform, tags, name, align})` -
+  place an existing pipeline-generated prop GLB by its asset_id. By default
+  (`Align::Base`) `transform.position.y` is where the object's LOWEST point
+  rests: put a table at the floor height, a lamp at the desk's top. Generated
+  GLBs are centred on their origin, so treating the position as the centre
+  sinks them halfway into the floor. Use this for every asset listed with
+  `world_builds_it: true` (the tables, racks, consoles and posts the game
+  needs), where the prompt puts it.
+- `w.asset_size(asset_id)` - an asset's real size in the world (`size`, and
+  `bottom` / `top`: how far its lowest / highest point is from its origin), so
+  you can build around it: a table top is at `floor + asset_size(table).size.y`.
+- `w.gameplay_anchor(GameplayAnchorDesc{id, position, facing, normal, relation,
+  support, tags})` - the point a requested gameplay item rests on, hangs from
+  or mounts on. Your brief lists every request with the EXACT anchor id it
+  needs. `relation`: `on_surface` (position ON the top face of the support),
+  `on_floor`, `hang_from` (position = bottom end of the pole/hook), 
+  `mount_on_wall` (position on the wall face, `normal` out of the wall),
+  `at_point`. `support` names the geometry under / above it. Leave the item's
+  whole footprint on its support; never place the requested item yourself.
+- `w.anchor_set(AnchorSetDesc{id, relation, points, facing, tags})` - many
+  points of one relation for things the game SPAWNS at runtime (a timed
+  challenge's targets under each pole, pickup pads). At least the requested
+  count.
+- `w.satisfies(requirement_id, how)` - record how this world meets a layout
+  requirement from your brief ("lane 3 is 18 m wide, lanes 1 and 2 are 12 m").
+  Every layout requirement needs one.
 - `w.nav_region(NavRegionDesc{id, min, max, floor_y})` - a rectangle of floor
   NPCs may walk on. One per room / corridor / courtyard / street; overlap at
   openings is fine; a ramp or staircase is several regions, one per landing.

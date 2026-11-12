@@ -258,6 +258,29 @@ def test_google_generate_defaults_to_gemini(tmp_path, monkeypatch):
     assert results[0].model == "gemini-3.1-flash-image"
 
 
+def test_google_gemini_passes_image_size(tmp_path, monkeypatch):
+    seen: list = []
+
+    class _Models(_FakeModels):
+        def generate_content(self, *, model, contents, config):
+            seen.append(config.image_config)
+            return super().generate_content(model=model, contents=contents, config=config)
+
+    class _Client(_FakeClient):
+        def __init__(self, api_key=None):
+            super().__init__(api_key)
+            self.models = _Models(_FakeImagenResp(1, b"PNGBYTES"))
+
+    _install_fake_genai(monkeypatch, _Client)
+    c = GoogleImageClient(GoogleImageConfig(api_key="key"))
+    c.generate(prompt="a soldier", out_dir=tmp_path, image_size="4k")
+    c.generate(prompt="a duck", out_dir=tmp_path / "b")
+    assert seen[0].image_size == "4K"
+    assert not hasattr(seen[1], "image_size")
+    with pytest.raises(ValueError):
+        c.generate(prompt="x", out_dir=tmp_path, image_size="8K")
+
+
 def test_google_missing_key_raises(monkeypatch, tmp_path):
     _install_fake_genai(monkeypatch)
     cfg = GoogleImageConfig(api_key=None)
@@ -356,6 +379,41 @@ def test_tripo_image_to_model_sends_v3_body(tmp_path):
     assert body["orientation"] == "align_image"
     # V2's ``type`` discriminator is gone; the endpoint carries it now.
     assert "type" not in body
+
+
+@respx.mock
+def test_tripo_multiview_then_model_from_its_task(tmp_path):
+    respx.mock.post(f"{V3}/files").mock(return_value=_ok({"file_token": "file_abc123"}))
+    respx.mock.post(f"{V3}/generation/image-to-multiview").mock(
+        return_value=_ok({"task_id": "mv_1"}))
+    views = {f"{v}_view_url": f"https://cdn.example.test/{v}.png"
+             for v in ("front", "left", "back", "right")}
+    respx.mock.get(f"{V3}/tasks/mv_1").mock(return_value=_ok({
+        "task_id": "mv_1", "type": "image_to_multiview", "status": "success",
+        "output": {"generate_multiview_image": views}}))
+    for v in ("front", "left", "back", "right"):
+        respx.mock.get(f"https://cdn.example.test/{v}.png").mock(
+            return_value=httpx.Response(200, content=v.encode()))
+    respx.mock.post(f"{V3}/generation/multiview-to-model").mock(
+        return_value=_ok({"task_id": "task_1"}))
+    respx.mock.get(f"{V3}/tasks/task_1").mock(return_value=_ok({
+        "task_id": "task_1", "status": "success", "output": {"model_url": MODEL_URL}}))
+    respx.mock.get(MODEL_URL).mock(return_value=httpx.Response(200, content=b"glb!"))
+    img = tmp_path / "ref.png"
+    img.write_bytes(b"PNG")
+
+    client = TripoClient(_cfg())
+    task, files = client.image_to_multiview(image_path=img, out_dir=tmp_path / "views")
+    assert task == "mv_1" and files["back"].read_bytes() == b"back"
+    assert _sent_body(respx.mock, "/generation/image-to-multiview") == {"input": "file_abc123"}
+    result = client.multiview_to_model(multiview_task_id=task, out_dir=tmp_path / "out")
+    assert result.primary_glb.read_bytes() == b"glb!"
+    body = _sent_body(respx.mock, "/generation/multiview-to-model")
+    assert body["inputs"] == [{"task_id": "mv_1"}]
+    assert body["model"] == "v3.1-20260211"
+    assert body["texture"] is True and body["pbr"] is True
+    assert body["texture_alignment"] == "original_image"
+    assert "enable_image_autofix" not in body and "input" not in body
 
 
 @respx.mock

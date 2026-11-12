@@ -14,6 +14,12 @@ Flow (image-to-3D):
     GET  /v3/tasks/{task_id}            -> poll to a terminal status
     GET  output.model_url               -> download the GLB
 
+Humanoid characters can go multiview instead (four views reconstruct hands
+far better than one): ``POST /v3/generation/image-to-multiview`` (input =
+file token; output.generate_multiview_image.{front,left,back,right}_view_url)
+then ``POST /v3/generation/multiview-to-model`` with
+``inputs=[{"task_id": <multiview task>}]``.
+
 Quality defaults are unchanged from the V2 wrapper (textured + PBR +
 image-aligned + Ultra-Mode geometry); only the transport moved. The one
 behavioural fix: ``model`` is REQUIRED on V3 (V2 silently fell back to
@@ -500,6 +506,95 @@ class TripoClient:
         body["texture_alignment"] = "original_image"
 
         task_id = self._create_task("/generation/image-to-model", body)
+        return self._await_and_download(task_id, out_dir)
+
+    # ------------------------------------------------------------------
+    # Multiview (humanoid characters)
+    # ------------------------------------------------------------------
+    def image_to_multiview(
+        self,
+        *,
+        image_path: str | os.PathLike[str],
+        out_dir: str | os.PathLike[str],
+    ) -> tuple[str, dict[str, Path]]:
+        """Front / left / back / right views of one reference image.
+
+        ``POST /v3/generation/image-to-multiview`` with a single ``input``
+        (file token); the task's ``output.generate_multiview_image`` holds
+        ``front_view_url`` / ``left_view_url`` / ``back_view_url`` /
+        ``right_view_url`` (verified against developers.tripo3d.ai,
+        2026-11-10). Returns ``(task_id, {view: downloaded png})`` -- the
+        views are downloaded so the hands can be checked before paying for
+        the model.
+        """
+
+        self._require_key()
+        token = self._upload_file(image_path)
+        task_id = self._create_task("/generation/image-to-multiview", {"input": token})
+        task = self._poll(task_id)
+        status = str(task.get("status") or "unknown").lower()
+        if status != "success":
+            raise ProviderCallError(
+                f"Tripo image-to-multiview {task_id} finished with status {status!r} "
+                f"(error_code={task.get('error_code')}): "
+                f"{task.get('error_message') or 'no error_message returned'}"
+            )
+        output = task.get("output") if isinstance(task.get("output"), dict) else {}
+        urls = output.get("generate_multiview_image") or {}
+        views: dict[str, Path] = {}
+        target = Path(out_dir)
+        target.mkdir(parents=True, exist_ok=True)
+        for view in ("front", "left", "back", "right"):
+            url = urls.get(f"{view}_view_url") if isinstance(urls, dict) else None
+            if not url:
+                continue
+            path = self._download(str(url), target)
+            final = target / f"{view}{path.suffix or '.png'}"
+            path.replace(final)
+            views[view] = final
+        if "front" not in views:
+            raise ProviderCallError(
+                f"Tripo image-to-multiview {task_id} returned no front view: {output!r}"
+            )
+        return task_id, views
+
+    def multiview_to_model(
+        self,
+        *,
+        multiview_task_id: str,
+        out_dir: str | os.PathLike[str],
+        texture_quality: str | None = None,
+        face_limit: int | None = None,
+    ) -> TripoTaskResult:
+        """A model from a finished image-to-multiview task.
+
+        ``POST /v3/generation/multiview-to-model`` with
+        ``inputs=[{"task_id": ...}]`` (the single-element form; the source
+        must be a successful ``image_to_multiview`` task). Textured + PBR +
+        ``texture_alignment="original_image"`` like every Tripo call here.
+        ``enable_image_autofix`` is an image-to-model parameter and is not
+        sent.
+        """
+
+        self._require_key()
+        if not multiview_task_id:
+            raise ProviderCallError("multiview_to_model needs an image-to-multiview task id")
+        model_version = self.config.model_version or _DEFAULT_MODEL_VERSION
+        body: dict[str, Any] = {
+            "inputs": [{"task_id": str(multiview_task_id)}],
+            "model": model_version,
+            "texture": True,
+            "pbr": True,
+            "texture_alignment": "original_image",
+            "orientation": "align_image",
+            "texture_quality": texture_quality or self.config.texture_quality,
+            "auto_size": self.config.auto_size,
+        }
+        if not _model_forbids_geometry_quality(model_version):
+            body["geometry_quality"] = self.config.geometry_quality
+        if face_limit is not None:
+            body["face_limit"] = int(face_limit)
+        task_id = self._create_task("/generation/multiview-to-model", body)
         return self._await_and_download(task_id, out_dir)
 
     def text_to_model(

@@ -13,12 +13,16 @@ Vec3  next_waypoint(agent, target);          // one step, avoidance applied
 bool  is_reachable(from, to);
 bool  path_distance(from, to, float& out);
 Vec3  project_to_ground(pos);
+Vec3  nearest_walkable(pos, margin_m = 0.4); // clamped inside the declared regions
 bool  line_of_sight(from, to);
 ```
 
 Behind it sit two layers with very different costs. Because everything goes
-through these five calls, changing or upgrading a layer never touches a line of
-generated code.
+through these calls, changing or upgrading a layer never touches a line of
+generated code. `nearest_walkable` exists because `region_at` snaps a point
+up to 2 m outside a region into it (an NPC a few centimetres outside a room
+still routes), so `is_reachable` alone accepts a spot past the fence; anything
+that PLACES a character (a follower's catch-up) clamps through it first.
 
 ### Layer 0 — local steering
 

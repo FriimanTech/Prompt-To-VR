@@ -203,7 +203,31 @@ public:
         std::uint32_t culled_room{0};
         /** Merged static batches drawn (each replaces many entities). */
         std::uint32_t batches_drawn{0};
+        /** Meshless entities drawn as a tag-requested placeholder shape,
+         *  floors (``ground``) excluded. A generated game should have none. */
+        std::uint32_t placeholders{0};
+        /** Meshless entities skipped because no tag asked for a placeholder
+         *  (logic hosts, anchors, colliders). */
+        std::uint32_t meshless_hidden{0};
+        /** Draws of something other than the player's own hands, body or
+         *  held items right at a hand or foot (see set_player_focus). The
+         *  player's collider proxies once drew as cubes over their fingers. */
+        std::uint32_t player_draws{0};
     };
+
+    /** Where the player's hands / feet are this frame and which entities
+     *  belong there (hand meshes, the avatar, held items). Anything else
+     *  drawn with its origin within ``radius`` of a point counts as a
+     *  ``player_draws``. Empty points disables the measure. */
+    void set_player_focus(std::vector<Vec3> points, std::vector<std::uint32_t> allowed,
+                          float radius = 0.35f) {
+        player_points_ = std::move(points);
+        player_allowed_ = std::move(allowed);
+        player_radius_ = radius;
+    }
+    /** The first entity names that drew as a placeholder / over the player,
+     *  for the 1 Hz log line. */
+    const std::vector<std::string>& player_draw_names() const { return player_draw_names_; }
 
     /** Merge the scene's static geometry (entities the compiler marked
      *  ``static_batch``: primitives and inline meshes) into one mesh per grid
@@ -286,10 +310,11 @@ public:
      *  ``feather_deg`` the width of the soft edge beyond it -- angles, not
      *  screen fractions, so every headset occludes the same visual field. */
     void set_vignette(float opacity, float clear_half_angle_deg,
-                      float feather_deg) {
+                      float feather_deg, const Vec3& color = Vec3(0.0f)) {
         vignette_opacity_ = opacity;
         vignette_clear_deg_ = clear_half_angle_deg;
         vignette_feather_deg_ = feather_deg;
+        vignette_color_ = color;
     }
 
     /** Build a list of DrawItems from the ECS.
@@ -577,6 +602,8 @@ private:
     float vignette_opacity_{0.0f};
     float vignette_clear_deg_{60.0f};
     float vignette_feather_deg_{20.0f};
+    /** Black for comfort and fades; white for a flashbang's white-out. */
+    Vec3 vignette_color_{0.0f};
 
     // World-space SDF text (menus, HUD numerals), drawn after geometry.
     TextRenderer text_{};
@@ -734,6 +761,13 @@ private:
     std::uint64_t frame_index_{0};
     std::uint32_t resident_triangles_{0};
     FrameStats stats_{};
+    void note_player_draw(World& world, std::uint32_t entity, const Vec3& pos);
+    std::vector<Vec3> player_points_;
+    std::vector<std::uint32_t> player_allowed_;
+    float player_radius_{0.35f};
+    std::vector<std::string> player_draw_names_;
+    /** Entities already reported as meshless-hidden / placeholder (log once). */
+    std::unordered_set<std::uint32_t> reported_meshless_;
     // Per-entity LOD hysteresis: remembers the level chosen last frame so a
     // mesh sitting exactly on a switch distance does not flicker between LODs.
     std::unordered_map<std::uint32_t, int> entity_lod_;

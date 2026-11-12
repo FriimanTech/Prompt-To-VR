@@ -240,6 +240,19 @@ struct CMesh {
     std::vector<float> lod_errors_rel;
 };
 
+/** The collider measured from a GLB prop's own mesh by the asset pipeline,
+ *  in metres in entity space at transform scale 1 (the same space the
+ *  renderer draws the mesh in). Physics builds the body from this:
+ *  ``mesh_lod``'s triangles for a static ``"mesh"`` body, the convex ``hull``
+ *  for anything that moves, the offset box for ``"aabb"``. */
+struct CCollisionGeom {
+    Vec3 aabb_min{0.0f};
+    Vec3 aabb_max{0.0f};
+    std::vector<Vec3> hull;
+    /** Index into ``CMesh::lod_paths`` of the static triangle collider, or -1. */
+    int mesh_lod{-1};
+};
+
 /** Rendering-only: this entity was marked static by the scene compiler.
  *  ``batch`` is the merged draw it belongs to (-1 = drawn on its own; set
  *  back to -1 if the entity ever moves), ``room`` the closed room it stands
@@ -603,6 +616,11 @@ struct CAnimator {
      * coarser. Without this, throttling would visibly slow distant NPCs
      * down. */
     float lod_debt_s{0.0f};
+    /** The clip whose pose the skeleton holds, or -1 before the first
+     *  sample. Beyond the last LOD band a character holds its pose -- but
+     *  only a pose of its CURRENT clip: one that spawned out there (a far
+     *  goblin) held its bind pose, a T-pose, for as long as it lived. */
+    int posed_clip{-1};
     /** One flag per joint, set by ``ISkeleton`` writes and cleared at the end
      *  of each tick. A set flag means "the clip must not touch this joint
      *  this frame". */
@@ -661,6 +679,9 @@ struct CPhysics {
     float restitution{0.2f};
     float friction{0.5f};
     std::string collision_shape{"aabb"};
+    /** Explicit capsule radius in metres (the player's body, sized from the
+     *  avatar). 0 = derived from the capsule's height. */
+    float capsule_radius_m{0.0f};
 };
 
 /** Hit points, plus the small amount of state dying needs.
@@ -682,6 +703,12 @@ struct CHealth {
     /** Counts down while the death animation plays; the entity is removed
      *  when it reaches zero. Negative means "not dying". */
     float death_timer_s{-1.0f};
+};
+
+/** Stunned (a flashbang): NPC behaviours stand still and do not attack
+ *  while ``remaining_s`` > 0. The engine counts it down. */
+struct CStun {
+    float remaining_s{0.0f};
 };
 
 /** Which side an entity is on.
