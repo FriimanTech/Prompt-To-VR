@@ -462,7 +462,7 @@ positions and colours baked in. Colliders stay per entity, so physics, AI and
 navigation are unchanged. A member that ever moves dissolves its batch (logged
 once) and its entities draw individually again. Measured: where the merged
 geometry is primitives that instancing had already collapsed, batching splits
-them into per-cell draws (Glock Laser Deck 11 → 34 draw calls, inside budget,
+them into per-cell draws (The Shooting Range Game 11 → 34 draw calls, inside budget,
 no GPU / CPU change); it pays off for many distinct inline meshes.
 
 ## Draw-time transform offsets
@@ -534,7 +534,7 @@ does nothing — the engine's earlier path set levels with no measurable effect.
 
 The level (none / low / medium / high) is set by the engine's governor through
 `xrUpdateSwapchainFB`; the runtime's own dynamic flag is off, so two
-controllers never fight. Measured on Quest 3 (Glock Laser Deck, GPU time):
+controllers never fight. Measured on Quest 3 (The Shooting Range Game, GPU time):
 level 0 10.2 ms, 1 5.95 ms, 2 5.4 ms, 3 4.6 ms. The density map costs about
 1 ms at level 0, so automatic FFR starts at level 1 (2 when the scene estimate
 is heavy); a user's "FFR off" drops the density map entirely.

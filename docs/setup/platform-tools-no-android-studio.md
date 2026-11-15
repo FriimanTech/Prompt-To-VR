@@ -2,7 +2,7 @@
 
 # No Android Studio: Fastest Way (Windows)
 
-Use this page when you only want to play the sample VR game, **Glock Laser Deck**, on a Quest from a Windows PC. You do not need Android Studio, Python, or Node.js.
+Use this page when you only want to play the sample VR game, **The Shooting Range Game**, on a Quest from a Windows PC. You do not need Android Studio, Python, or Node.js.
 
 On a Mac, use [No Android Studio: Fastest Way (Mac)](platform-tools-no-android-studio-mac.md).
 
@@ -89,6 +89,6 @@ The game does not sit in the normal app library.
 3. Click **Library**.
 4. Click **Menu** on the left side of that panel.
 5. Click **Unknown Sources**.
-6. Click **Glock Laser Deck**.
+6. Click **The Shooting Range Game**.
 
 Back to [Build and run on Quest](../build-and-run.md). The Android Studio path is [step 6](06-android-studio.md).

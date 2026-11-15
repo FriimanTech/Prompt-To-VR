@@ -413,22 +413,22 @@ def launch_sample():
     return {"ok": True, "exe": str(exe)}
 
 
-# The public sample APK. It is a copy of the Glock Laser Deck build, kept
+# The public sample APK. It is a copy of The Shooting Range Game build, kept
 # outside projects/ so a clone can install it without that folder.
-_QUEST_SAMPLE_ID = "20261030-165846-glock-laser-deck"
+_QUEST_SAMPLE_ID = "20261110-234612-the-shooting-range-game"
 
 
 @router.post("/sample/launch-quest")
 def launch_quest_sample():
-    """Install samples/quest-sample/GlockLaserDeck.apk and start it on the Quest."""
+    """Install samples/quest-sample/TheShootingRangeGame.apk and start it on the Quest."""
     s = get_settings()
-    apk = s.repo_root / "samples" / "quest-sample" / "GlockLaserDeck.apk"
+    apk = s.repo_root / "samples" / "quest-sample" / "TheShootingRangeGame.apk"
     if not apk.is_file():
         raise HTTPException(
             status_code=400,
             detail=(
                 "Sample Quest APK not found at"
-                " samples/quest-sample/GlockLaserDeck.apk."
+                " samples/quest-sample/TheShootingRangeGame.apk."
             ),
         )
     package = quest_package_name(s.android_package_prefix, _QUEST_SAMPLE_ID)

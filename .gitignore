@@ -109,6 +109,7 @@ engine/worldgen/build/
 captures/
 *.apk
 !samples/quest-sample/GlockLaserDeck.apk
+!samples/quest-sample/TheShootingRangeGame.apk
 *.aab
 *.ap_
 *.dex

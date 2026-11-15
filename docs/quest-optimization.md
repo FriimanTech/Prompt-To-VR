@@ -38,7 +38,7 @@ governor) are in [rendering.md](rendering.md); the verification passes in
 | Kind | What |
 |---|---|
 | Never lowers visible quality | instancing, static batching, texture dedupe by hash, ASTC with mips, two frames in flight, exact two-eye culling, room culling where the world has closed rooms, residency streaming with an always-resident lowest LOD |
-| Chosen per scene from measurements | multiview (on only above 120 estimated p95 draws: it measured ~10% more GPU time on both test games at 17-64 draws, CPU unchanged); initial FFR level 1, or 2 when the scene's estimate is heavy (the density map costs ~1 ms at level 0, level 1 removed ~40% of GPU time on Glock Laser Deck) |
+| Chosen per scene from measurements | multiview (on only above 120 estimated p95 draws: it measured ~10% more GPU time on both test games at 17-64 draws, CPU unchanged); initial FFR level 1, or 2 when the scene's estimate is heavy (the density map costs ~1 ms at level 0, level 1 removed ~40% of GPU time on The Shooting Range Game) |
 | Trades quality only when measured frames require it | the governor's ladders: FFR, render scale (floor 0.85), LOD bias, draw distance |
 
 Per-game starting values come from `scene_complexity`, not game size alone: a
@@ -246,7 +246,7 @@ density map); after = automatic settings. GPU from timestamps, PSS from
 
 | Game | GPU ms before → after | CPU ms | Draw calls | PSS MB | Memory status |
 |---|---|---|---|---|---|
-| Glock Laser Deck | 9.3 → 5.6 (p95 6.1) | 0.9 → 1.2 | 386 → 34 | 261 → 200 | verified_safe |
+| The Shooting Range Game | 9.3 → 5.6 (p95 6.1) | 0.9 → 1.2 | 386 → 34 | 261 → 200 | verified_safe |
 | Navy SEAL Raid | 6.0 → 2.8 (p95 3.7) | 1.9 → 1.8 | 426 → 22 | 273 → 204 | verified_safe |
 | Fun Goblin Shooter | (no baseline) 3.6 (p95 5.6) | 1.4 | 20 | 202 | verified_safe |
 | Navy SEAL Raid, max quality¹ | 3.2 (p95 4.6) | 1.5 | 22 | 248 | verified_safe |
@@ -255,12 +255,12 @@ density map); after = automatic settings. GPU from timestamps, PSS from
 FFR level 0 and render scale 1.0 held in every `perf:` line; ASTC 4x4 at
 2048 px; 0.5 px LOD threshold.
 
-A/B on Glock Laser Deck (GPU ms): multiview + density map 10.2 at FFR 0;
+A/B on The Shooting Range Game (GPU ms): multiview + density map 10.2 at FFR 0;
 without the density map 8.9; without multiview 9.0; FFR 1 / 2 / 3: 5.95 /
 5.4 / 4.6. Navy SEAL Raid: multiview 4.1 vs 3.7 without (CPU 1.8 both).
 
 Static batching on top of instancing did not reduce draw calls where the
-merged geometry was already instanced primitives (Glock Laser Deck: 11 → 34
+merged geometry was already instanced primitives (The Shooting Range Game: 11 → 34
 draws, inside the 300 budget, GPU and CPU unchanged); it helps scenes with
 many distinct inline meshes. Peak PSS stayed near 200 MB for every test
 game, far under the 4.5 GiB target; the memory model's estimates (383-427 MB)

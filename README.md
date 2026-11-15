@@ -208,7 +208,7 @@ npm run dev
 # open http://127.0.0.1:5173
 ```
 
-In the web panel, click **New project**. **Quest (standalone APK)** and **Full Player Avatar** are already selected. Paste a prompt and click **Create & run pipeline**. That is the recommended target. Switch to **PC VR (Quest Link)** or **Hands Only** only when you want those. **PC VR: Launch Starter Sample** starts the hand-authored PC VR starter room. It does not build that program, and it does not call the API providers. Build it first with the commands in [local setup](docs/local-setup.md). **Quest: Launch Sample Game** installs `samples/quest-sample/GlockLaserDeck.apk` on a connected Quest. Finish setup steps 5 and 6 first.
+In the web panel, click **New project**. **Quest (standalone APK)** and **Full Player Avatar** are already selected. Paste a prompt and click **Create & run pipeline**. That is the recommended target. Switch to **PC VR (Quest Link)** or **Hands Only** only when you want those. **PC VR: Launch Starter Sample** starts the hand-authored PC VR starter room. It does not build that program, and it does not call the API providers. Build it first with the commands in [local setup](docs/local-setup.md). **Quest: Launch Sample Game** installs `samples/quest-sample/TheShootingRangeGame.apk` on a connected Quest. Finish setup steps 5 and 6 first.
 
 Quest APK packaging, install, and on-headset checks are in [`docs/build-and-run.md`](docs/build-and-run.md) and [`docs/quest-build.md`](docs/quest-build.md). A PC VR `.exe` launch through Quest Link is documented in [`docs/build-and-run-pcvr.md`](docs/build-and-run-pcvr.md). That path has not been tested recently and may have major issues.
 

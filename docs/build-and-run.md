@@ -15,7 +15,7 @@ You do need Quest setup [step 5](setup/05-quest-developer-mode-and-adb-drivers.m
 - **No Android Studio: Fastest Way.** If you do not want to install Android Studio and only want to test the sample VR game this engine already created, use [Windows](setup/platform-tools-no-android-studio.md) or [Mac](setup/platform-tools-no-android-studio-mac.md).
 - **[Android Studio: Recommended if you plan to run or build on top of the VR Engine later](setup/06-android-studio.md).** This is the normal [step 6](setup/06-android-studio.md). It installs Platform-Tools with the rest of the Android SDK.
 
-The sample APK (VR Game) is in the repo at `samples/quest-sample/GlockLaserDeck.apk`. It is **Glock Laser Deck**, used as the sample until a dedicated starter APK is added. You do not need anything from `projects/`. The header button **Quest: Launch Sample Game** runs these same install and start steps for you. The headset still has to be connected, with Developer Mode on.
+The sample APK (VR Game) is in the repo at `samples/quest-sample/TheShootingRangeGame.apk`. It is **The Shooting Range Game**. You do not need anything from `projects/`. The header button **Quest: Launch Sample Game** runs these same install and start steps for you. The headset still has to be connected, with Developer Mode on.
 
 1. Connect the Quest to the Windows PC with a **data** USB cable.
 2. Put on the headset and choose **Always allow from this computer** if it asks.
@@ -30,7 +30,7 @@ The headset line must end in `device`.
 4. **Install the APK (VR Game).** This is the same install command the engine uses (`adb install -r`):
 
 ```powershell
-adb install -r .\samples\quest-sample\GlockLaserDeck.apk
+adb install -r .\samples\quest-sample\TheShootingRangeGame.apk
 ```
 
 Wait until PowerShell prints `Success`.
@@ -44,14 +44,14 @@ Pick either way.
 1. In the Quest, click **Library** to open your game library.
 2. Click **Menu**.
 3. In the menu panel, click **Unknown Sources**.
-4. In the Unknown Sources panel, click **Glock Laser Deck**.
+4. In the Unknown Sources panel, click **The Shooting Range Game**.
 
 #### B. Via the terminal
 
 With the headset still connected to the computer, run:
 
 ```powershell
-adb shell am start -n com.prompttovr.p20261030_165846_glock_laser_deck/android.app.NativeActivity
+adb shell am start -n com.prompttovr.p20261110_234612_the_shooting_range_game/android.app.NativeActivity
 ```
 
 ## Generate your own Quest game

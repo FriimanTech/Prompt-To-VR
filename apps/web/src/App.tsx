@@ -38,7 +38,7 @@ export default function App() {
     setSampleNote(null);
     try {
       await api.launchQuestSample();
-      setSampleNote("Glock Laser Deck is installed and starting on the Quest.");
+      setSampleNote("The Shooting Range Game is installed and starting on the Quest.");
     } catch (e) {
       setSampleNote(String(e));
     } finally {
@@ -88,7 +88,7 @@ export default function App() {
                   onClick={() => void launchQuestSample()}
                   className="ptv-button-primary"
                   disabled={sampleBusy !== null}
-                  title="Installs samples/quest-sample/GlockLaserDeck.apk on the connected Quest and starts Glock Laser Deck."
+                  title="Installs samples/quest-sample/TheShootingRangeGame.apk on the connected Quest and starts The Shooting Range Game."
                 >
                   {sampleBusy === "quest" ? "Installing Quest sample…" : "Quest: Launch Sample Game"}
                 </button>
