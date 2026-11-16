@@ -10,12 +10,11 @@ Finish [local setup](local-setup.md) before you generate a new game. The sample 
 
 An **APK (VR Game)** is the installable Quest game file. This sample is the fastest way to put a game this engine has already built onto a headset. You do not need Visual Studio, an API key, or a new pipeline run.
 
-You do need Quest setup [step 5](setup/05-quest-developer-mode-and-adb-drivers.md) (developer account, Developer Mode, and the Oculus ADB driver). Then pick one way to get `adb`:
+If you only want to play the sample, and you do not want Android Studio, follow [No Android Studio: Fastest Way (Windows)](setup/platform-tools-no-android-studio.md) or [No Android Studio: Fastest Way (Mac)](setup/platform-tools-no-android-studio-mac.md). Those pages include the Meta developer setup. The website installs the game. You do not install Platform-Tools yourself.
 
-- **No Android Studio: Fastest Way.** If you do not want to install Android Studio and only want to test the sample VR game this engine already created, use [Windows](setup/platform-tools-no-android-studio.md) or [Mac](setup/platform-tools-no-android-studio-mac.md).
-- **[Android Studio: Recommended if you plan to run or build on top of the VR Engine later](setup/06-android-studio.md).** This is the normal [step 6](setup/06-android-studio.md). It installs Platform-Tools with the rest of the Android SDK.
+If you are setting up this engine so you can build games, finish [step 5](setup/05-quest-developer-mode-and-adb-drivers.md) and [Android Studio](setup/06-android-studio.md). Android Studio installs Platform-Tools, including `adb`. The commands below are that path. The local website button **Quest: Launch Sample Game** runs the same install.
 
-The sample APK (VR Game) is in the repo at `samples/quest-sample/TheShootingRangeGame.apk`. It is **The Shooting Range Game**. You do not need anything from `projects/`. The header button **Quest: Launch Sample Game** runs these same install and start steps for you. The headset still has to be connected, with Developer Mode on.
+The sample APK (VR Game) is in the repo at `samples/quest-sample/TheShootingRangeGame.apk`. It is **The Shooting Range Game**. You do not need anything from `projects/`. The headset still has to be connected, with Developer Mode on.
 
 1. Connect the Quest to the Windows PC with a **data** USB cable.
 2. Put on the headset and choose **Always allow from this computer** if it asks.

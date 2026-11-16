@@ -175,3 +175,8 @@ $RECYCLE.BIN/
 3D_Objects/
 Uthana_Test/projects/*/builds/
 Uthana_Test/projects/*/logs/
+
+# ---------------------------------------------------------------------------
+# Helper Folder
+# ---------------------------------------------------------------------------
+Helper_Folder/VR_Engine_Deployment/
