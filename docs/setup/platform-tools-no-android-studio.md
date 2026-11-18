@@ -55,7 +55,7 @@ If Windows says the best driver is already installed, that is fine.
 
 If the headset is not already connected with a USB-C data cable, connect it now. Put the headset on and select **Allow** if it asks to allow USB debugging.
 
-1. Open [https://friiman-tech.vercel.app/products/prompt-to-vr-engine](https://friiman-tech.vercel.app/products/prompt-to-vr-engine).
+1. Open [https://friimantech.com/products/prompt-to-vr-engine](https://friimantech.com/products/prompt-to-vr-engine).
 2. Click **Play Sample VR Game**.
 3. Click **I've completed all setup steps**.
 4. Read the instructions labeled **Important**.

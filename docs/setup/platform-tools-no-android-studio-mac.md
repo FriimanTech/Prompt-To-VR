@@ -46,7 +46,7 @@ If the headset is not already connected, plug it into your unlocked Mac with a U
 
 1. If the Mac asks whether to allow the USB accessory, click **Allow**.
 2. Put on the headset. If it asks **Allow USB debugging?**, select **Allow**. On your own Mac, you can also select **Always allow from this computer**.
-3. On the Mac, open [https://friiman-tech.vercel.app/products/prompt-to-vr-engine](https://friiman-tech.vercel.app/products/prompt-to-vr-engine) in Google Chrome.
+3. On the Mac, open [https://friimantech.com/products/prompt-to-vr-engine](https://friimantech.com/products/prompt-to-vr-engine) in Google Chrome.
 4. Click **Play Sample VR Game**.
 5. Click **I've completed all setup steps**.
 6. Read the instructions labeled **Important**.
